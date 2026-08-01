@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../images/emby_image_cache.dart';
 import '../state/app_controller.dart';
 import 'diagnostic_log_screen.dart';
 import 'downloads/downloads_screen.dart';
@@ -18,6 +19,37 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+
+  Future<void> _handleAccountAction(String value) async {
+    if (value == 'logout') {
+      await widget.controller.signOut();
+      return;
+    }
+    if (value == 'logs') {
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const DiagnosticLogScreen()));
+      return;
+    }
+    if (value != 'clear-image-cache') return;
+    try {
+      final usage = await embyImageCacheManager.inspectUsage();
+      await embyImageCacheManager.clearAll();
+      PaintingBinding.instance.imageCache
+        ..clear()
+        ..clearLiveImages();
+      if (!mounted) return;
+      final megabytes = usage.bytes / (1024 * 1024);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已清理图片缓存（${megabytes.toStringAsFixed(1)} MB）')),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('图片缓存清理失败')));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -70,16 +102,7 @@ class _HomeShellState extends State<HomeShell> {
           PopupMenuButton<String>(
             tooltip: '账号',
             icon: const Icon(Icons.account_circle_outlined),
-            onSelected: (value) {
-              if (value == 'logout') widget.controller.signOut();
-              if (value == 'logs') {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const DiagnosticLogScreen(),
-                  ),
-                );
-              }
-            },
+            onSelected: _handleAccountAction,
             itemBuilder: (context) => [
               PopupMenuItem(
                 enabled: false,
@@ -107,6 +130,14 @@ class _HomeShellState extends State<HomeShell> {
                   contentPadding: EdgeInsets.zero,
                   leading: Icon(Icons.description_outlined),
                   title: Text('诊断日志'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'clear-image-cache',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.delete_sweep_outlined),
+                  title: Text('清理图片缓存'),
                 ),
               ),
               const PopupMenuItem(

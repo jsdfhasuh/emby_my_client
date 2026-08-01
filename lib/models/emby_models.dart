@@ -88,11 +88,14 @@ class EmbyItem {
     required this.backdropImageTags,
     required this.genres,
     required this.userData,
+    this.tags = const [],
     this.chapters = const [],
     this.mediaSources = const [],
     this.trickplay,
     this.mediaType,
     this.collectionType,
+    this.path,
+    this.container,
     this.overview,
     this.seriesName,
     this.seasonName,
@@ -110,6 +113,8 @@ class EmbyItem {
   final String type;
   final String? mediaType;
   final String? collectionType;
+  final String? path;
+  final String? container;
   final String? overview;
   final String? seriesName;
   final String? seasonName;
@@ -123,6 +128,7 @@ class EmbyItem {
   final Map<String, String> imageTags;
   final List<String> backdropImageTags;
   final List<String> genres;
+  final List<String> tags;
   final EmbyUserData userData;
   final List<EmbyChapter> chapters;
   final List<PlaybackMediaSource> mediaSources;
@@ -135,6 +141,20 @@ class EmbyItem {
       type == 'Video';
 
   bool get isSeries => type == 'Series';
+
+  bool get isPhoto => type == 'Photo';
+
+  bool get isPhotoContainer => type == 'PhotoAlbum' || type == 'Folder';
+
+  bool get isPhotoLibrary => collectionType?.toLowerCase() == 'photos';
+
+  bool get isStrm =>
+      _isStrmReference(path) ||
+      _isStrmContainer(container) ||
+      mediaSources.any(
+        (source) =>
+            _isStrmReference(source.path) || _isStrmContainer(source.container),
+      );
 
   double get progress => (userData.playedPercentage / 100).clamp(0.0, 1.0);
 
@@ -172,6 +192,8 @@ class EmbyItem {
       type: json['Type']?.toString() ?? 'Unknown',
       mediaType: json['MediaType']?.toString(),
       collectionType: json['CollectionType']?.toString(),
+      path: json['Path']?.toString(),
+      container: json['Container']?.toString(),
       overview: json['Overview']?.toString(),
       seriesName: json['SeriesName']?.toString(),
       seasonName: json['SeasonName']?.toString(),
@@ -185,6 +207,7 @@ class EmbyItem {
       imageTags: rawTags.map((key, value) => MapEntry(key, value.toString())),
       backdropImageTags: _asStringList(json['BackdropImageTags']),
       genres: _asStringList(json['Genres']),
+      tags: _asStringList(json['Tags']),
       userData: EmbyUserData.fromJson(_asMap(json['UserData'])),
       chapters: (json['Chapters'] as List<dynamic>? ?? const [])
           .whereType<Map>()
@@ -212,12 +235,15 @@ class EmbyItem {
     imageTags: imageTags,
     backdropImageTags: backdropImageTags,
     genres: genres,
+    tags: tags,
     userData: userData ?? this.userData,
     chapters: chapters,
     mediaSources: mediaSources,
     trickplay: trickplay,
     mediaType: mediaType,
     collectionType: collectionType,
+    path: path,
+    container: container,
     overview: overview,
     seriesName: seriesName,
     seasonName: seasonName,
@@ -230,6 +256,14 @@ class EmbyItem {
     primaryImageAspectRatio: primaryImageAspectRatio,
   );
 }
+
+bool _isStrmReference(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  if (normalized == null || normalized.isEmpty) return false;
+  return normalized.split(RegExp(r'[?#]')).first.endsWith('.strm');
+}
+
+bool _isStrmContainer(String? value) => value?.trim().toLowerCase() == 'strm';
 
 class EmbyChapter {
   const EmbyChapter({

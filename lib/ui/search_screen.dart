@@ -157,7 +157,7 @@ class _SearchScreenState extends State<SearchScreen> {
     }
     return MediaGrid(
       items: _results,
-      imageUrlFor: widget.api.imageUrl,
+      imageRequestFor: widget.api.imageRequest,
       onTap: _open,
     );
   }

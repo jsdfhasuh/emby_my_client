@@ -1,19 +1,25 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../../images/emby_image_cache.dart';
+import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
 
 class EmbyImage extends StatelessWidget {
   const EmbyImage({
     super.key,
-    required this.url,
+    required this.request,
     this.fit = BoxFit.cover,
     this.icon = Icons.movie_outlined,
+    this.alignment = Alignment.center,
+    this.fadeInDuration = const Duration(milliseconds: 180),
   });
 
-  final String? url;
+  final EmbyImageRequest? request;
   final BoxFit fit;
   final IconData icon;
+  final Alignment alignment;
+  final Duration fadeInDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -23,13 +29,34 @@ class EmbyImage extends StatelessWidget {
         child: Icon(icon, color: const Color(0xFF70797D), size: 32),
       ),
     );
-    if (url == null) return placeholder;
-    return CachedNetworkImage(
-      imageUrl: url!,
-      fit: fit,
-      fadeInDuration: const Duration(milliseconds: 180),
-      placeholder: (_, _) => placeholder,
-      errorWidget: (_, _, _) => placeholder,
+    final imageRequest = request;
+    if (imageRequest == null) return placeholder;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth.isFinite
+            ? (constraints.maxWidth * dpr).round()
+            : imageRequest.decodeWidth;
+        final maxHeight = constraints.maxHeight.isFinite
+            ? (constraints.maxHeight * dpr).round()
+            : imageRequest.decodeHeight;
+        final cacheWidth = maxWidth.clamp(64, imageRequest.decodeWidth);
+        final cacheHeight = maxHeight.clamp(64, imageRequest.decodeHeight);
+        return CachedNetworkImage(
+          imageUrl: imageRequest.uri.toString(),
+          httpHeaders: imageRequest.headers,
+          cacheKey: imageRequest.cacheKey,
+          cacheManager: embyImageCacheManager,
+          errorListener: imageRequest.errorListener,
+          memCacheWidth: cacheWidth,
+          memCacheHeight: cacheHeight,
+          fit: fit,
+          alignment: alignment,
+          fadeInDuration: fadeInDuration,
+          placeholder: (_, _) => placeholder,
+          errorWidget: (_, _, _) => placeholder,
+        );
+      },
     );
   }
 }
@@ -38,13 +65,13 @@ class MediaPosterCard extends StatelessWidget {
   const MediaPosterCard({
     super.key,
     required this.item,
-    required this.imageUrl,
+    required this.imageRequest,
     required this.onTap,
     this.width = 132,
   });
 
   final EmbyItem item;
-  final String? imageUrl;
+  final EmbyImageRequest? imageRequest;
   final VoidCallback onTap;
   final double width;
 
@@ -65,7 +92,7 @@ class MediaPosterCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    EmbyImage(url: imageUrl),
+                    EmbyImage(request: imageRequest),
                     if (item.userData.isPlayed)
                       const Positioned(
                         top: 7,
@@ -93,6 +120,31 @@ class MediaPosterCard extends StatelessWidget {
                           child: Padding(
                             padding: EdgeInsets.all(4),
                             child: Icon(Icons.favorite, size: 14),
+                          ),
+                        ),
+                      ),
+                    if (item.isStrm)
+                      Positioned(
+                        left: 7,
+                        bottom: item.progress > 0 && item.progress < 1 ? 9 : 7,
+                        child: const DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xD9000000),
+                            borderRadius: BorderRadius.all(Radius.circular(3)),
+                          ),
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 2,
+                            ),
+                            child: Text(
+                              'STRM',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -136,7 +188,7 @@ class MediaGrid extends StatelessWidget {
   const MediaGrid({
     super.key,
     required this.items,
-    required this.imageUrlFor,
+    required this.imageRequestFor,
     required this.onTap,
     this.padding = const EdgeInsets.all(16),
     this.shrinkWrap = false,
@@ -144,7 +196,7 @@ class MediaGrid extends StatelessWidget {
   });
 
   final List<EmbyItem> items;
-  final String? Function(EmbyItem item) imageUrlFor;
+  final EmbyImageRequest? Function(EmbyItem item) imageRequestFor;
   final ValueChanged<EmbyItem> onTap;
   final EdgeInsets padding;
   final bool shrinkWrap;
@@ -168,7 +220,7 @@ class MediaGrid extends StatelessWidget {
         return MediaPosterCard(
           item: item,
           width: double.infinity,
-          imageUrl: imageUrlFor(item),
+          imageRequest: imageRequestFor(item),
           onTap: () => onTap(item),
         );
       },

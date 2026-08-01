@@ -8,6 +8,7 @@ import '../models/emby_models.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import 'item_detail_screen.dart';
 import 'library_screen.dart';
+import 'photos/photo_library_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
 
@@ -73,6 +74,20 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) await _refresh();
   }
 
+  Future<void> _openLibrary(EmbyItem view) {
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => view.isPhotoLibrary
+            ? PhotoLibraryScreen(api: widget.api, directory: view)
+            : LibraryBrowseScreen(
+                api: widget.api,
+                view: view,
+                downloads: widget.downloads,
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<HomeData>(
@@ -136,12 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 _LibrarySection(
                   items: data.views,
                   api: widget.api,
-                  onTap: (view) => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) =>
-                          LibraryBrowseScreen(api: widget.api, view: view),
-                    ),
-                  ),
+                  onTap: _openLibrary,
                 ),
             ],
           ),
@@ -166,15 +176,15 @@ class _FeaturedMedia extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final imageUrl =
-        api.imageUrl(item, type: 'Backdrop', maxWidth: 1200) ??
-        api.imageUrl(item, maxWidth: 900);
+    final imageRequest =
+        api.imageRequest(item, type: 'Backdrop', maxWidth: 1200) ??
+        api.imageRequest(item, maxWidth: 900);
     return SizedBox(
       height: 236,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          EmbyImage(url: imageUrl),
+          EmbyImage(request: imageRequest),
           const DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -280,7 +290,7 @@ class _PosterSection extends StatelessWidget {
                 final item = items[index];
                 return MediaPosterCard(
                   item: item,
-                  imageUrl: api.imageUrl(item),
+                  imageRequest: api.imageRequest(item),
                   onTap: () => onTap(item),
                 );
               },
@@ -329,9 +339,9 @@ class _LibrarySection extends StatelessWidget {
               separatorBuilder: (_, _) => const SizedBox(width: 12),
               itemBuilder: (context, index) {
                 final item = items[index];
-                final url =
-                    api.imageUrl(item, type: 'Backdrop', maxWidth: 500) ??
-                    api.imageUrl(item, maxWidth: 500);
+                final request =
+                    api.imageRequest(item, type: 'Backdrop', maxWidth: 500) ??
+                    api.imageRequest(item, maxWidth: 500);
                 return SizedBox(
                   width: 210,
                   child: Card(
@@ -341,7 +351,7 @@ class _LibrarySection extends StatelessWidget {
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
-                          EmbyImage(url: url),
+                          EmbyImage(request: request),
                           const ColoredBox(color: Color(0x66000000)),
                           Padding(
                             padding: const EdgeInsets.all(14),

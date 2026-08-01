@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import '../core/diagnostic_log.dart';
+import '../core/server_scope.dart';
+import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
@@ -21,6 +24,19 @@ class EmbyApiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+enum LibrarySort {
+  nameAscending('SortName', 'Ascending'),
+  nameDescending('SortName', 'Descending'),
+  dateAddedDescending('DateCreated', 'Descending'),
+  productionYearDescending('ProductionYear', 'Descending'),
+  communityRatingDescending('CommunityRating', 'Descending');
+
+  const LibrarySort(this.sortBy, this.sortOrder);
+
+  final String sortBy;
+  final String sortOrder;
 }
 
 class EmbyApi {
@@ -50,14 +66,16 @@ class EmbyApi {
   static const clientName = 'Emby Flutter Client';
   static const clientVersion = '1.0.0';
   static const _itemFields =
-      'Overview,Genres,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
+      'Overview,Genres,Tags,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
       'DateCreated,OfficialRating,CommunityRating,RunTimeTicks,'
-      'ProductionYear,ProviderIds,ParentId,Path,Chapters,Trickplay';
+      'ProductionYear,ProviderIds,ParentId,Path,Container,Chapters,Trickplay';
 
   final EmbySession session;
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
   final FutureOr<void> Function()? _onRemoteCapabilitiesReported;
+  bool _imageAuthenticationFailureReported = false;
+  bool _disposed = false;
   late final EmbyUserDataService userData;
   late final EmbySessionService sessionControl;
   late final EmbyWebSocketClient realtime;
@@ -119,7 +137,9 @@ class EmbyApi {
         error: error.message,
       );
       final friendly = _friendlyError(error);
-      if (friendly.isAuthenticationFailure && _onSessionExpired != null) {
+      if (!_disposed &&
+          friendly.isAuthenticationFailure &&
+          _onSessionExpired != null) {
         unawaited(Future<void>.sync(_onSessionExpired));
       }
       throw friendly;
@@ -249,11 +269,14 @@ class EmbyApi {
 
   Future<void> _reportRemoteCapabilities() async {
     await sessionControl.reportCapabilities();
+    if (_disposed) return;
     final callback = _onRemoteCapabilitiesReported;
     if (callback != null) await Future<void>.sync(callback);
   }
 
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
     await realtime.dispose();
     _dio.close(force: true);
   }
@@ -301,6 +324,10 @@ class EmbyApi {
     required String parentId,
     int startIndex = 0,
     int limit = 60,
+    LibrarySort sort = LibrarySort.nameAscending,
+    String? genreId,
+    String? tagId,
+    bool favoritesOnly = false,
   }) => _getItemPage(
     '/Users/${session.userId}/Items',
     query: {
@@ -309,10 +336,95 @@ class EmbyApi {
       'Limit': limit,
       'Recursive': true,
       'IncludeItemTypes': 'Movie,Series,Video',
+      'SortBy': sort.sortBy,
+      'SortOrder': sort.sortOrder,
+      'GenreIds': ?genreId,
+      'TagIds': ?tagId,
+      if (favoritesOnly) 'Filters': 'IsFavorite',
+      'Fields': _itemFields,
+      'EnableUserData': true,
+      'EnableImages': true,
+    },
+  );
+
+  Future<List<EmbyItem>> getLibraryFolders({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getItemPage(
+    '/Users/${session.userId}/Items',
+    query: {
+      'ParentId': parentId,
+      'StartIndex': startIndex,
+      'Limit': limit,
+      'Recursive': false,
+      'IncludeItemTypes': 'Folder',
       'SortBy': 'SortName',
       'SortOrder': 'Ascending',
       'Fields': _itemFields,
       'EnableUserData': true,
+      'EnableImages': true,
+    },
+  );
+
+  Future<List<EmbyItem>> getLibraryGenres({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getLibraryTerms(
+    path: '/Genres',
+    parentId: parentId,
+    startIndex: startIndex,
+    limit: limit,
+  );
+
+  Future<List<EmbyItem>> getLibraryTags({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getLibraryTerms(
+    path: '/Tags',
+    parentId: parentId,
+    startIndex: startIndex,
+    limit: limit,
+  );
+
+  Future<List<EmbyItem>> _getLibraryTerms({
+    required String path,
+    required String parentId,
+    required int startIndex,
+    required int limit,
+  }) => _getItemPage(
+    path,
+    query: {
+      'UserId': session.userId,
+      'ParentId': parentId,
+      'StartIndex': startIndex,
+      'Limit': limit,
+      'Recursive': true,
+      'IncludeItemTypes': 'Movie,Series,Video',
+      'SortBy': 'SortName',
+      'SortOrder': 'Ascending',
+      'Fields': _itemFields,
+      'EnableImages': true,
+    },
+  );
+
+  Future<List<EmbyItem>> getPhotoChildren({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getItemPage(
+    '/Users/${session.userId}/Items',
+    query: {
+      'ParentId': parentId,
+      'StartIndex': startIndex,
+      'Limit': limit,
+      'Recursive': false,
+      'IncludeItemTypes': 'Photo,PhotoAlbum,Folder',
+      'SortBy': 'SortName',
+      'SortOrder': 'Ascending',
+      'Fields': _itemFields,
       'EnableImages': true,
     },
   );
@@ -381,26 +493,69 @@ class EmbyApi {
     return {for (final item in items) item.id: item.userData};
   }
 
-  String? imageUrl(
+  EmbyImageRequest? imageRequest(
     EmbyItem item, {
     String type = 'Primary',
     int maxWidth = 600,
+    int? maxHeight,
     int quality = 90,
   }) {
     final tag = type == 'Backdrop'
         ? item.backdropImageTags.firstOrNull
         : item.imageTags[type];
     if (tag == null || tag.isEmpty) return null;
-    return Uri.parse('${session.serverUrl}/Items/${item.id}/Images/$type')
-        .replace(
+    final width = EmbyImageRequest.bucketWidth(maxWidth);
+    final height = EmbyImageRequest.bucketWidth(
+      maxHeight ?? _defaultImageHeight(item, type: type, maxWidth: maxWidth),
+    );
+    final scope = ServerScope.fromSession(session);
+    final uri =
+        Uri.parse(
+          '${session.serverUrl}/Items/${Uri.encodeComponent(item.id)}'
+          '/Images/${Uri.encodeComponent(type)}',
+        ).replace(
           queryParameters: {
             'tag': tag,
-            'maxWidth': maxWidth.toString(),
+            'maxWidth': width.toString(),
+            'maxHeight': height.toString(),
             'quality': quality.toString(),
-            'api_key': session.accessToken,
           },
-        )
-        .toString();
+        );
+    return EmbyImageRequest(
+      uri: uri,
+      headers: Map.unmodifiable(playbackHeaders),
+      cacheKey:
+          'emby-image-v2:${scope.cacheNamespace}:${item.id}:'
+          '${type.toLowerCase()}:$tag:w$width:h$height:q$quality',
+      decodeWidth: width,
+      decodeHeight: height,
+      errorListener: _handleImageError,
+    );
+  }
+
+  int _defaultImageHeight(
+    EmbyItem item, {
+    required String type,
+    required int maxWidth,
+  }) {
+    if (type == 'Backdrop') return maxWidth;
+    final aspectRatio = item.primaryImageAspectRatio;
+    if (aspectRatio != null && aspectRatio.isFinite && aspectRatio > 0) {
+      return (maxWidth / aspectRatio).ceil();
+    }
+    return maxWidth * 2;
+  }
+
+  void _handleImageError(Object error) {
+    if (_disposed ||
+        error is! HttpExceptionWithStatus ||
+        (error.statusCode != 401 && error.statusCode != 403) ||
+        _imageAuthenticationFailureReported) {
+      return;
+    }
+    _imageAuthenticationFailureReported = true;
+    final callback = _onSessionExpired;
+    if (callback != null) unawaited(Future<void>.sync(callback));
   }
 
   Future<PlaybackPlan> getPlaybackPlan(
@@ -724,7 +879,9 @@ class EmbyApi {
         error: error.message,
       );
       final friendly = _friendlyError(error);
-      if (friendly.isAuthenticationFailure && _onSessionExpired != null) {
+      if (!_disposed &&
+          friendly.isAuthenticationFailure &&
+          _onSessionExpired != null) {
         unawaited(Future<void>.sync(_onSessionExpired));
       }
       throw friendly;
