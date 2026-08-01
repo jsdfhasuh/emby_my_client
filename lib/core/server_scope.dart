@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import '../models/emby_models.dart';
 
 class ServerScope {
@@ -27,6 +29,9 @@ class ServerScope {
   String get databaseKey => '${_encode(serverId)}.${_encode(userId)}';
 
   String get logLabel => _hash('$serverId\u0000$userId');
+
+  String get cacheNamespace =>
+      sha256.convert(utf8.encode('$serverId\u0000$userId')).toString();
 
   Map<String, String> toJson() => {'serverId': serverId, 'userId': userId};
 

@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import '../core/diagnostic_log.dart';
+import '../core/server_scope.dart';
+import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
@@ -21,6 +24,19 @@ class EmbyApiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+enum LibrarySort {
+  nameAscending('SortName', 'Ascending'),
+  nameDescending('SortName', 'Descending'),
+  dateAddedDescending('DateCreated', 'Descending'),
+  productionYearDescending('ProductionYear', 'Descending'),
+  communityRatingDescending('CommunityRating', 'Descending');
+
+  const LibrarySort(this.sortBy, this.sortOrder);
+
+  final String sortBy;
+  final String sortOrder;
 }
 
 class EmbyApi {
@@ -53,17 +69,19 @@ class EmbyApi {
   static const clientVersion = '1.0.0';
   static const _listItemFields =
       'PrimaryImageAspectRatio,DateCreated,OfficialRating,CommunityRating,'
-      'RunTimeTicks,ProductionYear,ParentId,Path';
+      'RunTimeTicks,ProductionYear,ParentId,Path,Container,Tags';
   static const _detailItemFields =
-      'Overview,Genres,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
+      'Overview,Genres,Tags,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
       'DateCreated,OfficialRating,CommunityRating,RunTimeTicks,'
-      'ProductionYear,ProviderIds,ParentId,Path,Chapters,Trickplay';
+      'ProductionYear,ProviderIds,ParentId,Path,Container,Chapters,Trickplay';
 
   final EmbySession session;
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
   final FutureOr<void> Function()? _onRemoteCapabilitiesReported;
   final FutureOr<void> Function()? _onRealtimeConnected;
+  bool _imageAuthenticationFailureReported = false;
+  bool _disposed = false;
   late final EmbyUserDataService userData;
   late final EmbySessionService sessionControl;
   late final EmbyWebSocketClient realtime;
@@ -128,7 +146,9 @@ class EmbyApi {
         error: error.message,
       );
       final friendly = _friendlyError(error);
-      if (friendly.isAuthenticationFailure && _onSessionExpired != null) {
+      if (!_disposed &&
+          friendly.isAuthenticationFailure &&
+          _onSessionExpired != null) {
         unawaited(Future<void>.sync(_onSessionExpired));
       }
       throw friendly;
@@ -255,6 +275,7 @@ class EmbyApi {
 
   Future<void> _reportRemoteCapabilities() async {
     await sessionControl.reportCapabilities();
+    if (_disposed) return;
     final callback = _onRemoteCapabilitiesReported;
     if (callback != null) await Future<void>.sync(callback);
   }
@@ -295,6 +316,8 @@ class EmbyApi {
   }
 
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
     await realtime.dispose();
     _dio.close(force: true);
   }
@@ -379,6 +402,10 @@ class EmbyApi {
     int startIndex = 0,
     int limit = 60,
     LibraryBrowseOptions options = const LibraryBrowseOptions(),
+    String? genreId,
+    String? tagId,
+    bool favoritesFilter = false,
+    bool includeMediaSources = false,
   }) async {
     final response = await _request(
       () => _dio.get<dynamic>(
@@ -391,9 +418,14 @@ class EmbyApi {
           'IncludeItemTypes': options.itemType.apiValue,
           'SortBy': options.sortBy.apiValue,
           'SortOrder': options.sortOrder.apiValue,
-          'Filters': ?options.playedFilter.apiValue,
+          if (favoritesFilter) 'Filters': 'IsFavorite',
+          if (!favoritesFilter) 'Filters': ?options.playedFilter.apiValue,
           if (options.favoriteOnly) 'IsFavorite': true,
-          'Fields': _listItemFields,
+          'GenreIds': ?genreId,
+          'TagIds': ?tagId,
+          'Fields': includeMediaSources
+              ? '$_listItemFields,MediaSources'
+              : _listItemFields,
           'EnableUserData': true,
           'EnableImages': true,
           'EnableTotalRecordCount': true,
@@ -412,6 +444,75 @@ class EmbyApi {
         ? rawTotal.toInt()
         : int.tryParse(rawTotal?.toString() ?? '');
     return EmbyItemPage(items: items, totalRecordCount: total);
+  }
+
+  Future<EmbyItemPage> getLibraryFolders({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) async {
+    final items = await _getItemPage(
+      '/Users/${session.userId}/Items',
+      query: {
+        'ParentId': parentId,
+        'StartIndex': startIndex,
+        'Limit': limit,
+        'Recursive': false,
+        'IncludeItemTypes': 'Folder',
+        'SortBy': 'SortName',
+        'SortOrder': 'Ascending',
+        'Fields': _listItemFields,
+        'EnableUserData': true,
+        'EnableImages': true,
+      },
+    );
+    return EmbyItemPage(items: items);
+  }
+
+  Future<EmbyItemPage> getLibraryGenres({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getLibraryTerms(
+    path: '/Genres',
+    parentId: parentId,
+    startIndex: startIndex,
+    limit: limit,
+  );
+
+  Future<EmbyItemPage> getLibraryTags({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getLibraryTerms(
+    path: '/Tags',
+    parentId: parentId,
+    startIndex: startIndex,
+    limit: limit,
+  );
+
+  Future<EmbyItemPage> _getLibraryTerms({
+    required String path,
+    required String parentId,
+    required int startIndex,
+    required int limit,
+  }) async {
+    final items = await _getItemPage(
+      path,
+      query: {
+        'UserId': session.userId,
+        'ParentId': parentId,
+        'StartIndex': startIndex,
+        'Limit': limit,
+        'Recursive': true,
+        'IncludeItemTypes': 'Movie,Series,Video',
+        'SortBy': 'SortName',
+        'SortOrder': 'Ascending',
+        'Fields': _listItemFields,
+        'EnableImages': true,
+      },
+    );
+    return EmbyItemPage(items: items);
   }
 
   Future<EmbyItemPage> search(
@@ -453,6 +554,25 @@ class EmbyApi {
         : int.tryParse(rawTotal?.toString() ?? '');
     return EmbyItemPage(items: items, totalRecordCount: total);
   }
+
+  Future<List<EmbyItem>> getPhotoChildren({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+  }) => _getItemPage(
+    '/Users/${session.userId}/Items',
+    query: {
+      'ParentId': parentId,
+      'StartIndex': startIndex,
+      'Limit': limit,
+      'Recursive': false,
+      'IncludeItemTypes': 'Photo,PhotoAlbum,Folder',
+      'SortBy': 'SortName',
+      'SortOrder': 'Ascending',
+      'Fields': _listItemFields,
+      'EnableImages': true,
+    },
+  );
 
   Future<EmbyItem> getItem(String itemId) async {
     final response = await _request(
@@ -500,25 +620,69 @@ class EmbyApi {
     return {for (final item in items) item.id: item.userData};
   }
 
-  String? imageUrl(
+  EmbyImageRequest? imageRequest(
     EmbyItem item, {
     String type = 'Primary',
     int maxWidth = 600,
+    int? maxHeight,
     int quality = 90,
   }) {
     final tag = type == 'Backdrop'
         ? item.backdropImageTags.firstOrNull
         : item.imageTags[type];
     if (tag == null || tag.isEmpty) return null;
-    return Uri.parse('${session.serverUrl}/Items/${item.id}/Images/$type')
-        .replace(
+    final width = EmbyImageRequest.bucketWidth(maxWidth);
+    final height = EmbyImageRequest.bucketWidth(
+      maxHeight ?? _defaultImageHeight(item, type: type, maxWidth: maxWidth),
+    );
+    final scope = ServerScope.fromSession(session);
+    final uri =
+        Uri.parse(
+          '${session.serverUrl}/Items/${Uri.encodeComponent(item.id)}'
+          '/Images/${Uri.encodeComponent(type)}',
+        ).replace(
           queryParameters: {
             'tag': tag,
-            'maxWidth': maxWidth.toString(),
+            'maxWidth': width.toString(),
+            'maxHeight': height.toString(),
             'quality': quality.toString(),
           },
-        )
-        .toString();
+        );
+    return EmbyImageRequest(
+      uri: uri,
+      headers: Map.unmodifiable(playbackHeaders),
+      cacheKey:
+          'emby-image-v2:${scope.cacheNamespace}:${item.id}:'
+          '${type.toLowerCase()}:$tag:w$width:h$height:q$quality',
+      decodeWidth: width,
+      decodeHeight: height,
+      errorListener: _handleImageError,
+    );
+  }
+
+  int _defaultImageHeight(
+    EmbyItem item, {
+    required String type,
+    required int maxWidth,
+  }) {
+    if (type == 'Backdrop') return maxWidth;
+    final aspectRatio = item.primaryImageAspectRatio;
+    if (aspectRatio != null && aspectRatio.isFinite && aspectRatio > 0) {
+      return (maxWidth / aspectRatio).ceil();
+    }
+    return maxWidth * 2;
+  }
+
+  void _handleImageError(Object error) {
+    if (_disposed ||
+        error is! HttpExceptionWithStatus ||
+        (error.statusCode != 401 && error.statusCode != 403) ||
+        _imageAuthenticationFailureReported) {
+      return;
+    }
+    _imageAuthenticationFailureReported = true;
+    final callback = _onSessionExpired;
+    if (callback != null) unawaited(Future<void>.sync(callback));
   }
 
   Future<PlaybackPlan> getPlaybackPlan(
@@ -866,7 +1030,9 @@ class EmbyApi {
         error: error.message,
       );
       final friendly = _friendlyError(error);
-      if (friendly.isAuthenticationFailure && _onSessionExpired != null) {
+      if (!_disposed &&
+          friendly.isAuthenticationFailure &&
+          _onSessionExpired != null) {
         unawaited(Future<void>.sync(_onSessionExpired));
       }
       throw friendly;

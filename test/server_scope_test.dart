@@ -10,6 +10,11 @@ void main() {
 
     expect(first, isNot(second));
     expect(first.databaseKey, isNot(second.databaseKey));
+    expect(first.cacheNamespace, isNot(second.cacheNamespace));
+    expect(first.cacheNamespace, hasLength(64));
+    expect(first.cacheNamespace, matches(RegExp(r'^[0-9a-f]{64}$')));
+    expect(first.cacheNamespace, isNot(contains(first.serverId)));
+    expect(first.cacheNamespace, isNot(contains(first.userId)));
     expect(ServerScope.fromJson(first.toJson()), first);
   });
 

@@ -352,8 +352,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 return MediaPosterCard(
                   item: item,
                   width: double.infinity,
-                  imageUrl: widget.api.imageUrl(item),
-                  imageHeaders: widget.api.imageHeaders,
+                  imageRequest: widget.api.imageRequest(item),
                   onTap: () => _open(item),
                 );
               }, childCount: _results.length),

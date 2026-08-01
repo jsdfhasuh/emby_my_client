@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
 import 'library_screen.dart';
+import 'photos/photo_library_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
 
@@ -114,12 +116,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openLibrary(EmbyItem library) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => LibraryBrowseScreen(
-          api: widget.api,
-          view: library,
-          downloads: widget.downloads,
-          categorySettings: widget.categorySettings,
-        ),
+        builder: (_) => library.isPhotoLibrary
+            ? PhotoLibraryScreen(api: widget.api, directory: library)
+            : LibraryBrowseScreen(
+                api: widget.api,
+                view: library,
+                downloads: widget.downloads,
+                categorySettings: widget.categorySettings,
+              ),
       ),
     );
     if (mounted) await _refresh();
@@ -310,9 +314,9 @@ class _LibraryShelf extends StatelessWidget {
                   separatorBuilder: (_, _) => const SizedBox(width: 12),
                   itemBuilder: (context, index) {
                     final item = items[index];
-                    final imageUrl =
-                        api.imageUrl(item, maxWidth: 700) ??
-                        api.imageUrl(item, type: 'Backdrop', maxWidth: 700);
+                    final imageRequest =
+                        api.imageRequest(item, maxWidth: 700) ??
+                        api.imageRequest(item, type: 'Backdrop', maxWidth: 700);
                     return SizedBox(
                       width: width,
                       child: InkWell(
@@ -326,8 +330,7 @@ class _LibraryShelf extends StatelessWidget {
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(6),
                                 child: EmbyImage(
-                                  url: imageUrl,
-                                  httpHeaders: api.imageHeaders,
+                                  request: imageRequest,
                                   icon: Icons.video_library_outlined,
                                 ),
                               ),
@@ -393,8 +396,7 @@ class _LandscapeShelf extends StatelessWidget {
               MediaLandscapeCard(
                 item: item,
                 width: width,
-                imageUrl: _landscapeImageUrl(api, item),
-                imageHeaders: api.imageHeaders,
+                imageRequest: _landscapeImageRequest(api, item),
                 onTap: () => onTap(item),
                 onPlay: onPlay == null ? null : () => onPlay!(item),
               ),
@@ -404,13 +406,13 @@ class _LandscapeShelf extends StatelessWidget {
     );
   }
 
-  String? _landscapeImageUrl(EmbyApi api, EmbyItem item) {
+  EmbyImageRequest? _landscapeImageRequest(EmbyApi api, EmbyItem item) {
     if (item.type == 'Movie' || item.type == 'Series') {
-      return api.imageUrl(item, type: 'Backdrop', maxWidth: 900) ??
-          api.imageUrl(item, maxWidth: 900);
+      return api.imageRequest(item, type: 'Backdrop', maxWidth: 900) ??
+          api.imageRequest(item, maxWidth: 900);
     }
-    return api.imageUrl(item, maxWidth: 900) ??
-        api.imageUrl(item, type: 'Backdrop', maxWidth: 900);
+    return api.imageRequest(item, maxWidth: 900) ??
+        api.imageRequest(item, type: 'Backdrop', maxWidth: 900);
   }
 }
 
@@ -447,8 +449,7 @@ class _PosterShelf extends StatelessWidget {
               MediaPosterCard(
                 item: item,
                 width: width,
-                imageUrl: api.imageUrl(item, maxWidth: 500),
-                imageHeaders: api.imageHeaders,
+                imageRequest: api.imageRequest(item, maxWidth: 500),
                 onTap: () => onTap(item),
               ),
           ],

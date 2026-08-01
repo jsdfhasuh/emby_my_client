@@ -224,8 +224,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> _expireSession(ServerScope scope) async {
-    if (_scope != scope) return;
+  Future<void> _expireSession(ServerScope scope, EmbyApi source) async {
+    if (_scope != scope || !identical(_clients.clientFor(scope), source)) {
+      return;
+    }
     _session = null;
     _scope = null;
     _serverCapabilities = null;
@@ -285,15 +287,23 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         libraryCategorySettingsStore: _categorySettingsStore,
       );
 
-  EmbyApi _createApi(EmbySession session, ServerScope scope) => EmbyApi(
-    session,
-    onSessionExpired: () => _expireSession(scope),
-    onRemoteCapabilitiesReported: () => _confirmRemoteControl(scope),
-    onRealtimeConnected: () async {
-      if (_disposed || _scope != scope) return;
-      await _syncOfflineProgress(includeDeferred: true);
-    },
-  );
+  EmbyApi _createApi(EmbySession session, ServerScope scope) {
+    late final EmbyApi api;
+    api = EmbyApi(
+      session,
+      onSessionExpired: () => _expireSession(scope, api),
+      onRemoteCapabilitiesReported: () => _confirmRemoteControl(scope, api),
+      onRealtimeConnected: () async {
+        if (_disposed ||
+            _scope != scope ||
+            !identical(_clients.clientFor(scope), api)) {
+          return;
+        }
+        await _syncOfflineProgress(includeDeferred: true);
+      },
+    );
+    return api;
+  }
 
   Future<ServerCapabilities> _restoreCapabilities(EmbySession session) async {
     final baseline = ServerCapabilities.fromSession(session);
@@ -319,8 +329,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _confirmRemoteControl(ServerScope scope) async {
-    if (_disposed || _scope != scope || !_clients.contains(scope)) return;
+  Future<void> _confirmRemoteControl(ServerScope scope, EmbyApi source) async {
+    if (_disposed ||
+        _scope != scope ||
+        !identical(_clients.clientFor(scope), source)) {
+      return;
+    }
     final current = _serverCapabilities;
     if (current == null || current.scope != scope) return;
     final updated = current.observe(

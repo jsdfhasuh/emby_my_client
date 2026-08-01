@@ -5,11 +5,15 @@ import 'package:flutter/material.dart';
 import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
+import '../playback/playback_queue.dart';
 import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
+import 'player_screen.dart';
+import 'photos/photo_library_screen.dart';
 import 'widgets/media_widgets.dart';
 
 class LibraryScreen extends StatefulWidget {
@@ -58,6 +62,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await future;
   }
 
+  Future<void> _openView(EmbyItem view) {
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => view.isPhotoLibrary
+            ? PhotoLibraryScreen(api: widget.api, directory: view)
+            : LibraryBrowseScreen(
+                api: widget.api,
+                view: view,
+                downloads: widget.downloads,
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<List<EmbyItem>>(
@@ -89,26 +107,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
             itemCount: views.length,
             itemBuilder: (context, index) {
               final view = views[index];
-              final url =
-                  widget.api.imageUrl(view, type: 'Backdrop', maxWidth: 700) ??
-                  widget.api.imageUrl(view, maxWidth: 700);
+              final request =
+                  widget.api.imageRequest(
+                    view,
+                    type: 'Backdrop',
+                    maxWidth: 700,
+                  ) ??
+                  widget.api.imageRequest(view, maxWidth: 700);
               return Card(
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => LibraryBrowseScreen(
-                        api: widget.api,
-                        view: view,
-                        downloads: widget.downloads,
-                        categorySettings: widget.categorySettings,
-                      ),
-                    ),
-                  ),
+                  onTap: () => _openView(view),
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      EmbyImage(url: url, httpHeaders: widget.api.imageHeaders),
+                      EmbyImage(request: request),
                       const DecoratedBox(
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
@@ -153,16 +166,349 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.downloads,
     this.initialOptions = const LibraryBrowseOptions(),
     this.categorySettings = const LibraryCategorySettings(),
-  });
+  }) : _facet = null;
+
+  const LibraryBrowseScreen._facet({
+    required this.api,
+    required this.view,
+    required _LibraryFacet facet,
+    this.downloads,
+    this.categorySettings = const LibraryCategorySettings(),
+  }) : initialOptions = const LibraryBrowseOptions(),
+       _facet = facet;
 
   final EmbyApi api;
   final EmbyItem view;
   final DownloadService? downloads;
   final LibraryBrowseOptions initialOptions;
   final LibraryCategorySettings categorySettings;
+  final _LibraryFacet? _facet;
 
   @override
   State<LibraryBrowseScreen> createState() => _LibraryBrowseScreenState();
+}
+
+enum _LibrarySection { videos, folders, genres, tags, favorites }
+
+extension on _LibrarySection {
+  String get label => switch (this) {
+    _LibrarySection.videos => '影片',
+    _LibrarySection.folders => '文件夹',
+    _LibrarySection.genres => '分类',
+    _LibrarySection.tags => '标签',
+    _LibrarySection.favorites => '收藏',
+  };
+
+  IconData get icon => switch (this) {
+    _LibrarySection.videos => Icons.movie_outlined,
+    _LibrarySection.folders => Icons.folder_outlined,
+    _LibrarySection.genres => Icons.category_outlined,
+    _LibrarySection.tags => Icons.label_outline,
+    _LibrarySection.favorites => Icons.favorite_border,
+  };
+
+  String get emptyTitle => switch (this) {
+    _LibrarySection.videos => '这个媒体库是空的',
+    _LibrarySection.folders => '没有文件夹',
+    _LibrarySection.genres => '没有分类',
+    _LibrarySection.tags => '没有标签',
+    _LibrarySection.favorites => '还没有收藏的媒体',
+  };
+}
+
+enum _LibraryFacetKind { genre, tag }
+
+class _LibraryFacet {
+  const _LibraryFacet({
+    required this.id,
+    required this.name,
+    required this.kind,
+  });
+
+  final String id;
+  final String name;
+  final _LibraryFacetKind kind;
+}
+
+class _LibrarySectionBar extends StatelessWidget {
+  const _LibrarySectionBar({required this.selected, required this.onSelected});
+
+  final _LibrarySection selected;
+  final ValueChanged<_LibrarySection> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      key: const ValueKey('library-section-bar'),
+      height: 58,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final section in _LibrarySection.values) ...[
+              FilterChip(
+                key: ValueKey('library-section-${section.name}'),
+                label: Text(section.label),
+                selected: selected == section,
+                showCheckmark: false,
+                onSelected: (_) => onSelected(section),
+              ),
+              if (section != _LibrarySection.values.last)
+                const SizedBox(width: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _LibraryMediaFilter { all, strm, regular }
+
+extension on _LibraryMediaFilter {
+  String get label => switch (this) {
+    _LibraryMediaFilter.all => '全部',
+    _LibraryMediaFilter.strm => 'STRM',
+    _LibraryMediaFilter.regular => '普通媒体',
+  };
+
+  bool includes(EmbyItem item) => switch (this) {
+    _LibraryMediaFilter.all => true,
+    _LibraryMediaFilter.strm => item.isStrm,
+    _LibraryMediaFilter.regular => !item.isStrm,
+  };
+
+  String get emptyTitle => switch (this) {
+    _LibraryMediaFilter.all => '这个媒体库是空的',
+    _LibraryMediaFilter.strm => '没有 STRM 媒体',
+    _LibraryMediaFilter.regular => '没有普通媒体',
+  };
+
+  IconData get emptyIcon => switch (this) {
+    _LibraryMediaFilter.all => Icons.movie_filter_outlined,
+    _LibraryMediaFilter.strm => Icons.link_off_outlined,
+    _LibraryMediaFilter.regular => Icons.movie_outlined,
+  };
+}
+
+extension on LibrarySort {
+  String get label => switch (this) {
+    LibrarySort.nameAscending => '名称 A-Z',
+    LibrarySort.nameDescending => '名称 Z-A',
+    LibrarySort.dateAddedDescending => '最近添加',
+    LibrarySort.productionYearDescending => '年份从新到旧',
+    LibrarySort.communityRatingDescending => '评分从高到低',
+  };
+}
+
+enum _LibraryMoreAction { refresh, reset }
+
+class _LibraryActionBar extends StatelessWidget {
+  const _LibraryActionBar({
+    required this.filter,
+    required this.sort,
+    required this.canPlay,
+    required this.onPlayAll,
+    required this.onShuffle,
+    required this.onFilterSelected,
+    required this.onSortSelected,
+    required this.onMoreSelected,
+  });
+
+  final _LibraryMediaFilter filter;
+  final LibrarySort sort;
+  final bool canPlay;
+  final VoidCallback onPlayAll;
+  final VoidCallback onShuffle;
+  final ValueChanged<_LibraryMediaFilter> onFilterSelected;
+  final ValueChanged<LibrarySort> onSortSelected;
+  final ValueChanged<_LibraryMoreAction> onMoreSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      key: const ValueKey('library-action-bar'),
+      height: 64,
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: constraints.maxWidth > 28
+                  ? constraints.maxWidth - 28
+                  : 0,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                IconButton(
+                  key: const ValueKey('library-play-all-button'),
+                  tooltip: '播放全部',
+                  onPressed: canPlay ? onPlayAll : null,
+                  icon: const Icon(Icons.play_arrow),
+                ),
+                IconButton(
+                  key: const ValueKey('library-shuffle-button'),
+                  tooltip: '随机播放',
+                  onPressed: canPlay ? onShuffle : null,
+                  icon: const Icon(Icons.shuffle),
+                ),
+                PopupMenuButton<LibrarySort>(
+                  key: const ValueKey('library-sort-button'),
+                  tooltip: '排序',
+                  icon: const Icon(Icons.sort),
+                  initialValue: sort,
+                  onSelected: onSortSelected,
+                  itemBuilder: (context) => [
+                    for (final option in LibrarySort.values)
+                      CheckedPopupMenuItem(
+                        key: ValueKey('library-sort-${option.name}'),
+                        value: option,
+                        checked: option == sort,
+                        child: Text(option.label),
+                      ),
+                  ],
+                ),
+                PopupMenuButton<_LibraryMediaFilter>(
+                  key: const ValueKey('library-filter-button'),
+                  tooltip: 'STRM 筛选',
+                  initialValue: filter,
+                  onSelected: onFilterSelected,
+                  icon: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(
+                        filter == _LibraryMediaFilter.all
+                            ? Icons.filter_list
+                            : Icons.filter_alt,
+                      ),
+                      if (filter != _LibraryMediaFilter.all)
+                        const Positioned(
+                          top: -2,
+                          right: -3,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: Color(0xFF55B948),
+                              shape: BoxShape.circle,
+                            ),
+                            child: SizedBox.square(dimension: 7),
+                          ),
+                        ),
+                    ],
+                  ),
+                  itemBuilder: (context) => [
+                    for (final option in _LibraryMediaFilter.values)
+                      CheckedPopupMenuItem(
+                        key: ValueKey('library-filter-${option.name}'),
+                        value: option,
+                        checked: option == filter,
+                        child: Text(option.label),
+                      ),
+                  ],
+                ),
+                PopupMenuButton<_LibraryMoreAction>(
+                  key: const ValueKey('library-more-button'),
+                  tooltip: '更多',
+                  icon: const Icon(Icons.more_horiz),
+                  onSelected: onMoreSelected,
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      key: ValueKey('library-more-refresh'),
+                      value: _LibraryMoreAction.refresh,
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.refresh),
+                        title: Text('刷新'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      key: ValueKey('library-more-reset'),
+                      value: _LibraryMoreAction.reset,
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.restart_alt),
+                        title: Text('重置筛选和排序'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LibraryGroupCard extends StatelessWidget {
+  const _LibraryGroupCard({
+    super.key,
+    required this.item,
+    required this.icon,
+    required this.imageRequest,
+    required this.onTap,
+  });
+
+  final EmbyItem item;
+  final IconData icon;
+  final EmbyImageRequest? imageRequest;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (imageRequest != null)
+              EmbyImage(request: imageRequest)
+            else
+              ColoredBox(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                child: Icon(icon, size: 42),
+              ),
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0x00000000), Color(0xD9000000)],
+                ),
+              ),
+            ),
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: 10,
+              child: Row(
+                children: [
+                  Icon(icon, size: 20, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      item.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
@@ -179,6 +525,31 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   int? _totalCount;
   int _generation = 0;
   Object? _error;
+  _LibrarySection _section = _LibrarySection.videos;
+  _LibraryMediaFilter _filter = _LibraryMediaFilter.all;
+  LibrarySort _sort = LibrarySort.nameAscending;
+
+  bool get _isMediaView =>
+      widget._facet != null ||
+      _section == _LibrarySection.videos ||
+      _section == _LibrarySection.favorites;
+
+  List<EmbyItem> get _displayedItems => _isMediaView
+      ? _items.where(_filter.includes).toList(growable: false)
+      : List.unmodifiable(_items);
+
+  List<EmbyItem> get _playableItems =>
+      _displayedItems.where((item) => item.isPlayable).toList(growable: false);
+
+  String get _emptyTitle => widget._facet == null
+      ? _section.emptyTitle
+      : '“${widget._facet!.name}”中没有媒体';
+
+  IconData get _emptyIcon => widget._facet == null
+      ? _section.icon
+      : widget._facet!.kind == _LibraryFacetKind.genre
+      ? Icons.category_outlined
+      : Icons.label_outline;
 
   @override
   void initState() {
@@ -230,12 +601,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _error = null;
     });
     try {
-      final page = await widget.api.getLibraryItems(
-        parentId: widget.view.id,
-        startIndex: startIndex,
-        limit: _pageSize,
-        options: _options,
-      );
+      final page = await _requestPage(startIndex);
       if (!mounted || generation != _generation) return;
       setState(() {
         _items.addAll(page.items);
@@ -253,6 +619,53 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         setState(() => _loading = false);
       }
     }
+  }
+
+  Future<EmbyItemPage> _requestPage(int startIndex) {
+    final facet = widget._facet;
+    if (facet != null) {
+      return widget.api.getLibraryItems(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+        options: _options,
+        genreId: facet.kind == _LibraryFacetKind.genre ? facet.id : null,
+        tagId: facet.kind == _LibraryFacetKind.tag ? facet.id : null,
+        includeMediaSources: true,
+      );
+    }
+    return switch (_section) {
+      _LibrarySection.videos => widget.api.getLibraryItems(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+        options: _options,
+        includeMediaSources: true,
+      ),
+      _LibrarySection.folders => widget.api.getLibraryFolders(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+      ),
+      _LibrarySection.genres => widget.api.getLibraryGenres(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+      ),
+      _LibrarySection.tags => widget.api.getLibraryTags(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+      ),
+      _LibrarySection.favorites => widget.api.getLibraryItems(
+        parentId: widget.view.id,
+        startIndex: startIndex,
+        limit: _pageSize,
+        options: _options,
+        favoritesFilter: true,
+        includeMediaSources: true,
+      ),
+    };
   }
 
   Future<void> _refresh() =>
@@ -296,6 +709,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           _items[index] = _items[index].copyWith(userData: updated);
         }
       }
+      if (widget._facet == null && _section == _LibrarySection.favorites) {
+        _items.removeWhere((item) => !item.userData.isFavorite);
+      }
     });
   }
 
@@ -311,6 +727,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _generation++;
     setState(() {
       _items.clear();
+      _loading = false;
       _hasMore = true;
       _totalCount = null;
       _loading = false;
@@ -355,6 +772,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     bool favoriteOnly = false,
   }) {
     final folderView = itemType == LibraryItemType.folder;
+    if (_section != _LibrarySection.videos ||
+        _filter != _LibraryMediaFilter.all) {
+      setState(() {
+        _section = _LibrarySection.videos;
+        _filter = _LibraryMediaFilter.all;
+      });
+    }
     _applyOptions(
       _options.copyWith(
         itemType: itemType,
@@ -492,7 +916,106 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     if (selected != null && mounted) _applyOptions(selected);
   }
 
+  void _selectFilter(_LibraryMediaFilter filter) {
+    if (filter == _filter) return;
+    setState(() => _filter = filter);
+    if (_displayedItems.isEmpty && _hasMore) {
+      unawaited(_loadUntilFilterMatches());
+    }
+  }
+
+  Future<void> _loadUntilFilterMatches() async {
+    while (mounted && _displayedItems.isEmpty && _hasMore && _error == null) {
+      final previousCount = _items.length;
+      await _loadMore();
+      if (_items.length <= previousCount) break;
+    }
+  }
+
+  void _selectSection(_LibrarySection section) {
+    if (section == _section) return;
+    setState(() {
+      _section = section;
+      _filter = _LibraryMediaFilter.all;
+    });
+    unawaited(_refresh());
+  }
+
+  void _selectSort(LibrarySort sort) {
+    if (sort == _sort) return;
+    setState(() => _sort = sort);
+    final options = switch (sort) {
+      LibrarySort.nameAscending => _options.copyWith(
+        sortBy: LibrarySortBy.name,
+        sortOrder: LibrarySortOrder.ascending,
+      ),
+      LibrarySort.nameDescending => _options.copyWith(
+        sortBy: LibrarySortBy.name,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+      LibrarySort.dateAddedDescending => _options.copyWith(
+        sortBy: LibrarySortBy.dateAdded,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+      LibrarySort.productionYearDescending => _options.copyWith(
+        sortBy: LibrarySortBy.productionYear,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+      LibrarySort.communityRatingDescending => _options.copyWith(
+        sortBy: LibrarySortBy.communityRating,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+    };
+    _applyOptions(options);
+  }
+
+  Future<void> _playAll({bool shuffle = false}) async {
+    final items = _playableItems.toList(growable: false);
+    if (items.isEmpty) return;
+    if (shuffle) items.shuffle();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PlayerScreen(
+          api: widget.api,
+          item: items.first,
+          queue: PlaybackQueue(api: widget.api, initialItems: items),
+        ),
+      ),
+    );
+    if (mounted) await _refreshUserData(items.map((item) => item.id));
+  }
+
+  void _selectMore(_LibraryMoreAction action) {
+    switch (action) {
+      case _LibraryMoreAction.refresh:
+        unawaited(_refresh());
+        return;
+      case _LibraryMoreAction.reset:
+        setState(() {
+          _filter = _LibraryMediaFilter.all;
+          _sort = LibrarySort.nameAscending;
+        });
+        final reset = _options.copyWith(
+          sortBy: LibrarySortBy.name,
+          sortOrder: LibrarySortOrder.ascending,
+          playedFilter: LibraryPlayedFilter.all,
+          itemType: LibraryItemType.all,
+          favoriteOnly: false,
+        );
+        if (reset == _options) {
+          unawaited(_refresh());
+        } else {
+          _applyOptions(reset);
+        }
+        return;
+    }
+  }
+
   Future<void> _open(EmbyItem item) async {
+    if (!_isMediaView) {
+      await _openGroup(item);
+      return;
+    }
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => item.isFolder
@@ -526,17 +1049,130 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  Future<void> _openGroup(EmbyItem item) async {
+    switch (_section) {
+      case _LibrarySection.folders:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LibraryBrowseScreen(
+              api: widget.api,
+              view: item,
+              downloads: widget.downloads,
+              categorySettings: widget.categorySettings,
+            ),
+          ),
+        );
+        if (mounted) await _refreshRealtime();
+        return;
+      case _LibrarySection.genres:
+      case _LibrarySection.tags:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LibraryBrowseScreen._facet(
+              api: widget.api,
+              view: widget.view,
+              downloads: widget.downloads,
+              categorySettings: widget.categorySettings,
+              facet: _LibraryFacet(
+                id: item.id,
+                name: item.name,
+                kind: _section == _LibrarySection.genres
+                    ? _LibraryFacetKind.genre
+                    : _LibraryFacetKind.tag,
+              ),
+            ),
+          ),
+        );
+        if (mounted) await _refreshRealtime();
+        return;
+      case _LibrarySection.videos:
+      case _LibrarySection.favorites:
+        return;
+    }
+  }
+
+  Widget _buildMediaGrid(List<EmbyItem> items) {
+    return SliverPadding(
+      padding: const EdgeInsets.all(16),
+      sliver: SliverGrid(
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 180,
+          childAspectRatio: 0.52,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 18,
+        ),
+        delegate: SliverChildBuilderDelegate((context, index) {
+          final item = items[index];
+          return MediaPosterCard(
+            key: ValueKey('library-item-${item.id}'),
+            item: item,
+            width: double.infinity,
+            imageRequest: widget.api.imageRequest(item),
+            onTap: () => _open(item),
+          );
+        }, childCount: items.length),
+      ),
+    );
+  }
+
+  Widget _buildGroupGrid(List<EmbyItem> items) {
+    return SliverPadding(
+      padding: const EdgeInsets.all(16),
+      sliver: SliverGrid(
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 240,
+          childAspectRatio: 1.45,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+        ),
+        delegate: SliverChildBuilderDelegate((context, index) {
+          final item = items[index];
+          return _LibraryGroupCard(
+            key: ValueKey('library-group-${item.id}'),
+            item: item,
+            icon: _section.icon,
+            imageRequest: widget.api.imageRequest(item, maxWidth: 500),
+            onTap: () => _open(item),
+          );
+        }, childCount: items.length),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final displayedItems = _displayedItems;
+    final facet = widget._facet;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.view.name)),
+      appBar: AppBar(title: Text(facet?.name ?? widget.view.name)),
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: CustomScrollView(
           controller: _controller,
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
-            SliverToBoxAdapter(child: _buildBrowseControls(context)),
+            if (facet == null)
+              SliverToBoxAdapter(
+                child: _LibrarySectionBar(
+                  selected: _section,
+                  onSelected: _selectSection,
+                ),
+              ),
+            if (facet == null && _section == _LibrarySection.videos)
+              SliverToBoxAdapter(child: _buildBrowseControls(context)),
+            if (_isMediaView && _options.itemType != LibraryItemType.folder)
+              SliverToBoxAdapter(
+                child: _LibraryActionBar(
+                  filter: _filter,
+                  sort: _sort,
+                  canPlay: _playableItems.isNotEmpty,
+                  onPlayAll: () => unawaited(_playAll()),
+                  onShuffle: () => unawaited(_playAll(shuffle: true)),
+                  onFilterSelected: _selectFilter,
+                  onSortSelected: _selectSort,
+                  onMoreSelected: _selectMore,
+                ),
+              ),
             if (_items.isEmpty && _loading)
               const SliverFillRemaining(
                 child: Center(child: CircularProgressIndicator()),
@@ -548,35 +1184,32 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             else if (_items.isEmpty)
               SliverFillRemaining(
                 child: EmptyState(
-                  icon: Icons.movie_filter_outlined,
-                  title: _options.activeFilterCount > 0
+                  icon: _emptyIcon,
+                  title: _options.activeFilterCount > 0 && _isMediaView
                       ? '没有符合筛选条件的项目'
-                      : '这个媒体库是空的',
+                      : _emptyTitle,
                 ),
               )
-            else
-              SliverPadding(
-                padding: const EdgeInsets.all(16),
-                sliver: SliverGrid(
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 180,
-                    childAspectRatio: 0.52,
-                    crossAxisSpacing: 12,
-                    mainAxisSpacing: 18,
-                  ),
-                  delegate: SliverChildBuilderDelegate((context, index) {
-                    final item = _items[index];
-                    return MediaPosterCard(
-                      item: item,
-                      width: double.infinity,
-                      imageUrl: widget.api.imageUrl(item),
-                      imageHeaders: widget.api.imageHeaders,
-                      onTap: () => _open(item),
-                    );
-                  }, childCount: _items.length),
+            else if (displayedItems.isEmpty && _error != null)
+              SliverFillRemaining(
+                child: ErrorState(error: _error!, onRetry: _loadMore),
+              )
+            else if (displayedItems.isEmpty && (_loading || _hasMore))
+              const SliverFillRemaining(
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (displayedItems.isEmpty)
+              SliverFillRemaining(
+                child: EmptyState(
+                  icon: _filter.emptyIcon,
+                  title: _filter.emptyTitle,
                 ),
-              ),
-            if (_items.isNotEmpty && (_loading || _error != null))
+              )
+            else if (_isMediaView)
+              _buildMediaGrid(displayedItems)
+            else
+              _buildGroupGrid(displayedItems),
+            if (displayedItems.isNotEmpty && (_loading || _error != null))
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.all(20),

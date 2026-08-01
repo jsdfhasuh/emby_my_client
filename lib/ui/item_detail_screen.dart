@@ -295,9 +295,9 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
 
     final item = _item!;
     final backdrop =
-        widget.api.imageUrl(item, type: 'Backdrop', maxWidth: 1400) ??
-        widget.api.imageUrl(item, maxWidth: 900);
-    final poster = widget.api.imageUrl(item, maxWidth: 500);
+        widget.api.imageRequest(item, type: 'Backdrop', maxWidth: 1400) ??
+        widget.api.imageRequest(item, maxWidth: 900);
+    final poster = widget.api.imageRequest(item, maxWidth: 500);
 
     return Scaffold(
       body: CustomScrollView(
@@ -309,10 +309,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
               background: Stack(
                 fit: StackFit.expand,
                 children: [
-                  EmbyImage(
-                    url: backdrop,
-                    httpHeaders: widget.api.imageHeaders,
-                  ),
+                  EmbyImage(request: backdrop),
                   const DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -346,10 +343,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                           aspectRatio: 2 / 3,
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(6),
-                            child: EmbyImage(
-                              url: poster,
-                              httpHeaders: widget.api.imageHeaders,
-                            ),
+                            child: EmbyImage(request: poster),
                           ),
                         ),
                       ),
@@ -493,7 +487,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
           )
         else
           ..._episodes.map((episode) {
-            final imageUrl = widget.api.imageUrl(episode, maxWidth: 420);
+            final imageRequest = widget.api.imageRequest(
+              episode,
+              maxWidth: 420,
+            );
             return Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Material(
@@ -511,10 +508,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              EmbyImage(
-                                url: imageUrl,
-                                httpHeaders: widget.api.imageHeaders,
-                              ),
+                              EmbyImage(request: imageRequest),
                               const Center(
                                 child: DecoratedBox(
                                   decoration: BoxDecoration(

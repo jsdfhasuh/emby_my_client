@@ -51,12 +51,13 @@ void main() {
         ),
       );
     });
-    final url = Uri.parse(api.imageUrl(_item, maxWidth: 500)!);
+    final request = api.imageRequest(_item, maxWidth: 500)!;
+    final url = request.uri;
 
     expect(url.queryParameters, isNot(contains('api_key')));
     expect(url.queryParameters['tag'], 'primary-tag');
-    expect(api.imageHeaders['X-Emby-Token'], _session.accessToken);
-    expect(api.imageHeaders['X-Emby-Authorization'], isNotEmpty);
+    expect(request.headers['X-Emby-Token'], _session.accessToken);
+    expect(request.headers['X-Emby-Authorization'], isNotEmpty);
   });
 }
 

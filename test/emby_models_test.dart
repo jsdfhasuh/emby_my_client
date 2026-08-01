@@ -39,6 +39,8 @@ void main() {
       'ParentIndexNumber': 1,
       'IndexNumber': 2,
       'RunTimeTicks': 36000000000,
+      'Genres': ['剧情'],
+      'Tags': ['高码率'],
       'ImageTags': {'Primary': 'image-tag'},
       'UserData': {
         'PlaybackPositionTicks': 9000000000,
@@ -53,6 +55,8 @@ void main() {
     expect(item.resumePosition, const Duration(minutes: 15));
     expect(item.progress, 0.25);
     expect(item.userData.unplayedItemCount, 12);
+    expect(item.genres, ['剧情']);
+    expect(item.tags, ['高码率']);
   });
 
   test('parses intro and credits chapter markers', () {
@@ -102,6 +106,38 @@ void main() {
     expect(info?.height, 180);
     expect(info?.tilesPerImage, 100);
     expect(info?.intervalMilliseconds, 10000);
+  });
+
+  test('classifies STRM items from item and media source metadata', () {
+    final itemPath = EmbyItem.fromJson({
+      'Id': 'movie-1',
+      'Name': 'Movie',
+      'Type': 'Movie',
+      'Path': r'D:\Media\Movie.STRM',
+    });
+    final sourceContainer = EmbyItem.fromJson({
+      'Id': 'movie-2',
+      'Name': 'Movie 2',
+      'Type': 'Movie',
+      'MediaSources': [
+        {
+          'Id': 'source-1',
+          'Path': 'https://media.example.test/video',
+          'Container': 'STRM',
+        },
+      ],
+    });
+    final regular = EmbyItem.fromJson({
+      'Id': 'movie-3',
+      'Name': 'Movie 3',
+      'Type': 'Movie',
+      'Path': '/media/movie.mkv',
+      'Container': 'mkv',
+    });
+
+    expect(itemPath.isStrm, isTrue);
+    expect(sourceContainer.isStrm, isTrue);
+    expect(regular.isStrm, isFalse);
   });
 
   test('diagnostic logs redact network URLs and Emby credentials', () {
