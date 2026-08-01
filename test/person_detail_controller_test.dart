@@ -16,6 +16,7 @@ void main() {
         personCalls++;
         return personResult.future;
       },
+      loadUserData: _emptyUserData,
       loadItems:
           ({
             required personId,
@@ -54,6 +55,7 @@ void main() {
     final controller = PersonDetailController(
       personId: 'person-1',
       loadPerson: (_) async => _person,
+      loadUserData: _emptyUserData,
       loadItems:
           ({
             required personId,
@@ -95,6 +97,7 @@ void main() {
       final controller = PersonDetailController(
         personId: 'person-1',
         loadPerson: (_) async => _person,
+        loadUserData: _emptyUserData,
         loadItems:
             ({
               required personId,
@@ -144,6 +147,7 @@ void main() {
       final controller = PersonDetailController(
         personId: 'person-1',
         loadPerson: (_) async => _person,
+        loadUserData: _emptyUserData,
         loadItems:
             ({
               required personId,
@@ -184,12 +188,145 @@ void main() {
     },
   );
 
+  test('first-page failure can retry without reloading the person', () async {
+    var itemAttempts = 0;
+    var personCalls = 0;
+    final controller = PersonDetailController(
+      personId: 'person-1',
+      loadPerson: (_) async {
+        personCalls++;
+        return _person;
+      },
+      loadItems:
+          ({
+            required personId,
+            startIndex = 0,
+            limit = 60,
+            filter = PersonMediaFilter.all,
+          }) async {
+            itemAttempts++;
+            if (itemAttempts == 1) throw StateError('first page failed');
+            return EmbyItemPage(items: [_item('movie-1')], totalRecordCount: 1);
+          },
+      loadUserData: _emptyUserData,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.load();
+    expect(controller.state.person, _person);
+    expect(controller.state.items, isEmpty);
+    expect(controller.state.itemsError, isA<StateError>());
+
+    await controller.retryItems();
+    expect(personCalls, 1);
+    expect(itemAttempts, 2);
+    expect(controller.state.items.single.id, 'movie-1');
+    expect(controller.state.itemsError, isNull);
+  });
+
+  test(
+    'refreshes one item user data without resetting person works state',
+    () async {
+      final starts = <int>[];
+      final controller = PersonDetailController(
+        personId: 'person-1',
+        loadPerson: (_) async => _person,
+        loadItems:
+            ({
+              required personId,
+              startIndex = 0,
+              limit = 60,
+              filter = PersonMediaFilter.all,
+            }) async {
+              starts.add(startIndex);
+              return EmbyItemPage(
+                items: startIndex == 0
+                    ? [
+                        for (var index = 0; index < 60; index++)
+                          _item('movie-$index'),
+                      ]
+                    : [_item('movie-60')],
+                totalRecordCount: 61,
+              );
+            },
+        loadUserData: (ids) async => {
+          'movie-1': const EmbyUserData(
+            playbackPositionTicks: 7200000000,
+            playedPercentage: 75,
+            isPlayed: true,
+            isFavorite: true,
+            unplayedItemCount: 4,
+          ),
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+
+      await controller.refreshItemUserData('movie-1');
+      await controller.loadMore();
+
+      expect(controller.state.filter, PersonMediaFilter.all);
+      expect(controller.state.totalRecordCount, 61);
+      expect(controller.state.items, hasLength(61));
+      expect(starts, [0, 60]);
+      expect(
+        controller.state.items[1].userData.playbackPositionTicks,
+        7200000000,
+      );
+      expect(controller.state.items[1].userData.playedPercentage, 75);
+      expect(controller.state.items[1].userData.isPlayed, isTrue);
+      expect(controller.state.items[1].userData.isFavorite, isTrue);
+      expect(controller.state.items[1].userData.unplayedItemCount, 4);
+      expect(controller.state.items.first.userData.isPlayed, isFalse);
+      expect(controller.state.items.last.id, 'movie-60');
+    },
+  );
+
+  test('old user data refresh cannot write into a new filter result', () async {
+    final refreshResult = Completer<Map<String, EmbyUserData>>();
+    final controller = PersonDetailController(
+      personId: 'person-1',
+      loadPerson: (_) async => _person,
+      loadItems:
+          ({
+            required personId,
+            startIndex = 0,
+            limit = 60,
+            filter = PersonMediaFilter.all,
+          }) async => EmbyItemPage(
+            items: [
+              _item(
+                'shared-item',
+                type: filter == PersonMediaFilter.movie ? 'Movie' : 'Series',
+                userData: EmbyUserData(
+                  isFavorite: filter == PersonMediaFilter.movie,
+                ),
+              ),
+            ],
+            totalRecordCount: 1,
+          ),
+      loadUserData: (_) => refreshResult.future,
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+
+    final refresh = controller.refreshItemUserData('shared-item');
+    await controller.selectFilter(PersonMediaFilter.movie);
+    refreshResult.complete({'shared-item': const EmbyUserData(isPlayed: true)});
+    await refresh;
+
+    expect(controller.state.filter, PersonMediaFilter.movie);
+    expect(controller.state.items.single.userData.isFavorite, isTrue);
+    expect(controller.state.items.single.userData.isPlayed, isFalse);
+  });
+
   test('late requests do not notify listeners after disposal', () async {
     final personResult = Completer<EmbyItem>();
     final itemsResult = Completer<EmbyItemPage>();
     final controller = PersonDetailController(
       personId: 'person-1',
       loadPerson: (_) => personResult.future,
+      loadUserData: _emptyUserData,
       loadItems:
           ({
             required personId,
@@ -222,12 +359,19 @@ const _person = EmbyItem(
   userData: EmbyUserData(),
 );
 
-EmbyItem _item(String id, {String type = 'Movie'}) => EmbyItem(
+EmbyItem _item(
+  String id, {
+  String type = 'Movie',
+  EmbyUserData userData = const EmbyUserData(),
+}) => EmbyItem(
   id: id,
   name: id,
   type: type,
   imageTags: const {},
   backdropImageTags: const [],
   genres: const [],
-  userData: const EmbyUserData(),
+  userData: userData,
 );
+
+Future<Map<String, EmbyUserData>> _emptyUserData(Iterable<String> _) async =>
+    const {};

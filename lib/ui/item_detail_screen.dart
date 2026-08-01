@@ -291,6 +291,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         builder: (_) => PersonDetailScreen(
           api: widget.api,
           personId: personId,
+          initialPerson: person,
           downloads: widget.downloads,
         ),
       ),

@@ -698,7 +698,7 @@ Moonfin-Core 使用 GPL v2。本功能只参考其公开 Emby API 使用方式�
   首屏与下一页错误重试和销毁保护。
 - 在电影、电视剧和单集详情接入演员横向惰性列表；无 ID 演员保留展示但不可点击。
 - 新增人物资料、作品数量、全部/电影/电视剧筛选、作品网格与详情跳转。
-- `dart format lib test`、`flutter analyze`、全量 `flutter test`（210 项）通过。
+- `dart format lib test`、`flutter analyze`、全量 `flutter test` 通过。
 - `flutter build apk --debug --split-per-abi` 通过，生成 armeabi-v7a、arm64-v8a 和
   x86_64 Debug APK。
 
@@ -712,3 +712,14 @@ Moonfin-Core 使用 GPL v2。本功能只参考其公开 Emby API 使用方式�
 - 未修改 `library_screen.dart`。
 - 未增加媒体库位置提示、可见范围计算、`NameStartsWith`、`NameLessThan` 或
   `# / A-Z` 导航状态。
+
+2026-08-01 审查修正：
+
+- 人物页接收类型化 `EmbyPerson` 初始资料；人物详情请求失败时继续显示演员卡片的
+  姓名和头像，作品查询与人物资料重试互不阻塞。
+- 同 ID 人物记录在首次出现位置合并，演员/客串演员类型优先，并用后续记录补齐
+  缺失的角色和头像 Tag。
+- 从作品详情返回后只刷新该作品的 `UserData`，不重置人物页筛选、分页或滚动位置；
+  旧筛选发起的刷新结果不能写入新列表。
+- 补充人物回退与重试、第一页作品重试、跨角色去重、作品状态刷新，以及电影、
+  电视剧、单集演员区域条件的自动化测试。

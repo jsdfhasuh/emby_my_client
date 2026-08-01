@@ -310,22 +310,40 @@ class EmbyItem {
 List<EmbyPerson> _parsePeople(dynamic value) {
   if (value is! List) return const [];
   final people = <EmbyPerson>[];
-  final seenIds = <String>{};
+  final indexesById = <String, int>{};
   final seenAnonymous = <String>{};
   for (final entry in value.whereType<Map>()) {
     final person = EmbyPerson.fromJson(Map<String, dynamic>.from(entry));
     if (person == null) continue;
     final id = person.id;
-    final isNew = id != null
-        ? seenIds.add(id)
-        : seenAnonymous.add(
-            '${_normalizePersonField(person.type)}\u0000'
-            '${_normalizePersonField(person.name)}\u0000'
-            '${_normalizePersonField(person.role ?? '')}',
-          );
-    if (isNew) people.add(person);
+    if (id != null) {
+      final existingIndex = indexesById[id];
+      if (existingIndex == null) {
+        indexesById[id] = people.length;
+        people.add(person);
+      } else {
+        people[existingIndex] = _mergePerson(people[existingIndex], person);
+      }
+      continue;
+    }
+    final key =
+        '${_normalizePersonField(person.type)}\u0000'
+        '${_normalizePersonField(person.name)}\u0000'
+        '${_normalizePersonField(person.role ?? '')}';
+    if (seenAnonymous.add(key)) people.add(person);
   }
   return List.unmodifiable(people);
+}
+
+EmbyPerson _mergePerson(EmbyPerson first, EmbyPerson later) {
+  final preferred = !first.isCast && later.isCast ? later : first;
+  return EmbyPerson(
+    id: first.id,
+    name: preferred.name,
+    type: preferred.type,
+    role: first.role ?? later.role,
+    primaryImageTag: first.primaryImageTag ?? later.primaryImageTag,
+  );
 }
 
 String _normalizePersonField(String value) =>

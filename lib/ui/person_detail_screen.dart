@@ -15,11 +15,13 @@ class PersonDetailScreen extends StatefulWidget {
     super.key,
     required this.api,
     required this.personId,
+    required this.initialPerson,
     this.downloads,
   });
 
   final EmbyApi api;
   final String personId;
+  final EmbyPerson initialPerson;
   final DownloadService? downloads;
 
   @override
@@ -38,6 +40,7 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
       personId: widget.personId,
       loadPerson: widget.api.getItem,
       loadItems: widget.api.getPersonItems,
+      loadUserData: widget.api.getUserDataForItems,
     );
     _scrollController.addListener(_onScroll);
     unawaited(_controller.load());
@@ -77,6 +80,15 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
         ),
       ),
     );
+    if (!mounted) return;
+    try {
+      await _controller.refreshItemUserData(item.id);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
   }
 
   @override
@@ -92,7 +104,7 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
             slivers: [
               SliverAppBar(
                 pinned: true,
-                title: Text(state.person?.name ?? '人物'),
+                title: Text(state.person?.name ?? widget.initialPerson.name),
               ),
               SliverToBoxAdapter(child: _buildPersonHeader(state)),
               SliverToBoxAdapter(
@@ -109,52 +121,11 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
 
   Widget _buildPersonHeader(PersonDetailState state) {
     final person = state.person;
-    if (person == null && state.loadingPerson) {
-      return const SizedBox(
-        height: 190,
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (person == null) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Icon(Icons.person_off_outlined, size: 38),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '人物资料加载失败',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    state.personError.toString(),
-                    style: const TextStyle(color: Color(0xFF9DA6A9)),
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton.icon(
-                    onPressed: _controller.retryPerson,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('重试人物资料'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final overview = person.overview?.trim();
+    final overview = person?.overview?.trim();
     final imageRequest = widget.api.imageRequestForTag(
-      itemId: person.id,
+      itemId: person?.id ?? widget.personId,
       type: 'Primary',
-      tag: person.imageTags['Primary'],
+      tag: person?.imageTags['Primary'] ?? widget.initialPerson.primaryImageTag,
       maxWidth: 700,
       maxHeight: 1050,
     );
@@ -175,11 +146,23 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
               ),
               const SizedBox(width: 16),
               Expanded(
-                child: Text(
-                  person.name,
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      person?.name ?? widget.initialPerson.name,
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(fontWeight: FontWeight.w800),
+                    ),
+                    if (state.loadingPerson) ...[
+                      const SizedBox(height: 14),
+                      const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ],
@@ -200,6 +183,38 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
                 fontSize: 15,
                 height: 1.65,
               ),
+            ),
+          ],
+          if (state.personError != null) ...[
+            const SizedBox(height: 18),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.error_outline, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '人物资料加载失败',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        state.personError.toString(),
+                        style: const TextStyle(color: Color(0xFF9DA6A9)),
+                      ),
+                      const SizedBox(height: 6),
+                      TextButton.icon(
+                        onPressed: _controller.retryPerson,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('重试人物资料'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ],

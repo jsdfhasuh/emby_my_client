@@ -131,6 +131,43 @@ void main() {
 
       expect(item.people, hasLength(2));
     });
+
+    test('prefers a later cast record without changing the first position', () {
+      final item = EmbyItem.fromJson({
+        'People': [
+          {'Id': 'person-1', 'Name': '导演记录', 'Type': 'Director'},
+          {'Id': 'person-2', 'Name': '另一演员', 'Type': 'Actor'},
+          {'Id': 'person-1', 'Name': '演员记录', 'Type': 'Actor', 'Role': '主角'},
+        ],
+      });
+
+      expect(item.people.map((person) => person.id), ['person-1', 'person-2']);
+      expect(item.people.first.name, '演员记录');
+      expect(item.people.first.type, 'Actor');
+      expect(item.people.first.role, '主角');
+      expect(
+        item.people.where((person) => person.id == 'person-1'),
+        hasLength(1),
+      );
+    });
+
+    test('fills a missing image tag from a later record with the same ID', () {
+      final item = EmbyItem.fromJson({
+        'People': [
+          {'Id': 'person-1', 'Name': '演员一', 'Type': 'Actor'},
+          {
+            'Id': 'person-1',
+            'Name': '演员一',
+            'Type': 'Writer',
+            'PrimaryImageTag': 'later-image-tag',
+          },
+        ],
+      });
+
+      expect(item.people, hasLength(1));
+      expect(item.people.single.type, 'Actor');
+      expect(item.people.single.primaryImageTag, 'later-image-tag');
+    });
   });
 
   test('parses intro and credits chapter markers', () {

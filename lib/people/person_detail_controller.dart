@@ -10,6 +10,8 @@ typedef PersonItemsLoader =
       int limit,
       PersonMediaFilter filter,
     });
+typedef PersonUserDataLoader =
+    Future<Map<String, EmbyUserData>> Function(Iterable<String> itemIds);
 
 class PersonDetailState {
   const PersonDetailState({
@@ -42,19 +44,23 @@ class PersonDetailController extends ChangeNotifier {
     required this.personId,
     required PersonLoader loadPerson,
     required PersonItemsLoader loadItems,
+    required PersonUserDataLoader loadUserData,
     this.pageSize = 60,
   }) : _loadPerson = loadPerson,
-       _loadItems = loadItems;
+       _loadItems = loadItems,
+       _loadUserData = loadUserData;
 
   final String personId;
   final int pageSize;
   final PersonLoader _loadPerson;
   final PersonItemsLoader _loadItems;
+  final PersonUserDataLoader _loadUserData;
 
   PersonDetailState _state = const PersonDetailState();
   bool _disposed = false;
   int _personGeneration = 0;
   int _itemsGeneration = 0;
+  int _userDataGeneration = 0;
   int _nextStartIndex = 0;
 
   PersonDetailState get state => _state;
@@ -63,6 +69,7 @@ class PersonDetailController extends ChangeNotifier {
     if (_disposed) return;
     final personGeneration = ++_personGeneration;
     final itemsGeneration = ++_itemsGeneration;
+    _userDataGeneration++;
     _nextStartIndex = 0;
     _setState(
       PersonDetailState(
@@ -87,6 +94,7 @@ class PersonDetailController extends ChangeNotifier {
   Future<void> selectFilter(PersonMediaFilter filter) async {
     if (_disposed || filter == _state.filter) return;
     final generation = ++_itemsGeneration;
+    _userDataGeneration++;
     _nextStartIndex = 0;
     _setState(
       _copyState(
@@ -121,11 +129,38 @@ class PersonDetailController extends ChangeNotifier {
       return;
     }
     final generation = ++_itemsGeneration;
+    _userDataGeneration++;
     _nextStartIndex = 0;
     _setState(
       _copyState(loadingFirstPage: true, clearItemsError: true, hasMore: true),
     );
     await _requestItems(generation: generation, firstPage: true);
+  }
+
+  Future<void> refreshItemUserData(String itemId) async {
+    if (_disposed || !_state.items.any((item) => item.id == itemId)) return;
+    final itemsGeneration = _itemsGeneration;
+    final userDataGeneration = ++_userDataGeneration;
+    try {
+      final results = await _loadUserData([itemId]);
+      if (!_acceptItems(itemsGeneration) ||
+          userDataGeneration != _userDataGeneration) {
+        return;
+      }
+      final userData = results[itemId];
+      if (userData == null) return;
+      final index = _state.items.indexWhere((item) => item.id == itemId);
+      if (index < 0) return;
+      final items = List<EmbyItem>.of(_state.items);
+      items[index] = items[index].copyWith(userData: userData);
+      _setState(_copyState(items: List.unmodifiable(items)));
+    } catch (error) {
+      if (!_acceptItems(itemsGeneration) ||
+          userDataGeneration != _userDataGeneration) {
+        return;
+      }
+      rethrow;
+    }
   }
 
   Future<void> _requestPerson(int generation) async {
@@ -235,6 +270,7 @@ class PersonDetailController extends ChangeNotifier {
     _disposed = true;
     _personGeneration++;
     _itemsGeneration++;
+    _userDataGeneration++;
     super.dispose();
   }
 }
