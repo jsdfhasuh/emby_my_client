@@ -71,7 +71,8 @@ class EmbyApi {
       'PrimaryImageAspectRatio,DateCreated,OfficialRating,CommunityRating,'
       'RunTimeTicks,ProductionYear,ParentId,Path,Container,Tags';
   static const _detailItemFields =
-      'Overview,Genres,Tags,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
+      'Overview,Genres,Tags,People,MediaSources,MediaStreams,'
+      'PrimaryImageAspectRatio,'
       'DateCreated,OfficialRating,CommunityRating,RunTimeTicks,'
       'ProductionYear,ProviderIds,ParentId,Path,Container,Chapters,Trickplay';
 
@@ -584,6 +585,53 @@ class EmbyApi {
     return EmbyItem.fromJson(_map(response.data));
   }
 
+  Future<EmbyItemPage> getPersonItems({
+    required String personId,
+    int startIndex = 0,
+    int limit = 60,
+    PersonMediaFilter filter = PersonMediaFilter.all,
+  }) async {
+    final normalizedPersonId = personId.trim();
+    if (normalizedPersonId.isEmpty) {
+      throw ArgumentError.value(personId, 'personId', '人物 ID 不能为空');
+    }
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'PersonIds': normalizedPersonId,
+          'IncludeItemTypes': filter.apiValue,
+          'Recursive': true,
+          'SortBy': 'PremiereDate',
+          'SortOrder': 'Descending',
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Fields': _listItemFields,
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    final data = _map(response.data);
+    final rawItems = data['Items'] as List<dynamic>? ?? const [];
+    final seen = <String>{};
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
+        .where((item) => item.id.isNotEmpty && seen.add(item.id))
+        .toList(growable: false);
+    final rawTotal = data['TotalRecordCount'];
+    final total = rawTotal is num
+        ? rawTotal.toInt()
+        : int.tryParse(rawTotal?.toString() ?? '');
+    return EmbyItemPage(
+      items: items,
+      totalRecordCount: total,
+      rawItemCount: rawItems.length,
+    );
+  }
+
   Future<List<EmbyItem>> getSeasons(String seriesId) => _getItemPage(
     '/Shows/$seriesId/Seasons',
     query: {
@@ -630,15 +678,33 @@ class EmbyApi {
     final tag = type == 'Backdrop'
         ? item.backdropImageTags.firstOrNull
         : item.imageTags[type];
-    if (tag == null || tag.isEmpty) return null;
-    final width = EmbyImageRequest.bucketWidth(maxWidth);
-    final height = EmbyImageRequest.bucketWidth(
-      maxHeight ?? _defaultImageHeight(item, type: type, maxWidth: maxWidth),
+    return imageRequestForTag(
+      itemId: item.id,
+      type: type,
+      tag: tag,
+      maxWidth: maxWidth,
+      maxHeight:
+          maxHeight ??
+          _defaultImageHeight(item, type: type, maxWidth: maxWidth),
+      quality: quality,
     );
+  }
+
+  EmbyImageRequest? imageRequestForTag({
+    required String itemId,
+    required String type,
+    required String? tag,
+    required int maxWidth,
+    int? maxHeight,
+    int quality = 90,
+  }) {
+    if (itemId.isEmpty || tag == null || tag.isEmpty) return null;
+    final width = EmbyImageRequest.bucketWidth(maxWidth);
+    final height = EmbyImageRequest.bucketWidth(maxHeight ?? maxWidth * 2);
     final scope = ServerScope.fromSession(session);
     final uri =
         Uri.parse(
-          '${session.serverUrl}/Items/${Uri.encodeComponent(item.id)}'
+          '${session.serverUrl}/Items/${Uri.encodeComponent(itemId)}'
           '/Images/${Uri.encodeComponent(type)}',
         ).replace(
           queryParameters: {
@@ -652,7 +718,7 @@ class EmbyApi {
       uri: uri,
       headers: Map.unmodifiable(playbackHeaders),
       cacheKey:
-          'emby-image-v2:${scope.cacheNamespace}:${item.id}:'
+          'emby-image-v2:${scope.cacheNamespace}:$itemId:'
           '${type.toLowerCase()}:$tag:w$width:h$height:q$quality',
       decodeWidth: width,
       decodeHeight: height,

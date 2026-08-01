@@ -9,6 +9,7 @@
 - 首页继续观看、最近添加和媒体库
 - 媒体库分页浏览与全库搜索
 - 电影、剧集、季和单集详情
+- 电影、电视剧和单集演员列表，以及人物资料与服务端分页作品
 - 基于 `PlaybackInfo` 的 DirectPlay / DirectStream / Transcode 协商
 - `media_kit` / libmpv 视频播放、断点续播和播放进度回报
 - HTTP 局域网服务器与 HTTPS 服务器
@@ -42,3 +43,9 @@ flutter build apk --debug --split-per-abi
 
 调试 APK 使用调试签名。正式发布前需要更换
 `applicationId`、应用图标，并配置 Android release 签名。
+
+## 人物作品里程碑
+
+里程碑 A 的代码、自动化测试和分 ABI Debug APK 构建已完成。人物数据只来自当前
+Emby 服务器，作品只查询电影和电视剧。真实 Emby 服务器与 Android 设备验收尚待
+可用设备执行；媒体库位置提示和 `# / A-Z` 导航仍未实施。

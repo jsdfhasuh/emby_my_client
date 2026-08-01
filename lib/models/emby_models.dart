@@ -84,6 +84,44 @@ class EmbyUserData {
   );
 }
 
+class EmbyPerson {
+  const EmbyPerson({
+    required this.name,
+    required this.type,
+    this.id,
+    this.role,
+    this.primaryImageTag,
+  });
+
+  final String? id;
+  final String name;
+  final String type;
+  final String? role;
+  final String? primaryImageTag;
+
+  bool get isCast => type == 'Actor' || type == 'GuestStar';
+
+  bool get isNavigable => id != null && id!.isNotEmpty;
+
+  static EmbyPerson? fromJson(Map<String, dynamic> json) {
+    final name = _personString(json['Name']);
+    if (name == null) return null;
+    return EmbyPerson(
+      id: _personString(json['Id']),
+      name: name,
+      type: _personString(json['Type']) ?? '',
+      role: _personString(json['Role']),
+      primaryImageTag: _personString(json['PrimaryImageTag']),
+    );
+  }
+}
+
+String? _personString(dynamic value) {
+  if (value is! String) return null;
+  final result = value.trim();
+  return result.isEmpty ? null : result;
+}
+
 class EmbyItem {
   const EmbyItem({
     required this.id,
@@ -94,6 +132,7 @@ class EmbyItem {
     required this.genres,
     required this.userData,
     this.tags = const [],
+    this.people = const [],
     this.chapters = const [],
     this.mediaSources = const [],
     this.trickplay,
@@ -134,6 +173,7 @@ class EmbyItem {
   final List<String> backdropImageTags;
   final List<String> genres;
   final List<String> tags;
+  final List<EmbyPerson> people;
   final EmbyUserData userData;
   final List<EmbyChapter> chapters;
   final List<PlaybackMediaSource> mediaSources;
@@ -216,6 +256,7 @@ class EmbyItem {
       backdropImageTags: _asStringList(json['BackdropImageTags']),
       genres: _asStringList(json['Genres']),
       tags: _asStringList(json['Tags']),
+      people: _parsePeople(json['People']),
       userData: EmbyUserData.fromJson(_asMap(json['UserData'])),
       chapters: (json['Chapters'] as List<dynamic>? ?? const [])
           .whereType<Map>()
@@ -244,6 +285,7 @@ class EmbyItem {
     backdropImageTags: backdropImageTags,
     genres: genres,
     tags: tags,
+    people: people,
     userData: userData ?? this.userData,
     chapters: chapters,
     mediaSources: mediaSources,
@@ -264,6 +306,30 @@ class EmbyItem {
     primaryImageAspectRatio: primaryImageAspectRatio,
   );
 }
+
+List<EmbyPerson> _parsePeople(dynamic value) {
+  if (value is! List) return const [];
+  final people = <EmbyPerson>[];
+  final seenIds = <String>{};
+  final seenAnonymous = <String>{};
+  for (final entry in value.whereType<Map>()) {
+    final person = EmbyPerson.fromJson(Map<String, dynamic>.from(entry));
+    if (person == null) continue;
+    final id = person.id;
+    final isNew = id != null
+        ? seenIds.add(id)
+        : seenAnonymous.add(
+            '${_normalizePersonField(person.type)}\u0000'
+            '${_normalizePersonField(person.name)}\u0000'
+            '${_normalizePersonField(person.role ?? '')}',
+          );
+    if (isNew) people.add(person);
+  }
+  return List.unmodifiable(people);
+}
+
+String _normalizePersonField(String value) =>
+    value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
 
 bool _isStrmReference(String? value) {
   final normalized = value?.trim().toLowerCase();
@@ -331,6 +397,16 @@ enum SearchItemType {
   final String apiValue;
 }
 
+enum PersonMediaFilter {
+  all('Movie,Series'),
+  movie('Movie'),
+  series('Series');
+
+  const PersonMediaFilter(this.apiValue);
+
+  final String apiValue;
+}
+
 class LibraryBrowseOptions {
   const LibraryBrowseOptions({
     this.sortBy = LibrarySortBy.name,
@@ -380,10 +456,17 @@ class LibraryBrowseOptions {
 }
 
 class EmbyItemPage {
-  const EmbyItemPage({required this.items, this.totalRecordCount});
+  const EmbyItemPage({
+    required this.items,
+    this.totalRecordCount,
+    int? rawItemCount,
+  }) : _rawItemCount = rawItemCount;
 
   final List<EmbyItem> items;
   final int? totalRecordCount;
+  final int? _rawItemCount;
+
+  int get rawItemCount => _rawItemCount ?? items.length;
 }
 
 class EmbyChapter {

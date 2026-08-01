@@ -30,6 +30,7 @@ void main() {
       final listFields = requests.first.queryParameters['Fields'].toString();
       final detailFields = requests.last.queryParameters['Fields'].toString();
       for (final field in [
+        'People',
         'MediaSources',
         'MediaStreams',
         'Chapters',
@@ -58,6 +59,50 @@ void main() {
     expect(url.queryParameters['tag'], 'primary-tag');
     expect(request.headers['X-Emby-Token'], _session.accessToken);
     expect(request.headers['X-Emby-Authorization'], isNotEmpty);
+  });
+
+  test('person image requests use ID and tag without URL credentials', () {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: const {},
+        ),
+      );
+    });
+    final request = api.imageRequestForTag(
+      itemId: 'person/1',
+      type: 'Primary',
+      tag: 'person-tag',
+      maxWidth: 240,
+      maxHeight: 360,
+    )!;
+
+    expect(request.uri.path, '/Items/person%2F1/Images/Primary');
+    expect(request.uri.queryParameters['tag'], 'person-tag');
+    expect(request.uri.toString(), isNot(contains(_session.accessToken)));
+    expect(request.headers['X-Emby-Token'], _session.accessToken);
+    expect(request.cacheKey, contains(':person/1:primary:person-tag:'));
+    expect(request.cacheKey, isNot(contains(_session.accessToken)));
+    expect(
+      api.imageRequestForTag(
+        itemId: 'person-1',
+        type: 'Primary',
+        tag: null,
+        maxWidth: 240,
+      ),
+      isNull,
+    );
+    expect(
+      api.imageRequestForTag(
+        itemId: '',
+        type: 'Primary',
+        tag: 'orphan-tag',
+        maxWidth: 240,
+      ),
+      isNull,
+    );
   });
 }
 

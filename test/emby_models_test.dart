@@ -59,6 +59,80 @@ void main() {
     expect(item.tags, ['高码率']);
   });
 
+  group('people parsing', () {
+    test('parses cast fields, preserves order, and deduplicates people', () {
+      final item = EmbyItem.fromJson({
+        'Id': 'movie-1',
+        'Name': 'Movie',
+        'Type': 'Movie',
+        'People': [
+          {
+            'Id': 'person-1',
+            'Name': '演员一',
+            'Type': 'Actor',
+            'Role': '主角',
+            'PrimaryImageTag': 'tag-1',
+          },
+          {'Name': '客串演员', 'Type': 'GuestStar', 'Role': '客串角色'},
+          {'Id': 'person-1', 'Name': '重复演员', 'Type': 'Actor'},
+          {'Name': '  客串演员  ', 'Type': ' gueststar ', 'Role': '  客串角色 '},
+          {'Id': 'director-1', 'Name': '导演', 'Type': 'Director'},
+          {'Name': '   ', 'Type': 'Actor'},
+          'invalid-entry',
+        ],
+      });
+
+      expect(item.people, hasLength(3));
+      expect(item.people.map((person) => person.name), ['演员一', '客串演员', '导演']);
+      expect(item.people.first.id, 'person-1');
+      expect(item.people.first.role, '主角');
+      expect(item.people.first.primaryImageTag, 'tag-1');
+      expect(item.people.first.isNavigable, isTrue);
+      expect(item.people[1].isCast, isTrue);
+      expect(item.people[1].isNavigable, isFalse);
+      expect(item.people.last.isCast, isFalse);
+    });
+
+    test('ignores malformed people payloads and malformed fields', () {
+      for (final people in [null, const {}, 'invalid']) {
+        final item = EmbyItem.fromJson({'People': people});
+        expect(item.people, isEmpty);
+      }
+
+      final item = EmbyItem.fromJson({
+        'People': [
+          {
+            'Name': '演员',
+            'Type': 7,
+            'Id': 9,
+            'Role': const [],
+            'PrimaryImageTag': const {},
+          },
+          {'Name': 42, 'Type': 'Actor'},
+        ],
+      });
+
+      expect(item.people, hasLength(1));
+      expect(item.people.single.name, '演员');
+      expect(item.people.single.type, isEmpty);
+      expect(item.people.single.id, isNull);
+      expect(item.people.single.role, isNull);
+      expect(item.people.single.primaryImageTag, isNull);
+    });
+
+    test('deduplicates anonymous people by normalized type name and role', () {
+      final item = EmbyItem.fromJson({
+        'People': [
+          {'Name': 'Actor  Name', 'Type': 'Actor', 'Role': 'Lead Role'},
+          {'Name': ' actor name ', 'Type': ' actor ', 'Role': ' lead   role '},
+          {'Name': 'Actor Name', 'Type': 'Actor', 'Role': 'Other Role'},
+        ],
+      });
+
+      expect(item.people, hasLength(2));
+    });
+  });
+
   test('parses intro and credits chapter markers', () {
     final item = EmbyItem.fromJson({
       'Id': 'episode-1',

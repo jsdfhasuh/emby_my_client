@@ -8,8 +8,10 @@ import '../downloads/download_service.dart';
 import '../models/emby_models.dart';
 import '../playback/playback_queue.dart';
 import '../realtime/realtime_refresh_binding.dart';
+import 'person_detail_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
+import 'widgets/person_widgets.dart';
 
 class ItemDetailScreen extends StatefulWidget {
   const ItemDetailScreen({
@@ -281,6 +283,20 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     ).showSnackBar(SnackBar(content: Text(error.toString())));
   }
 
+  Future<void> _openPerson(EmbyPerson person) async {
+    final personId = person.id;
+    if (personId == null || personId.isEmpty) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PersonDetailScreen(
+          api: widget.api,
+          personId: personId,
+          downloads: widget.downloads,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -411,6 +427,24 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                         fontSize: 15,
                         height: 1.65,
                       ),
+                    ),
+                  ],
+                  if ((item.type == 'Movie' ||
+                          item.type == 'Series' ||
+                          item.type == 'Episode') &&
+                      item.people.any((person) => person.isCast)) ...[
+                    const SizedBox(height: 28),
+                    CastRow(
+                      people: item.people,
+                      imageRequestFor: (person) =>
+                          widget.api.imageRequestForTag(
+                            itemId: person.id ?? '',
+                            type: 'Primary',
+                            tag: person.primaryImageTag,
+                            maxWidth: 240,
+                            maxHeight: 360,
+                          ),
+                      onTap: _openPerson,
                     ),
                   ],
                   if (item.isSeries) ...[
