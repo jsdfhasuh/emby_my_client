@@ -47,8 +47,10 @@ class PlaybackController extends ChangeNotifier {
   int _maxStreamingBitrate;
   int _generation = 0;
   bool _sawBuffering = false;
+  bool _startupFailureSignaled = false;
   bool _disposed = false;
   bool _engineDisposed = false;
+  final Map<String, DateTime> _engineLogLastWritten = {};
 
   PlaybackState get state => _state;
   int get maxStreamingBitrate => _maxStreamingBitrate;
@@ -75,6 +77,7 @@ class PlaybackController extends ChangeNotifier {
     );
     var forceTranscode = forceTranscodeInitially;
     var retriedWithTranscode = forceTranscodeInitially;
+    var fellBackToTranscode = false;
 
     while (_isCurrent(token)) {
       PlaybackPlan? plan;
@@ -109,7 +112,9 @@ class PlaybackController extends ChangeNotifier {
                 : Duration.zero);
         await engine.open(
           plan.uri,
-          headers: playbackHeaders,
+          headers: plan.usesServerAuthentication
+              ? playbackHeaders
+              : const <String, String>{},
           play: resume == Duration.zero && playAfterReady,
         );
         _throwIfStale(token);
@@ -139,6 +144,7 @@ class PlaybackController extends ChangeNotifier {
             phase: PlaybackPhase.ready,
             isBuffering: false,
             clearError: true,
+            clearStatus: true,
           ),
         );
         try {
@@ -164,8 +170,8 @@ class PlaybackController extends ChangeNotifier {
         if (plan != null) await reporter.stop(_state.position);
         return;
       } catch (error, stackTrace) {
+        if (!_isCurrent(token)) return;
         final canRetry =
-            _isCurrent(token) &&
             !retriedWithTranscode &&
             resolver.canForceTranscode &&
             plan != null &&
@@ -173,6 +179,7 @@ class PlaybackController extends ChangeNotifier {
             _state.phase != PlaybackPhase.ready;
         if (canRetry) {
           retriedWithTranscode = true;
+          fellBackToTranscode = true;
           forceTranscode = true;
           DiagnosticLog.instance.warning(
             'player',
@@ -183,6 +190,7 @@ class PlaybackController extends ChangeNotifier {
             _state.copyWith(
               phase: PlaybackPhase.retryingWithTranscode,
               isBuffering: true,
+              statusMessage: '直连失败，正在切换到服务器转码…',
             ),
           );
           try {
@@ -199,12 +207,26 @@ class PlaybackController extends ChangeNotifier {
           stackTrace: stackTrace,
         );
         if (_isCurrent(token)) {
+          final friendly = friendlyPlaybackError(error);
           _setState(
             _state.copyWith(
               phase: PlaybackPhase.failed,
               isBuffering: false,
-              errorMessage: friendlyPlaybackError(error),
+              errorMessage: fellBackToTranscode
+                  ? '直连失败，服务器转码也不可用：$friendly'
+                  : friendly,
+              clearStatus: true,
             ),
+          );
+        }
+        try {
+          await engine.stop();
+        } catch (stopError, stopStackTrace) {
+          DiagnosticLog.instance.error(
+            'player',
+            'Failed to stop player after startup failure item=${item.id}',
+            error: stopError,
+            stackTrace: stopStackTrace,
           );
         }
         if (plan != null) await reporter.stop(_state.position);
@@ -448,7 +470,6 @@ class PlaybackController extends ChangeNotifier {
       }),
       engine.playingStream.listen((playing) {
         _setState(_state.copyWith(isPlaying: playing));
-        if (playing) _markReady();
       }),
       engine.bufferingStream.listen((buffering) {
         if (buffering) _sawBuffering = true;
@@ -459,9 +480,7 @@ class PlaybackController extends ChangeNotifier {
         (completed) => _setState(_state.copyWith(isCompleted: completed)),
       ),
       engine.errorStream.listen(_handleEngineError),
-      engine.logStream.listen(
-        (log) => DiagnosticLog.instance.warning('libmpv', log),
-      ),
+      engine.logStream.listen(_handleEngineLog),
       engine.audioTracksStream.listen(
         (tracks) => _setState(_state.copyWith(audioTracks: tracks)),
       ),
@@ -491,6 +510,62 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
     }
+  }
+
+  void _handleEngineLog(String log) {
+    final lower = log.toLowerCase();
+    final fingerprint = _engineLogFingerprint(lower);
+    final now = DateTime.now();
+    final lastWritten = _engineLogLastWritten[fingerprint];
+    if (lastWritten == null ||
+        now.difference(lastWritten) >= const Duration(seconds: 2)) {
+      if (_engineLogLastWritten.length >= 64) {
+        _engineLogLastWritten.clear();
+      }
+      _engineLogLastWritten[fingerprint] = now;
+      DiagnosticLog.instance.warning('libmpv', log);
+    }
+
+    if (_startupFailureSignaled || !_isStartupPhase(_state.phase)) return;
+    if (!_isFatalStartupLog(lower)) return;
+
+    final completer = _readyCompleter;
+    if (completer == null || completer.isCompleted) return;
+    _startupFailureSignaled = true;
+    completer.completeError(log);
+  }
+
+  static bool _isStartupPhase(PlaybackPhase phase) =>
+      phase == PlaybackPhase.opening ||
+      phase == PlaybackPhase.waitingForReady ||
+      phase == PlaybackPhase.retryingWithTranscode;
+
+  static bool _isFatalStartupLog(String lower) {
+    if (lower.contains('failed to resolve hostname') ||
+        lower.contains('no address associated with hostname') ||
+        lower.contains('unknown host')) {
+      return true;
+    }
+    if (lower.contains('inflate return value') &&
+        lower.contains('incorrect header check')) {
+      return true;
+    }
+    if (lower.contains('failed to open http://') ||
+        lower.contains('failed to open https://')) {
+      return true;
+    }
+    return lower.contains('http error 4') ||
+        lower.contains('http error 5') ||
+        lower.contains('server returned 4') ||
+        lower.contains('server returned 5');
+  }
+
+  static String _engineLogFingerprint(String lower) {
+    if (lower.contains('inflate return value')) return 'http-inflate';
+    if (lower.contains('log message buffer overflow')) return 'log-overflow';
+    if (lower.contains('failed to resolve hostname')) return 'dns-resolution';
+    if (lower.contains('failed to open http')) return 'http-open';
+    return lower;
   }
 
   Future<void> _applySelectedDirectPlayTracks(
@@ -544,6 +619,7 @@ class PlaybackController extends ChangeNotifier {
 
   void _prepareReadyWait() {
     _sawBuffering = false;
+    _startupFailureSignaled = false;
     _readyCompleter = Completer<void>();
   }
 
@@ -654,10 +730,22 @@ class PlaybackController extends ChangeNotifier {
 
   static String friendlyPlaybackError(Object error) {
     final message = error.toString().toLowerCase();
+    if (message.contains('failed to resolve hostname') ||
+        message.contains('no address associated with hostname') ||
+        message.contains('unknown host')) {
+      return '无法解析媒体地址，请检查 .strm 链接或 DNS';
+    }
+    if (message.contains('inflate return value') ||
+        message.contains('incorrect header check')) {
+      return '服务器返回的转码流格式异常';
+    }
+    if (message.contains('timeout') ||
+        message.contains('did not become ready')) {
+      return '媒体连接超时';
+    }
     if (message.contains('failed to open') ||
         message.contains('http') ||
-        message.contains('network') ||
-        message.contains('timeout')) {
+        message.contains('network')) {
       return '无法连接媒体流';
     }
     if (message.contains('codec') || message.contains('decoder')) {

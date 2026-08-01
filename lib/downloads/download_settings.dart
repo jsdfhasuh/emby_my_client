@@ -15,6 +15,8 @@ abstract interface class DownloadSettingsStore {
   Future<DownloadSettings> load(ServerScope scope);
 
   Future<void> save(ServerScope scope, DownloadSettings settings);
+
+  Future<void> clear(ServerScope scope);
 }
 
 class SharedPreferencesDownloadSettingsStore implements DownloadSettingsStore {
@@ -34,6 +36,10 @@ class SharedPreferencesDownloadSettingsStore implements DownloadSettingsStore {
   Future<void> save(ServerScope scope, DownloadSettings settings) =>
       _preferences.setBool(_wifiOnlyKey(scope), settings.wifiOnly);
 
+  @override
+  Future<void> clear(ServerScope scope) =>
+      _preferences.remove(_wifiOnlyKey(scope));
+
   String _wifiOnlyKey(ServerScope scope) =>
       'downloads.${scope.databaseKey}.wifiOnly';
 }
@@ -48,5 +54,10 @@ class MemoryDownloadSettingsStore implements DownloadSettingsStore {
   @override
   Future<void> save(ServerScope scope, DownloadSettings settings) async {
     _settings[scope] = settings;
+  }
+
+  @override
+  Future<void> clear(ServerScope scope) async {
+    _settings.remove(scope);
   }
 }

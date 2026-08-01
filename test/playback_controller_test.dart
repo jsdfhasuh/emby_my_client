@@ -74,6 +74,85 @@ void main() {
     await controller.shutdown();
   });
 
+  test(
+    'remote strm uses authenticated Emby stream and still falls back',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, remoteStrm: true);
+      final engine = _FakeEngine();
+      engine.onOpen = (count) {
+        if (count == 1) {
+          engineLater(() => engine.playingController.add(true));
+        } else {
+          engineLater(
+            () => engine.durationController.add(const Duration(hours: 1)),
+          );
+        }
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        readyTimeout: const Duration(milliseconds: 20),
+      );
+
+      await controller.start();
+
+      expect(engine.openUris.first.origin, _session.serverUrl);
+      expect(engine.openUris.first.path, '/Videos/item-1/stream');
+      expect(engine.openHeaders.first['X-Emby-Token'], _session.accessToken);
+      expect(engine.openUris.last.origin, _session.serverUrl);
+      expect(engine.openHeaders.last['X-Emby-Token'], _session.accessToken);
+      expect(controller.state.plan?.method, PlayMethod.transcode);
+
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'fatal stream logs fall back immediately and stop failed transcode',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, remoteStrm: true);
+      final engine = _FakeEngine();
+      final statuses = <String>[];
+      engine.onOpen = (count) {
+        if (count == 1) {
+          engineLater(
+            () => engine.logController.add('http: HTTP error 502 Bad Gateway'),
+          );
+        } else {
+          engineLater(
+            () => engine.logController.add(
+              'http: inflate return value: -3, incorrect header check',
+            ),
+          );
+        }
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        readyTimeout: const Duration(seconds: 10),
+      );
+      controller.addListener(() {
+        final status = controller.state.statusMessage;
+        if (status != null) statuses.add(status);
+      });
+
+      await controller.start().timeout(const Duration(milliseconds: 500));
+
+      expect(engine.openUris, hasLength(2));
+      expect(engine.stopCalls, 2);
+      expect(statuses, contains('直连失败，正在切换到服务器转码…'));
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.isBuffering, isFalse);
+      expect(controller.state.errorMessage, '直连失败，服务器转码也不可用：服务器返回的转码流格式异常');
+
+      await controller.shutdown();
+    },
+  );
+
   test('shutdown is idempotent and invalidates late startup work', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -98,6 +177,36 @@ void main() {
       lessThanOrEqualTo(1),
     );
   });
+
+  test(
+    'late resolver failure does not stop an already disposed engine',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      addTearDown(api.dispose);
+      final engine = _FakeEngine();
+      final resolution = Completer<PlaybackPlan>();
+      final controller = PlaybackController(
+        item: _plainItem,
+        engine: engine,
+        resolver: _DelayedResolver(resolution.future),
+        reporter: PlaybackSessionReporter(api: api, item: _plainItem),
+        playbackHeaders: api.playbackHeaders,
+        progressInterval: const Duration(hours: 1),
+      );
+
+      final startup = controller.start();
+      await Future<void>.delayed(Duration.zero);
+      await controller.shutdown();
+      resolution.completeError(TimeoutException('late PlaybackInfo timeout'));
+      await startup;
+
+      expect(engine.stopCalls, 0);
+      expect(engine.disposeCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.idle);
+      controller.dispose();
+    },
+  );
 
   test('serial reconfiguration preserves position and playing state', () async {
     final requests = <RequestOptions>[];
@@ -147,7 +256,7 @@ PlaybackController _controller({
   progressInterval: const Duration(hours: 1),
 );
 
-EmbyApi _api(List<RequestOptions> requests) {
+EmbyApi _api(List<RequestOptions> requests, {bool remoteStrm = false}) {
   final dio = Dio();
   dio.interceptors.add(
     InterceptorsWrapper(
@@ -163,7 +272,12 @@ EmbyApi _api(List<RequestOptions> requests) {
                 'MediaSources': [
                   {
                     'Id': 'source-1',
-                    'SupportsDirectPlay': true,
+                    'Path': remoteStrm
+                        ? 'https://upstream.example.test/live.m3u8'
+                        : null,
+                    'Protocol': remoteStrm ? 'Http' : 'File',
+                    'Container': remoteStrm ? 'strm' : 'mkv',
+                    'SupportsDirectPlay': !remoteStrm,
                     'SupportsDirectStream': false,
                     'SupportsTranscoding': true,
                     'TranscodingUrl': '/Videos/item/master.m3u8',
@@ -209,6 +323,7 @@ class _FakeEngine implements PlaybackEngine {
 
   void Function(int count)? onOpen;
   final List<bool> openPlayValues = [];
+  final List<Uri> openUris = [];
   final List<Map<String, String>> openHeaders = [];
   final List<Duration> seekValues = [];
   int playCalls = 0;
@@ -254,6 +369,7 @@ class _FakeEngine implements PlaybackEngine {
     required bool play,
   }) async {
     openPlayValues.add(play);
+    openUris.add(uri);
     openHeaders.add(Map<String, String>.from(headers));
     onOpen?.call(openPlayValues.length);
   }
@@ -315,6 +431,28 @@ class _FakeEngine implements PlaybackEngine {
   Future<void> dispose() async {
     disposeCalls++;
   }
+}
+
+class _DelayedResolver implements PlaybackStreamResolver {
+  const _DelayedResolver(this.result);
+
+  final Future<PlaybackPlan> result;
+
+  @override
+  bool get canForceTranscode => true;
+
+  @override
+  Future<PlaybackPlan> resolve(
+    EmbyItem item, {
+    String? mediaSourceId,
+    int? audioStreamIndex,
+    int? subtitleStreamIndex,
+    int maxStreamingBitrate = 120000000,
+    bool forceTranscode = false,
+  }) => result;
+
+  @override
+  Uri resolveExternalUrl(String rawUrl) => Uri.parse(rawUrl);
 }
 
 const _session = EmbySession(

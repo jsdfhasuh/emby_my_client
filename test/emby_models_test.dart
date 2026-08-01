@@ -40,7 +40,11 @@ void main() {
       'IndexNumber': 2,
       'RunTimeTicks': 36000000000,
       'ImageTags': {'Primary': 'image-tag'},
-      'UserData': {'PlaybackPositionTicks': 9000000000, 'PlayedPercentage': 25},
+      'UserData': {
+        'PlaybackPositionTicks': 9000000000,
+        'PlayedPercentage': 25,
+        'UnplayedItemCount': 12,
+      },
     });
 
     expect(item.isPlayable, isTrue);
@@ -48,6 +52,7 @@ void main() {
     expect(item.runtimeLabel, '1 小时 0 分钟');
     expect(item.resumePosition, const Duration(minutes: 15));
     expect(item.progress, 0.25);
+    expect(item.userData.unplayedItemCount, 12);
   });
 
   test('parses intro and credits chapter markers', () {
@@ -99,17 +104,33 @@ void main() {
     expect(info?.intervalMilliseconds, 10000);
   });
 
-  test('diagnostic logs redact Emby credentials', () {
+  test('diagnostic logs redact network URLs and Emby credentials', () {
     const token = 'c608e7499c5e4df19de4f0951ef6fce9';
     final redacted = DiagnosticLog.redact(
       'http://server/stream?api_key=$token '
+      'wss://server/socket?api_key=$token '
+      'https%3A%2F%2Fserver%2Fencoded%3Fapi_key%3D$token '
       'X-Emby-Token=$token X-Emby-Token: $token Token="$token"',
     );
 
     expect(redacted, isNot(contains(token)));
-    expect(redacted, contains('api_key=<redacted>'));
+    expect(redacted, isNot(contains('server')));
+    expect('<redacted-url>'.allMatches(redacted), hasLength(3));
     expect(redacted, contains('X-Emby-Token=<redacted>'));
     expect(redacted, contains('X-Emby-Token: <redacted>'));
     expect(redacted, contains('Token="<redacted>"'));
+  });
+
+  test('diagnostic logs redact usernames and media titles', () {
+    final redacted = DiagnosticLog.redact(
+      'Authenticated user private-user\n'
+      'Selected DirectPlay source=source-1 '
+      'name=Private Media Title container=mp4 bitrate=1234',
+    );
+
+    expect(redacted, isNot(contains('private-user')));
+    expect(redacted, isNot(contains('Private Media Title')));
+    expect(redacted, contains('Authenticated user <redacted>'));
+    expect(redacted, contains('name=<redacted> container=mp4'));
   });
 }

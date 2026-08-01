@@ -95,6 +95,32 @@ void main() {
     },
   );
 
+  test('network recovery retries deferred progress immediately', () async {
+    final now = DateTime.utc(2026, 7, 30, 12);
+    final harness = await _SyncHarness.create(
+      serverUserData: const {'PlaybackPositionTicks': 100, 'Played': false},
+      localPositionTicks: 200,
+      now: now,
+      serverReadFailures: 1,
+    );
+    addTearDown(harness.dispose);
+
+    final failed = await harness.sync.sync();
+    final deferred = await harness.sync.sync();
+    final recovered = await harness.sync.sync(includeDeferred: true);
+    final stored = await harness.repository.loadProgress(_scope, 'item-1');
+
+    expect(failed.failed, 1);
+    expect(deferred.synced, 0);
+    expect(recovered.synced, 1);
+    expect(stored?.syncStatus, 'synced');
+    expect(harness.requests.map((request) => request.path), [
+      '/Users/user-1/Items',
+      '/Users/user-1/Items',
+      '/Sessions/Playing/Stopped',
+    ]);
+  });
+
   test(
     'does not overwrite progress written while a sync is in flight',
     () async {
@@ -147,6 +173,7 @@ class _SyncHarness {
     required int localPositionTicks,
     DateTime? now,
     bool failServerRead = false,
+    int serverReadFailures = 0,
     Future<void> Function()? beforeStoppedResponse,
   }) async {
     final database = LocalDatabase(
@@ -155,13 +182,17 @@ class _SyncHarness {
     );
     final repository = DownloadRepository(database);
     final requests = <RequestOptions>[];
+    var remainingServerReadFailures = serverReadFailures;
     final dio = Dio()
       ..interceptors.add(
         InterceptorsWrapper(
           onRequest: (options, handler) async {
             requests.add(options);
             if (options.method == 'GET') {
-              if (failServerRead) {
+              if (failServerRead || remainingServerReadFailures > 0) {
+                if (remainingServerReadFailures > 0) {
+                  remainingServerReadFailures--;
+                }
                 handler.reject(
                   DioException.badResponse(
                     statusCode: 500,

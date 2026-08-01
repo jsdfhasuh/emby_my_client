@@ -68,6 +68,7 @@ PlaybackPlan _plan(List<Map<String, dynamic>> streams) => PlaybackPlan(
   mediaSourceId: 'source',
   playSessionId: 'session',
   method: PlayMethod.directPlay,
+  usesServerAuthentication: true,
   mediaStreams: streams,
   transcodingReasons: const [],
   availableMediaSources: const [],

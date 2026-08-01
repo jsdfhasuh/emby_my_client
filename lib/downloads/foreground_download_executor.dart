@@ -121,6 +121,18 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
         'download',
         'Failed to stop Android download service: $error',
       );
+      return;
+    }
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (await FlutterForegroundTask.isRunningService &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (await FlutterForegroundTask.isRunningService) {
+      DiagnosticLog.instance.warning(
+        'download',
+        'Android download service did not stop within 5 seconds',
+      );
     }
   }
 
@@ -139,11 +151,16 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
 }
 
 class _DownloadTaskHandler extends TaskHandler {
+  final DownloadCommandQueue _commands = DownloadCommandQueue();
+  final Completer<void> _startupSettled = Completer<void>();
   LocalDatabase? _database;
   EmbyApi? _api;
   DownloadService? _service;
   bool _ready = false;
+  bool _destroying = false;
   bool _publishing = false;
+  bool _publishPending = false;
+  bool _notifyMainPending = false;
   bool _stopRequested = false;
 
   @override
@@ -161,7 +178,7 @@ class _DownloadTaskHandler extends TaskHandler {
         return;
       }
       final scope = ServerScope.fromSession(session);
-      final database = LocalDatabase();
+      final database = LocalDatabase(singleInstance: false);
       await database.open();
       final api = EmbyApi(session);
       final service = DownloadService(
@@ -185,7 +202,7 @@ class _DownloadTaskHandler extends TaskHandler {
         await service.resume(task.id);
       }
       _ready = true;
-      await _publish();
+      await _publish(notifyMain: true);
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'download',
@@ -199,6 +216,8 @@ class _DownloadTaskHandler extends TaskHandler {
         notificationButtons: const [],
       );
       _requestStop();
+    } finally {
+      if (!_startupSettled.isCompleted) _startupSettled.complete();
     }
   }
 
@@ -215,7 +234,7 @@ class _DownloadTaskHandler extends TaskHandler {
         .firstOrNull;
     final taskId = data['taskId']?.toString();
     if (command != null) {
-      unawaited(_handleCommand(command, taskId));
+      unawaited(_queueCommand(command, taskId));
     }
   }
 
@@ -224,14 +243,18 @@ class _DownloadTaskHandler extends TaskHandler {
     final taskId = _currentTask()?.id;
     if (taskId == null) return;
     if (id == _pauseButtonId) {
-      unawaited(_handleCommand(DownloadExecutorCommand.pause, taskId));
+      unawaited(_queueCommand(DownloadExecutorCommand.pause, taskId));
     } else if (id == _deleteButtonId) {
-      unawaited(_handleCommand(DownloadExecutorCommand.delete, taskId));
+      unawaited(_queueCommand(DownloadExecutorCommand.delete, taskId));
     }
   }
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    _destroying = true;
+    _ready = false;
+    if (!_startupSettled.isCompleted) _startupSettled.complete();
+    await _commands.close();
     final service = _service;
     _service = null;
     if (service != null) {
@@ -243,6 +266,24 @@ class _DownloadTaskHandler extends TaskHandler {
     _api = null;
     await _database?.close();
     _database = null;
+  }
+
+  Future<void> _queueCommand(DownloadExecutorCommand command, String? taskId) {
+    if (_destroying) return Future<void>.value();
+    return _commands
+        .add(() async {
+          await _startupSettled.future;
+          if (_destroying || !_ready) return;
+          await _handleCommand(command, taskId);
+        })
+        .catchError((Object error, StackTrace stackTrace) {
+          DiagnosticLog.instance.error(
+            'download',
+            'Android download command failed command=${command.name}',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        });
   }
 
   Future<void> _handleCommand(
@@ -259,14 +300,17 @@ class _DownloadTaskHandler extends TaskHandler {
         if (taskId != null) await service.resume(taskId);
       case DownloadExecutorCommand.delete:
         if (taskId != null) await service.delete(taskId);
+      case DownloadExecutorCommand.settingsChanged:
+        await service.reloadSettings();
       case DownloadExecutorCommand.wake:
+        await service.reloadSettings();
         await service.refresh();
     }
-    await _publish();
+    await _publish(notifyMain: true);
   }
 
   void _onServiceChanged() {
-    unawaited(_publish());
+    unawaited(_publish(notifyMain: true));
   }
 
   DownloadTaskRecord? _currentTask() {
@@ -278,51 +322,83 @@ class _DownloadTaskHandler extends TaskHandler {
             .where((task) => task.status == DownloadStatus.queued)
             .firstOrNull ??
         tasks
+            .where((task) => task.status == DownloadStatus.waitingForNetwork)
+            .firstOrNull ??
+        tasks
+            .where((task) => task.status == DownloadStatus.waitingForStorage)
+            .firstOrNull ??
+        tasks
             .where((task) => task.status == DownloadStatus.cancelling)
             .firstOrNull;
   }
 
-  Future<void> _publish() async {
-    if (!_ready || _publishing) return;
+  Future<void> _publish({bool notifyMain = false}) async {
+    if (!_ready || _stopRequested) return;
+    _publishPending = true;
+    _notifyMainPending = _notifyMainPending || notifyMain;
+    if (_publishing) return;
     _publishing = true;
     try {
-      final service = _service;
-      if (service == null) return;
-      FlutterForegroundTask.sendDataToMain({'type': 'downloadChanged'});
-      final current = _currentTask();
-      if (current == null && !service.hasActiveWork) {
+      while (_publishPending && !_stopRequested) {
+        _publishPending = false;
+        final shouldNotifyMain = _notifyMainPending;
+        _notifyMainPending = false;
+        final service = _service;
+        if (service == null) return;
+        if (shouldNotifyMain) {
+          FlutterForegroundTask.sendDataToMain({'type': 'downloadChanged'});
+        }
+        final current = _currentTask();
+        if (current == null) {
+          if (service.hasActiveWork) {
+            await FlutterForegroundTask.updateService(
+              notificationTitle: 'Emby 离线下载',
+              notificationText: '正在结束当前任务',
+              notificationButtons: const [],
+            );
+            continue;
+          }
+          await FlutterForegroundTask.updateService(
+            notificationTitle: 'Emby 离线下载',
+            notificationText: '下载任务已结束',
+            notificationButtons: const [],
+          );
+          _requestStop();
+          return;
+        }
+        final activeCount = service.tasks
+            .where(
+              (task) =>
+                  task.status == DownloadStatus.running ||
+                  task.status == DownloadStatus.queued ||
+                  task.status == DownloadStatus.waitingForNetwork ||
+                  task.status == DownloadStatus.waitingForStorage,
+            )
+            .length;
+        final percent = current.progress == null
+            ? null
+            : (current.progress! * 100).round();
+        final stateText = switch (current.status) {
+          DownloadStatus.queued => '等待下载',
+          DownloadStatus.waitingForNetwork =>
+            current.lastErrorCode == 'wifiRequired' ? '等待 Wi-Fi' : '等待网络',
+          DownloadStatus.waitingForStorage => '等待存储空间',
+          _ => '正在下载',
+        };
+        final text = [
+          stateText,
+          if (percent != null) '$percent%',
+          '$activeCount 个任务',
+        ].join(' · ');
         await FlutterForegroundTask.updateService(
           notificationTitle: 'Emby 离线下载',
-          notificationText: '下载任务已结束',
-          notificationButtons: const [],
+          notificationText: text,
+          notificationButtons: const [
+            NotificationButton(id: _pauseButtonId, text: '暂停'),
+            NotificationButton(id: _deleteButtonId, text: '取消'),
+          ],
         );
-        _requestStop();
-        return;
       }
-      if (current == null) return;
-      final activeCount = service.tasks
-          .where(
-            (task) =>
-                task.status == DownloadStatus.running ||
-                task.status == DownloadStatus.queued,
-          )
-          .length;
-      final percent = current.progress == null
-          ? null
-          : (current.progress! * 100).round();
-      final text = [
-        current.status == DownloadStatus.queued ? '等待下载' : '正在下载',
-        if (percent != null) '$percent%',
-        '$activeCount 个任务',
-      ].join(' · ');
-      await FlutterForegroundTask.updateService(
-        notificationTitle: 'Emby 离线下载',
-        notificationText: text,
-        notificationButtons: const [
-          NotificationButton(id: _pauseButtonId, text: '暂停'),
-          NotificationButton(id: _deleteButtonId, text: '取消'),
-        ],
-      );
     } finally {
       _publishing = false;
     }
@@ -331,6 +407,17 @@ class _DownloadTaskHandler extends TaskHandler {
   void _requestStop() {
     if (_stopRequested) return;
     _stopRequested = true;
-    unawaited(FlutterForegroundTask.stopService());
+    unawaited(_stopService());
+  }
+
+  Future<void> _stopService() async {
+    final result = await FlutterForegroundTask.stopService();
+    if (result case ServiceRequestFailure(:final error)) {
+      DiagnosticLog.instance.warning(
+        'download',
+        'Failed to stop idle Android download service: $error',
+      );
+      _stopRequested = false;
+    }
   }
 }

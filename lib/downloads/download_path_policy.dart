@@ -1,6 +1,9 @@
 import 'dart:io';
 
 import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
+
+import '../core/server_scope.dart';
 
 class DownloadPathPolicy {
   DownloadPathPolicy(Directory directory)
@@ -32,4 +35,9 @@ class DownloadPathPolicy {
       return false;
     }
   }
+}
+
+Future<Directory> defaultDownloadDirectory(ServerScope scope) async {
+  final root = await getApplicationSupportDirectory();
+  return Directory(path.join(root.path, 'offline', scope.databaseKey));
 }

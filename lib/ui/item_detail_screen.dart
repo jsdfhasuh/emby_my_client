@@ -140,10 +140,16 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         switch (task.status) {
           case DownloadStatus.queued:
           case DownloadStatus.running:
+          case DownloadStatus.waitingForNetwork:
+          case DownloadStatus.waitingForStorage:
             await downloads.pause(task.id);
           case DownloadStatus.paused:
           case DownloadStatus.failed:
-            await downloads.resume(task.id);
+            if (task.requiresFreshDownload) {
+              await downloads.redownload(task.id);
+            } else {
+              await downloads.resume(task.id);
+            }
           case DownloadStatus.completed:
             await _playOffline(task);
           case DownloadStatus.cancelling:
@@ -163,7 +169,13 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     final offlineItem = await downloads.offlineItem(task.itemId);
     if (!mounted) return;
     if (offlineItem == null) {
-      _showError(StateError('离线文件记录不存在'));
+      final current = downloads.taskForItem(task.itemId);
+      final message = switch (current?.lastErrorCode) {
+        'localMediaCorrupt' => '本地文件损坏，请重新下载',
+        'missingFile' => '本地文件丢失，请重新下载',
+        _ => '离线文件记录不存在',
+      };
+      _showError(StateError(message));
       return;
     }
     await Navigator.of(context).push(
@@ -297,7 +309,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
               background: Stack(
                 fit: StackFit.expand,
                 children: [
-                  EmbyImage(url: backdrop),
+                  EmbyImage(
+                    url: backdrop,
+                    httpHeaders: widget.api.imageHeaders,
+                  ),
                   const DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -331,7 +346,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                           aspectRatio: 2 / 3,
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(6),
-                            child: EmbyImage(url: poster),
+                            child: EmbyImage(
+                              url: poster,
+                              httpHeaders: widget.api.imageHeaders,
+                            ),
                           ),
                         ),
                       ),
@@ -493,7 +511,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              EmbyImage(url: imageUrl),
+                              EmbyImage(
+                                url: imageUrl,
+                                httpHeaders: widget.api.imageHeaders,
+                              ),
                               const Center(
                                 child: DecoratedBox(
                                   decoration: BoxDecoration(
@@ -699,7 +720,13 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
             ? '准备下载'
             : switch (status) {
                 null => '下载',
-                DownloadStatus.queued || DownloadStatus.running => '暂停下载',
+                DownloadStatus.queued ||
+                DownloadStatus.running ||
+                DownloadStatus.waitingForNetwork ||
+                DownloadStatus.waitingForStorage => '暂停下载',
+                DownloadStatus.failed
+                    when task?.requiresFreshDownload == true =>
+                  '重新下载',
                 DownloadStatus.paused || DownloadStatus.failed => '继续下载',
                 DownloadStatus.completed => '离线播放',
                 DownloadStatus.cancelling => '正在删除',
@@ -711,7 +738,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
               )
             : Icon(switch (status) {
                 null => Icons.download_outlined,
-                DownloadStatus.queued || DownloadStatus.running => Icons.pause,
+                DownloadStatus.queued ||
+                DownloadStatus.running ||
+                DownloadStatus.waitingForNetwork ||
+                DownloadStatus.waitingForStorage => Icons.pause,
                 DownloadStatus.paused ||
                 DownloadStatus.failed => Icons.download_outlined,
                 DownloadStatus.completed => Icons.offline_pin,

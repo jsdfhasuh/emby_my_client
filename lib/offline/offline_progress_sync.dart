@@ -36,19 +36,25 @@ class OfflineProgressSync {
   final DateTime Function() _now;
   Future<OfflineProgressSyncResult>? _operation;
 
-  Future<OfflineProgressSyncResult> sync() {
+  Future<OfflineProgressSyncResult> sync({bool includeDeferred = false}) {
     final active = _operation;
     if (active != null) return active;
-    final operation = _sync();
+    final operation = _sync(includeDeferred: includeDeferred);
     _operation = operation;
     return operation.whenComplete(() {
       if (identical(_operation, operation)) _operation = null;
     });
   }
 
-  Future<OfflineProgressSyncResult> _sync() async {
+  Future<OfflineProgressSyncResult> _sync({
+    required bool includeDeferred,
+  }) async {
     final startedAt = _now().toUtc();
-    final pending = await _store.listPendingProgress(scope, now: startedAt);
+    final pending = await _store.listPendingProgress(
+      scope,
+      now: startedAt,
+      includeDeferred: includeDeferred,
+    );
     if (pending.isEmpty) {
       return const OfflineProgressSyncResult(
         synced: 0,
@@ -121,7 +127,7 @@ class OfflineProgressSync {
             syncStatus: 'synced',
             clearRetryAfter: true,
           );
-          if (await _saveIfUnchanged(record, adopted)) {
+          if (await _saveIfUnchanged(syncing, adopted)) {
             synced++;
           } else {
             superseded++;
@@ -136,7 +142,7 @@ class OfflineProgressSync {
             syncStatus: 'synced',
             clearRetryAfter: true,
           );
-          if (await _saveIfUnchanged(record, adopted)) {
+          if (await _saveIfUnchanged(syncing, adopted)) {
             synced++;
           } else {
             superseded++;
@@ -153,7 +159,7 @@ class OfflineProgressSync {
           );
         }
         if (await _saveIfUnchanged(
-          record,
+          syncing,
           record.copyWith(syncStatus: 'synced', clearRetryAfter: true),
         )) {
           synced++;
@@ -167,7 +173,7 @@ class OfflineProgressSync {
           error: error,
           stackTrace: stackTrace,
         );
-        if (await _markFailedIfUnchanged(record, startedAt)) {
+        if (await _markFailedIfUnchanged(syncing, startedAt)) {
           failed++;
         } else {
           superseded++;
@@ -192,17 +198,7 @@ class OfflineProgressSync {
   }
 
   Future<bool> _saveIfUnchanged(
-    OfflineProgressRecord original,
+    OfflineProgressRecord expected,
     OfflineProgressRecord replacement,
-  ) async {
-    final current = await _store.loadProgress(scope, original.itemId);
-    if (current == null ||
-        current.updatedAt != original.updatedAt ||
-        current.positionTicks != original.positionTicks ||
-        current.played != original.played) {
-      return false;
-    }
-    await _store.saveProgress(replacement);
-    return true;
-  }
+  ) => _store.saveProgressIfUnchanged(expected, replacement);
 }

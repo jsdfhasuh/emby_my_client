@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
@@ -7,6 +9,7 @@ import 'package:emby_my_client/downloads/download_assets.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
 
 void main() {
   test(
@@ -61,19 +64,86 @@ void main() {
         ),
       );
       expect(metadata.primaryImagePath, isNotNull);
+      final assetRoot = path.join(directory.path, 'assets');
+      expect(path.isWithin(assetRoot, metadata.primaryImagePath!), isTrue);
       expect(await File(metadata.primaryImagePath!).readAsBytes(), _imageBytes);
       final external = metadata.mediaStreams.where(
         (stream) => stream['IsExternal'] == true,
       );
       expect(external, hasLength(1));
       final subtitlePath = external.single['DeliveryUrl']!.toString();
+      expect(path.isWithin(assetRoot, subtitlePath), isTrue);
       expect(await File(subtitlePath).readAsBytes(), _subtitleBytes);
       expect(
         metadata.mediaStreams.any((stream) => stream['Index'] == 4),
         isFalse,
       );
+      final partialFiles = await directory
+          .list(recursive: true, followLinks: false)
+          .where((entity) => entity is File && entity.path.endsWith('.part'))
+          .toList();
+      expect(partialFiles, isEmpty);
     },
   );
+
+  test('cancels an asset response rejected before streaming', () async {
+    CancelToken? requestToken;
+    var streamListened = false;
+    final responseStream = Stream<Uint8List>.multi((controller) {
+      streamListened = true;
+      controller.close();
+    });
+    final dio = Dio()
+      ..interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            requestToken = options.cancelToken;
+            handler.resolve(
+              Response<ResponseBody>(
+                requestOptions: options,
+                statusCode: 200,
+                headers: Headers.fromMap({
+                  'content-length': ['4'],
+                  'content-type': ['image/jpeg'],
+                }),
+                data: ResponseBody(responseStream, 200),
+              ),
+            );
+          },
+        ),
+      );
+    final api = EmbyApi(_session, dio: dio);
+    addTearDown(api.dispose);
+    final directory = await Directory.systemTemp.createTemp(
+      'emby-assets-reject-test-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final task = _task().copyWith(
+      metadata: OfflineMediaMetadata(
+        name: 'Offline Test',
+        itemType: 'Movie',
+        primaryImageTag: 'image-tag',
+        mediaStreams: const [],
+      ),
+    );
+
+    final metadata = await EmbyDownloadAssetService(
+      api,
+      maximumAssetBytes: 3,
+    ).downloadAssets(task, directory);
+
+    expect(requestToken, isNotNull);
+    expect(requestToken!.isCancelled, isTrue);
+    expect(streamListened, isFalse);
+    expect(metadata.primaryImagePath, isNull);
+    expect(
+      await directory
+          .list(recursive: true, followLinks: false)
+          .where((entity) => entity is File && entity.path.endsWith('.part'))
+          .toList(),
+      isEmpty,
+    );
+  });
 }
 
 DownloadTaskRecord _task() {

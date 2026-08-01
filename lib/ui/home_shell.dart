@@ -6,6 +6,7 @@ import 'downloads/downloads_screen.dart';
 import 'home_screen.dart';
 import 'library_screen.dart';
 import 'search_screen.dart';
+import 'settings_screen.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key, required this.controller});
@@ -24,9 +25,21 @@ class _HomeShellState extends State<HomeShell> {
     final api = widget.controller.api;
     final downloads = widget.controller.downloads;
     final pages = [
-      HomeScreen(api: api, downloads: downloads),
-      LibraryScreen(api: api, downloads: downloads),
-      SearchScreen(api: api, downloads: downloads),
+      HomeScreen(
+        api: api,
+        downloads: downloads,
+        categorySettings: widget.controller.libraryCategorySettings,
+      ),
+      LibraryScreen(
+        api: api,
+        downloads: downloads,
+        categorySettings: widget.controller.libraryCategorySettings,
+      ),
+      SearchScreen(
+        api: api,
+        downloads: downloads,
+        categorySettings: widget.controller.libraryCategorySettings,
+      ),
     ];
     const titles = ['首页', '媒体库', '搜索'];
 
@@ -79,6 +92,20 @@ class _HomeShellState extends State<HomeShell> {
                   ),
                 );
               }
+              if (value == 'settings') {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => SettingsScreen(
+                      settings: widget.controller.libraryCategorySettings,
+                      accountName: widget.controller.session!.username,
+                      onLibraryCategorySettingsChanged:
+                          widget.controller.updateLibraryCategorySettings,
+                      onDeleteAccountData:
+                          widget.controller.deleteCurrentAccountData,
+                    ),
+                  ),
+                );
+              }
             },
             itemBuilder: (context) => [
               PopupMenuItem(
@@ -101,6 +128,14 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'settings',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.settings_outlined),
+                  title: Text('设置'),
+                ),
+              ),
               const PopupMenuItem(
                 value: 'logs',
                 child: ListTile(

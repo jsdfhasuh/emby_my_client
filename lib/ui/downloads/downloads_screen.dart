@@ -36,12 +36,16 @@ class DownloadsScreen extends StatelessWidget {
                 onChanged: (value) => downloads.setWifiOnly(value),
               ),
               const Divider(height: 1),
+              if (tasks.isNotEmpty) ...[
+                _DownloadStorageSummary(tasks: tasks),
+                const Divider(height: 1),
+              ],
               Expanded(
                 child: tasks.isEmpty
                     ? const EmptyState(
                         icon: Icons.download_for_offline_outlined,
                         title: '还没有离线内容',
-                        message: '在电影或剧集详情中选择下载。',
+                        message: '在媒体详情中选择下载。',
                       )
                     : ListView.separated(
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
@@ -66,9 +70,13 @@ class DownloadsScreen extends StatelessWidget {
     final item = await downloads.offlineItem(task.itemId);
     if (!context.mounted) return;
     if (item == null) {
+      final current = downloads.taskForItem(task.itemId);
+      final message = current?.requiresFreshDownload == true
+          ? '${_friendlyError(current?.lastErrorCode)}，请重新下载'
+          : '离线文件记录不存在';
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('离线文件记录不存在')));
+      ).showSnackBar(SnackBar(content: Text(message)));
       return;
     }
     await Navigator.of(context).push(
@@ -109,6 +117,33 @@ class DownloadsScreen extends StatelessWidget {
       ),
     );
     if (confirmed == true) unawaited(downloads.delete(task.id));
+  }
+}
+
+class _DownloadStorageSummary extends StatelessWidget {
+  const _DownloadStorageSummary({required this.tasks});
+
+  final List<DownloadTaskRecord> tasks;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = tasks.where((task) => task.isComplete).length;
+    final incomplete = tasks.length - completed;
+    final mediaBytes = tasks.fold<int>(
+      0,
+      (total, task) => total + task.downloadedBytes,
+    );
+    return ListTile(
+      dense: true,
+      leading: const Icon(Icons.storage_outlined),
+      title: Text('媒体文件占用 ${_formatBytes(mediaBytes)}'),
+      subtitle: Text(
+        [
+          '$completed 个可离线播放',
+          if (incomplete > 0) '$incomplete 个未完成',
+        ].join(' · '),
+      ),
+    );
   }
 }
 
@@ -179,9 +214,15 @@ class _DownloadRow extends StatelessWidget {
               )
             else if (task.canResume)
               IconButton(
-                tooltip: '继续',
-                onPressed: () => downloads.resume(task.id),
-                icon: const Icon(Icons.play_arrow_rounded),
+                tooltip: task.requiresFreshDownload ? '重新下载' : '继续',
+                onPressed: () => task.requiresFreshDownload
+                    ? downloads.redownload(task.id)
+                    : downloads.resume(task.id),
+                icon: Icon(
+                  task.requiresFreshDownload
+                      ? Icons.refresh_rounded
+                      : Icons.play_arrow_rounded,
+                ),
               ),
             IconButton(
               tooltip: task.isComplete ? '删除离线文件' : '取消下载',
@@ -225,6 +266,8 @@ class _DownloadThumbnail extends StatelessWidget {
 IconData _statusIcon(DownloadStatus status) => switch (status) {
   DownloadStatus.queued => Icons.schedule,
   DownloadStatus.running => Icons.downloading,
+  DownloadStatus.waitingForNetwork => Icons.wifi_off,
+  DownloadStatus.waitingForStorage => Icons.sd_storage_outlined,
   DownloadStatus.paused => Icons.pause_circle_outline,
   DownloadStatus.completed => Icons.download_done,
   DownloadStatus.failed => Icons.error_outline,
@@ -240,6 +283,9 @@ String _statusText(DownloadTaskRecord task) {
   return switch (task.status) {
     DownloadStatus.queued => '等待下载 · $size',
     DownloadStatus.running => '正在下载 · $size',
+    DownloadStatus.waitingForNetwork =>
+      '${_friendlyError(task.lastErrorCode)} · $size',
+    DownloadStatus.waitingForStorage => '等待存储空间 · $size',
     DownloadStatus.paused => '已暂停 · $size',
     DownloadStatus.completed => '可离线播放 · $size',
     DownloadStatus.failed => '${_friendlyError(task.lastErrorCode)} · $size',
@@ -257,9 +303,12 @@ String _friendlyError(String? code) => switch (code) {
   'networkUnavailable' => '当前没有网络',
   'wifiRequired' => '等待 Wi-Fi',
   'missingFile' => '本地文件丢失',
+  'localMediaCorrupt' => '本地文件损坏',
   'invalidLocalPath' => '本地文件路径无效',
   'nonMediaContentType' || 'nonMediaPayload' => '服务器返回的不是媒体',
-  'contentLengthMismatch' || 'rangeResumeRejected' => '文件校验失败',
+  'contentLengthMismatch' ||
+  'rangeResumeRejected' ||
+  'checksumMismatch' => '文件校验失败',
   'processInterrupted' => '应用退出后已暂停',
   _ => '下载失败',
 };

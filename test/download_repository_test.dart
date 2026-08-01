@@ -1,5 +1,6 @@
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/local_database.dart';
+import 'package:emby_my_client/downloads/download_integrity.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/downloads/download_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -41,6 +42,7 @@ void main() {
     final secondOffline = await repository.listOfflineItems(_secondScope);
 
     expect(firstTasks.map((task) => task.id), ['task-1']);
+    expect(firstTasks.single.integrity, first.integrity);
     expect(secondTasks.map((task) => task.id), ['task-2']);
     expect(firstOffline, hasLength(1));
     expect(firstOffline.single.progress?.positionTicks, 120000000);
@@ -51,6 +53,50 @@ void main() {
     );
     expect(rows.toString(), isNot(contains('access-token')));
   });
+
+  test(
+    'progress compare-and-set never overwrites a newer local record',
+    () async {
+      final database = LocalDatabase(
+        factory: databaseFactoryFfi,
+        pathResolver: () async => inMemoryDatabasePath,
+      );
+      addTearDown(database.close);
+      final repository = DownloadRepository(database);
+      final original = OfflineProgressRecord(
+        scope: _firstScope,
+        itemId: 'same-item',
+        positionTicks: 120000000,
+        played: false,
+        updatedAt: DateTime.utc(2026, 7, 30, 12),
+        syncStatus: 'pending',
+      );
+      final syncing = original.copyWith(syncStatus: 'syncing');
+      await repository.saveProgress(original);
+
+      expect(
+        await repository.saveProgressIfUnchanged(original, syncing),
+        isTrue,
+      );
+
+      final newer = original.copyWith(
+        positionTicks: 180000000,
+        updatedAt: DateTime.utc(2026, 7, 30, 12, 1),
+        syncStatus: 'pending',
+      );
+      await repository.saveProgress(newer);
+      final staleResult = original.copyWith(syncStatus: 'synced');
+
+      expect(
+        await repository.saveProgressIfUnchanged(syncing, staleResult),
+        isFalse,
+      );
+      final stored = await repository.loadProgress(_firstScope, 'same-item');
+      expect(stored?.positionTicks, newer.positionTicks);
+      expect(stored?.updatedAt, newer.updatedAt);
+      expect(stored?.syncStatus, 'pending');
+    },
+  );
 }
 
 DownloadTaskRecord _task(ServerScope scope, String id) {
@@ -65,6 +111,10 @@ DownloadTaskRecord _task(ServerScope scope, String id) {
     status: DownloadStatus.paused,
     downloadedBytes: 4,
     retryCount: 0,
+    integrity: DownloadIntegrity.fromStored(
+      'sha-256',
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    ),
     tempPath: '$id.part',
     finalPath: '$id.mkv',
     metadata: OfflineMediaMetadata(

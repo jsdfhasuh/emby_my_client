@@ -6,16 +6,23 @@ import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../models/emby_models.dart';
 import '../realtime/realtime_refresh_binding.dart';
+import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
 import 'library_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.api, this.downloads});
+  const HomeScreen({
+    super.key,
+    required this.api,
+    this.downloads,
+    this.categorySettings = const LibraryCategorySettings(),
+  });
 
   final EmbyApi api;
   final DownloadService? downloads;
+  final LibraryCategorySettings categorySettings;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -24,11 +31,13 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late Future<HomeData> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  final Map<String, HomeLatestSection> _latestSections = {};
+  int _loadGeneration = 0;
 
   @override
   void initState() {
     super.initState();
-    _future = widget.api.getHome();
+    _future = _loadHome(_loadGeneration);
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refresh,
@@ -44,11 +53,49 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _refresh() async {
-    final future = widget.api.getHome();
+    final generation = ++_loadGeneration;
+    final future = _loadHome(generation);
     setState(() {
+      _latestSections.clear();
       _future = future;
     });
     await future;
+  }
+
+  Future<HomeData> _loadHome(int generation) async {
+    final data = await widget.api.getHomeBase();
+    if (mounted && generation == _loadGeneration) {
+      unawaited(_loadLatestSections(data.views, generation));
+    }
+    return data;
+  }
+
+  Future<void> _loadLatestSections(List<EmbyItem> views, int generation) async {
+    const concurrency = 4;
+    for (var start = 0; start < views.length; start += concurrency) {
+      if (!mounted || generation != _loadGeneration) return;
+      final end = (start + concurrency).clamp(0, views.length);
+      await Future.wait(
+        views.sublist(start, end).map((library) async {
+          final section = await widget.api.getHomeLatestSection(library);
+          if (!mounted || generation != _loadGeneration || section == null) {
+            return;
+          }
+          setState(() => _latestSections[library.id] = section);
+        }),
+      );
+    }
+  }
+
+  List<HomeLatestSection> _orderedLatestSections(HomeData data) {
+    final sections = <String, HomeLatestSection>{
+      for (final section in data.latestSections) section.library.id: section,
+      ..._latestSections,
+    };
+    return data.views
+        .map((view) => sections[view.id])
+        .whereType<HomeLatestSection>()
+        .toList(growable: false);
   }
 
   Future<void> _openDetail(EmbyItem item) async {
@@ -58,6 +105,20 @@ class _HomeScreenState extends State<HomeScreen> {
           api: widget.api,
           initialItem: item,
           downloads: widget.downloads,
+        ),
+      ),
+    );
+    if (mounted) await _refresh();
+  }
+
+  Future<void> _openLibrary(EmbyItem library) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LibraryBrowseScreen(
+          api: widget.api,
+          view: library,
+          downloads: widget.downloads,
+          categorySettings: widget.categorySettings,
         ),
       ),
     );
@@ -86,7 +147,10 @@ class _HomeScreenState extends State<HomeScreen> {
           return ErrorState(error: snapshot.error!, onRetry: () => _refresh());
         }
         final data = snapshot.data!;
-        if (data.views.isEmpty && data.resume.isEmpty && data.latest.isEmpty) {
+        final latestSections = _orderedLatestSections(data);
+        if (data.views.isEmpty &&
+            data.resume.isEmpty &&
+            latestSections.isEmpty) {
           return RefreshIndicator(
             onRefresh: _refresh,
             child: const CustomScrollView(
@@ -104,45 +168,188 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         }
 
-        final featured = data.latest.firstOrNull ?? data.resume.firstOrNull;
         return RefreshIndicator(
           onRefresh: _refresh,
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.only(bottom: 28),
+            padding: const EdgeInsets.only(top: 6, bottom: 30),
             children: [
-              if (featured != null)
-                _FeaturedMedia(
+              if (data.views.isNotEmpty)
+                _LibraryShelf(
+                  items: data.views,
                   api: widget.api,
-                  item: featured,
-                  onOpen: () => _openDetail(featured),
-                  onPlay: featured.isPlayable ? () => _play(featured) : null,
+                  onTap: _openLibrary,
                 ),
               if (data.resume.isNotEmpty)
-                _PosterSection(
+                _LandscapeShelf(
                   title: '继续观看',
                   items: data.resume,
                   api: widget.api,
                   onTap: _openDetail,
+                  onPlay: _play,
                 ),
-              if (data.latest.isNotEmpty)
-                _PosterSection(
-                  title: '最近添加',
-                  items: data.latest,
-                  api: widget.api,
-                  onTap: _openDetail,
-                ),
-              if (data.views.isNotEmpty)
-                _LibrarySection(
-                  items: data.views,
-                  api: widget.api,
-                  onTap: (view) => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) =>
-                          LibraryBrowseScreen(api: widget.api, view: view),
-                    ),
+              for (final section in latestSections)
+                if (_prefersLandscape(section))
+                  _LandscapeShelf(
+                    title: '最新${section.library.name}',
+                    items: section.items,
+                    api: widget.api,
+                    onTap: _openDetail,
+                    onTitleTap: () => _openLibrary(section.library),
+                  )
+                else
+                  _PosterShelf(
+                    title: '最新${section.library.name}',
+                    items: section.items,
+                    api: widget.api,
+                    onTap: _openDetail,
+                    onTitleTap: () => _openLibrary(section.library),
                   ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  bool _prefersLandscape(HomeLatestSection section) {
+    var landscape = 0;
+    var portrait = 0;
+    for (final item in section.items) {
+      final ratio = item.primaryImageAspectRatio;
+      if (ratio == null || ratio <= 0) continue;
+      if (ratio >= 1.2) {
+        landscape++;
+      } else {
+        portrait++;
+      }
+    }
+    if (landscape + portrait > 0) return landscape > portrait;
+    return switch (section.library.collectionType?.toLowerCase()) {
+      'homevideos' || 'musicvideos' => true,
+      _ => false,
+    };
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title, this.onTap});
+
+  final String title;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+          ),
+          if (onTap != null) ...[
+            const SizedBox(width: 5),
+            const Icon(Icons.chevron_right, size: 20),
+          ],
+        ],
+      ),
+    );
+    if (onTap == null) return content;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: content,
+    );
+  }
+}
+
+class _LibraryShelf extends StatelessWidget {
+  const _LibraryShelf({
+    required this.items,
+    required this.api,
+    required this.onTap,
+  });
+
+  final List<EmbyItem> items;
+  final EmbyApi api;
+  final ValueChanged<EmbyItem> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < 600
+            ? (constraints.maxWidth * 0.68).clamp(210.0, 250.0)
+            : 270.0;
+        final labelHeight =
+            7 + MediaQuery.textScalerOf(context).scale(13) * 1.2 + 8;
+        return Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: _SectionHeader(title: '我的媒体'),
+              ),
+              const SizedBox(height: 9),
+              SizedBox(
+                height: width * 9 / 16 + labelHeight,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: items.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 12),
+                  itemBuilder: (context, index) {
+                    final item = items[index];
+                    final imageUrl =
+                        api.imageUrl(item, maxWidth: 700) ??
+                        api.imageUrl(item, type: 'Backdrop', maxWidth: 700);
+                    return SizedBox(
+                      width: width,
+                      child: InkWell(
+                        onTap: () => onTap(item),
+                        borderRadius: BorderRadius.circular(6),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            AspectRatio(
+                              aspectRatio: 16 / 9,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(6),
+                                child: EmbyImage(
+                                  url: imageUrl,
+                                  httpHeaders: api.imageHeaders,
+                                  icon: Icons.video_library_outlined,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 7),
+                            Text(
+                              item.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                height: 1.2,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
+              ),
             ],
           ),
         );
@@ -151,219 +358,139 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class _FeaturedMedia extends StatelessWidget {
-  const _FeaturedMedia({
-    required this.api,
-    required this.item,
-    required this.onOpen,
-    required this.onPlay,
-  });
-
-  final EmbyApi api;
-  final EmbyItem item;
-  final VoidCallback onOpen;
-  final VoidCallback? onPlay;
-
-  @override
-  Widget build(BuildContext context) {
-    final imageUrl =
-        api.imageUrl(item, type: 'Backdrop', maxWidth: 1200) ??
-        api.imageUrl(item, maxWidth: 900);
-    return SizedBox(
-      height: 236,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          EmbyImage(url: imageUrl),
-          const DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Color(0x18000000), Color(0xEE0D1012)],
-                stops: [0.25, 1],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 18,
-            right: 18,
-            bottom: 20,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 26,
-                    height: 1.05,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                Text(
-                  [
-                    item.subtitle,
-                    item.runtimeLabel,
-                    item.officialRating,
-                  ].whereType<String>().join(' · '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Color(0xFFD1D6D7)),
-                ),
-                const SizedBox(height: 13),
-                Row(
-                  children: [
-                    if (onPlay != null)
-                      FilledButton.icon(
-                        onPressed: onPlay,
-                        icon: const Icon(Icons.play_arrow_rounded),
-                        label: const Text('播放'),
-                      ),
-                    if (onPlay != null) const SizedBox(width: 10),
-                    OutlinedButton.icon(
-                      onPressed: onOpen,
-                      icon: const Icon(Icons.info_outline),
-                      label: const Text('详情'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PosterSection extends StatelessWidget {
-  const _PosterSection({
+class _LandscapeShelf extends StatelessWidget {
+  const _LandscapeShelf({
     required this.title,
     required this.items,
     required this.api,
     required this.onTap,
+    this.onPlay,
+    this.onTitleTap,
   });
 
   final String title;
   final List<EmbyItem> items;
   final EmbyApi api;
   final ValueChanged<EmbyItem> onTap;
+  final ValueChanged<EmbyItem>? onPlay;
+  final VoidCallback? onTitleTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 22),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              title,
-              style: Theme.of(
-                context,
-              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 266,
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              scrollDirection: Axis.horizontal,
-              itemCount: items.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 12),
-              itemBuilder: (context, index) {
-                final item = items[index];
-                return MediaPosterCard(
-                  item: item,
-                  imageUrl: api.imageUrl(item),
-                  onTap: () => onTap(item),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < 600
+            ? (constraints.maxWidth * 0.76).clamp(250.0, 320.0)
+            : (constraints.maxWidth * 0.43).clamp(320.0, 380.0);
+        return _ShelfFrame(
+          title: title,
+          onTitleTap: onTitleTap,
+          height:
+              width * 9 / 16 +
+              MediaLandscapeCard.minimumMetadataHeight(context),
+          children: [
+            for (final item in items)
+              MediaLandscapeCard(
+                item: item,
+                width: width,
+                imageUrl: _landscapeImageUrl(api, item),
+                imageHeaders: api.imageHeaders,
+                onTap: () => onTap(item),
+                onPlay: onPlay == null ? null : () => onPlay!(item),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  String? _landscapeImageUrl(EmbyApi api, EmbyItem item) {
+    if (item.type == 'Movie' || item.type == 'Series') {
+      return api.imageUrl(item, type: 'Backdrop', maxWidth: 900) ??
+          api.imageUrl(item, maxWidth: 900);
+    }
+    return api.imageUrl(item, maxWidth: 900) ??
+        api.imageUrl(item, type: 'Backdrop', maxWidth: 900);
+  }
+}
+
+class _PosterShelf extends StatelessWidget {
+  const _PosterShelf({
+    required this.title,
+    required this.items,
+    required this.api,
+    required this.onTap,
+    required this.onTitleTap,
+  });
+
+  final String title;
+  final List<EmbyItem> items;
+  final EmbyApi api;
+  final ValueChanged<EmbyItem> onTap;
+  final VoidCallback onTitleTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < 600
+            ? (constraints.maxWidth * 0.31).clamp(112.0, 132.0)
+            : constraints.maxWidth < 1000
+            ? 142.0
+            : 154.0;
+        return _ShelfFrame(
+          title: title,
+          onTitleTap: onTitleTap,
+          height: width * 1.5 + MediaPosterCard.minimumMetadataHeight(context),
+          children: [
+            for (final item in items)
+              MediaPosterCard(
+                item: item,
+                width: width,
+                imageUrl: api.imageUrl(item, maxWidth: 500),
+                imageHeaders: api.imageHeaders,
+                onTap: () => onTap(item),
+              ),
+          ],
+        );
+      },
     );
   }
 }
 
-class _LibrarySection extends StatelessWidget {
-  const _LibrarySection({
-    required this.items,
-    required this.api,
-    required this.onTap,
+class _ShelfFrame extends StatelessWidget {
+  const _ShelfFrame({
+    required this.title,
+    required this.height,
+    required this.children,
+    this.onTitleTap,
   });
 
-  final List<EmbyItem> items;
-  final EmbyApi api;
-  final ValueChanged<EmbyItem> onTap;
+  final String title;
+  final double height;
+  final List<Widget> children;
+  final VoidCallback? onTitleTap;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 22),
+      padding: const EdgeInsets.only(top: 18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              '媒体库',
-              style: Theme.of(
-                context,
-              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-            ),
+            child: _SectionHeader(title: title, onTap: onTitleTap),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           SizedBox(
-            height: 116,
+            height: height,
             child: ListView.separated(
-              scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: items.length,
+              scrollDirection: Axis.horizontal,
+              itemCount: children.length,
               separatorBuilder: (_, _) => const SizedBox(width: 12),
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final url =
-                    api.imageUrl(item, type: 'Backdrop', maxWidth: 500) ??
-                    api.imageUrl(item, maxWidth: 500);
-                return SizedBox(
-                  width: 210,
-                  child: Card(
-                    clipBehavior: Clip.antiAlias,
-                    child: InkWell(
-                      onTap: () => onTap(item),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          EmbyImage(url: url),
-                          const ColoredBox(color: Color(0x66000000)),
-                          Padding(
-                            padding: const EdgeInsets.all(14),
-                            child: Align(
-                              alignment: Alignment.bottomLeft,
-                              child: Text(
-                                item.name,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 17,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
+              itemBuilder: (_, index) => children[index],
             ),
           ),
         ],

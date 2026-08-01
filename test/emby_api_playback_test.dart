@@ -123,7 +123,100 @@ void main() {
 
       expect(plan.mediaSourceId, 'direct');
       expect(plan.method, PlayMethod.directPlay);
+      expect(plan.usesServerAuthentication, isTrue);
     });
+
+    test(
+      'proxies remote strm through the authenticated Emby stream endpoint',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'remote-strm',
+                  transcode: true,
+                  path:
+                      'https://upstream.example.test/live.m3u8'
+                      '?api_key=upstream-key&quality=1080p',
+                  protocol: 'Http',
+                  container: 'strm',
+                  transcodingUrl: '/Videos/item/master.m3u8',
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_item);
+
+        expect(plan.method, PlayMethod.directPlay);
+        expect(plan.uri.origin, _session.serverUrl);
+        expect(plan.uri.path, '/Videos/item-1/stream');
+        expect(plan.uri.queryParameters['MediaSourceId'], 'remote-strm');
+        expect(plan.uri.queryParameters['Static'], 'true');
+        expect(plan.uri.queryParameters, isNot(contains('api_key')));
+        expect(plan.usesServerAuthentication, isTrue);
+      },
+    );
+
+    test(
+      'forced retry bypasses remote strm and uses server transcode',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'remote-strm',
+                  transcode: true,
+                  path: 'https://upstream.example.test/live.m3u8',
+                  protocol: 'Http',
+                  container: 'strm',
+                  transcodingUrl: '/Videos/item/master.m3u8',
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_item, forceTranscode: true);
+
+        expect(plan.method, PlayMethod.transcode);
+        expect(plan.uri.origin, _session.serverUrl);
+        expect(plan.usesServerAuthentication, isTrue);
+      },
+    );
+
+    test(
+      'ignores unsafe strm paths and uses the Emby stream endpoint',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'loopback-strm',
+                  transcode: true,
+                  path: 'http://127.0.0.1/private.m3u8',
+                  protocol: 'Http',
+                  container: 'strm',
+                  transcodingUrl: '/Videos/item/master.m3u8',
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_item);
+
+        expect(plan.method, PlayMethod.directPlay);
+        expect(plan.uri.origin, _session.serverUrl);
+        expect(plan.uri.path, '/Videos/item-1/stream');
+        expect(plan.uri.queryParameters['MediaSourceId'], 'loopback-strm');
+        expect(plan.usesServerAuthentication, isTrue);
+      },
+    );
 
     test(
       'uses a stable preferred source ID and falls back when invalid',
@@ -225,6 +318,8 @@ void main() {
       expect(relative.uri.toString(), isNot(contains('secret')));
       expect(absolute.uri.host, 'cdn.example.test');
       expect(absolute.uri.toString(), isNot(contains('secret')));
+      expect(relative.usesServerAuthentication, isTrue);
+      expect(absolute.usesServerAuthentication, isFalse);
     });
 
     test('keeps a missing PlaySessionId nullable', () async {
@@ -433,12 +528,17 @@ Map<String, dynamic> _source({
   bool directPlay = false,
   bool directStream = false,
   bool transcode = false,
+  String? path,
+  String? protocol,
+  String container = 'mkv',
   String? directStreamUrl,
   String? transcodingUrl,
 }) => {
   'Id': id,
   'Name': id,
-  'Container': 'mkv',
+  'Path': ?path,
+  'Protocol': ?protocol,
+  'Container': container,
   'Bitrate': 8000000,
   'SupportsDirectPlay': directPlay,
   'SupportsDirectStream': directStream,
@@ -467,6 +567,7 @@ PlaybackPlan _plan({
   mediaSourceId: 'source-1',
   playSessionId: playSessionId,
   method: method,
+  usesServerAuthentication: true,
   mediaStreams: const [],
   transcodingReasons: const [],
   availableMediaSources: const [],

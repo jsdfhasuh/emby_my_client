@@ -24,10 +24,28 @@ void main() {
     expect(resolver.canForceTranscode, isFalse);
     expect(plan.uri, file.uri);
     expect(plan.playSessionId, isNull);
+    expect(plan.usesServerAuthentication, isFalse);
     expect(
       () => resolver.resolve(offline.toEmbyItem(), forceTranscode: true),
       throwsStateError,
     );
+  });
+
+  test('rejects an empty local file without online fallback', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'emby-offline-empty-test-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}${Platform.pathSeparator}empty.mkv');
+    await file.create();
+    final offline = _offline(file.path);
+    final resolver = OfflinePlaybackResolver(offline);
+
+    expect(
+      () => resolver.resolve(offline.toEmbyItem()),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(resolver.canForceTranscode, isFalse);
   });
 
   test('writes offline progress without an online session report', () async {

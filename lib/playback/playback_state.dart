@@ -27,6 +27,7 @@ class PlaybackState {
     this.playbackRate = 1,
     this.plan,
     this.errorMessage,
+    this.statusMessage,
   });
 
   final PlaybackPhase phase;
@@ -41,6 +42,7 @@ class PlaybackState {
   final double playbackRate;
   final PlaybackPlan? plan;
   final String? errorMessage;
+  final String? statusMessage;
 
   bool get isReady => phase == PlaybackPhase.ready;
   bool get hasError => phase == PlaybackPhase.failed;
@@ -60,6 +62,8 @@ class PlaybackState {
     bool clearPlan = false,
     String? errorMessage,
     bool clearError = false,
+    String? statusMessage,
+    bool clearStatus = false,
   }) => PlaybackState(
     phase: phase ?? this.phase,
     position: position ?? this.position,
@@ -73,5 +77,6 @@ class PlaybackState {
     playbackRate: playbackRate ?? this.playbackRate,
     plan: clearPlan ? null : plan ?? this.plan,
     errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
+    statusMessage: clearStatus ? null : statusMessage ?? this.statusMessage,
   );
 }

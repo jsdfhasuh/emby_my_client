@@ -1,6 +1,6 @@
 # 阶段 8 设计索引
 
-更新日期：2026-07-30
+更新日期：2026-07-31
 
 参考基线：Moonfin-Core `1b203f43efb3bd0e9d2589340c00b6c443d3ee8c`
 
@@ -22,8 +22,11 @@
 
 - [x] 阶段 8.0 共同基础代码与本地质量门槛完成。
 - [ ] 阶段 8.1 离线下载实施中：首版代码已覆盖 Android 前台下载、策略、
-  附属资源、清理、离线播放和进度同步，并通过 78 项本地测试；平台构建、
-  Android 15 重启恢复策略和真实服务器/物理设备验收待完成。
+  网络与存储自动等待/续传、标准 HTTP 摘要校验、附属资源、清理、离线播放和
+  进度同步，并通过 165 项本地测试、三 ABI 构建、Android 15 恢复策略和核心
+  物理设备流程。最终 arm64 包覆盖安装后，schema v4 数据、3.43 GB 既有媒体和
+  海报保持不变，worker 命令串行化、进度原子提交、冷启动与隐私日志复核通过；
+  网络、存储、设备重启、外挂字幕和真实进度冲突的剩余真机验收仍待完成。
 - [ ] 阶段 8.2 Live TV 待实施。
 - [ ] 阶段 8.3 Android TV 待实施。
 - [ ] 阶段 8.4 投屏待实施。
@@ -42,6 +45,7 @@ lib/core/server_capabilities.dart
 lib/data/client_registry.dart
 lib/data/local_database.dart
 lib/data/server_capabilities_repository.dart
+lib/data/account_data_cleanup.dart
 ```
 
 - [x] `ServerScope` 使用 `serverId + userId` 隔离设置、下载和缓存。
@@ -54,12 +58,15 @@ lib/data/server_capabilities_repository.dart
 - [x] WebSocket 能力上报成功后持久化远程控制能力证据。
 - [x] Token 继续只保存在安全存储，数据库不保存明文 Token。
 - [x] 数据库不可用时保留在线模式，并写入脱敏诊断日志。
+- [x] 普通退出保留 Scope 数据；显式账户清理只删除匹配 Scope 的目录、数据库记录
+  和设置，并在错误目录或仍运行的 Android worker 前停止。
 
 基础层不是一次性大重构。只在第一个使用者出现时增加对应接口，并为当前单服务器
 行为保留兼容适配器。
 
-阶段 8.1 已在共同数据库上升级到 schema v3，并增加下载任务、离线项目和
-离线进度表；v1 到 v3 迁移已测试。当前阶段仍未达到本节第 5 条的统一完成定义。
+阶段 8.1 已在共同数据库上升级到 schema v4，并增加下载任务、离线项目和
+离线进度表，以及下载摘要字段；v1 到 v4 迁移已测试，v3 到 v4 也已在保留
+3.43 GB 真实媒体的物理设备上通过。当前阶段仍未达到本节第 5 条的统一完成定义。
 
 ## 3. 推荐顺序
 

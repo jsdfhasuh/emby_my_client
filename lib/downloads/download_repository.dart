@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../core/server_scope.dart';
 import '../data/local_database.dart';
+import 'download_integrity.dart';
 import 'download_models.dart';
 
 abstract interface class DownloadStore {
@@ -19,11 +20,17 @@ abstract interface class DownloadStore {
 
   Future<void> saveProgress(OfflineProgressRecord progress);
 
+  Future<bool> saveProgressIfUnchanged(
+    OfflineProgressRecord expected,
+    OfflineProgressRecord replacement,
+  );
+
   Future<OfflineProgressRecord?> loadProgress(ServerScope scope, String itemId);
 
   Future<List<OfflineProgressRecord>> listPendingProgress(
     ServerScope scope, {
     required DateTime now,
+    bool includeDeferred = false,
   });
 
   Future<void> removeOfflineItem(DownloadTaskRecord task);
@@ -139,17 +146,46 @@ class DownloadRepository implements DownloadStore {
   @override
   Future<void> saveProgress(OfflineProgressRecord progress) async {
     await _database.transaction(
-      (database) => database.insert('offline_progress', {
-        'server_id': progress.scope.serverId,
-        'user_id': progress.scope.userId,
-        'item_id': progress.itemId,
-        'position_ticks': progress.positionTicks,
-        'played': progress.played ? 1 : 0,
-        'updated_at_ms': progress.updatedAt.millisecondsSinceEpoch,
-        'sync_status': progress.syncStatus,
-        'retry_after_ms': progress.retryAfter?.millisecondsSinceEpoch,
-      }, conflictAlgorithm: ConflictAlgorithm.replace),
+      (database) => database.insert(
+        'offline_progress',
+        _progressToRow(progress),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      ),
     );
+  }
+
+  @override
+  Future<bool> saveProgressIfUnchanged(
+    OfflineProgressRecord expected,
+    OfflineProgressRecord replacement,
+  ) async {
+    if (expected.scope != replacement.scope ||
+        expected.itemId != replacement.itemId) {
+      throw ArgumentError('Progress replacement identity does not match');
+    }
+    final expectedRetryAfter = expected.retryAfter?.millisecondsSinceEpoch;
+    final changed = await _database.transaction(
+      (database) => database.update(
+        'offline_progress',
+        _progressToRow(replacement),
+        where:
+            'server_id = ? AND user_id = ? AND item_id = ? '
+            'AND position_ticks = ? AND played = ? AND updated_at_ms = ? '
+            'AND sync_status = ? '
+            '${expectedRetryAfter == null ? 'AND retry_after_ms IS NULL' : 'AND retry_after_ms = ?'}',
+        whereArgs: [
+          expected.scope.serverId,
+          expected.scope.userId,
+          expected.itemId,
+          expected.positionTicks,
+          expected.played ? 1 : 0,
+          expected.updatedAt.millisecondsSinceEpoch,
+          expected.syncStatus,
+          ?expectedRetryAfter,
+        ],
+      ),
+    );
+    return changed == 1;
   }
 
   @override
@@ -172,18 +208,20 @@ class DownloadRepository implements DownloadStore {
   Future<List<OfflineProgressRecord>> listPendingProgress(
     ServerScope scope, {
     required DateTime now,
+    bool includeDeferred = false,
   }) async {
     final rows = await _database.read(
       (database) => database.query(
         'offline_progress',
-        where:
-            'server_id = ? AND user_id = ? AND sync_status != ? '
-            'AND (retry_after_ms IS NULL OR retry_after_ms <= ?)',
+        where: includeDeferred
+            ? 'server_id = ? AND user_id = ? AND sync_status != ?'
+            : 'server_id = ? AND user_id = ? AND sync_status != ? '
+                  'AND (retry_after_ms IS NULL OR retry_after_ms <= ?)',
         whereArgs: [
           scope.serverId,
           scope.userId,
           'synced',
-          now.millisecondsSinceEpoch,
+          if (!includeDeferred) now.millisecondsSinceEpoch,
         ],
         orderBy: 'updated_at_ms ASC',
       ),
@@ -285,6 +323,8 @@ Map<String, Object?> _taskToRow(DownloadTaskRecord task) => {
   'source_fingerprint': task.sourceFingerprint,
   'etag': task.etag,
   'expected_bytes': task.expectedBytes,
+  'integrity_algorithm': task.integrity?.algorithm,
+  'integrity_digest': task.integrity?.digest,
   'downloaded_bytes': task.downloadedBytes,
   'status': task.status.name,
   'retry_count': task.retryCount,
@@ -294,6 +334,17 @@ Map<String, Object?> _taskToRow(DownloadTaskRecord task) => {
   'metadata_json': jsonEncode(task.metadata.toJson()),
   'created_at_ms': task.createdAt.millisecondsSinceEpoch,
   'updated_at_ms': task.updatedAt.millisecondsSinceEpoch,
+};
+
+Map<String, Object?> _progressToRow(OfflineProgressRecord progress) => {
+  'server_id': progress.scope.serverId,
+  'user_id': progress.scope.userId,
+  'item_id': progress.itemId,
+  'position_ticks': progress.positionTicks,
+  'played': progress.played ? 1 : 0,
+  'updated_at_ms': progress.updatedAt.millisecondsSinceEpoch,
+  'sync_status': progress.syncStatus,
+  'retry_after_ms': progress.retryAfter?.millisecondsSinceEpoch,
 };
 
 DownloadTaskRecord _taskFromRow(Map<String, Object?> row) => DownloadTaskRecord(
@@ -324,6 +375,10 @@ DownloadTaskRecord _taskFromRow(Map<String, Object?> row) => DownloadTaskRecord(
   updatedAt: _date(row['updated_at_ms']),
   etag: _string(row['etag']),
   expectedBytes: _integer(row['expected_bytes']),
+  integrity: DownloadIntegrity.fromStored(
+    _string(row['integrity_algorithm']),
+    _string(row['integrity_digest']),
+  ),
   lastErrorCode: _string(row['last_error_code']),
 );
 

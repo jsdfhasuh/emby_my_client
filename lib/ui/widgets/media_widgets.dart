@@ -7,11 +7,13 @@ class EmbyImage extends StatelessWidget {
   const EmbyImage({
     super.key,
     required this.url,
+    this.httpHeaders,
     this.fit = BoxFit.cover,
     this.icon = Icons.movie_outlined,
   });
 
   final String? url;
+  final Map<String, String>? httpHeaders;
   final BoxFit fit;
   final IconData icon;
 
@@ -26,6 +28,7 @@ class EmbyImage extends StatelessWidget {
     if (url == null) return placeholder;
     return CachedNetworkImage(
       imageUrl: url!,
+      httpHeaders: httpHeaders,
       fit: fit,
       fadeInDuration: const Duration(milliseconds: 180),
       placeholder: (_, _) => placeholder,
@@ -40,13 +43,23 @@ class MediaPosterCard extends StatelessWidget {
     required this.item,
     required this.imageUrl,
     required this.onTap,
+    this.imageHeaders,
     this.width = 132,
   });
 
   final EmbyItem item;
   final String? imageUrl;
+  final Map<String, String>? imageHeaders;
   final VoidCallback onTap;
   final double width;
+
+  static double minimumMetadataHeight(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    const lineHeight = 1.2;
+    final titleHeight = scaler.scale(13) * lineHeight * 2;
+    final subtitleHeight = scaler.scale(11) * lineHeight;
+    return 8 + titleHeight + 2 + subtitleHeight + 12;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -65,20 +78,21 @@ class MediaPosterCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    EmbyImage(url: imageUrl),
+                    EmbyImage(
+                      url: imageUrl,
+                      httpHeaders: imageHeaders,
+                      icon: item.isFolder
+                          ? Icons.folder_outlined
+                          : Icons.movie_outlined,
+                    ),
                     if (item.userData.isPlayed)
-                      const Positioned(
+                      const Positioned(top: 7, right: 7, child: _PlayedBadge())
+                    else if (item.userData.unplayedItemCount > 0)
+                      Positioned(
                         top: 7,
                         right: 7,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: Color(0xDD55B948),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Padding(
-                            padding: EdgeInsets.all(4),
-                            child: Icon(Icons.check, size: 14),
-                          ),
+                        child: _UnplayedBadge(
+                          count: item.userData.unplayedItemCount,
                         ),
                       ),
                     if (item.userData.isFavorite)
@@ -116,16 +130,215 @@ class MediaPosterCard extends StatelessWidget {
               item.name,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 2),
             Text(
               item.subtitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: Color(0xFF9DA6A9)),
+              style: const TextStyle(
+                fontSize: 11,
+                height: 1.2,
+                color: Color(0xFF9DA6A9),
+              ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class MediaLandscapeCard extends StatelessWidget {
+  const MediaLandscapeCard({
+    super.key,
+    required this.item,
+    required this.imageUrl,
+    required this.onTap,
+    this.imageHeaders,
+    this.onPlay,
+    this.width = 280,
+  });
+
+  final EmbyItem item;
+  final String? imageUrl;
+  final Map<String, String>? imageHeaders;
+  final VoidCallback onTap;
+  final VoidCallback? onPlay;
+  final double width;
+
+  static double minimumMetadataHeight(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    const lineHeight = 1.2;
+    final titleHeight = scaler.scale(13) * lineHeight;
+    final subtitleHeight = scaler.scale(11) * lineHeight;
+    return 7 + titleHeight + 2 + subtitleHeight + 8;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    EmbyImage(
+                      url: imageUrl,
+                      httpHeaders: imageHeaders,
+                      icon: item.isFolder
+                          ? Icons.folder_outlined
+                          : Icons.live_tv_outlined,
+                    ),
+                    if (item.userData.isPlayed)
+                      const Positioned(top: 7, right: 7, child: _PlayedBadge())
+                    else if (item.userData.unplayedItemCount > 0)
+                      Positioned(
+                        top: 7,
+                        right: 7,
+                        child: _UnplayedBadge(
+                          count: item.userData.unplayedItemCount,
+                        ),
+                      ),
+                    if (item.userData.isFavorite)
+                      const Positioned(
+                        top: 7,
+                        left: 7,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xDD9A3D46),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Padding(
+                            padding: EdgeInsets.all(4),
+                            child: Icon(Icons.favorite, size: 14),
+                          ),
+                        ),
+                      ),
+                    if (onPlay != null)
+                      Positioned(
+                        right: 8,
+                        bottom: 8,
+                        child: Material(
+                          color: const Color(0xC7000000),
+                          shape: const CircleBorder(),
+                          child: IconButton(
+                            tooltip: '播放',
+                            onPressed: onPlay,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 40,
+                              height: 40,
+                            ),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(
+                              Icons.play_arrow_rounded,
+                              size: 26,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (item.progress > 0 && item.progress < 1)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: LinearProgressIndicator(
+                          value: item.progress,
+                          minHeight: 4,
+                          backgroundColor: Colors.black54,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              item.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              item.subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 11,
+                height: 1.2,
+                color: Color(0xFF9DA6A9),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PlayedBadge extends StatelessWidget {
+  const _PlayedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return const DecoratedBox(
+      decoration: BoxDecoration(
+        color: Color(0xDD55B948),
+        shape: BoxShape.circle,
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(4),
+        child: Icon(Icons.check, size: 14),
+      ),
+    );
+  }
+}
+
+class _UnplayedBadge extends StatelessWidget {
+  const _UnplayedBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xEE46AE54),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+          child: Center(
+            child: Text(
+              count > 99 ? '99+' : '$count',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -138,6 +351,7 @@ class MediaGrid extends StatelessWidget {
     required this.items,
     required this.imageUrlFor,
     required this.onTap,
+    this.imageHeaders,
     this.padding = const EdgeInsets.all(16),
     this.shrinkWrap = false,
     this.physics,
@@ -145,6 +359,7 @@ class MediaGrid extends StatelessWidget {
 
   final List<EmbyItem> items;
   final String? Function(EmbyItem item) imageUrlFor;
+  final Map<String, String>? imageHeaders;
   final ValueChanged<EmbyItem> onTap;
   final EdgeInsets padding;
   final bool shrinkWrap;
@@ -169,6 +384,7 @@ class MediaGrid extends StatelessWidget {
           item: item,
           width: double.infinity,
           imageUrl: imageUrlFor(item),
+          imageHeaders: imageHeaders,
           onTap: () => onTap(item),
         );
       },

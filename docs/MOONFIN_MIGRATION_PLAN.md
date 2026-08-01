@@ -1,6 +1,6 @@
 # Moonfin-Core 借鉴迁移计划
 
-更新日期：2026-07-30
+更新日期：2026-07-31
 
 参考仓库：[Moonfin-Client/Moonfin-Core](https://github.com/Moonfin-Client/Moonfin-Core)
 
@@ -21,6 +21,9 @@
 
 - Emby 服务器登录及会话安全存储。
 - 首页、媒体库、搜索、详情、季和剧集列表。
+- 媒体库总数、分类快捷入口、服务端排序和组合筛选。
+- 搜索防抖、相关性结果、媒体类型筛选、分页、文件夹结果和分用户最近搜索。
+- 响应式首页媒体架、分媒体库最新内容、继续观看横版卡片和未观看数量角标。
 - 基于 `media_kit` 和 libmpv 的 Android 视频播放。
 - DirectPlay、DirectStream、Transcode 分级协商和单次自动转码回退。
 - ready 后断点恢复、播放会话上报和服务端转码资源清理。
@@ -39,8 +42,11 @@
 - 阶段 8.0 共同基础已完成代码和本地门槛。
 - 阶段 8.1 的数据库、原始下载、Android `dataSync` 前台服务、下载策略、
   附属资源、清理、最小离线播放和进度冲突同步已完成代码与本地测试。
-- 阶段 8.1 仍缺本轮 APK 构建与模拟器回归、Android 15 及以上的重启恢复策略，
-  以及真实服务器和物理设备验收。
+- 阶段 8.1 已完成本轮三 ABI 构建、Android 15 及以上恢复策略、文件边界审计，
+  以及真实服务器和物理设备上的原始下载、暂停、续传、取消、删除和最小离线播放。
+- 阶段 8.1 仍缺下载中的 Wi-Fi/移动网络切换、空间不足、设备重启、飞行模式
+  外挂字幕样本和真实离线进度冲突验收；飞行模式本地目录、海报、播放、定位和
+  重新联网自动同步已通过真机验收。
 - Live TV、投屏、多服务器和 Android TV 尚未实现。
 - SyncPlay 尚未确认 Emby 对等协议，保持协议阻塞。
 
@@ -339,6 +345,33 @@ stopping
 - 网络切换后 WebSocket 能恢复且不会高频重连。
 - 同一局域网服务器能够自动发现并直接选择。
 
+### 阶段 7.1：媒体库浏览和筛选
+
+状态：完成；代码、本地质量门槛、主界面和筛选面板均已通过真机验收
+
+参考 Emby 原版媒体库工具栏和 Moonfin 的集中式浏览状态后独立实现：
+
+- [x] 显示服务端返回的媒体总数。
+- [x] 增加节目、电影、剧集、视频、收藏和文件夹快捷入口。
+- [x] 文件夹模式只读取当前目录层级，点击目录后继续按 `ParentId` 下钻。
+- [x] 设置页可分别显示或隐藏电影、剧集、视频、收藏和文件夹快捷入口。
+- [x] 分类偏好按服务器和用户隔离保存；默认仅显示节目、收藏和文件夹。
+- [x] 增加名称、加入日期、首映日期、年份、评分和时长排序。
+- [x] 支持升序和降序切换。
+- [x] 支持已播放、未播放、项目类型和收藏组合筛选。
+- [x] 筛选条件提交前保留在面板草稿中，取消面板不会发起新请求。
+- [x] 排序和筛选通过 Emby `/Users/<userId>/Items` 服务端参数执行。
+- [x] 分页使用 `TotalRecordCount` 判断结束，不再只依赖页面长度。
+- [x] 切换条件时忽略旧请求的晚到结果，避免混入上一组数据。
+- [x] 增加 API 参数和筛选交互 Widget 测试。
+
+验收标准：
+
+- 真实媒体库切换排序或筛选后，总数和项目列表同步变化。
+- 快速切换多个条件时不会短暂显示上一组结果。
+- 空结果、加载失败和继续分页均有明确界面状态。
+- 1080×2400 竖屏不出现控件重叠或 RenderFlex 溢出。
+
 ### 阶段 8：大型扩展项目
 
 状态：设计计划完成；阶段 8.0 完成；阶段 8.1 离线下载实施中
@@ -400,20 +433,24 @@ lib/downloads/download_repository.dart
 lib/downloads/download_service.dart
 lib/downloads/download_transport.dart
 lib/downloads/download_executor.dart
+lib/downloads/download_integrity.dart
 lib/downloads/download_settings.dart
 lib/downloads/download_preflight.dart
 lib/downloads/foreground_download_executor.dart
 lib/downloads/download_assets.dart
 lib/downloads/download_cleanup.dart
+lib/data/account_data_cleanup.dart
 lib/offline/offline_playback_resolver.dart
 lib/offline/offline_playback_reporter.dart
 lib/offline/offline_progress_sync.dart
 lib/ui/downloads/downloads_screen.dart
 test/download_service_test.dart
+test/download_integrity_test.dart
 test/download_repository_test.dart
 test/download_transport_test.dart
 test/download_assets_test.dart
 test/download_cleanup_test.dart
+test/account_data_cleanup_test.dart
 test/offline_playback_test.dart
 test/offline_progress_sync_test.dart
 test/downloads_ui_test.dart
@@ -421,30 +458,85 @@ test/downloads_ui_test.dart
 
 当前实现：
 
-- SQLite schema v3 和下载、离线项目、离线进度三张 Scope 隔离表。
+- SQLite schema v4 和下载、离线项目、离线进度三张 Scope 隔离表；v4 只增加
+  下载摘要字段，不移动既有媒体。
 - 原始文件队列、暂停、续传、取消、删除、有限重试和原子完成。
-- Token 只放认证头，不进入下载 URL、SQLite 或诊断错误文本。
-- 进程中断恢复、缺失完成文件失效和基本媒体内容/长度校验。
+- Token 只放认证头，不进入下载 URL 或 SQLite；诊断日志统一移除网络 URL 和
+  鉴权值，并在启动时清洗旧日志。
+- 进程中断恢复，以及启动恢复和播放前的完成文件存在性、可读性与长度检查。
+  本地成品丢失或损坏时撤销可播放记录并显示“重新下载”；只有用户明确点击后才
+  清理坏文件、断点、ETag 和摘要，并从安全目录的 0 字节重新排队，不回退在线流。
+- 支持 `Repr-Digest`、`Digest`、完整响应的 `Content-Digest` 和
+  `Content-MD5`，优先 SHA-256、其次 MD5；摘要持久化并用于 Range 续传后的
+  整文件流式校验，不把 ETag 当摘要。
+- Range 固定请求 `Accept-Encoding: identity`；ETag 或摘要变化时关闭当前响应并
+  从零下载。摘要失败会删除坏载荷、清空断点并明确报错，不回退其他下载端点。
+- 自动化测试覆盖 401/403、429/5xx 有界退避、ETag 变化、长度不符、HTTP 416、
+  非媒体响应释放、重复投递幂等和非空间文件系统失败。
 - 最小离线目录、本地播放和 pending 离线进度写入。
 - 本地播放不请求 PlaybackInfo、不建立在线播放会话、不保持 WebSocket、
   不执行转码回退。
 - 电影和剧集详情下载操作、下载管理入口和下载状态页面。
+- 下载页汇总当前 Scope 的媒体文件和断点占用，并区分可离线播放与未完成项目。
 - Android `dataSync` 前台服务 isolate 从安全存储重新读取会话，命令只传任务 ID。
+- Android worker 串行执行暂停、继续、删除、设置刷新和唤醒命令；单个命令失败
+  不阻塞后续命令，服务销毁前会封闭并等待命令队列，避免刷新与删除交错恢复
+  陈旧任务或关闭数据库时仍有命令写入。
 - 私密通知展示进度、暂停和取消，不展示服务器地址或媒体标题。
 - “仅 Wi-Fi”策略、网络条件检查和包含安全余量的剩余空间预检。
+- 下载 worker 监听网络变化；不符合当前策略时把任务持久化为
+  `waitingForNetwork`、立即中止传输且保留 `.part`，网络恢复后使用 Range/ETag
+  自动续传。手动暂停不会被网络恢复覆盖，主 isolate 的策略修改会通知 worker
+  重新加载。
+- 下载前空间预检失败仍阻止创建任务；传输中系统明确返回 ENOSPC 时，任务持久化为
+  `waitingForStorage` 并保留 `.part`。worker 每 15 秒重新检查一次剩余空间，条件
+  恢复后自动使用 Range/If-Range 续传；等待期间可以暂停或取消。
+- 网络异常收尾会在写入等待状态前重新读取最新用户命令，避免旧异常异步覆盖稍后
+  发出的暂停或取消。
 - 下载同源海报和外挂字幕，跨域字幕拒绝，字幕地址改写为本地文件路径。
+- 新任务将成品、断点和附属资源分别写入 Scope 下的 `media/`、`parts/` 和
+  `assets/`；附属资源的 `.part` 也只进入 `parts/assets/`。已有根目录或相对路径
+  记录继续按原位置使用，不复制或迁移大文件。
+- 启动恢复会校正数据库记录有断点字节数但 `.part` 已丢失的任务，清零陈旧字节数
+  和 ETag，避免后续发送错误 Range。
+- 所有删除先持久化 `cancelling`，再删除任务文件，最后在事务中移除下载、离线项目
+  和无剩余离线版本的进度记录；进程中断后下一次启动继续完成删除。
+- 普通退出继续保留离线数据；设置页提供带二次确认的“删除此账户数据”，先等待
+  Android worker 停止，再删除该 Scope 的媒体目录、SQLite 记录、搜索历史和下载、
+  分类、播放设置。目录名不匹配 Scope 时拒绝执行，其他账户数据保持不变。
 - 7 天无主文件保留期清理；附属资源失败不回滚已完成的视频文件。
+- 附属图片或字幕因状态码、类型、大小、空响应或文件错误提前失败时会取消响应并
+  删除无续传价值的 `.part`，避免后台连接继续占用网络。
 - 离线进度同步采用服务端已观看优先，否则选择更远位置；失败后 5 分钟重试，
-  且同步期间产生的新本地进度不会被旧结果覆盖。
+  `pending`、`syncing` 和最终状态通过 SQLite 原子条件更新提交；同步期间或提交
+  瞬间产生的新本地进度会使旧结果更新 0 行，不会被覆盖。
+- WebSocket 每次连接成功都会触发离线进度同步；明确恢复联网时允许绕过旧失败
+  记录的重试时间，持续断网时仍保留 5 分钟退避。
+- SQLite 使用 WAL；前台服务运行期间由 worker isolate 独占任务状态写入，
+  主 isolate 合并并串行刷新，避免跨 isolate 写竞争。
+- worker 使用独立的非单实例数据库句柄，关闭 worker 不会关闭主数据库；
+  暂停只在传输操作真正收尾后停止前台服务。
+- 通知“暂停”和“取消”均已通过 Android PendingIntent 真机点击；强制终止应用后，
+  用户重新打开应用会从持久化断点恢复下载。
+- 账户清理版本已覆盖安装；真机确认设置入口、危险色和二次确认弹窗可达，取消后
+  登录态和原有 3.4 GB 离线文件保持不变，冷启动无 Flutter、SQLite 或原生崩溃。
+- 下载占用汇总版本已覆盖安装；真实下载页显示“媒体文件占用 3.43 GB”和
+  “1 个可离线播放”，与应用私有目录约 3.4 GB 一致。1080×2400 布局无重叠，
+  截图保存在 `build/qa/download-storage-summary.png`。
+- 标准摘要和 schema v4 版本已完成三 ABI 构建并覆盖安装到同一真机。安装前数据库
+  为 v3、1 条已完成任务、`3,679,942,140` 下载字节；冷启动后数据库为 v4，
+  `PRAGMA integrity_check` 为 `ok`，任务数量、完成状态和字节数完全不变。
+- 既有 3.43 GB 媒体和海报的大小、时间戳未变化，无活动任务时 `dataSync` 服务
+  未启动；日志无 AndroidRuntime、Flutter 或 SQLite 异常，原始和编码 URL 均为
+  0。下载页截图保存在 `build/qa/download-integrity-migration.png`。
+- 自动化测试覆盖完成文件在启动时和播放前被截断、离线记录失效、UI 明确显示
+  “重新下载”，以及重新下载清空旧 ETag/摘要并从 0 字节开始；运行期只读取文件
+  长度，不重新哈希既有 3.43 GB 媒体。
 
 仍未完成：
 
-- 重新构建三 ABI APK，并在模拟器验证 Manifest 合并、AOT 回调入口和插件注册。
-- Android 15 及以上禁止 `BOOT_COMPLETED` 直接启动 `dataSync` 前台服务；
-  必须改用受约束的恢复入口，或关闭开机自启并明确为“再次打开应用后恢复”。
-- 审计下载删除逻辑的绝对路径比较，覆盖数据库中存在相对路径的兼容场景。
-- 物理设备、真实 Emby、大文件中断和断网播放验收。
-- 通知按钮、锁屏、切后台、杀进程、设备重启和飞行模式字幕播放验收。
+- 下载中的 Wi-Fi/移动网络切换、空间不足和设备重启验收。
+- 飞行模式外挂字幕验收；当前真实离线样本不含外挂字幕。
 - 离线进度冲突策略在真实 Emby 上的端到端验收。
 - 转码下载。
 
@@ -618,18 +710,18 @@ test/emby_server_discovery_test.dart
 
 ## 10. 最新验证记录
 
-验证日期：2026-07-30
+验证日期：2026-07-31
 
 已通过：
 
 ```text
 dart format lib test
 flutter analyze                         No issues found
-flutter test                            78 tests passed
+flutter test                            165 tests passed
+flutter build apk --debug --split-per-abi
 ```
 
-以下 APK 是较早源码状态的构建产物；加入 Android 前台下载服务和最新离线能力后，
-必须重新执行 `flutter build apk --debug --split-per-abi`，不能作为本轮构建证据：
+以下 APK 已从本轮最终源码重新构建：
 
 ```text
 build/app/outputs/flutter-apk/app-armeabi-v7a-debug.apk
@@ -657,17 +749,116 @@ Android 模拟器验证：
 - 首次启动曾因模拟器最低内存水位被系统 `lowmemorykiller` 终止，不是应用异常；
   清理缓存进程后再次冷启动并保持运行。
 
-当前仍未连接 Android 物理设备，也没有在模拟器中配置可登录的真实 Emby
-服务器。因此以下证据仍缺失：
+Android 物理设备和真实 Emby 验证：
 
-- Android 物理设备安装和启动。
-- 真实媒体播放、轨道切换、横滑定位、Trickplay 和自动下一集。
+- 目标设备为 `9798ef47`，Xiaomi 22021211RC、Android 14、arm64-v8a。
+- `app-arm64-v8a-debug.apk` 已使用 `adb install -r` 覆盖安装，登录数据保留。
+- 覆盖安装后的冷启动成功，未发现 Flutter 异常或 Android 崩溃。
+- 网络等待状态版本已重新完成三 ABI 构建并覆盖安装 arm64 APK；应用进程和前台
+  Activity 正常，未发现 `AndroidRuntime`、`E/flutter`、插件或 SQLite 异常。
+- 关闭 Wi-Fi 后 WebSocket 按约 2.2 秒、4.1 秒和 10 秒逐步退避；恢复 Wi-Fi 后
+  自动重连并重新上报远程控制能力，未出现高频重连。
+- 媒体库筛选版本已覆盖安装；真实 1080×2400 媒体库显示 `共 448 项`，
+  快捷入口、排序、升降序和筛选入口均正常绘制。
+- 分类设置版本已覆盖安装；账号菜单可进入设置，电影、剧集、视频默认关闭，
+  收藏和文件夹默认开启；重新进入真实媒体库后仅显示节目、收藏和文件夹。
+- 媒体库主界面截图保存在 `build/qa/library-filter-home.png` 和
+  `build/qa/library-filter-browse.png`。
+- 真机筛选面板提交“未播放 + 视频”后，总数从 448 变为 442，筛选徽标显示 2；
+  重置后恢复 448。1080×2400 下未出现控件重叠、RenderFlex 溢出或旧结果混入，
+  截图保存在 `build/qa/library-filter-combination.png`。
+- 用户已确认真实媒体正常播放、断点续播、横滑定位、暂停、进度条、字幕和音轨。
+- `.strm` 媒体会优先选中 `DirectPlay`，但不再把 Emby `PlaybackInfo` 的外部
+  `Path` 直接交给播放器，而是请求同源
+  `/Videos/<id>/stream?MediaSourceId=<sourceId>&Static=true`，由 Emby 后端解析
+  或代理 `.strm` 上游；该请求携带正常的 Emby 鉴权头。
+- 更新后的真机日志已确认 item `161992` 实际命中上述 `/Videos/161992/stream`
+  接口，不再访问外部 `Path`。当前服务端响应仍不可播放：mpv 尝试定位到约
+  3.34 GB 处读取 MP4 尾部元数据时返回 `Seek failed`，随后出现
+  `moov atom not found` 和读取超时。服务端代理必须透传请求 `Range`，并返回
+  正确的 `206`、`Content-Range`、`Content-Length`、`Accept-Ranges: bytes`
+  和 `Content-Type`，不能只返回 URL 文本、截断内容或不可定位的单向流。
+- 本轮真实 `.strm` 上游为 `alist.jsdfhasuh.top`。手机、Windows、1.1.1.1 和
+  8.8.8.8 均确认该主机名不存在，因此直连失败属于上游 DNS 问题。
+- 直连失败后客户端确实请求了 Emby HLS 转码；当前服务端或反向代理返回的 HLS
+  响应触发 `inflate return value: -3, incorrect header check`，需检查
+  `Content-Encoding` 和重复压缩。
+- 播放器现会把 DNS、HTTP 打开失败和错误压缩头识别为启动失败：直连立即回退，
+  转码也失败时立即显示错误并停止 mpv，不再保持无限加载或继续输出高频日志。
+- 自动化测试覆盖“DNS 失败立即回退”和“转码解压失败立即报错并停止播放器”；
+  更新后的失败提示仍需一次人工实体机确认。
+- 阶段 8.1 最终三 ABI APK 已重新构建；合并 Manifest 包含 `dataSync` 前台服务、
+  SQLite WAL 开关，不包含 `RECEIVE_BOOT_COMPLETED` 或重启 Receiver。
+- 前台任务配置确认
+  `autoRunOnBoot=false`、`autoRunOnMyPackageReplaced=false` 和
+  `allowAutoRestart=false`；设备重启后由用户再次打开应用恢复持久化任务。
+- 真机数据库已实际生成 `emby_client.db-wal` 和 `emby_client.db-shm`。
+- `waitingForStorage` 版本已重新生成三个 ABI APK，并覆盖安装到同一 Android 14
+  实体机；登录和约 3.4 GB 既有离线文件保留。冷启动后进程与 Activity 正常，
+  无活动任务时 `dataSync` 服务没有误启动，日志未发现 Flutter、AndroidRuntime、
+  插件或 SQLite 异常。
+- 存储分区和可恢复删除版本已再次覆盖安装；旧完成文件仍保留在原目录，总量约
+  3.4 GB，启动没有创建 `media/` 或 `parts/` 迁移目录，也没有出现大文件复制。
+- item `100970` 从已暂停的 3.4 MB 任务继续到 40.0 MB 完成，前台服务和私密
+  通知随后自动退出；不重启应用直接离线播放成功，日志记录
+  `Playback ready item=100970 method=DirectPlay`。
+- 上述本地播放没有请求 PlaybackInfo、没有在线播放会话上报，也没有再次出现
+  `database_closed`、`SQLITE_BUSY` 或数据库锁等待。
+- 3.43 GB 完成项在飞行模式下可进入离线目录，本地海报正常显示；离线播放进入
+  `Playback ready`，本地解码器持续输出音视频，定位后退出写入约 69 秒的
+  `pending` 进度。该样本字幕页只有“关闭字幕”，因此外挂字幕仍需另一个真实样本。
+- 审查发现恢复网络后 WebSocket 虽会重连，但旧实现不会触发离线进度同步；现已
+  将连接成功事件接入同步，并为恢复联网增加一次可绕过旧重试时间的强制查询。
+- 新 arm64 包已在真机制造 `failed` 且重试时间仍在未来的记录；不切后台、不重启
+  应用恢复 Wi-Fi 后，WebSocket 在长退避结束时重连，约 0.4 秒后日志记录
+  `Synced 1 offline progress record(s)`，数据库状态变为 `synced` 且重试时间清空。
+- 3.43 GB 的真实媒体在下载至 1.35 GB 时主动暂停；4 秒内页面变为“继续下载”，
+  `dumpsys` 确认 `dataSync` 前台服务退出，通知移除。
+- 取消该大文件任务后 1.35 GB `.part` 被删除，下载列表为空，应用私有下载目录
+  只保留空的 Scope 目录。
+- 真机测试过程中通知标题始终为通用“Emby 离线下载”，可见性为
+  `VISIBILITY_PRIVATE`，未展示媒体标题、服务器地址或 Token。
+- 实际展开系统通知并点击“暂停”后，`.part` 停在 `1,852,681,320` 字节，3 秒内
+  不再增长；前台服务和通知退出，详情页变为“继续下载”。
+- 从全新任务实际点击通知“取消”时通知仍处于活动状态；5 秒内任务、`.part`、
+  附属文件、前台服务和通知全部清理，详情页恢复为“下载”。
+- 下载中执行 `am force-stop` 后服务和通知立即退出；重新打开应用后自动从断点
+  恢复，`.part` 在 3 秒内从 `2,124,221,720` 增长到 `2,278,158,600` 字节。
+- 下载中返回桌面后，当前焦点确认为 MIUI Launcher，应用 PID 保持不变；
+  `.part` 在 3 秒内增长 `176,372,192` 字节，前台服务和通知持续活动。
+- 设备进入 `mWakefulness=Dozing` 后，`.part` 在 3 秒内增长
+  `277,375,536` 字节，前台服务和私密通知持续活动。
+- 隐私审计最初发现诊断日志保留 185 个网络 URL；统一日志脱敏器现会替换
+  HTTP(S)、WebSocket 和编码 URL，并在启动时清洗历史日志。更新版覆盖安装后，
+  原始/编码 URL 和未脱敏鉴权值均为 0，历史 URL 转为 185 个
+  `<redacted-url>`；SQLite 完整性为 `ok`，其中 URL、鉴权字段、下载任务、
+  离线项目和待同步进度均为 0。
+- 日志隐私回归继续覆盖旧版 `Authenticated user <name>` 和播放决策中的媒体源
+  `name=<title>`；新日志不再写入用户名或媒体标题，启动清洗会处理既有记录。
+- 快速退出播放器后晚到的 PlaybackInfo 失败会先校验当前会话所有权，不再调用
+  已释放的 Player；对应异步竞态已加入自动化回归。
+- 本轮最终 arm64 APK（SHA-256
+  `F703FBADC360083676D13B0D2EA36177AD9EAE3C4BE85CDC57CA17316DFE828D`）已再次
+  覆盖安装并冷启动。安装前后的数据库逻辑内容一致：schema v4、完整性 `ok`、
+  1 条 `completed` 任务、1 个离线项目、1 条 `synced` 进度，下载和预期字节均为
+  `3,679,942,140`；快照保存在 `build/qa/device-db-progress-cas-after/`。
+- 最终冷启动进程中的 AndroidRuntime、`E/flutter`、SQLite 和
+  `Failed to stop player after startup failure` 均为 0；持久化诊断日志中的未脱敏
+  用户名、媒体标题、原始/编码 URL 和鉴权值均为 0。既有媒体
+  `3,679,942,140` 字节、海报 `108,188` 字节及二者时间戳 `1785484898` 均未变化。
+- worker 命令串行化版本覆盖安装后，无活动任务时 `dataSync` 服务数为 0，启动
+  日志中的下载命令、AndroidRuntime、Flutter 和 SQLite 错误均为 0。
+- 原子进度提交版本覆盖安装后，schema 保持 v4 且数据库逻辑内容不变；启动日志中
+  SQLite 参数、离线同步、AndroidRuntime 和 Flutter 错误均为 0。
+
+以下证据仍缺失：
+
+- Trickplay 和自动下一集的真实媒体验收。
 - 画中画进入、控制和退出。
 - 真实 Emby 服务器上的收藏、观看状态和页面实时刷新。
-- WebSocket 断网恢复、`ForceKeepAlive` 和远程 `Playstate` 控制。
+- `ForceKeepAlive` 和远程 `Playstate` 控制。
 - 真实局域网 UDP 7359 服务器发现。
 - 退出、切集和重协商后服务端不存在残留转码任务。
-- 真实媒体原始下载、Range 大文件续传、取消、删除和重新下载。
-- 切后台、锁屏、杀进程和设备重启后的下载恢复与通知操作。
-- 飞行模式离线目录、播放、定位和外挂字幕。
-- 离线进度重新联网后同步到 Emby。
+- Wi-Fi/移动网络切换、空间不足和设备重启后的下载恢复。
+- 真实 Emby 上服务端已观看或更远位置的离线进度冲突合并。
+- 飞行模式外挂字幕；当前完成项没有外挂字幕轨道。

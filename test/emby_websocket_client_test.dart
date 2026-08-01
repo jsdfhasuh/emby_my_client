@@ -198,6 +198,30 @@ void main() {
 
       await client.dispose();
     });
+
+    test('runs the connected callback again after reconnecting', () async {
+      final sockets = <_FakeSocket>[];
+      var connectedCallbacks = 0;
+      final client = EmbyWebSocketClient(
+        _session,
+        connector: (_) async {
+          final socket = _FakeSocket();
+          sockets.add(socket);
+          return socket;
+        },
+        reconnectDelay: (_) => Duration.zero,
+        onConnected: () => connectedCallbacks++,
+      );
+
+      await client.start();
+      await sockets.single.disconnect();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(sockets, hasLength(2));
+      expect(connectedCallbacks, 2);
+
+      await client.dispose();
+    });
   });
 }
 
@@ -211,6 +235,8 @@ class _FakeSocket implements EmbySocket {
   Stream<dynamic> get messages => _controller.stream;
 
   void emit(String data) => _controller.add(data);
+
+  Future<void> disconnect() => close();
 
   @override
   void add(String data) => sent.add(data);

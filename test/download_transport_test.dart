@@ -59,6 +59,7 @@ void main() {
     );
 
     expect(response.statusCode, 206);
+    expect(captured?.headers['Accept-Encoding'], 'identity');
     expect(captured?.headers['Range'], 'bytes=7-');
     expect(captured?.headers['If-Range'], '"v1"');
     expect(captured?.headers['X-Emby-Token'], _session.accessToken);

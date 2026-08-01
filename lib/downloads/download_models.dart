@@ -2,8 +2,18 @@ import 'dart:collection';
 
 import '../core/server_scope.dart';
 import '../models/emby_models.dart';
+import 'download_integrity.dart';
 
-enum DownloadStatus { queued, running, paused, completed, failed, cancelling }
+enum DownloadStatus {
+  queued,
+  running,
+  waitingForNetwork,
+  waitingForStorage,
+  paused,
+  completed,
+  failed,
+  cancelling,
+}
 
 enum DownloadSourceKind { original }
 
@@ -142,6 +152,7 @@ class DownloadTaskRecord {
     required this.updatedAt,
     this.etag,
     this.expectedBytes,
+    this.integrity,
     this.lastErrorCode,
   });
 
@@ -161,6 +172,7 @@ class DownloadTaskRecord {
   final DateTime updatedAt;
   final String? etag;
   final int? expectedBytes;
+  final DownloadIntegrity? integrity;
   final String? lastErrorCode;
 
   String get displayName => metadata.name;
@@ -173,9 +185,21 @@ class DownloadTaskRecord {
     return (downloadedBytes / total).clamp(0, 1);
   }
 
-  bool get canPause => status == DownloadStatus.running;
+  bool get canPause =>
+      status == DownloadStatus.running ||
+      status == DownloadStatus.waitingForNetwork ||
+      status == DownloadStatus.waitingForStorage;
   bool get canResume =>
       status == DownloadStatus.paused || status == DownloadStatus.failed;
+  bool get requiresFreshDownload =>
+      status == DownloadStatus.failed &&
+      switch (lastErrorCode) {
+        'checksumMismatch' ||
+        'invalidLocalPath' ||
+        'localMediaCorrupt' ||
+        'missingFile' => true,
+        _ => false,
+      };
   bool get isComplete => status == DownloadStatus.completed;
 
   DownloadTaskRecord copyWith({
@@ -188,6 +212,8 @@ class DownloadTaskRecord {
     bool clearEtag = false,
     int? expectedBytes,
     bool clearExpectedBytes = false,
+    DownloadIntegrity? integrity,
+    bool clearIntegrity = false,
     String? lastErrorCode,
     bool clearLastErrorCode = false,
     OfflineMediaMetadata? metadata,
@@ -211,6 +237,7 @@ class DownloadTaskRecord {
     expectedBytes: clearExpectedBytes
         ? null
         : expectedBytes ?? this.expectedBytes,
+    integrity: clearIntegrity ? null : integrity ?? this.integrity,
     lastErrorCode: clearLastErrorCode
         ? null
         : lastErrorCode ?? this.lastErrorCode,

@@ -45,6 +45,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       mediaSourceId: offlineItem.mediaSourceId,
       playSessionId: null,
       method: PlayMethod.directPlay,
+      usesServerAuthentication: false,
       audioStreamIndex: audioStreamIndex,
       subtitleStreamIndex: subtitleStreamIndex,
       container: offlineItem.metadata.container,

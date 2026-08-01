@@ -5,6 +5,8 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:disk_space_plus/disk_space_plus.dart';
 
 abstract interface class DownloadPreflight {
+  Stream<void> get networkChanges;
+
   Future<void> verifyNetwork({required bool wifiOnly});
 
   Future<void> verifyStorage({
@@ -27,6 +29,10 @@ class PlatformDownloadPreflight implements DownloadPreflight {
   final DiskSpacePlus _diskSpace;
   final int minimumUnknownSizeBytes;
   final int minimumSafetyMarginBytes;
+
+  @override
+  Stream<void> get networkChanges =>
+      _connectivity.onConnectivityChanged.map((_) {});
 
   @override
   Future<void> verifyNetwork({required bool wifiOnly}) async {
@@ -82,6 +88,9 @@ class PlatformDownloadPreflight implements DownloadPreflight {
 
 class NoopDownloadPreflight implements DownloadPreflight {
   const NoopDownloadPreflight();
+
+  @override
+  Stream<void> get networkChanges => const Stream<void>.empty();
 
   @override
   Future<void> verifyNetwork({required bool wifiOnly}) async {}

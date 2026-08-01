@@ -14,6 +14,18 @@ class DownloadResponse {
   final Map<String, String> headers;
 
   String? header(String name) => headers[name.toLowerCase()];
+
+  Future<void> discard() async {
+    final subscription = stream.listen(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    try {
+      await subscription.cancel();
+    } catch (_) {
+      // A failed cancellation must not hide the response error being handled.
+    }
+  }
 }
 
 abstract interface class DownloadTransport {

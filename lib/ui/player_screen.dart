@@ -87,6 +87,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   int? _nextCountdown;
   int _autoPlayedCount = 0;
   String? _error;
+  String? _playbackStatus;
 
   @override
   void initState() {
@@ -200,6 +201,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _buffering = playback.isBuffering;
       _plan = playback.plan;
       _error = playback.errorMessage;
+      _playbackStatus = playback.statusMessage;
       _completed = playback.isCompleted;
     });
     if (playingChanged) {
@@ -722,6 +724,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _buffering = true;
       _completed = false;
       _error = null;
+      _playbackStatus = null;
       _showSkipIntro = false;
       _autoNextCancelled = false;
       _nextCountdown = null;
@@ -1220,8 +1223,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   controls: NoVideoControls,
                 ),
               ),
-              if (_buffering && _error == null)
-                const Center(child: CircularProgressIndicator()),
+              if (_buffering && _error == null) _buildBuffering(),
               if (_error != null) _buildError(),
               IgnorePointer(
                 ignoring: !_controlsVisible,
@@ -1464,6 +1466,25 @@ class _PlayerScreenState extends State<PlayerScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildBuffering() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const CircularProgressIndicator(),
+          if (_playbackStatus != null) ...[
+            const SizedBox(height: 16),
+            Text(
+              _playbackStatus!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white),
+            ),
+          ],
+        ],
       ),
     );
   }

@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../core/diagnostic_log.dart';
 import '../core/server_capabilities.dart';
 import '../core/server_scope.dart';
+import '../data/account_data_cleanup.dart';
 import '../data/client_registry.dart';
 import '../data/emby_api.dart';
 import '../data/local_database.dart';
@@ -19,14 +20,19 @@ import '../downloads/download_settings.dart';
 import '../downloads/foreground_download_executor.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
+import '../settings/library_category_settings.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
     SessionStore? store,
     LocalDatabase? database,
     ClientRegistry<EmbyApi>? clients,
+    LibraryCategorySettingsStore? libraryCategorySettingsStore,
+    AccountDataCleanup? accountDataCleanup,
   }) : _store = store ?? SessionStore(),
        _database = database ?? LocalDatabase(),
+       _libraryCategorySettingsStore = libraryCategorySettingsStore,
+       _accountDataCleanup = accountDataCleanup,
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -37,6 +43,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final SessionStore _store;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
+  LibraryCategorySettingsStore? _libraryCategorySettingsStore;
+  AccountDataCleanup? _accountDataCleanup;
   late final ServerCapabilitiesRepository _capabilitiesRepository;
   late final DownloadRepository _downloadRepository;
   EmbySession? _session;
@@ -44,17 +52,24 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   ServerCapabilities? _serverCapabilities;
   DownloadService? _downloads;
   OfflineProgressSync? _offlineProgressSync;
+  LibraryCategorySettings _libraryCategorySettings =
+      const LibraryCategorySettings();
   Future<void>? _offlineSyncOperation;
+  bool _offlineSyncIncludesDeferred = false;
+  bool _offlineDeferredSyncRequested = false;
   bool _isInitializing = true;
   bool _observingLifecycle = false;
   bool _localDatabaseAvailable = false;
   bool _disposed = false;
   Future<void>? _initialization;
+  Future<void>? _accountDataDeletion;
 
   EmbySession? get session => _session;
   ServerScope? get scope => _scope;
   ServerCapabilities? get serverCapabilities => _serverCapabilities;
   DownloadService? get downloads => _downloads;
+  LibraryCategorySettings get libraryCategorySettings =>
+      _libraryCategorySettings;
   bool get isInitializing => _isInitializing;
   bool get isSignedIn => _session != null;
   bool get localDatabaseAvailable => _localDatabaseAvailable;
@@ -83,6 +98,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       _session = null;
       _scope = null;
       _serverCapabilities = null;
+      _libraryCategorySettings = const LibraryCategorySettings();
     } finally {
       _isInitializing = false;
       if (!_disposed) notifyListeners();
@@ -102,6 +118,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       deviceId: deviceId,
     );
     final scope = ServerScope.fromSession(session);
+    final libraryCategorySettings = await _restoreLibraryCategorySettings(
+      scope,
+    );
     await _store.saveSession(session);
     final api = _createApi(session, scope);
     final previousScope = _scope;
@@ -112,6 +131,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _session = session;
     _scope = scope;
     _serverCapabilities = await _restoreCapabilities(session);
+    _libraryCategorySettings = libraryCategorySettings;
     _clients.register(scope, api);
     await _activateDownloads(api, scope);
     unawaited(api.realtime.start());
@@ -137,6 +157,70 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _session = null;
     _scope = null;
     _serverCapabilities = null;
+    _libraryCategorySettings = const LibraryCategorySettings();
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> deleteCurrentAccountData() {
+    final active = _accountDataDeletion;
+    if (active != null) return active;
+    late final Future<void> operation;
+    operation = _deleteCurrentAccountData().whenComplete(() {
+      if (identical(_accountDataDeletion, operation)) {
+        _accountDataDeletion = null;
+      }
+    });
+    _accountDataDeletion = operation;
+    return operation;
+  }
+
+  Future<void> _deleteCurrentAccountData() async {
+    final currentSession = _session;
+    final currentScope = _scope;
+    if (currentSession == null || currentScope == null) {
+      throw StateError('当前没有已登录的 Emby 会话');
+    }
+    final currentApi = _clients.clientFor(currentScope);
+    await _shutdownDownloads(stopExecutor: true, requireExecutorStopped: true);
+    try {
+      await _accountDataCleaner.delete(
+        scope: currentScope,
+        session: currentSession,
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'storage',
+        'Failed to delete scoped account data scope=${currentScope.logLabel}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (!_disposed && _scope == currentScope && currentApi != null) {
+        try {
+          await _activateDownloads(currentApi, currentScope);
+        } catch (restoreError, restoreStackTrace) {
+          DiagnosticLog.instance.error(
+            'download',
+            'Failed to restore downloads after account cleanup failure',
+            error: restoreError,
+            stackTrace: restoreStackTrace,
+          );
+        }
+      }
+      rethrow;
+    }
+
+    try {
+      await currentApi?.logout();
+    } catch (_) {
+      // Local account data has already been deleted; remote logout is best effort.
+    }
+    await _clients.unregister(currentScope);
+    if (_scope != currentScope) return;
+    await _store.clearSession();
+    _session = null;
+    _scope = null;
+    _serverCapabilities = null;
+    _libraryCategorySettings = const LibraryCategorySettings();
     if (!_disposed) notifyListeners();
   }
 
@@ -145,6 +229,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _session = null;
     _scope = null;
     _serverCapabilities = null;
+    _libraryCategorySettings = const LibraryCategorySettings();
     await _shutdownDownloads(stopExecutor: true);
     await _clients.unregister(scope);
     await _store.clearSession();
@@ -157,15 +242,57 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _session = session;
     _scope = scope;
     _serverCapabilities = await _restoreCapabilities(session);
+    _libraryCategorySettings = await _restoreLibraryCategorySettings(scope);
     _clients.register(scope, api);
     await _activateDownloads(api, scope);
     unawaited(api.realtime.start());
   }
 
+  Future<void> updateLibraryCategorySettings(
+    LibraryCategorySettings settings,
+  ) async {
+    final scope = _scope;
+    if (scope == null) throw StateError('当前没有已登录的 Emby 会话');
+    await _categorySettingsStore.save(scope, settings);
+    if (_disposed || _scope != scope) return;
+    _libraryCategorySettings = settings;
+    notifyListeners();
+  }
+
+  Future<LibraryCategorySettings> _restoreLibraryCategorySettings(
+    ServerScope scope,
+  ) async {
+    try {
+      return await _categorySettingsStore.load(scope);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'storage',
+        'Failed to restore library category settings',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return const LibraryCategorySettings();
+    }
+  }
+
+  LibraryCategorySettingsStore get _categorySettingsStore =>
+      _libraryCategorySettingsStore ??=
+          SharedPreferencesLibraryCategorySettingsStore();
+
+  AccountDataCleanup get _accountDataCleaner =>
+      _accountDataCleanup ??= AccountDataCleanup(
+        database: _database,
+        libraryCategorySettingsStore: _categorySettingsStore,
+      );
+
   EmbyApi _createApi(EmbySession session, ServerScope scope) => EmbyApi(
     session,
     onSessionExpired: () => _expireSession(scope),
     onRemoteCapabilitiesReported: () => _confirmRemoteControl(scope),
+    onRealtimeConnected: () async {
+      if (_disposed || _scope != scope) return;
+      await _syncOfflineProgress(includeDeferred: true);
+    },
   );
 
   Future<ServerCapabilities> _restoreCapabilities(EmbySession session) async {
@@ -263,14 +390,32 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _shutdownDownloads({bool stopExecutor = false}) async {
+  Future<void> _shutdownDownloads({
+    bool stopExecutor = false,
+    bool requireExecutorStopped = false,
+  }) async {
     final service = _downloads;
+    if (service != null && stopExecutor) {
+      final stopped = await service.stopExecutor();
+      if (requireExecutorStopped && !stopped) {
+        throw StateError('Android 下载服务仍在运行，请稍后重试');
+      }
+    } else if (service == null && stopExecutor && Platform.isAndroid) {
+      final executor = ForegroundDownloadExecutor();
+      try {
+        await executor.stop();
+        if (requireExecutorStopped && await executor.isRunning) {
+          throw StateError('Android 下载服务仍在运行，请稍后重试');
+        }
+      } finally {
+        await executor.dispose();
+      }
+    }
     _downloads = null;
     _offlineProgressSync = null;
     final syncOperation = _offlineSyncOperation;
     if (syncOperation != null) await syncOperation;
     if (service == null) return;
-    if (stopExecutor) await service.stopExecutor();
     await service.shutdown();
     service.dispose();
   }
@@ -291,23 +436,35 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _syncOfflineProgress() {
+  Future<void> _syncOfflineProgress({bool includeDeferred = false}) {
+    if (includeDeferred && !_offlineSyncIncludesDeferred) {
+      _offlineDeferredSyncRequested = true;
+    }
     final active = _offlineSyncOperation;
     if (active != null) return active;
-    final operation = _runOfflineProgressSync();
+    final shouldIncludeDeferred = _offlineDeferredSyncRequested;
+    _offlineDeferredSyncRequested = false;
+    _offlineSyncIncludesDeferred = shouldIncludeDeferred;
+    final operation = _runOfflineProgressSync(
+      includeDeferred: shouldIncludeDeferred,
+    );
     _offlineSyncOperation = operation;
     return operation.whenComplete(() {
       if (identical(_offlineSyncOperation, operation)) {
         _offlineSyncOperation = null;
+        _offlineSyncIncludesDeferred = false;
+        if (_offlineDeferredSyncRequested && !_disposed) {
+          unawaited(_syncOfflineProgress());
+        }
       }
     });
   }
 
-  Future<void> _runOfflineProgressSync() async {
+  Future<void> _runOfflineProgressSync({required bool includeDeferred}) async {
     final sync = _offlineProgressSync;
     if (sync == null || _disposed) return;
     try {
-      final result = await sync.sync();
+      final result = await sync.sync(includeDeferred: includeDeferred);
       if (result.synced > 0) {
         DiagnosticLog.instance.info(
           'offline-sync',

@@ -19,8 +19,14 @@ class DiagnosticLog {
       final directory = await getApplicationSupportDirectory();
       await directory.create(recursive: true);
       final file = File('${directory.path}${Platform.pathSeparator}$_fileName');
-      if (await file.exists() && await file.length() > _maxFileBytes) {
-        await file.writeAsString('');
+      if (await file.exists()) {
+        if (await file.length() > _maxFileBytes) {
+          await file.writeAsString('');
+        } else {
+          final existing = await file.readAsString();
+          final sanitized = redact(existing);
+          if (sanitized != existing) await file.writeAsString(sanitized);
+        }
       }
       _file = file;
       info('app', 'Diagnostic log initialized');
@@ -88,6 +94,14 @@ class DiagnosticLog {
   @visibleForTesting
   static String redact(String value) {
     var result = value;
+    result = result.replaceAll(
+      RegExp(r'''\b(?:https?|wss?)://[^\s<>"']+''', caseSensitive: false),
+      '<redacted-url>',
+    );
+    result = result.replaceAll(
+      RegExp(r'''\b(?:https?|wss?)%3A%2F%2F[^\s<>"']+''', caseSensitive: false),
+      '<redacted-url>',
+    );
     result = result.replaceAllMapped(
       RegExp(
         r'(api_key|x-emby-token)(=|%3D|:\s*)([^&\s,"%}\]]+)',
@@ -102,6 +116,17 @@ class DiagnosticLog {
     result = result.replaceAllMapped(
       RegExp(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', caseSensitive: false),
       (match) => '${match[1]}<redacted>',
+    );
+    result = result.replaceAllMapped(
+      RegExp(r'(Authenticated user\s+)[^\r\n]+', caseSensitive: false),
+      (match) => '${match[1]}<redacted>',
+    );
+    result = result.replaceAllMapped(
+      RegExp(
+        r'(Selected [^\r\n]*?\bsource=\S+\s+name=).*?(\s+container=)',
+        caseSensitive: false,
+      ),
+      (match) => '${match[1]}<redacted>${match[2]}',
     );
     return result;
   }

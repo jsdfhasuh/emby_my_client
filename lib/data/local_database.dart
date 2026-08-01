@@ -4,18 +4,24 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../core/server_scope.dart';
+
 typedef DatabasePathResolver = Future<String> Function();
 
 class LocalDatabase {
-  LocalDatabase({DatabaseFactory? factory, DatabasePathResolver? pathResolver})
-    : _factory = factory,
-      _pathResolver = pathResolver ?? _defaultPath;
+  LocalDatabase({
+    DatabaseFactory? factory,
+    DatabasePathResolver? pathResolver,
+    this.singleInstance = true,
+  }) : _factory = factory,
+       _pathResolver = pathResolver ?? _defaultPath;
 
-  static const schemaVersion = 3;
+  static const schemaVersion = 4;
   static const fileName = 'emby_client.db';
 
   final DatabaseFactory? _factory;
   final DatabasePathResolver _pathResolver;
+  final bool singleInstance;
   Database? _database;
   Future<Database>? _opening;
 
@@ -34,6 +40,33 @@ class LocalDatabase {
   Future<T> transaction<T>(
     Future<T> Function(Transaction transaction) operation,
   ) async => (await open()).transaction(operation);
+
+  Future<void> deleteScopeData(ServerScope scope) async {
+    await transaction((database) async {
+      final where = 'server_id = ? AND user_id = ?';
+      final whereArgs = [scope.serverId, scope.userId];
+      await database.delete(
+        'offline_progress',
+        where: where,
+        whereArgs: whereArgs,
+      );
+      await database.delete(
+        'offline_items',
+        where: where,
+        whereArgs: whereArgs,
+      );
+      await database.delete(
+        'download_tasks',
+        where: where,
+        whereArgs: whereArgs,
+      );
+      await database.delete(
+        'server_capabilities',
+        where: where,
+        whereArgs: whereArgs,
+      );
+    });
+  }
 
   Future<void> close() async {
     final opening = _opening;
@@ -58,8 +91,10 @@ class LocalDatabase {
         databasePath,
         options: OpenDatabaseOptions(
           version: schemaVersion,
+          singleInstance: singleInstance,
           onConfigure: (database) async {
             await database.execute('PRAGMA foreign_keys = ON');
+            await database.setJournalMode('WAL');
           },
           onCreate: (database, version) =>
               _migrate(database, fromVersion: 0, toVersion: version),
@@ -167,6 +202,14 @@ class LocalDatabase {
           await database.execute(
             'CREATE INDEX offline_items_scope '
             'ON offline_items (server_id, user_id, completed_at_ms)',
+          );
+          break;
+        case 4:
+          await database.execute(
+            'ALTER TABLE download_tasks ADD COLUMN integrity_algorithm TEXT',
+          );
+          await database.execute(
+            'ALTER TABLE download_tasks ADD COLUMN integrity_digest TEXT',
           );
           break;
       }

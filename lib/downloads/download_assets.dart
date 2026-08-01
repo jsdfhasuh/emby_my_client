@@ -11,7 +11,7 @@ import 'download_models.dart';
 abstract interface class DownloadAssetService {
   Future<OfflineMediaMetadata> downloadAssets(
     DownloadTaskRecord task,
-    Directory mediaDirectory,
+    Directory downloadDirectory,
   );
 }
 
@@ -27,10 +27,15 @@ class EmbyDownloadAssetService implements DownloadAssetService {
   @override
   Future<OfflineMediaMetadata> downloadAssets(
     DownloadTaskRecord task,
-    Directory mediaDirectory,
+    Directory downloadDirectory,
   ) async {
+    if (task.id.isEmpty) throw ArgumentError.value(task.id, 'task.id');
+    final assetKey = task.id.length <= 16 ? task.id : task.id.substring(0, 16);
     final assetDirectory = Directory(
-      path.join(mediaDirectory.path, 'assets', task.id.substring(0, 16)),
+      path.join(downloadDirectory.path, 'assets', assetKey),
+    );
+    final temporaryDirectory = Directory(
+      path.join(downloadDirectory.path, 'parts', 'assets', assetKey),
     );
     await assetDirectory.create(recursive: true);
     var primaryImagePath = task.metadata.primaryImagePath;
@@ -49,7 +54,12 @@ class EmbyDownloadAssetService implements DownloadAssetService {
               },
             );
         final imageFile = File(path.join(assetDirectory.path, 'primary.jpg'));
-        await _download(imageUri, imageFile, requireImage: true);
+        await _download(
+          imageUri,
+          imageFile,
+          temporaryDirectory: temporaryDirectory,
+          requireImage: true,
+        );
         primaryImagePath = imageFile.path;
       } catch (error, stackTrace) {
         DiagnosticLog.instance.warning(
@@ -81,7 +91,11 @@ class EmbyDownloadAssetService implements DownloadAssetService {
         final subtitleFile = File(
           path.join(assetDirectory.path, 'subtitle-$index.$extension'),
         );
-        await _download(uri, subtitleFile);
+        await _download(
+          uri,
+          subtitleFile,
+          temporaryDirectory: temporaryDirectory,
+        );
         stream['DeliveryUrl'] = subtitleFile.path;
         mediaStreams.add(stream);
       } catch (error, stackTrace) {
@@ -94,6 +108,10 @@ class EmbyDownloadAssetService implements DownloadAssetService {
       }
     }
 
+    if (await temporaryDirectory.exists() &&
+        await temporaryDirectory.list(followLinks: false).isEmpty) {
+      await temporaryDirectory.delete();
+    }
     return task.metadata.copyWith(
       primaryImagePath: primaryImagePath,
       mediaStreams: mediaStreams,
@@ -103,55 +121,71 @@ class EmbyDownloadAssetService implements DownloadAssetService {
   Future<void> _download(
     Uri uri,
     File destination, {
+    required Directory temporaryDirectory,
     bool requireImage = false,
   }) async {
     _requireSameServer(uri);
     final cancelToken = CancelToken();
     final response = await api.openDownload(uri, cancelToken: cancelToken);
-    if (response.statusCode != 200) {
-      throw EmbyApiException('附属资源下载失败', statusCode: response.statusCode);
-    }
-    final contentType = response.headers.value('content-type')?.toLowerCase();
-    if (requireImage &&
-        contentType != null &&
-        !contentType.startsWith('image/')) {
-      throw const FormatException('nonImageAsset');
-    }
-    final contentLength = int.tryParse(
-      response.headers.value('content-length') ?? '',
-    );
-    if (contentLength != null && contentLength > maximumAssetBytes) {
-      throw const FormatException('assetTooLarge');
-    }
-    await destination.parent.create(recursive: true);
-    final temporary = File('${destination.path}.part');
-    if (await temporary.exists()) await temporary.delete();
-    final sink = await temporary.open(mode: FileMode.writeOnly);
-    var received = 0;
+    File? temporary;
     try {
+      if (response.statusCode != 200) {
+        throw EmbyApiException('附属资源下载失败', statusCode: response.statusCode);
+      }
+      final contentType = response.headers.value('content-type')?.toLowerCase();
+      if (requireImage &&
+          contentType != null &&
+          !contentType.startsWith('image/')) {
+        throw const FormatException('nonImageAsset');
+      }
+      final contentLength = int.tryParse(
+        response.headers.value('content-length') ?? '',
+      );
+      if (contentLength != null && contentLength > maximumAssetBytes) {
+        throw const FormatException('assetTooLarge');
+      }
+      await destination.parent.create(recursive: true);
+      await temporaryDirectory.create(recursive: true);
+      temporary = File(
+        path.join(
+          temporaryDirectory.path,
+          '${path.basename(destination.path)}.part',
+        ),
+      );
+      if (await temporary.exists()) await temporary.delete();
+      final sink = await temporary.open(mode: FileMode.writeOnly);
+      var received = 0;
       final body = response.data;
       if (body == null) throw const FormatException('emptyAsset');
-      await for (final chunk in body.stream) {
-        received += chunk.length;
-        if (received > maximumAssetBytes) {
-          cancelToken.cancel('assetTooLarge');
-          throw const FormatException('assetTooLarge');
+      try {
+        await for (final chunk in body.stream) {
+          received += chunk.length;
+          if (received > maximumAssetBytes) {
+            throw const FormatException('assetTooLarge');
+          }
+          await sink.writeFrom(chunk);
         }
-        await sink.writeFrom(chunk);
+      } finally {
+        await sink.close();
       }
-    } finally {
-      await sink.close();
+      if (received <= 0) throw const FormatException('emptyAsset');
+      if (contentLength != null && contentLength != received) {
+        throw const FormatException('assetLengthMismatch');
+      }
+      if (await destination.exists()) await destination.delete();
+      await temporary.rename(destination.path);
+    } catch (_) {
+      if (!cancelToken.isCancelled) cancelToken.cancel('assetDownloadFailed');
+      final partial = temporary;
+      if (partial != null) {
+        try {
+          if (await partial.exists()) await partial.delete();
+        } on FileSystemException {
+          // The orphan cleanup pass will retry a partial file we cannot remove.
+        }
+      }
+      rethrow;
     }
-    if (received <= 0) {
-      if (await temporary.exists()) await temporary.delete();
-      throw const FormatException('emptyAsset');
-    }
-    if (contentLength != null && contentLength != received) {
-      if (await temporary.exists()) await temporary.delete();
-      throw const FormatException('assetLengthMismatch');
-    }
-    if (await destination.exists()) await destination.delete();
-    await temporary.rename(destination.path);
   }
 
   void _requireSameServer(Uri uri) {
@@ -171,7 +205,7 @@ class NoopDownloadAssetService implements DownloadAssetService {
   @override
   Future<OfflineMediaMetadata> downloadAssets(
     DownloadTaskRecord task,
-    Directory mediaDirectory,
+    Directory downloadDirectory,
   ) async => task.metadata;
 }
 

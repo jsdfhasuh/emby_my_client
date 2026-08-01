@@ -111,6 +111,9 @@ class PlaybackSettingsStore {
   Future<void> save(EmbySession session, PlaybackSettings settings) =>
       _storage.write(key: _key(session), value: jsonEncode(settings.toJson()));
 
+  Future<void> clear(EmbySession session) =>
+      _storage.delete(key: _key(session));
+
   String _key(EmbySession session) =>
       'playback_settings_v1_${session.serverId}_${session.userId}';
 }

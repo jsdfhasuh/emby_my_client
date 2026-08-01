@@ -146,7 +146,7 @@ class EmbyWebSocketClient {
           Future<void>.sync(onConnected).catchError((Object error) {
             DiagnosticLog.instance.error(
               'realtime',
-              'Failed to report WebSocket session capabilities',
+              'Failed to handle WebSocket connection',
               error: error,
             );
           }),

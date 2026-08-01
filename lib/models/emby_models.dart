@@ -52,18 +52,21 @@ class EmbyUserData {
     this.playedPercentage = 0,
     this.isPlayed = false,
     this.isFavorite = false,
+    this.unplayedItemCount = 0,
   });
 
   final int playbackPositionTicks;
   final double playedPercentage;
   final bool isPlayed;
   final bool isFavorite;
+  final int unplayedItemCount;
 
   factory EmbyUserData.fromJson(Map<String, dynamic> json) => EmbyUserData(
     playbackPositionTicks: _asInt(json['PlaybackPositionTicks']) ?? 0,
     playedPercentage: _asDouble(json['PlayedPercentage']) ?? 0,
     isPlayed: json['Played'] as bool? ?? false,
     isFavorite: json['IsFavorite'] as bool? ?? false,
+    unplayedItemCount: _asInt(json['UnplayedItemCount']) ?? 0,
   );
 
   EmbyUserData copyWith({
@@ -71,11 +74,13 @@ class EmbyUserData {
     double? playedPercentage,
     bool? isPlayed,
     bool? isFavorite,
+    int? unplayedItemCount,
   }) => EmbyUserData(
     playbackPositionTicks: playbackPositionTicks ?? this.playbackPositionTicks,
     playedPercentage: playedPercentage ?? this.playedPercentage,
     isPlayed: isPlayed ?? this.isPlayed,
     isFavorite: isFavorite ?? this.isFavorite,
+    unplayedItemCount: unplayedItemCount ?? this.unplayedItemCount,
   );
 }
 
@@ -136,12 +141,15 @@ class EmbyItem {
 
   bool get isSeries => type == 'Series';
 
+  bool get isFolder => type == 'Folder' || type == 'CollectionFolder';
+
   double get progress => (userData.playedPercentage / 100).clamp(0.0, 1.0);
 
   Duration get resumePosition =>
       Duration(microseconds: userData.playbackPositionTicks ~/ 10);
 
   String get subtitle {
+    if (isFolder) return '文件夹';
     if (type == 'Episode') {
       final season = parentIndexNumber?.toString().padLeft(2, '0');
       final episode = indexNumber?.toString().padLeft(2, '0');
@@ -229,6 +237,119 @@ class EmbyItem {
     officialRating: officialRating,
     primaryImageAspectRatio: primaryImageAspectRatio,
   );
+}
+
+enum LibrarySortBy {
+  name('SortName'),
+  dateAdded('DateCreated'),
+  premiereDate('PremiereDate'),
+  productionYear('ProductionYear'),
+  communityRating('CommunityRating'),
+  runtime('Runtime');
+
+  const LibrarySortBy(this.apiValue);
+
+  final String apiValue;
+}
+
+enum LibrarySortOrder {
+  ascending('Ascending'),
+  descending('Descending');
+
+  const LibrarySortOrder(this.apiValue);
+
+  final String apiValue;
+}
+
+enum LibraryPlayedFilter {
+  all(null),
+  played('IsPlayed'),
+  unplayed('IsUnplayed');
+
+  const LibraryPlayedFilter(this.apiValue);
+
+  final String? apiValue;
+}
+
+enum LibraryItemType {
+  all('Movie,Series,Video'),
+  movie('Movie'),
+  series('Series'),
+  video('Video'),
+  folder('Folder,Movie,Series,Episode,Video', recursive: false);
+
+  const LibraryItemType(this.apiValue, {this.recursive = true});
+
+  final String apiValue;
+  final bool recursive;
+}
+
+enum SearchItemType {
+  all('Movie,Series,Episode,Video,Folder,CollectionFolder'),
+  movie('Movie'),
+  series('Series'),
+  episode('Episode'),
+  video('Video'),
+  folder('Folder,CollectionFolder');
+
+  const SearchItemType(this.apiValue);
+
+  final String apiValue;
+}
+
+class LibraryBrowseOptions {
+  const LibraryBrowseOptions({
+    this.sortBy = LibrarySortBy.name,
+    this.sortOrder = LibrarySortOrder.ascending,
+    this.playedFilter = LibraryPlayedFilter.all,
+    this.itemType = LibraryItemType.all,
+    this.favoriteOnly = false,
+  });
+
+  final LibrarySortBy sortBy;
+  final LibrarySortOrder sortOrder;
+  final LibraryPlayedFilter playedFilter;
+  final LibraryItemType itemType;
+  final bool favoriteOnly;
+
+  int get activeFilterCount =>
+      (favoriteOnly ? 1 : 0) +
+      (playedFilter == LibraryPlayedFilter.all ? 0 : 1) +
+      (itemType == LibraryItemType.all ? 0 : 1);
+
+  LibraryBrowseOptions copyWith({
+    LibrarySortBy? sortBy,
+    LibrarySortOrder? sortOrder,
+    LibraryPlayedFilter? playedFilter,
+    LibraryItemType? itemType,
+    bool? favoriteOnly,
+  }) => LibraryBrowseOptions(
+    sortBy: sortBy ?? this.sortBy,
+    sortOrder: sortOrder ?? this.sortOrder,
+    playedFilter: playedFilter ?? this.playedFilter,
+    itemType: itemType ?? this.itemType,
+    favoriteOnly: favoriteOnly ?? this.favoriteOnly,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is LibraryBrowseOptions &&
+      other.sortBy == sortBy &&
+      other.sortOrder == sortOrder &&
+      other.playedFilter == playedFilter &&
+      other.itemType == itemType &&
+      other.favoriteOnly == favoriteOnly;
+
+  @override
+  int get hashCode =>
+      Object.hash(sortBy, sortOrder, playedFilter, itemType, favoriteOnly);
+}
+
+class EmbyItemPage {
+  const EmbyItemPage({required this.items, this.totalRecordCount});
+
+  final List<EmbyItem> items;
+  final int? totalRecordCount;
 }
 
 class EmbyChapter {
@@ -329,16 +450,23 @@ class EmbyTrickplayResolution {
   }
 }
 
+class HomeLatestSection {
+  const HomeLatestSection({required this.library, required this.items});
+
+  final EmbyItem library;
+  final List<EmbyItem> items;
+}
+
 class HomeData {
   const HomeData({
     required this.views,
     required this.resume,
-    required this.latest,
+    required this.latestSections,
   });
 
   final List<EmbyItem> views;
   final List<EmbyItem> resume;
-  final List<EmbyItem> latest;
+  final List<HomeLatestSection> latestSections;
 }
 
 enum PlayMethod {
@@ -446,6 +574,7 @@ class PlaybackPlan {
     required this.mediaSourceId,
     required this.playSessionId,
     required this.method,
+    required this.usesServerAuthentication,
     required this.mediaStreams,
     required this.transcodingReasons,
     required this.availableMediaSources,
@@ -462,6 +591,7 @@ class PlaybackPlan {
   final String mediaSourceId;
   final String? playSessionId;
   final PlayMethod method;
+  final bool usesServerAuthentication;
   final int? audioStreamIndex;
   final int? subtitleStreamIndex;
   final String? liveStreamId;
@@ -479,6 +609,7 @@ class PlaybackPlan {
     String? playSessionId,
     bool clearPlaySessionId = false,
     PlayMethod? method,
+    bool? usesServerAuthentication,
     int? audioStreamIndex,
     bool clearAudioStreamIndex = false,
     int? subtitleStreamIndex,
@@ -499,6 +630,8 @@ class PlaybackPlan {
         ? null
         : playSessionId ?? this.playSessionId,
     method: method ?? this.method,
+    usesServerAuthentication:
+        usesServerAuthentication ?? this.usesServerAuthentication,
     audioStreamIndex: clearAudioStreamIndex
         ? null
         : audioStreamIndex ?? this.audioStreamIndex,

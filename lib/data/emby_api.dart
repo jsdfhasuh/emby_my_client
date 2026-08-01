@@ -29,9 +29,11 @@ class EmbyApi {
     Dio? dio,
     FutureOr<void> Function()? onSessionExpired,
     FutureOr<void> Function()? onRemoteCapabilitiesReported,
+    FutureOr<void> Function()? onRealtimeConnected,
   }) : _dio = dio ?? _createDio(session),
        _onSessionExpired = onSessionExpired,
-       _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported {
+       _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported,
+       _onRealtimeConnected = onRealtimeConnected {
     if (dio != null) {
       _configureDio(dio, session);
     }
@@ -43,13 +45,16 @@ class EmbyApi {
     sessionControl = EmbySessionService(dio: _dio, execute: _request);
     realtime = EmbyWebSocketClient(
       session,
-      onConnected: _reportRemoteCapabilities,
+      onConnected: _handleRealtimeConnected,
     );
   }
 
   static const clientName = 'Emby Flutter Client';
   static const clientVersion = '1.0.0';
-  static const _itemFields =
+  static const _listItemFields =
+      'PrimaryImageAspectRatio,DateCreated,OfficialRating,CommunityRating,'
+      'RunTimeTicks,ProductionYear,ParentId,Path';
+  static const _detailItemFields =
       'Overview,Genres,MediaSources,MediaStreams,PrimaryImageAspectRatio,'
       'DateCreated,OfficialRating,CommunityRating,RunTimeTicks,'
       'ProductionYear,ProviderIds,ParentId,Path,Chapters,Trickplay';
@@ -58,6 +63,7 @@ class EmbyApi {
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
   final FutureOr<void> Function()? _onRemoteCapabilitiesReported;
+  final FutureOr<void> Function()? _onRealtimeConnected;
   late final EmbyUserDataService userData;
   late final EmbySessionService sessionControl;
   late final EmbyWebSocketClient realtime;
@@ -69,6 +75,8 @@ class EmbyApi {
       token: session.accessToken,
     ),
   };
+
+  Map<String, String> get imageHeaders => playbackHeaders;
 
   List<Uri> originalDownloadUris({
     required String itemId,
@@ -97,6 +105,7 @@ class EmbyApi {
     String? etag,
   }) async {
     final headers = <String, String>{
+      'Accept-Encoding': 'identity',
       if (offset > 0) 'Range': 'bytes=$offset-',
       if (offset > 0 && etag != null && etag.isNotEmpty) 'If-Range': etag,
     };
@@ -161,10 +170,7 @@ class EmbyApi {
       if (token == null || token.isEmpty || userId == null || userId.isEmpty) {
         throw const EmbyApiException('服务器没有返回有效的登录会话');
       }
-      DiagnosticLog.instance.info(
-        'auth',
-        'Authenticated user ${user['Name'] ?? username}',
-      );
+      DiagnosticLog.instance.info('auth', 'Authentication succeeded');
       return EmbySession(
         serverUrl: normalized,
         serverName: info['ServerName']?.toString() ?? 'Emby',
@@ -253,23 +259,93 @@ class EmbyApi {
     if (callback != null) await Future<void>.sync(callback);
   }
 
+  Future<void> _handleRealtimeConnected() async {
+    final operations = <Future<void>>[
+      _runConnectedAction(
+        _reportRemoteCapabilities,
+        'Failed to report WebSocket session capabilities',
+      ),
+    ];
+    final callback = _onRealtimeConnected;
+    if (callback != null) {
+      operations.add(
+        _runConnectedAction(
+          () => Future<void>.sync(callback),
+          'Failed to handle WebSocket reconnect',
+        ),
+      );
+    }
+    await Future.wait(operations);
+  }
+
+  Future<void> _runConnectedAction(
+    Future<void> Function() action,
+    String failureMessage,
+  ) async {
+    try {
+      await action();
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'realtime',
+        failureMessage,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   Future<void> dispose() async {
     await realtime.dispose();
     _dio.close(force: true);
   }
 
   Future<HomeData> getHome() async {
+    final base = await getHomeBase();
+    final latestSections = <HomeLatestSection>[];
+    const concurrency = 4;
+    for (var start = 0; start < base.views.length; start += concurrency) {
+      final end = (start + concurrency).clamp(0, base.views.length);
+      final batch = await Future.wait(
+        base.views.sublist(start, end).map(getHomeLatestSection),
+      );
+      latestSections.addAll(batch.whereType<HomeLatestSection>());
+    }
+    return HomeData(
+      views: base.views,
+      resume: base.resume,
+      latestSections: latestSections,
+    );
+  }
+
+  Future<HomeData> getHomeBase() async {
     final result = await Future.wait<List<EmbyItem>>([
       getViews(),
       getResumeItems(),
-      getLatestItems(),
     ]);
-    return HomeData(views: result[0], resume: result[1], latest: result[2]);
+    return HomeData(
+      views: result[0],
+      resume: result[1],
+      latestSections: const [],
+    );
+  }
+
+  Future<HomeLatestSection?> getHomeLatestSection(EmbyItem library) async {
+    try {
+      final items = await getLatestItems(parentId: library.id, limit: 18);
+      if (items.isEmpty) return null;
+      return HomeLatestSection(library: library, items: items);
+    } catch (error) {
+      DiagnosticLog.instance.warning(
+        'home',
+        'Skipped latest shelf library=${library.id}: $error',
+      );
+      return null;
+    }
   }
 
   Future<List<EmbyItem>> getViews() => _getItemPage(
     '/Users/${session.userId}/Views',
-    query: {'Fields': _itemFields},
+    query: {'Fields': _listItemFields},
   );
 
   Future<List<EmbyItem>> getResumeItems({int limit = 20}) => _getItemPage(
@@ -278,7 +354,7 @@ class EmbyApi {
       'Limit': limit,
       'MediaTypes': 'Video',
       'Recursive': true,
-      'Fields': _itemFields,
+      'Fields': _listItemFields,
       'EnableUserData': true,
       'EnableImages': true,
     },
@@ -291,55 +367,98 @@ class EmbyApi {
           'ParentId': ?parentId,
           'Limit': limit,
           'IncludeItemTypes': 'Movie,Series,Episode,Video',
-          'Fields': _itemFields,
+          'Fields': _listItemFields,
           'EnableUserData': true,
+          'EnableImages': true,
           'GroupItems': true,
         },
       );
 
-  Future<List<EmbyItem>> getLibraryItems({
+  Future<EmbyItemPage> getLibraryItems({
     required String parentId,
     int startIndex = 0,
     int limit = 60,
-  }) => _getItemPage(
-    '/Users/${session.userId}/Items',
-    query: {
-      'ParentId': parentId,
-      'StartIndex': startIndex,
-      'Limit': limit,
-      'Recursive': true,
-      'IncludeItemTypes': 'Movie,Series,Video',
-      'SortBy': 'SortName',
-      'SortOrder': 'Ascending',
-      'Fields': _itemFields,
-      'EnableUserData': true,
-      'EnableImages': true,
-    },
-  );
-
-  Future<List<EmbyItem>> search(String term, {int limit = 60}) {
-    final query = term.trim();
-    if (query.isEmpty) return Future.value(const []);
-    return _getItemPage(
-      '/Users/${session.userId}/Items',
-      query: {
-        'SearchTerm': query,
-        'Limit': limit,
-        'Recursive': true,
-        'IncludeItemTypes': 'Movie,Series,Episode,Video',
-        'SortBy': 'SortName',
-        'Fields': _itemFields,
-        'EnableUserData': true,
-        'EnableImages': true,
-      },
+    LibraryBrowseOptions options = const LibraryBrowseOptions(),
+  }) async {
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': options.itemType.recursive,
+          'IncludeItemTypes': options.itemType.apiValue,
+          'SortBy': options.sortBy.apiValue,
+          'SortOrder': options.sortOrder.apiValue,
+          'Filters': ?options.playedFilter.apiValue,
+          if (options.favoriteOnly) 'IsFavorite': true,
+          'Fields': _listItemFields,
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
     );
+    final data = _map(response.data);
+    final rawItems = data['Items'] as List<dynamic>? ?? const [];
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList(growable: false);
+    final rawTotal = data['TotalRecordCount'];
+    final total = rawTotal is num
+        ? rawTotal.toInt()
+        : int.tryParse(rawTotal?.toString() ?? '');
+    return EmbyItemPage(items: items, totalRecordCount: total);
+  }
+
+  Future<EmbyItemPage> search(
+    String term, {
+    int startIndex = 0,
+    int limit = 60,
+    SearchItemType itemType = SearchItemType.all,
+  }) async {
+    final query = term.trim();
+    if (query.isEmpty) {
+      return const EmbyItemPage(items: [], totalRecordCount: 0);
+    }
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'SearchTerm': query,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': true,
+          'IncludeItemTypes': itemType.apiValue,
+          'Fields': _listItemFields,
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    final data = _map(response.data);
+    final rawItems = data['Items'] as List<dynamic>? ?? const [];
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList(growable: false);
+    final rawTotal = data['TotalRecordCount'];
+    final total = rawTotal is num
+        ? rawTotal.toInt()
+        : int.tryParse(rawTotal?.toString() ?? '');
+    return EmbyItemPage(items: items, totalRecordCount: total);
   }
 
   Future<EmbyItem> getItem(String itemId) async {
     final response = await _request(
       () => _dio.get<dynamic>(
         '/Users/${session.userId}/Items/$itemId',
-        queryParameters: {'Fields': _itemFields},
+        queryParameters: {'Fields': _detailItemFields},
       ),
     );
     return EmbyItem.fromJson(_map(response.data));
@@ -349,7 +468,7 @@ class EmbyApi {
     '/Shows/$seriesId/Seasons',
     query: {
       'UserId': session.userId,
-      'Fields': _itemFields,
+      'Fields': _listItemFields,
       'EnableUserData': true,
     },
   );
@@ -360,7 +479,7 @@ class EmbyApi {
         query: {
           'UserId': session.userId,
           'SeasonId': ?seasonId,
-          'Fields': _itemFields,
+          'Fields': _listItemFields,
           'EnableUserData': true,
         },
       );
@@ -397,7 +516,6 @@ class EmbyApi {
             'tag': tag,
             'maxWidth': maxWidth.toString(),
             'quality': quality.toString(),
-            'api_key': session.accessToken,
           },
         )
         .toString();
@@ -466,24 +584,52 @@ class EmbyApi {
         ? preferredSource
         : _bestSource(sources, forceTranscode: forceTranscode);
 
-    late final String rawUrl;
+    late final Uri uri;
     late final PlayMethod method;
     if (forceTranscode) {
       if (!source.supportsTranscoding || source.transcodingUrl == null) {
         throw const EmbyApiException('服务器没有提供可用的转码流');
       }
-      rawUrl = source.transcodingUrl!;
+      uri = _streamUri(
+        source.transcodingUrl!,
+        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
+        subtitleStreamIndex:
+            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+      );
       method = PlayMethod.transcode;
+    } else if (_isStrmSource(source)) {
+      uri = _streamUri(
+        '${session.serverUrl}/Videos/${item.id}/stream?'
+        'MediaSourceId=${Uri.encodeQueryComponent(source.id)}&Static=true',
+        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
+        subtitleStreamIndex:
+            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+      );
+      method = PlayMethod.directPlay;
     } else if (source.supportsDirectPlay) {
-      rawUrl =
-          '${session.serverUrl}/Videos/${item.id}/stream?'
-          'MediaSourceId=${Uri.encodeQueryComponent(source.id)}&Static=true';
+      uri = _streamUri(
+        '${session.serverUrl}/Videos/${item.id}/stream?'
+        'MediaSourceId=${Uri.encodeQueryComponent(source.id)}&Static=true',
+        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
+        subtitleStreamIndex:
+            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+      );
       method = PlayMethod.directPlay;
     } else if (source.supportsDirectStream && source.directStreamUrl != null) {
-      rawUrl = source.directStreamUrl!;
+      uri = _streamUri(
+        source.directStreamUrl!,
+        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
+        subtitleStreamIndex:
+            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+      );
       method = PlayMethod.directStream;
     } else if (source.supportsTranscoding && source.transcodingUrl != null) {
-      rawUrl = source.transcodingUrl!;
+      uri = _streamUri(
+        source.transcodingUrl!,
+        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
+        subtitleStreamIndex:
+            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+      );
       method = PlayMethod.transcode;
     } else {
       throw const EmbyApiException('媒体源没有可用的播放地址');
@@ -492,11 +638,6 @@ class EmbyApi {
     final selectedAudio = audioStreamIndex ?? source.defaultAudioStreamIndex;
     final selectedSubtitle =
         subtitleStreamIndex ?? source.defaultSubtitleStreamIndex;
-    final uri = _streamUri(
-      rawUrl,
-      audioStreamIndex: selectedAudio,
-      subtitleStreamIndex: selectedSubtitle,
-    );
     _logPlaybackDecision(
       source,
       method: method,
@@ -511,6 +652,7 @@ class EmbyApi {
       mediaSourceId: source.id,
       playSessionId: info.playSessionId,
       method: method,
+      usesServerAuthentication: _usesServerAuthentication(uri),
       audioStreamIndex: selectedAudio,
       subtitleStreamIndex: selectedSubtitle,
       liveStreamId: source.liveStreamId,
@@ -752,11 +894,25 @@ class EmbyApi {
       }
     }
     for (final source in sources) {
+      if (_isStrmSource(source)) return source;
+    }
+    for (final source in sources) {
       if (source.supportsTranscoding && source.transcodingUrl != null) {
         return source;
       }
     }
     return sources.first;
+  }
+
+  bool _isStrmSource(PlaybackMediaSource source) =>
+      source.container?.toLowerCase() == 'strm';
+
+  bool _usesServerAuthentication(Uri uri) {
+    if (!uri.hasAuthority) return false;
+    final server = Uri.parse(session.serverUrl);
+    return uri.scheme.toLowerCase() == server.scheme.toLowerCase() &&
+        uri.host.toLowerCase() == server.host.toLowerCase() &&
+        uri.port == server.port;
   }
 
   Uri _streamUri(
@@ -827,10 +983,14 @@ class EmbyApi {
         )
         .firstOrNull;
 
+    final uriForLog = _usesServerAuthentication(uri)
+        ? uri.toString()
+        : '${uri.scheme}://${uri.host}'
+              '${uri.hasPort ? ':${uri.port}' : ''}/<remote>';
     DiagnosticLog.instance.info(
       'playback',
       'Selected ${method.serverValue} source=${source.id} '
-          'name=${source.name ?? 'unknown'} container=${source.container ?? 'unknown'} '
+          'container=${source.container ?? 'unknown'} '
           'bitrate=${source.bitrate ?? 'unknown'} maxBitrate=$maxStreamingBitrate '
           'video=${video?['Codec'] ?? 'unknown'}/'
           '${video?['Profile'] ?? 'unknown'}/L${video?['Level'] ?? 'unknown'} '
@@ -841,7 +1001,8 @@ class EmbyApi {
           'subtitle=$subtitleStreamIndex:${subtitle?['Codec'] ?? 'off'} '
           'external=${subtitle?['IsExternal'] ?? false} '
           'errorCode=${errorCode ?? 'none'} '
-          'transcodingReasons=${source.transcodingReasons.join('|')} uri=$uri',
+          'transcodingReasons=${source.transcodingReasons.join('|')} '
+          'uri=$uriForLog',
     );
   }
 
