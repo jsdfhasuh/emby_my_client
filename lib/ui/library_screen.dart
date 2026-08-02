@@ -7,6 +7,7 @@ import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
+import '../library/library_alphabet_filter.dart';
 import '../library/library_grid_geometry.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
@@ -18,6 +19,7 @@ import 'item_detail_screen.dart';
 import 'player_screen.dart';
 import 'photos/photo_library_screen.dart';
 import 'widgets/library_position_overlay.dart';
+import 'widgets/library_alphabet_navigation.dart';
 import 'widgets/media_widgets.dart';
 
 class LibraryScreen extends StatefulWidget {
@@ -536,13 +538,37 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   _LibraryMediaFilter _filter = _LibraryMediaFilter.all;
   LibrarySort _sort = LibrarySort.nameAscending;
 
-  bool get _isMediaView =>
-      widget._facet != null ||
-      _section == _LibrarySection.videos ||
-      _section == _LibrarySection.favorites;
+  bool get _isMediaView => _isMediaViewFor(_section);
 
   bool get _positionEnabled =>
       _isMediaView && _options.itemType != LibraryItemType.folder;
+
+  bool get _alphabetEnabled => _alphabetAvailableFor(_options);
+
+  bool _isMediaViewFor(_LibrarySection section) =>
+      widget._facet != null ||
+      section == _LibrarySection.videos ||
+      section == _LibrarySection.favorites;
+
+  bool _alphabetAvailableFor(
+    LibraryBrowseOptions options, {
+    _LibrarySection? section,
+  }) =>
+      _isMediaViewFor(section ?? _section) &&
+      options.itemType != LibraryItemType.folder &&
+      options.sortBy == LibrarySortBy.name &&
+      options.sortOrder == LibrarySortOrder.ascending;
+
+  LibraryBrowseOptions _normalizeAlphabetOptions(
+    LibraryBrowseOptions options, {
+    _LibrarySection? section,
+  }) {
+    if (_alphabetAvailableFor(options, section: section) ||
+        options.alphabetFilter.isAll) {
+      return options;
+    }
+    return options.copyWith(alphabetFilter: const AllItems());
+  }
 
   List<EmbyItem> get _displayedItems => _isMediaView
       ? _items.where(_filter.includes).toList(growable: false)
@@ -564,7 +590,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   @override
   void initState() {
     super.initState();
-    _options = widget.initialOptions;
+    _options = _normalizeAlphabetOptions(widget.initialOptions);
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     _realtimeRefresh = RealtimeRefreshBinding(
@@ -678,6 +704,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<EmbyItemPage> _requestPage(int startIndex) {
+    final alphabetFilter = _alphabetEnabled
+        ? _options.alphabetFilter
+        : const AllItems();
     final facet = widget._facet;
     if (facet != null) {
       return widget.api.getLibraryItems(
@@ -688,6 +717,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         genreId: facet.kind == _LibraryFacetKind.genre ? facet.id : null,
         tagId: facet.kind == _LibraryFacetKind.tag ? facet.id : null,
         includeMediaSources: true,
+        nameStartsWith: alphabetFilter.nameStartsWith,
+        nameLessThan: alphabetFilter.nameLessThan,
       );
     }
     return switch (_section) {
@@ -697,6 +728,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         limit: _pageSize,
         options: _options,
         includeMediaSources: true,
+        nameStartsWith: alphabetFilter.nameStartsWith,
+        nameLessThan: alphabetFilter.nameLessThan,
       ),
       _LibrarySection.folders => widget.api.getLibraryFolders(
         parentId: widget.view.id,
@@ -720,6 +753,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         options: _options,
         favoritesFilter: true,
         includeMediaSources: true,
+        nameStartsWith: alphabetFilter.nameStartsWith,
+        nameLessThan: alphabetFilter.nameLessThan,
       ),
     };
   }
@@ -824,6 +859,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _applyOptions(LibraryBrowseOptions options) {
+    options = _normalizeAlphabetOptions(options);
     if (options == _options) return;
     _generation++;
     setState(() {
@@ -1011,9 +1047,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   void _selectSection(_LibrarySection section) {
     if (section == _section) return;
+    final options = _normalizeAlphabetOptions(_options, section: section);
     setState(() {
       _section = section;
       _filter = _LibraryMediaFilter.all;
+      _options = options;
     });
     unawaited(_refresh());
   }
@@ -1044,6 +1082,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       ),
     };
     _applyOptions(options);
+  }
+
+  void _selectAlphabetFilter(LibraryAlphabetFilter filter) {
+    if (!_alphabetEnabled || filter == _options.alphabetFilter) return;
+    _applyOptions(_options.copyWith(alphabetFilter: filter));
   }
 
   Future<void> _playAll({bool shuffle = false}) async {
@@ -1078,6 +1121,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           playedFilter: LibraryPlayedFilter.all,
           itemType: LibraryItemType.all,
           favoriteOnly: false,
+          alphabetFilter: const AllItems(),
         );
         if (reset == _options) {
           unawaited(_refresh());
@@ -1105,6 +1149,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                   itemType: LibraryItemType.folder,
                   playedFilter: LibraryPlayedFilter.all,
                   favoriteOnly: false,
+                  alphabetFilter: const AllItems(),
                 ),
               )
             : ItemDetailScreen(
@@ -1268,6 +1313,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                         onMoreSelected: _selectMore,
                       ),
                     ),
+                  if (_alphabetEnabled && !_options.alphabetFilter.isAll)
+                    SliverToBoxAdapter(
+                      child: LibraryAlphabetFilterChip(
+                        filter: _options.alphabetFilter,
+                        onClear: () => _selectAlphabetFilter(const AllItems()),
+                      ),
+                    ),
                   if (_items.isEmpty && _loading)
                     const SliverFillRemaining(
                       child: Center(child: CircularProgressIndicator()),
@@ -1324,6 +1376,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             ),
           ),
           LibraryPositionOverlay(controller: _positionController),
+          if (_alphabetEnabled)
+            LibraryAlphabetNavigation(
+              selected: _options.alphabetFilter,
+              onSelected: _selectAlphabetFilter,
+            ),
         ],
       ),
     );

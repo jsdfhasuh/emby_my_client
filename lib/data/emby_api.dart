@@ -6,6 +6,7 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import '../core/diagnostic_log.dart';
 import '../core/server_scope.dart';
 import '../images/emby_image_request.dart';
+import '../library/library_alphabet_filter.dart';
 import '../models/emby_models.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
@@ -409,7 +410,24 @@ class EmbyApi {
     String? tagId,
     bool favoritesFilter = false,
     bool includeMediaSources = false,
+    String? nameStartsWith,
+    String? nameLessThan,
   }) async {
+    final effectiveNameStartsWith =
+        nameStartsWith ?? options.alphabetFilter.nameStartsWith;
+    final effectiveNameLessThan =
+        nameLessThan ?? options.alphabetFilter.nameLessThan;
+    final normalizedNameStartsWith = effectiveNameStartsWith == null
+        ? null
+        : normalizeLibraryAlphabetLetter(effectiveNameStartsWith);
+    final normalizedNameLessThan = effectiveNameLessThan == null
+        ? null
+        : normalizeLibraryAlphabetLetter(effectiveNameLessThan);
+    if (normalizedNameStartsWith != null && normalizedNameLessThan != null) {
+      throw ArgumentError(
+        'NameStartsWith and NameLessThan cannot be used together.',
+      );
+    }
     final response = await _request(
       () => _dio.get<dynamic>(
         '/Users/${session.userId}/Items',
@@ -426,6 +444,8 @@ class EmbyApi {
           if (options.favoriteOnly) 'IsFavorite': true,
           'GenreIds': ?genreId,
           'TagIds': ?tagId,
+          'NameStartsWith': ?normalizedNameStartsWith,
+          'NameLessThan': ?normalizedNameLessThan,
           'Fields': includeMediaSources
               ? '$_listItemFields,MediaSources'
               : _listItemFields,

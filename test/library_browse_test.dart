@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -45,7 +46,47 @@ void main() {
       captured?.queryParameters,
       containsPair('EnableTotalRecordCount', true),
     );
+    expect(captured?.queryParameters, isNot(contains('NameStartsWith')));
+    expect(captured?.queryParameters, isNot(contains('NameLessThan')));
   });
+
+  test(
+    'library alphabet parameters are normalized and mutually exclusive',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api((options, handler) {
+        requests.add(options);
+        handler.resolve(_libraryResponse(options));
+      });
+
+      await api.getLibraryItems(parentId: 'library-1', nameStartsWith: ' m ');
+      await api.getLibraryItems(parentId: 'library-1', nameLessThan: 'a');
+      await api.getLibraryItems(
+        parentId: 'library-1',
+        options: LibraryBrowseOptions(alphabetFilter: LetterItems('q')),
+      );
+
+      expect(requests.first.queryParameters['NameStartsWith'], 'M');
+      expect(requests.first.queryParameters, isNot(contains('NameLessThan')));
+      expect(requests[1].queryParameters['NameLessThan'], 'A');
+      expect(requests[1].queryParameters, isNot(contains('NameStartsWith')));
+      expect(requests.last.queryParameters['NameStartsWith'], 'Q');
+
+      await expectLater(
+        api.getLibraryItems(
+          parentId: 'library-1',
+          nameStartsWith: 'M',
+          nameLessThan: 'A',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        api.getLibraryItems(parentId: 'library-1', nameStartsWith: '#'),
+        throwsArgumentError,
+      );
+      expect(requests, hasLength(3));
+    },
+  );
 
   test('folder browsing requests only the current directory level', () async {
     RequestOptions? captured;

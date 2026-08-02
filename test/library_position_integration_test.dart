@@ -485,6 +485,8 @@ class _CountingLibraryApi extends EmbyApi {
     String? tagId,
     bool favoritesFilter = false,
     bool includeMediaSources = false,
+    String? nameStartsWith,
+    String? nameLessThan,
   }) async => EmbyItemPage(
     items: [
       for (var index = 0; index < itemCount; index++)

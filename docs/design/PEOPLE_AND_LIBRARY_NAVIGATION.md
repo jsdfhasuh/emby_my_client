@@ -2,8 +2,8 @@
 
 更新日期：2026-08-02
 
-状态：里程碑 A、B 已实施（自动化测试与构建通过，真实服务器/Android 验收待执行）；
-里程碑 C 未实施
+状态：里程碑 A、B、C 已实施（自动化测试与构建通过，真实服务器/Android 验收
+待执行）
 
 项目基线：`main` 分支提交
 `20b1636021463b81c184ccb3e6193d378daa3104`
@@ -660,7 +660,8 @@ Android 设备验收待执行。
 
 ### 里程碑 C：`# / A-Z` 快速导航
 
-实施状态：未实施。
+实施状态：代码、自动化测试与分 ABI Debug APK 构建已完成；真实 Emby 服务器和
+Android 设备验收待执行。
 
 - 扩展媒体库 API 和筛选状态。
 - 完成字母栏、中央字母预览和筛选标签。
@@ -786,3 +787,39 @@ Moonfin-Core 使用 GPL v2。本功能只参考其公开 Emby API 使用方式�
 - `dart format lib test`、`flutter analyze`、248 项全量 `flutter test` 和
   `git diff --check` 通过；分 ABI Debug APK 构建生成 armeabi-v7a、arm64-v8a 和
   x86_64 三个产物。
+
+## 26. 里程碑 C 实施记录
+
+2026-08-02 完成：
+
+- 新增不可变 `LibraryAlphabetFilter` 状态及 `AllItems`、`SymbolsItems`、
+  `LetterItems` 实现；字母统一规范为单个大写 ASCII 字母，并进入
+  `LibraryBrowseOptions` equality、hash 和筛选计数。
+- `getLibraryItems` 支持互斥的 `NameStartsWith` / `NameLessThan` 参数；普通请求不发送
+  字母参数，字母项发送 `NameStartsWith=<A-Z>`，`#` 发送 `NameLessThan=A`，非法值在
+  网络请求前拒绝。
+- 新增右侧可点击或长按展开的 `全部、#、A-Z` 字母栏；触摸拖动经过字母时显示中央
+  预览，松开提交筛选并收起，顶部显示可关闭的“首字母”筛选标签。
+- 字母导航只在名称升序的实际媒体项目网格启用；名称降序、其他排序、文件夹项目和
+  文件夹/流派/标签分组网格自动隐藏并清除字母筛选。
+- 选择或清除字母复用媒体库请求代次和分页重置：清空旧项目、从 `StartIndex=0`
+  请求、滚动回顶部并清空旧位置快照；下一页保留相同字母参数，快速选择时只接受
+  最后一次请求结果。
+- 服务端不支持字母参数时显示当前筛选的局部错误和重试入口，不回退到无筛选请求，
+  也不启动客户端全库扫描。
+- 补充筛选规范化/equality、API 参数互斥、字母与 `#` 映射、拖动预览、筛选标签、
+  分页、排序/分组禁用、紧凑横屏、服务端错误和晚到响应竞态测试。
+- `dart format lib test`、`flutter analyze`、258 项全量 `flutter test` 和
+  `git diff --check` 通过；`flutter build apk --debug --split-per-abi` 生成
+  armeabi-v7a、arm64-v8a 和 x86_64 Debug APK。
+
+待验收：
+
+- 当前开发环境未提供真实 Emby 会话或 Android 设备；第 20 节的服务器参数兼容性、
+  中文/自定义 `SortName` 归类、触摸滑动和系统手势现场验收尚未执行。
+
+范围确认：
+
+- 未进行本地全库扫描，未实现可拖拽百分比跳转或任意 `StartIndex` 双向虚拟列表。
+- 未在媒体库根目录、分组网格、图片库或搜索页启用字母导航。
+- 未改变里程碑 A 的人物语义或里程碑 B 的位置计算、700 毫秒淡出和程序化恢复语义。

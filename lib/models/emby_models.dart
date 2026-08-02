@@ -1,3 +1,5 @@
+import '../library/library_alphabet_filter.dart';
+
 class EmbySession {
   const EmbySession({
     required this.serverUrl,
@@ -439,6 +441,7 @@ class LibraryBrowseOptions {
     this.playedFilter = LibraryPlayedFilter.all,
     this.itemType = LibraryItemType.all,
     this.favoriteOnly = false,
+    this.alphabetFilter = const AllItems(),
   });
 
   final LibrarySortBy sortBy;
@@ -446,11 +449,13 @@ class LibraryBrowseOptions {
   final LibraryPlayedFilter playedFilter;
   final LibraryItemType itemType;
   final bool favoriteOnly;
+  final LibraryAlphabetFilter alphabetFilter;
 
   int get activeFilterCount =>
       (favoriteOnly ? 1 : 0) +
       (playedFilter == LibraryPlayedFilter.all ? 0 : 1) +
-      (itemType == LibraryItemType.all ? 0 : 1);
+      (itemType == LibraryItemType.all ? 0 : 1) +
+      (alphabetFilter.isAll ? 0 : 1);
 
   LibraryBrowseOptions copyWith({
     LibrarySortBy? sortBy,
@@ -458,12 +463,14 @@ class LibraryBrowseOptions {
     LibraryPlayedFilter? playedFilter,
     LibraryItemType? itemType,
     bool? favoriteOnly,
+    LibraryAlphabetFilter? alphabetFilter,
   }) => LibraryBrowseOptions(
     sortBy: sortBy ?? this.sortBy,
     sortOrder: sortOrder ?? this.sortOrder,
     playedFilter: playedFilter ?? this.playedFilter,
     itemType: itemType ?? this.itemType,
     favoriteOnly: favoriteOnly ?? this.favoriteOnly,
+    alphabetFilter: alphabetFilter ?? this.alphabetFilter,
   );
 
   @override
@@ -473,11 +480,18 @@ class LibraryBrowseOptions {
       other.sortOrder == sortOrder &&
       other.playedFilter == playedFilter &&
       other.itemType == itemType &&
-      other.favoriteOnly == favoriteOnly;
+      other.favoriteOnly == favoriteOnly &&
+      other.alphabetFilter == alphabetFilter;
 
   @override
-  int get hashCode =>
-      Object.hash(sortBy, sortOrder, playedFilter, itemType, favoriteOnly);
+  int get hashCode => Object.hash(
+    sortBy,
+    sortOrder,
+    playedFilter,
+    itemType,
+    favoriteOnly,
+    alphabetFilter,
+  );
 }
 
 class EmbyItemPage {
