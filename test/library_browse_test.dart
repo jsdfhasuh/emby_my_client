@@ -65,12 +65,26 @@ void main() {
         parentId: 'library-1',
         options: LibraryBrowseOptions(alphabetFilter: LetterItems('q')),
       );
+      await api.getLibraryItems(
+        parentId: 'library-1',
+        options: LibraryBrowseOptions(alphabetFilter: LetterItems('q')),
+        nameLessThan: 'a',
+      );
+      await api.getLibraryItems(
+        parentId: 'library-1',
+        options: const LibraryBrowseOptions(alphabetFilter: SymbolsItems()),
+        nameStartsWith: 'm',
+      );
 
       expect(requests.first.queryParameters['NameStartsWith'], 'M');
       expect(requests.first.queryParameters, isNot(contains('NameLessThan')));
       expect(requests[1].queryParameters['NameLessThan'], 'A');
       expect(requests[1].queryParameters, isNot(contains('NameStartsWith')));
-      expect(requests.last.queryParameters['NameStartsWith'], 'Q');
+      expect(requests[2].queryParameters['NameStartsWith'], 'Q');
+      expect(requests[3].queryParameters['NameLessThan'], 'A');
+      expect(requests[3].queryParameters, isNot(contains('NameStartsWith')));
+      expect(requests[4].queryParameters['NameStartsWith'], 'M');
+      expect(requests[4].queryParameters, isNot(contains('NameLessThan')));
 
       await expectLater(
         api.getLibraryItems(
@@ -84,7 +98,7 @@ void main() {
         api.getLibraryItems(parentId: 'library-1', nameStartsWith: '#'),
         throwsArgumentError,
       );
-      expect(requests, hasLength(3));
+      expect(requests, hasLength(5));
     },
   );
 

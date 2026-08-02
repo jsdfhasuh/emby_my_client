@@ -6,6 +6,7 @@ import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -96,6 +97,47 @@ void main() {
     await api.dispose();
   });
 
+  testWidgets('one long-press gesture expands, drags, and commits a letter', (
+    tester,
+  ) async {
+    _setPhoneView(tester);
+    final requests = <RequestOptions>[];
+    final api = _alphabetApi(requests);
+
+    await tester.pumpWidget(_app(api));
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('library-alphabet-button'))),
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('library-alphabet-rail')), findsOneWidget);
+
+    await gesture.moveTo(
+      tester.getCenter(find.byKey(const ValueKey('library-alphabet-option-m'))),
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('library-alphabet-preview-label')),
+          )
+          .data,
+      'M',
+    );
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(requests.last.queryParameters['NameStartsWith'], 'M');
+    expect(requests.last.queryParameters, isNot(contains('NameLessThan')));
+    expect(find.text('首字母：M'), findsOneWidget);
+    expect(find.byKey(const ValueKey('library-alphabet-rail')), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
   testWidgets('symbols filter remains exclusive across server pagination', (
     tester,
   ) async {
@@ -133,6 +175,225 @@ void main() {
     expect(requests.last.queryParameters['StartIndex'], 0);
     expect(requests.last.queryParameters, isNot(contains('NameStartsWith')));
     expect(requests.last.queryParameters, isNot(contains('NameLessThan')));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
+  testWidgets(
+    'STRM plus M loads the next server page until a local match appears',
+    (tester) async {
+      _setPhoneView(tester);
+      final requests = <RequestOptions>[];
+      final api = _localFilterAlphabetApi(requests, (options, handler) {
+        final startIndex = options.queryParameters['StartIndex'] as int? ?? 0;
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: startIndex == 0
+                ? _pageJson(prefix: 'm', startIndex: 0, total: 61)
+                : {
+                    'TotalRecordCount': 61,
+                    'Items': [_strmItemJson('m', 60)],
+                  },
+          ),
+        );
+      });
+
+      await tester.pumpWidget(_app(api));
+      await tester.pumpAndSettle();
+      await _selectMediaFilter(tester, 'strm');
+      await _selectAlphabet(tester, 'm');
+
+      final letterRequests = _letterRequests(requests, 'M');
+      expect(
+        letterRequests.map((request) => request.queryParameters['StartIndex']),
+        [0, 60],
+      );
+      for (final request in letterRequests) {
+        expect(request.queryParameters['NameStartsWith'], 'M');
+        expect(request.queryParameters, isNot(contains('NameLessThan')));
+      }
+      expect(
+        find.byKey(const ValueKey('library-item-m-strm-60')),
+        findsOneWidget,
+      );
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await api.dispose();
+    },
+  );
+
+  testWidgets('STRM plus M reaches an empty state after every page misses', (
+    tester,
+  ) async {
+    _setPhoneView(tester);
+    final requests = <RequestOptions>[];
+    final api = _localFilterAlphabetApi(requests, (options, handler) {
+      final startIndex = options.queryParameters['StartIndex'] as int? ?? 0;
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: _pageJson(prefix: 'm', startIndex: startIndex, total: 120),
+        ),
+      );
+    });
+
+    await tester.pumpWidget(_app(api));
+    await tester.pumpAndSettle();
+    await _selectMediaFilter(tester, 'strm');
+    await _selectAlphabet(tester, 'm');
+
+    expect(
+      _letterRequests(
+        requests,
+        'M',
+      ).map((request) => request.queryParameters['StartIndex']),
+      [0, 60],
+    );
+    expect(find.text('没有 STRM 媒体'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(ErrorState), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
+  testWidgets(
+    'STRM plus M shows the next-page error without an unfiltered fallback',
+    (tester) async {
+      _setPhoneView(tester);
+      final requests = <RequestOptions>[];
+      final api = _localFilterAlphabetApi(requests, (options, handler) {
+        final startIndex = options.queryParameters['StartIndex'] as int? ?? 0;
+        if (startIndex == 60) {
+          handler.reject(
+            DioException(
+              requestOptions: options,
+              response: Response<dynamic>(
+                requestOptions: options,
+                statusCode: 500,
+              ),
+            ),
+          );
+          return;
+        }
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: _pageJson(prefix: 'm', startIndex: 0, total: 120),
+          ),
+        );
+      });
+
+      await tester.pumpWidget(_app(api));
+      await tester.pumpAndSettle();
+      await _selectMediaFilter(tester, 'strm');
+      await _selectAlphabet(tester, 'm');
+
+      final letterRequests = _letterRequests(requests, 'M');
+      expect(
+        letterRequests.map((request) => request.queryParameters['StartIndex']),
+        [0, 60],
+      );
+      expect(find.byType(ErrorState), findsOneWidget);
+      expect(find.text('首字母：M'), findsOneWidget);
+      expect(
+        requests
+            .skip(1)
+            .every(
+              (request) => request.queryParameters['NameStartsWith'] == 'M',
+            ),
+        isTrue,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await api.dispose();
+    },
+  );
+
+  testWidgets('an old M auto-page cannot contaminate a later Z query', (
+    tester,
+  ) async {
+    _setPhoneView(tester);
+    final requests = <RequestOptions>[];
+    final mSecondPage = Completer<void>();
+    final api = _localFilterAlphabetApi(requests, (options, handler) {
+      final query = options.queryParameters;
+      final letter = query['NameStartsWith'];
+      final startIndex = query['StartIndex'] as int? ?? 0;
+      if (letter == 'M' && startIndex == 60) {
+        unawaited(
+          mSecondPage.future.then((_) {
+            handler.resolve(
+              Response<dynamic>(
+                requestOptions: options,
+                statusCode: 200,
+                data: {
+                  'TotalRecordCount': 61,
+                  'Items': [_strmItemJson('m', 60)],
+                },
+              ),
+            );
+          }),
+        );
+        return;
+      }
+      if (letter == 'M') {
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: _pageJson(prefix: 'm', startIndex: 0, total: 61),
+          ),
+        );
+        return;
+      }
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [_strmItemJson('z', 0)],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(_app(api));
+    await tester.pumpAndSettle();
+    await _selectMediaFilter(tester, 'strm');
+    await _selectAlphabetWithoutSettling(tester, 'm');
+    await _pumpUntil(tester, () => _letterRequests(requests, 'M').length == 2);
+    expect(
+      _letterRequests(
+        requests,
+        'M',
+      ).map((request) => request.queryParameters['StartIndex']),
+      [0, 60],
+    );
+
+    await _selectAlphabetWithoutSettling(tester, 'z');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('library-item-z-strm-0')), findsOneWidget);
+
+    mSecondPage.complete();
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('library-item-z-strm-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('library-item-m-strm-60')), findsNothing);
+    expect(
+      _letterRequests(
+        requests,
+        'Z',
+      ).map((request) => request.queryParameters['StartIndex']),
+      [0],
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     await api.dispose();
@@ -347,6 +608,24 @@ Future<void> _selectAlphabetWithoutSettling(
   await tester.pump();
 }
 
+Future<void> _selectMediaFilter(WidgetTester tester, String key) async {
+  await tester.tap(find.byKey(const ValueKey('library-filter-button')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(ValueKey('library-filter-$key')));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _pumpUntil(WidgetTester tester, bool Function() condition) async {
+  for (var attempt = 0; attempt < 20 && !condition(); attempt++) {
+    await tester.pump(const Duration(milliseconds: 10));
+  }
+  expect(
+    condition(),
+    isTrue,
+    reason: 'Timed out waiting for async test state.',
+  );
+}
+
 Finder _verticalScrollable() => find.byWidgetPredicate(
   (widget) =>
       widget is Scrollable &&
@@ -382,6 +661,47 @@ EmbyApi _alphabetApi(List<RequestOptions> requests) {
   return EmbyApi(_session, dio: dio);
 }
 
+typedef _AlphabetRequestHandler =
+    void Function(RequestOptions options, RequestInterceptorHandler handler);
+
+EmbyApi _localFilterAlphabetApi(
+  List<RequestOptions> requests,
+  _AlphabetRequestHandler onAlphabetRequest,
+) {
+  final dio = Dio()
+    ..interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          requests.add(options);
+          final query = options.queryParameters;
+          if (!query.containsKey('NameStartsWith') &&
+              !query.containsKey('NameLessThan')) {
+            handler.resolve(
+              Response<dynamic>(
+                requestOptions: options,
+                statusCode: 200,
+                data: {
+                  'TotalRecordCount': 1,
+                  'Items': [_strmItemJson('initial', 0)],
+                },
+              ),
+            );
+            return;
+          }
+          onAlphabetRequest(options, handler);
+        },
+      ),
+    );
+  return EmbyApi(_session, dio: dio);
+}
+
+List<RequestOptions> _letterRequests(
+  List<RequestOptions> requests,
+  String letter,
+) => requests
+    .where((request) => request.queryParameters['NameStartsWith'] == letter)
+    .toList(growable: false);
+
 class _DeferredAlphabetApi extends EmbyApi {
   _DeferredAlphabetApi() : super(_session, dio: Dio());
 
@@ -402,11 +722,7 @@ class _DeferredAlphabetApi extends EmbyApi {
     String? nameStartsWith,
     String? nameLessThan,
   }) {
-    final filter = nameStartsWith != null
-        ? LetterItems(nameStartsWith)
-        : nameLessThan != null
-        ? const SymbolsItems()
-        : const AllItems();
+    final filter = options.alphabetFilter;
     filters.add(filter);
     return switch (filter) {
       LetterItems(letter: 'M') => mRequest.future,
@@ -460,6 +776,12 @@ Map<String, dynamic> _itemJson(String prefix, int index) => {
   'BackdropImageTags': const <String>[],
   'Genres': const <String>[],
   'UserData': const <String, dynamic>{},
+};
+
+Map<String, dynamic> _strmItemJson(String prefix, int index) => {
+  ..._itemJson('$prefix-strm', index),
+  'Path': '/media/$prefix-$index.strm',
+  'Container': 'strm',
 };
 
 const _session = EmbySession(

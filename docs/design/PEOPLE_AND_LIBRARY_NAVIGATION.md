@@ -813,6 +813,25 @@ Moonfin-Core 使用 GPL v2。本功能只参考其公开 Emby API 使用方式�
   `git diff --check` 通过；`flutter build apk --debug --split-per-abi` 生成
   armeabi-v7a、arm64-v8a 和 x86_64 Debug APK。
 
+2026-08-02 审查修正：
+
+- 本地 STRM/普通媒体筛选激活时，选择或清除字母、改变排序或其他服务端查询条件会从
+  `StartIndex=0` 开始，并在首个服务端分页没有本地匹配项时继续读取同一查询的下一页；
+  每页保留当前 `NameStartsWith` 或 `NameLessThan`，找到匹配、分页结束或请求失败即停止。
+- `_loadUntilFilterMatches` 绑定启动时的请求 generation，并复用同 generation 正在进行的
+  分页；generation 改变后旧循环立即退出，不能用新查询状态继续翻页或写入结果。全部
+  分页无本地匹配时进入明确空状态，下一页失败时保留当前字母筛选并显示错误，不发送
+  无字母参数的回退请求，也不启动独立客户端全库扫描。
+- 媒体库请求统一由 `LibraryBrowseOptions.alphabetFilter` 提供字母状态；API 的显式
+  `nameStartsWith` / `nameLessThan` 作为一整组覆盖 options，避免两处来源交叉组合。
+- 收起的字母按钮支持一次连续长按、拖动到目标字母并松手提交；只长按不拖动仍保持
+  字母栏展开，点击展开后的既有拖动和点击交互保持不变。
+- 新增 STRM + M 跨页命中、全部无匹配、下一页错误、M/Z 自动翻页竞态、API 参数来源
+  冲突和单个 `TestGesture` 连续长按拖动测试。
+- `dart format lib test`、`flutter analyze`、263 项全量 `flutter test` 和
+  `git diff --check` 通过；`flutter build apk --debug --split-per-abi` 生成
+  armeabi-v7a、arm64-v8a 和 x86_64 Debug APK。
+
 待验收：
 
 - 当前开发环境未提供真实 Emby 会话或 Android 设备；第 20 节的服务器参数兼容性、

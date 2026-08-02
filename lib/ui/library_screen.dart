@@ -525,6 +525,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   late final RealtimeRefreshBinding _realtimeRefresh;
   late LibraryBrowseOptions _options;
   bool _loading = false;
+  Future<void>? _activeLoad;
+  int? _activeLoadGeneration;
   bool _reloading = false;
   bool _hasMore = true;
   bool _pendingRealtimeLibraryRefresh = false;
@@ -674,9 +676,22 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _positionController.clear();
   }
 
-  Future<void> _loadMore() async {
-    if (_loading || !_hasMore) return;
-    final generation = _generation;
+  Future<void> _loadMore({int? expectedGeneration}) {
+    final generation = expectedGeneration ?? _generation;
+    if (!mounted || generation != _generation || !_hasMore) {
+      return Future.value();
+    }
+    final activeLoad = _activeLoad;
+    if (_loading && _activeLoadGeneration == generation && activeLoad != null) {
+      return activeLoad;
+    }
+    final load = _performLoadMore(generation);
+    _activeLoad = load;
+    _activeLoadGeneration = generation;
+    return load;
+  }
+
+  Future<void> _performLoadMore(int generation) async {
     final startIndex = _items.length;
     setState(() {
       _loading = true;
@@ -704,9 +719,6 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<EmbyItemPage> _requestPage(int startIndex) {
-    final alphabetFilter = _alphabetEnabled
-        ? _options.alphabetFilter
-        : const AllItems();
     final facet = widget._facet;
     if (facet != null) {
       return widget.api.getLibraryItems(
@@ -717,8 +729,6 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         genreId: facet.kind == _LibraryFacetKind.genre ? facet.id : null,
         tagId: facet.kind == _LibraryFacetKind.tag ? facet.id : null,
         includeMediaSources: true,
-        nameStartsWith: alphabetFilter.nameStartsWith,
-        nameLessThan: alphabetFilter.nameLessThan,
       );
     }
     return switch (_section) {
@@ -728,8 +738,6 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         limit: _pageSize,
         options: _options,
         includeMediaSources: true,
-        nameStartsWith: alphabetFilter.nameStartsWith,
-        nameLessThan: alphabetFilter.nameLessThan,
       ),
       _LibrarySection.folders => widget.api.getLibraryFolders(
         parentId: widget.view.id,
@@ -753,8 +761,6 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         options: _options,
         favoritesFilter: true,
         includeMediaSources: true,
-        nameStartsWith: alphabetFilter.nameStartsWith,
-        nameLessThan: alphabetFilter.nameLessThan,
       ),
     };
   }
@@ -871,7 +877,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _error = null;
     });
     _clearPosition(scrollToTop: true);
-    unawaited(_loadMore());
+    _loadForCurrentFilter();
   }
 
   void _selectQuickCategory({
@@ -1033,16 +1039,40 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     setState(() => _filter = filter);
     _clearPosition(scrollToTop: true);
     if (_displayedItems.isEmpty && _hasMore) {
-      unawaited(_loadUntilFilterMatches());
+      unawaited(_loadUntilFilterMatches(_generation));
     }
   }
 
-  Future<void> _loadUntilFilterMatches() async {
-    while (mounted && _displayedItems.isEmpty && _hasMore && _error == null) {
-      final previousCount = _items.length;
-      await _loadMore();
-      if (_items.length <= previousCount) break;
+  void _loadForCurrentFilter() {
+    final generation = _generation;
+    if (_filter == _LibraryMediaFilter.all) {
+      unawaited(_loadMore(expectedGeneration: generation));
+    } else {
+      unawaited(_loadUntilFilterMatches(generation));
     }
+  }
+
+  Future<void> _loadUntilFilterMatches(int generation) async {
+    while (mounted &&
+        generation == _generation &&
+        _displayedItems.isEmpty &&
+        _hasMore &&
+        _error == null) {
+      final previousCount = _items.length;
+      await _loadMore(expectedGeneration: generation);
+      if (!mounted || generation != _generation) return;
+      if (_error != null ||
+          _displayedItems.isNotEmpty ||
+          !_hasMore ||
+          _items.length <= previousCount) {
+        return;
+      }
+    }
+  }
+
+  void _retryEmptyLoad() {
+    if (_error != null) setState(() => _error = null);
+    _loadForCurrentFilter();
   }
 
   void _selectSection(_LibrarySection section) {
@@ -1326,7 +1356,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                     )
                   else if (_items.isEmpty && _error != null)
                     SliverFillRemaining(
-                      child: ErrorState(error: _error!, onRetry: _loadMore),
+                      child: ErrorState(
+                        error: _error!,
+                        onRetry: _retryEmptyLoad,
+                      ),
                     )
                   else if (_items.isEmpty)
                     SliverFillRemaining(
@@ -1339,7 +1372,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                     )
                   else if (displayedItems.isEmpty && _error != null)
                     SliverFillRemaining(
-                      child: ErrorState(error: _error!, onRetry: _loadMore),
+                      child: ErrorState(
+                        error: _error!,
+                        onRetry: _retryEmptyLoad,
+                      ),
                     )
                   else if (displayedItems.isEmpty && (_loading || _hasMore))
                     const SliverFillRemaining(

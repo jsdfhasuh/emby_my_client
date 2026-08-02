@@ -413,10 +413,14 @@ class EmbyApi {
     String? nameStartsWith,
     String? nameLessThan,
   }) async {
-    final effectiveNameStartsWith =
-        nameStartsWith ?? options.alphabetFilter.nameStartsWith;
-    final effectiveNameLessThan =
-        nameLessThan ?? options.alphabetFilter.nameLessThan;
+    final hasExplicitAlphabetFilter =
+        nameStartsWith != null || nameLessThan != null;
+    final effectiveNameStartsWith = hasExplicitAlphabetFilter
+        ? nameStartsWith
+        : options.alphabetFilter.nameStartsWith;
+    final effectiveNameLessThan = hasExplicitAlphabetFilter
+        ? nameLessThan
+        : options.alphabetFilter.nameLessThan;
     final normalizedNameStartsWith = effectiveNameStartsWith == null
         ? null
         : normalizeLibraryAlphabetLetter(effectiveNameStartsWith);

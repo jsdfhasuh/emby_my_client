@@ -21,6 +21,7 @@ class LibraryAlphabetNavigation extends StatefulWidget {
 
 class _LibraryAlphabetNavigationState extends State<LibraryAlphabetNavigation> {
   bool _expanded = false;
+  bool _trackingCollapsedLongPress = false;
   LibraryAlphabetFilter? _preview;
 
   void _expand() {
@@ -32,6 +33,7 @@ class _LibraryAlphabetNavigationState extends State<LibraryAlphabetNavigation> {
     if (!_expanded && _preview == null) return;
     setState(() {
       _expanded = false;
+      _trackingCollapsedLongPress = false;
       _preview = null;
     });
   }
@@ -52,6 +54,7 @@ class _LibraryAlphabetNavigationState extends State<LibraryAlphabetNavigation> {
   void _commit(LibraryAlphabetFilter filter) {
     setState(() {
       _expanded = false;
+      _trackingCollapsedLongPress = false;
       _preview = null;
     });
     widget.onSelected(filter);
@@ -59,11 +62,17 @@ class _LibraryAlphabetNavigationState extends State<LibraryAlphabetNavigation> {
 
   void _commitPreview() {
     final preview = _preview;
-    if (preview == null) {
-      _collapse();
-      return;
-    }
+    if (preview == null) return;
     _commit(preview);
+  }
+
+  void _previewAtNavigationPosition(
+    double localY,
+    double navigationHeight,
+    double railHeight,
+  ) {
+    final railTop = (navigationHeight - railHeight) / 2;
+    _previewAt(localY - railTop, railHeight);
   }
 
   @override
@@ -75,41 +84,67 @@ class _LibraryAlphabetNavigationState extends State<LibraryAlphabetNavigation> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final railHeight = math.min(600.0, constraints.maxHeight);
-            return Stack(
-              children: [
-                if (_expanded)
-                  Positioned.fill(
-                    child: GestureDetector(
-                      key: const ValueKey('library-alphabet-barrier'),
-                      behavior: HitTestBehavior.translucent,
-                      onTap: _collapse,
+            return GestureDetector(
+              behavior: HitTestBehavior.deferToChild,
+              onLongPressStart: (_) {
+                if (_expanded) return;
+                _trackingCollapsedLongPress = true;
+                _expand();
+              },
+              onLongPressMoveUpdate: (details) {
+                if (!_trackingCollapsedLongPress) return;
+                _previewAtNavigationPosition(
+                  details.localPosition.dy,
+                  constraints.maxHeight,
+                  railHeight,
+                );
+              },
+              onLongPressEnd: (_) {
+                if (!_trackingCollapsedLongPress) return;
+                _trackingCollapsedLongPress = false;
+                _commitPreview();
+              },
+              onLongPressCancel: () {
+                if (!_trackingCollapsedLongPress) return;
+                _trackingCollapsedLongPress = false;
+                _collapse();
+              },
+              child: Stack(
+                children: [
+                  if (_expanded)
+                    Positioned.fill(
+                      child: GestureDetector(
+                        key: const ValueKey('library-alphabet-barrier'),
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _collapse,
+                      ),
                     ),
+                  Align(
+                    alignment: _expanded
+                        ? Alignment.centerRight
+                        : const Alignment(1, 0.55),
+                    child: _expanded
+                        ? _AlphabetRail(
+                            height: railHeight,
+                            selected: widget.selected,
+                            preview: _preview,
+                            onPreview: _showPreview,
+                            onPreviewAt: _previewAt,
+                            onCommit: _commit,
+                            onCommitPreview: _commitPreview,
+                            onCancelPreview: () {
+                              if (_preview == null) return;
+                              setState(() => _preview = null);
+                            },
+                          )
+                        : _AlphabetButton(onPressed: _expand),
                   ),
-                Align(
-                  alignment: _expanded
-                      ? Alignment.centerRight
-                      : const Alignment(1, 0.55),
-                  child: _expanded
-                      ? _AlphabetRail(
-                          height: railHeight,
-                          selected: widget.selected,
-                          preview: _preview,
-                          onPreview: _showPreview,
-                          onPreviewAt: _previewAt,
-                          onCommit: _commit,
-                          onCommitPreview: _commitPreview,
-                          onCancelPreview: () {
-                            if (_preview == null) return;
-                            setState(() => _preview = null);
-                          },
-                        )
-                      : _AlphabetButton(onPressed: _expand),
-                ),
-                if (_preview case final preview?)
-                  IgnorePointer(
-                    child: Center(child: _AlphabetPreview(filter: preview)),
-                  ),
-              ],
+                  if (_preview case final preview?)
+                    IgnorePointer(
+                      child: Center(child: _AlphabetPreview(filter: preview)),
+                    ),
+                ],
+              ),
             );
           },
         ),
@@ -161,13 +196,13 @@ class _AlphabetButton extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Tooltip(
         message: '按首字母筛选',
+        triggerMode: TooltipTriggerMode.tap,
         child: Semantics(
           button: true,
           label: '按首字母筛选',
           child: InkWell(
             key: const ValueKey('library-alphabet-button'),
             onTap: onPressed,
-            onLongPress: onPressed,
             child: const SizedBox(
               width: 44,
               height: 44,
