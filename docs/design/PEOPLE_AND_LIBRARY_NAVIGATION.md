@@ -131,7 +131,10 @@ class EmbyPerson {
   final String? role;
   final String? primaryImageTag;
 
-  bool get isCast => type == 'Actor' || type == 'GuestStar';
+  bool get isCast {
+    final normalizedType = type.trim().toLowerCase();
+    return normalizedType == 'actor' || normalizedType == 'gueststar';
+  }
   bool get isNavigable => id != null && id!.isNotEmpty;
 }
 ```
