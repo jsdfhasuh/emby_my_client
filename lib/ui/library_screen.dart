@@ -1,11 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
+import '../library/library_grid_geometry.dart';
+import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
 import '../playback/playback_queue.dart';
 import '../realtime/emby_event.dart';
@@ -14,6 +17,7 @@ import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
 import 'player_screen.dart';
 import 'photos/photo_library_screen.dart';
+import 'widgets/library_position_overlay.dart';
 import 'widgets/media_widgets.dart';
 
 class LibraryScreen extends StatefulWidget {
@@ -514,6 +518,7 @@ class _LibraryGroupCard extends StatelessWidget {
 class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   static const _pageSize = 60;
   final _controller = ScrollController();
+  late final LibraryScrollPositionController _positionController;
   final List<EmbyItem> _items = [];
   late final RealtimeRefreshBinding _realtimeRefresh;
   late LibraryBrowseOptions _options;
@@ -524,6 +529,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   final Set<String> _pendingRealtimeUserDataIds = {};
   int? _totalCount;
   int _generation = 0;
+  int _positionGeneration = 0;
   Object? _error;
   _LibrarySection _section = _LibrarySection.videos;
   _LibraryMediaFilter _filter = _LibraryMediaFilter.all;
@@ -534,12 +540,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _section == _LibrarySection.videos ||
       _section == _LibrarySection.favorites;
 
+  bool get _positionEnabled =>
+      _isMediaView && _options.itemType != LibraryItemType.folder;
+
   List<EmbyItem> get _displayedItems => _isMediaView
       ? _items.where(_filter.includes).toList(growable: false)
       : List.unmodifiable(_items);
 
   List<EmbyItem> get _playableItems =>
       _displayedItems.where((item) => item.isPlayable).toList(growable: false);
+
+  int? get _positionTotalCount {
+    if (_filter == _LibraryMediaFilter.all) return _totalCount;
+    return !_hasMore && !_loading ? _displayedItems.length : null;
+  }
 
   String get _emptyTitle => widget._facet == null
       ? _section.emptyTitle
@@ -555,6 +569,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   void initState() {
     super.initState();
     _options = widget.initialOptions;
+    _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
@@ -584,12 +599,56 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _controller
       ..removeListener(_onScroll)
       ..dispose();
+    _positionController.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
 
   void _onScroll() {
     if (!_reloading && _controller.position.extentAfter < 700) _loadMore();
+  }
+
+  bool _onScrollNotification(ScrollNotification notification) {
+    if (!_positionEnabled ||
+        notification.depth != 0 ||
+        notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+    if (notification is ScrollStartNotification) {
+      _positionController.onScrollStart();
+    } else if (notification is ScrollUpdateNotification ||
+        notification is OverscrollNotification) {
+      _positionController.onScrollUpdate();
+    } else if (notification is ScrollEndNotification) {
+      _positionController.onScrollEnd();
+    }
+    return false;
+  }
+
+  void _schedulePositionUpdate({
+    required SliverConstraints constraints,
+    required int loadedCount,
+    required int? totalCount,
+  }) {
+    final generation = _positionGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _positionGeneration || !_positionEnabled) {
+        return;
+      }
+      _positionController.updateLayout(
+        constraints: constraints,
+        loadedCount: loadedCount,
+        totalCount: totalCount,
+      );
+    });
+  }
+
+  void _clearPosition({bool scrollToTop = false}) {
+    _positionGeneration++;
+    if (scrollToTop && _controller.hasClients && _controller.offset != 0) {
+      _controller.jumpTo(0);
+    }
+    _positionController.clear();
   }
 
   Future<void> _loadMore() async {
@@ -710,7 +769,14 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         }
       }
       if (widget._facet == null && _section == _LibrarySection.favorites) {
+        final previousCount = _items.length;
         _items.removeWhere((item) => !item.userData.isFavorite);
+        final removedCount = previousCount - _items.length;
+        if (_totalCount != null && removedCount > 0) {
+          _totalCount = _totalCount! > removedCount
+              ? _totalCount! - removedCount
+              : 0;
+        }
       }
     });
   }
@@ -733,6 +799,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _loading = false;
       _error = null;
     });
+    _clearPosition(scrollToTop: !restoreScrollPosition);
     try {
       while (mounted && _items.length < targetItemCount && _hasMore) {
         final previousCount = _items.length;
@@ -764,6 +831,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _loading = false;
       _error = null;
     });
+    _clearPosition(scrollToTop: true);
     unawaited(_loadMore());
   }
 
@@ -772,22 +840,27 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     bool favoriteOnly = false,
   }) {
     final folderView = itemType == LibraryItemType.folder;
-    if (_section != _LibrarySection.videos ||
-        _filter != _LibraryMediaFilter.all) {
+    final changedSectionOrLocalFilter =
+        _section != _LibrarySection.videos ||
+        _filter != _LibraryMediaFilter.all;
+    if (changedSectionOrLocalFilter) {
       setState(() {
         _section = _LibrarySection.videos;
         _filter = _LibraryMediaFilter.all;
       });
     }
-    _applyOptions(
-      _options.copyWith(
-        itemType: itemType,
-        favoriteOnly: favoriteOnly,
-        playedFilter: folderView
-            ? LibraryPlayedFilter.all
-            : _options.playedFilter,
-      ),
+    final options = _options.copyWith(
+      itemType: itemType,
+      favoriteOnly: favoriteOnly,
+      playedFilter: folderView
+          ? LibraryPlayedFilter.all
+          : _options.playedFilter,
     );
+    if (options == _options) {
+      if (changedSectionOrLocalFilter) unawaited(_refresh());
+      return;
+    }
+    _applyOptions(options);
   }
 
   Future<void> _showFilters() async {
@@ -919,6 +992,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   void _selectFilter(_LibraryMediaFilter filter) {
     if (filter == _filter) return;
     setState(() => _filter = filter);
+    _clearPosition(scrollToTop: true);
     if (_displayedItems.isEmpty && _hasMore) {
       unawaited(_loadUntilFilterMatches());
     }
@@ -1093,24 +1167,30 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Widget _buildMediaGrid(List<EmbyItem> items) {
     return SliverPadding(
-      padding: const EdgeInsets.all(16),
-      sliver: SliverGrid(
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 180,
-          childAspectRatio: 0.52,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 18,
-        ),
-        delegate: SliverChildBuilderDelegate((context, index) {
-          final item = items[index];
-          return MediaPosterCard(
-            key: ValueKey('library-item-${item.id}'),
-            item: item,
-            width: double.infinity,
-            imageRequest: widget.api.imageRequest(item),
-            onTap: () => _open(item),
+      padding: libraryMediaGridGeometry.padding,
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          if (_positionEnabled) {
+            _schedulePositionUpdate(
+              constraints: constraints,
+              loadedCount: items.length,
+              totalCount: _positionTotalCount,
+            );
+          }
+          return SliverGrid(
+            gridDelegate: libraryMediaGridGeometry,
+            delegate: SliverChildBuilderDelegate((context, index) {
+              final item = items[index];
+              return MediaPosterCard(
+                key: ValueKey('library-item-${item.id}'),
+                item: item,
+                width: double.infinity,
+                imageRequest: widget.api.imageRequest(item),
+                onTap: () => _open(item),
+              );
+            }, childCount: items.length),
           );
-        }, childCount: items.length),
+        },
       ),
     );
   }
@@ -1145,87 +1225,97 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final facet = widget._facet;
     return Scaffold(
       appBar: AppBar(title: Text(facet?.name ?? widget.view.name)),
-      body: RefreshIndicator(
-        onRefresh: _refresh,
-        child: CustomScrollView(
-          controller: _controller,
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            if (facet == null)
-              SliverToBoxAdapter(
-                child: _LibrarySectionBar(
-                  selected: _section,
-                  onSelected: _selectSection,
-                ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          NotificationListener<ScrollNotification>(
+            onNotification: _onScrollNotification,
+            child: RefreshIndicator(
+              onRefresh: _refresh,
+              child: CustomScrollView(
+                controller: _controller,
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  if (facet == null)
+                    SliverToBoxAdapter(
+                      child: _LibrarySectionBar(
+                        selected: _section,
+                        onSelected: _selectSection,
+                      ),
+                    ),
+                  if (facet == null && _section == _LibrarySection.videos)
+                    SliverToBoxAdapter(child: _buildBrowseControls(context)),
+                  if (_isMediaView &&
+                      _options.itemType != LibraryItemType.folder)
+                    SliverToBoxAdapter(
+                      child: _LibraryActionBar(
+                        filter: _filter,
+                        sort: _sort,
+                        canPlay: _playableItems.isNotEmpty,
+                        onPlayAll: () => unawaited(_playAll()),
+                        onShuffle: () => unawaited(_playAll(shuffle: true)),
+                        onFilterSelected: _selectFilter,
+                        onSortSelected: _selectSort,
+                        onMoreSelected: _selectMore,
+                      ),
+                    ),
+                  if (_items.isEmpty && _loading)
+                    const SliverFillRemaining(
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (_items.isEmpty && _error != null)
+                    SliverFillRemaining(
+                      child: ErrorState(error: _error!, onRetry: _loadMore),
+                    )
+                  else if (_items.isEmpty)
+                    SliverFillRemaining(
+                      child: EmptyState(
+                        icon: _emptyIcon,
+                        title: _options.activeFilterCount > 0 && _isMediaView
+                            ? '没有符合筛选条件的项目'
+                            : _emptyTitle,
+                      ),
+                    )
+                  else if (displayedItems.isEmpty && _error != null)
+                    SliverFillRemaining(
+                      child: ErrorState(error: _error!, onRetry: _loadMore),
+                    )
+                  else if (displayedItems.isEmpty && (_loading || _hasMore))
+                    const SliverFillRemaining(
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (displayedItems.isEmpty)
+                    SliverFillRemaining(
+                      child: EmptyState(
+                        icon: _filter.emptyIcon,
+                        title: _filter.emptyTitle,
+                      ),
+                    )
+                  else if (_isMediaView)
+                    _buildMediaGrid(displayedItems)
+                  else
+                    _buildGroupGrid(displayedItems),
+                  if (displayedItems.isNotEmpty && (_loading || _error != null))
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: _error != null
+                            ? Center(
+                                child: TextButton.icon(
+                                  onPressed: _loadMore,
+                                  icon: const Icon(Icons.refresh),
+                                  label: const Text('加载失败，重试'),
+                                ),
+                              )
+                            : const Center(child: CircularProgressIndicator()),
+                      ),
+                    ),
+                ],
               ),
-            if (facet == null && _section == _LibrarySection.videos)
-              SliverToBoxAdapter(child: _buildBrowseControls(context)),
-            if (_isMediaView && _options.itemType != LibraryItemType.folder)
-              SliverToBoxAdapter(
-                child: _LibraryActionBar(
-                  filter: _filter,
-                  sort: _sort,
-                  canPlay: _playableItems.isNotEmpty,
-                  onPlayAll: () => unawaited(_playAll()),
-                  onShuffle: () => unawaited(_playAll(shuffle: true)),
-                  onFilterSelected: _selectFilter,
-                  onSortSelected: _selectSort,
-                  onMoreSelected: _selectMore,
-                ),
-              ),
-            if (_items.isEmpty && _loading)
-              const SliverFillRemaining(
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else if (_items.isEmpty && _error != null)
-              SliverFillRemaining(
-                child: ErrorState(error: _error!, onRetry: _loadMore),
-              )
-            else if (_items.isEmpty)
-              SliverFillRemaining(
-                child: EmptyState(
-                  icon: _emptyIcon,
-                  title: _options.activeFilterCount > 0 && _isMediaView
-                      ? '没有符合筛选条件的项目'
-                      : _emptyTitle,
-                ),
-              )
-            else if (displayedItems.isEmpty && _error != null)
-              SliverFillRemaining(
-                child: ErrorState(error: _error!, onRetry: _loadMore),
-              )
-            else if (displayedItems.isEmpty && (_loading || _hasMore))
-              const SliverFillRemaining(
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else if (displayedItems.isEmpty)
-              SliverFillRemaining(
-                child: EmptyState(
-                  icon: _filter.emptyIcon,
-                  title: _filter.emptyTitle,
-                ),
-              )
-            else if (_isMediaView)
-              _buildMediaGrid(displayedItems)
-            else
-              _buildGroupGrid(displayedItems),
-            if (displayedItems.isNotEmpty && (_loading || _error != null))
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: _error != null
-                      ? Center(
-                          child: TextButton.icon(
-                            onPressed: _loadMore,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('加载失败，重试'),
-                          ),
-                        )
-                      : const Center(child: CircularProgressIndicator()),
-                ),
-              ),
-          ],
-        ),
+            ),
+          ),
+          LibraryPositionOverlay(controller: _positionController),
+        ],
       ),
     );
   }
