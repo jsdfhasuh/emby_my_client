@@ -168,6 +168,64 @@ void main() {
       expect(item.people.single.type, 'Actor');
       expect(item.people.single.primaryImageTag, 'later-image-tag');
     });
+
+    test('does not fill a cast role from a non-cast record', () {
+      final item = EmbyItem.fromJson({
+        'People': [
+          {'Id': 'person-1', 'Name': '演员记录', 'Type': 'Actor'},
+          {'Id': 'person-1', 'Name': '编剧记录', 'Type': 'Writer', 'Role': '编剧职务'},
+        ],
+      });
+
+      expect(item.people.single.type, 'Actor');
+      expect(item.people.single.role, isNull);
+    });
+
+    test('uses the cast role when a non-cast record appears first', () {
+      final item = EmbyItem.fromJson({
+        'People': [
+          {
+            'Id': 'person-1',
+            'Name': '导演记录',
+            'Type': 'Director',
+            'Role': '导演职务',
+          },
+          {'Id': 'person-1', 'Name': '演员记录', 'Type': ' actor ', 'Role': '演员角色'},
+        ],
+      });
+
+      expect(item.people.single.name, '演员记录');
+      expect(item.people.single.type, 'actor');
+      expect(item.people.single.role, '演员角色');
+    });
+
+    test('recognizes normalized cast types and merge priority', () {
+      final actor = EmbyPerson.fromJson(const {
+        'Name': '小写演员',
+        'Type': ' actor ',
+      });
+      final guestStar = EmbyPerson.fromJson(const {
+        'Name': '小写客串',
+        'Type': 'GUESTSTAR',
+      });
+      final item = EmbyItem.fromJson({
+        'People': [
+          {'Id': 'person-1', 'Name': '导演记录', 'Type': 'Director'},
+          {
+            'Id': 'person-1',
+            'Name': '客串记录',
+            'Type': ' gueststar ',
+            'Role': '客串角色',
+          },
+        ],
+      });
+
+      expect(actor?.isCast, isTrue);
+      expect(guestStar?.isCast, isTrue);
+      expect(item.people.single.name, '客串记录');
+      expect(item.people.single.isCast, isTrue);
+      expect(item.people.single.role, '客串角色');
+    });
   });
 
   test('parses intro and credits chapter markers', () {

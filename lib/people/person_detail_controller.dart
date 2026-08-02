@@ -60,7 +60,7 @@ class PersonDetailController extends ChangeNotifier {
   bool _disposed = false;
   int _personGeneration = 0;
   int _itemsGeneration = 0;
-  int _userDataGeneration = 0;
+  final Map<String, int> _userDataGenerations = {};
   int _nextStartIndex = 0;
 
   PersonDetailState get state => _state;
@@ -69,7 +69,7 @@ class PersonDetailController extends ChangeNotifier {
     if (_disposed) return;
     final personGeneration = ++_personGeneration;
     final itemsGeneration = ++_itemsGeneration;
-    _userDataGeneration++;
+    _userDataGenerations.clear();
     _nextStartIndex = 0;
     _setState(
       PersonDetailState(
@@ -94,7 +94,7 @@ class PersonDetailController extends ChangeNotifier {
   Future<void> selectFilter(PersonMediaFilter filter) async {
     if (_disposed || filter == _state.filter) return;
     final generation = ++_itemsGeneration;
-    _userDataGeneration++;
+    _userDataGenerations.clear();
     _nextStartIndex = 0;
     _setState(
       _copyState(
@@ -129,7 +129,7 @@ class PersonDetailController extends ChangeNotifier {
       return;
     }
     final generation = ++_itemsGeneration;
-    _userDataGeneration++;
+    _userDataGenerations.clear();
     _nextStartIndex = 0;
     _setState(
       _copyState(loadingFirstPage: true, clearItemsError: true, hasMore: true),
@@ -140,11 +140,12 @@ class PersonDetailController extends ChangeNotifier {
   Future<void> refreshItemUserData(String itemId) async {
     if (_disposed || !_state.items.any((item) => item.id == itemId)) return;
     final itemsGeneration = _itemsGeneration;
-    final userDataGeneration = ++_userDataGeneration;
+    final userDataGeneration = (_userDataGenerations[itemId] ?? 0) + 1;
+    _userDataGenerations[itemId] = userDataGeneration;
     try {
       final results = await _loadUserData([itemId]);
       if (!_acceptItems(itemsGeneration) ||
-          userDataGeneration != _userDataGeneration) {
+          userDataGeneration != _userDataGenerations[itemId]) {
         return;
       }
       final userData = results[itemId];
@@ -156,7 +157,7 @@ class PersonDetailController extends ChangeNotifier {
       _setState(_copyState(items: List.unmodifiable(items)));
     } catch (error) {
       if (!_acceptItems(itemsGeneration) ||
-          userDataGeneration != _userDataGeneration) {
+          userDataGeneration != _userDataGenerations[itemId]) {
         return;
       }
       rethrow;
@@ -270,7 +271,7 @@ class PersonDetailController extends ChangeNotifier {
     _disposed = true;
     _personGeneration++;
     _itemsGeneration++;
-    _userDataGeneration++;
+    _userDataGenerations.clear();
     super.dispose();
   }
 }

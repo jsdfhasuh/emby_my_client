@@ -18,8 +18,8 @@ void main() {
         home: Scaffold(
           body: CastRow(
             people: const [
-              EmbyPerson(id: 'person-1', name: '可点击演员', type: 'Actor'),
-              EmbyPerson(name: '无 ID 演员', type: 'GuestStar', role: '客串'),
+              EmbyPerson(id: 'person-1', name: '可点击演员', type: ' actor '),
+              EmbyPerson(name: '无 ID 演员', type: 'gueststar', role: '客串'),
               EmbyPerson(id: 'director-1', name: '导演', type: 'Director'),
             ],
             imageRequestFor: (_) => null,

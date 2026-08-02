@@ -99,7 +99,10 @@ class EmbyPerson {
   final String? role;
   final String? primaryImageTag;
 
-  bool get isCast => type == 'Actor' || type == 'GuestStar';
+  bool get isCast {
+    final normalizedType = type.trim().toLowerCase();
+    return normalizedType == 'actor' || normalizedType == 'gueststar';
+  }
 
   bool get isNavigable => id != null && id!.isNotEmpty;
 
@@ -337,12 +340,16 @@ List<EmbyPerson> _parsePeople(dynamic value) {
 
 EmbyPerson _mergePerson(EmbyPerson first, EmbyPerson later) {
   final preferred = !first.isCast && later.isCast ? later : first;
+  final fallback = identical(preferred, first) ? later : first;
+  final role =
+      preferred.role ??
+      (preferred.isCast && !fallback.isCast ? null : fallback.role);
   return EmbyPerson(
     id: first.id,
     name: preferred.name,
     type: preferred.type,
-    role: first.role ?? later.role,
-    primaryImageTag: first.primaryImageTag ?? later.primaryImageTag,
+    role: role,
+    primaryImageTag: preferred.primaryImageTag ?? fallback.primaryImageTag,
   );
 }
 

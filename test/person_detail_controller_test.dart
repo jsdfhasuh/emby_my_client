@@ -320,6 +320,47 @@ void main() {
     expect(controller.state.items.single.userData.isPlayed, isFalse);
   });
 
+  test(
+    'concurrent user data refreshes for different items both apply',
+    () async {
+      final firstResult = Completer<Map<String, EmbyUserData>>();
+      final secondResult = Completer<Map<String, EmbyUserData>>();
+      final controller = PersonDetailController(
+        personId: 'person-1',
+        loadPerson: (_) async => _person,
+        loadItems:
+            ({
+              required personId,
+              startIndex = 0,
+              limit = 60,
+              filter = PersonMediaFilter.all,
+            }) async => EmbyItemPage(
+              items: [_item('movie-1'), _item('movie-2')],
+              totalRecordCount: 2,
+            ),
+        loadUserData: (ids) => switch (ids.single) {
+          'movie-1' => firstResult.future,
+          'movie-2' => secondResult.future,
+          final id => throw StateError('Unexpected item ID: $id'),
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+
+      final firstRefresh = controller.refreshItemUserData('movie-1');
+      final secondRefresh = controller.refreshItemUserData('movie-2');
+      secondResult.complete({'movie-2': const EmbyUserData(isFavorite: true)});
+      await secondRefresh;
+      firstResult.complete({'movie-1': const EmbyUserData(isPlayed: true)});
+      await firstRefresh;
+
+      expect(controller.state.items[0].userData.isPlayed, isTrue);
+      expect(controller.state.items[0].userData.isFavorite, isFalse);
+      expect(controller.state.items[1].userData.isPlayed, isFalse);
+      expect(controller.state.items[1].userData.isFavorite, isTrue);
+    },
+  );
+
   test('late requests do not notify listeners after disposal', () async {
     final personResult = Completer<EmbyItem>();
     final itemsResult = Completer<EmbyItemPage>();
