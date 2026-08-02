@@ -770,3 +770,19 @@ Moonfin-Core 使用 GPL v2。本功能只参考其公开 Emby API 使用方式�
 - 位置提示只接入实际媒体项目网格，未接入媒体库根目录、分组网格、图片库或搜索页。
 - 未创建逐项 `GlobalKey`，未加载完整媒体库，未实现可拖动滚动条。
 - 未增加 `NameStartsWith`、`NameLessThan` 或 `# / A-Z` 导航状态。
+
+2026-08-02 审查修正：
+
+- 媒体网格和 `SliverChildBuilderDelegate` 在 `_buildMediaGrid` 的布局回调外创建；
+  `SliverLayoutBuilder` 只报告约束并复用同一个网格实例，连续滚动不再替换 delegate
+  或重建同一批可见海报卡片。
+- 本地媒体筛选完成后的总数直接使用传入网格的 `items.length`；位置布局回调不再读取
+  `_displayedItems`，两千项本地数据下每次位置计算保持 O(1)。
+- 实时刷新恢复 `jumpTo` 期间抑制位置通知，并在恢复完成后清空位置状态；程序化恢复
+  不显示浮层，下一次用户主动滚动才重新显示。
+- 补充连续小幅滚动的网格/delegate/卡片复用测试、两千项本地筛选的常量时间布局测试，
+  以及实时刷新保留滚动位置且浮层保持隐藏的测试；既有位置、分页、旋转和 700 毫秒
+  淡出测试继续覆盖。
+- `dart format lib test`、`flutter analyze`、248 项全量 `flutter test` 和
+  `git diff --check` 通过；分 ABI Debug APK 构建生成 armeabi-v7a、arm64-v8a 和
+  x86_64 三个产物。

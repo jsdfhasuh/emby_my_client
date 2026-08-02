@@ -530,6 +530,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   int? _totalCount;
   int _generation = 0;
   int _positionGeneration = 0;
+  bool _suppressPositionNotifications = false;
   Object? _error;
   _LibrarySection _section = _LibrarySection.videos;
   _LibraryMediaFilter _filter = _LibraryMediaFilter.all;
@@ -549,11 +550,6 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   List<EmbyItem> get _playableItems =>
       _displayedItems.where((item) => item.isPlayable).toList(growable: false);
-
-  int? get _positionTotalCount {
-    if (_filter == _LibraryMediaFilter.all) return _totalCount;
-    return !_hasMore && !_loading ? _displayedItems.length : null;
-  }
 
   String get _emptyTitle => widget._facet == null
       ? _section.emptyTitle
@@ -609,7 +605,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   bool _onScrollNotification(ScrollNotification notification) {
-    if (!_positionEnabled ||
+    if (_suppressPositionNotifications ||
+        !_positionEnabled ||
         notification.depth != 0 ||
         notification.metrics.axis != Axis.vertical) {
       return false;
@@ -815,7 +812,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         final offset = previousOffset
             .clamp(0.0, _controller.position.maxScrollExtent)
             .toDouble();
-        _controller.jumpTo(offset);
+        _suppressPositionNotifications = true;
+        try {
+          _controller.jumpTo(offset);
+        } finally {
+          _suppressPositionNotifications = false;
+          _clearPosition();
+        }
       });
     }
   }
@@ -1166,6 +1169,24 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Widget _buildMediaGrid(List<EmbyItem> items) {
+    final positionTotalCount = _filter == _LibraryMediaFilter.all
+        ? _totalCount
+        : !_hasMore && !_loading
+        ? items.length
+        : null;
+    final grid = SliverGrid(
+      gridDelegate: libraryMediaGridGeometry,
+      delegate: SliverChildBuilderDelegate((context, index) {
+        final item = items[index];
+        return MediaPosterCard(
+          key: ValueKey('library-item-${item.id}'),
+          item: item,
+          width: double.infinity,
+          imageRequest: widget.api.imageRequest(item),
+          onTap: () => _open(item),
+        );
+      }, childCount: items.length),
+    );
     return SliverPadding(
       padding: libraryMediaGridGeometry.padding,
       sliver: SliverLayoutBuilder(
@@ -1174,22 +1195,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             _schedulePositionUpdate(
               constraints: constraints,
               loadedCount: items.length,
-              totalCount: _positionTotalCount,
+              totalCount: positionTotalCount,
             );
           }
-          return SliverGrid(
-            gridDelegate: libraryMediaGridGeometry,
-            delegate: SliverChildBuilderDelegate((context, index) {
-              final item = items[index];
-              return MediaPosterCard(
-                key: ValueKey('library-item-${item.id}'),
-                item: item,
-                width: double.infinity,
-                imageRequest: widget.api.imageRequest(item),
-                onTap: () => _open(item),
-              );
-            }, childCount: items.length),
-          );
+          return grid;
         },
       ),
     );

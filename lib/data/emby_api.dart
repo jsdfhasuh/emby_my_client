@@ -46,6 +46,7 @@ class EmbyApi {
     FutureOr<void> Function()? onSessionExpired,
     FutureOr<void> Function()? onRemoteCapabilitiesReported,
     FutureOr<void> Function()? onRealtimeConnected,
+    EmbySocketConnector? realtimeConnector,
   }) : _dio = dio ?? _createDio(session),
        _onSessionExpired = onSessionExpired,
        _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported,
@@ -61,6 +62,7 @@ class EmbyApi {
     sessionControl = EmbySessionService(dio: _dio, execute: _request);
     realtime = EmbyWebSocketClient(
       session,
+      connector: realtimeConnector,
       onConnected: _handleRealtimeConnected,
     );
   }

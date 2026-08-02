@@ -1,13 +1,107 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
+import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('small continuous scrolling reuses the grid and visible cards', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _pagedApi(starts: <int>[], totalCount: 120);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen(api: api, view: _library),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final position = tester
+        .state<ScrollableState>(_verticalScrollable())
+        .position;
+    position.jumpTo(300);
+    await tester.pump();
+
+    final gridFinder = find.byType(SliverGrid);
+    final initialGrid = tester.widget<SliverGrid>(gridFinder);
+    final initialDelegate = initialGrid.delegate;
+    final initialCards = <String, MediaPosterCard>{
+      for (final element in find.byType(MediaPosterCard).evaluate())
+        (element.widget as MediaPosterCard).item.id:
+            element.widget as MediaPosterCard,
+    };
+    expect(initialCards, isNotEmpty);
+
+    for (var step = 1; step <= 8; step++) {
+      position.jumpTo(300 + step * 0.5);
+      await tester.pump();
+      final currentGrid = tester.widget<SliverGrid>(gridFinder);
+      expect(identical(currentGrid, initialGrid), isTrue);
+      expect(identical(currentGrid.delegate, initialDelegate), isTrue);
+      for (final entry in initialCards.entries) {
+        final cardFinder = find.byKey(ValueKey('library-item-${entry.key}'));
+        expect(cardFinder, findsOneWidget);
+        expect(
+          identical(tester.widget<MediaPosterCard>(cardFinder), entry.value),
+          isTrue,
+        );
+      }
+    }
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
+  testWidgets('layout stays O(1) after filtering two thousand local items', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final counter = _ReadCounter();
+    final api = _CountingLibraryApi(itemCount: 2000, counter: counter);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen(api: api, view: _library),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
+    await tester.pumpAndSettle();
+
+    final position = tester
+        .state<ScrollableState>(_verticalScrollable())
+        .position;
+    position.jumpTo(300);
+    await tester.pump();
+    final readsAfterFilterBuild = counter.reads;
+    expect(readsAfterFilterBuild, greaterThanOrEqualTo(2000));
+
+    for (var step = 1; step <= 8; step++) {
+      position.jumpTo(300 + step * 0.5);
+      await tester.pump();
+    }
+    expect(counter.reads, readsAfterFilterBuild);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
   testWidgets(
     'reports server position continuously across pagination and resize',
     (tester) async {
@@ -184,6 +278,66 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await api.dispose();
   });
+
+  testWidgets('realtime position restoration keeps the overlay hidden', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final socket = _FakeEmbySocket();
+    final starts = <int>[];
+    final api = _pagedApi(
+      starts: starts,
+      totalCount: 120,
+      realtimeConnector: (_) async => socket,
+    );
+    await api.realtime.start();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen(api: api, view: _library),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final scrollable = _verticalScrollable();
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('library-item-item-70')),
+      700,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 700));
+    await tester.pump(const Duration(milliseconds: 180));
+    expect(_opacity(tester), 0);
+    final position = tester.state<ScrollableState>(scrollable).position;
+    final previousOffset = position.pixels;
+
+    socket.emitLibraryChanged();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+
+    expect(starts, [0, 60, 0, 60]);
+    expect(position.pixels, closeTo(previousOffset, 1));
+    expect(_opacity(tester), 0);
+    expect(find.byKey(const ValueKey('library-position-panel')), findsNothing);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(CustomScrollView)),
+    );
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    await tester.pump();
+    expect(_opacity(tester), 1);
+    await gesture.up();
+
+    await tester.runAsync(api.realtime.stop);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.runAsync(api.dispose);
+  });
 }
 
 EmbyApi _pagedApi({
@@ -191,11 +345,18 @@ EmbyApi _pagedApi({
   required int totalCount,
   bool includeStrm = false,
   List<RequestOptions>? requests,
+  EmbySocketConnector? realtimeConnector,
 }) {
   final dio = Dio()
     ..interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
+          if (options.path != '/Users/user-1/Items') {
+            handler.resolve(
+              Response<dynamic>(requestOptions: options, statusCode: 204),
+            );
+            return;
+          }
           requests?.add(options);
           final start = options.queryParameters['StartIndex'] as int? ?? 0;
           final limit = options.queryParameters['Limit'] as int? ?? 60;
@@ -220,7 +381,7 @@ EmbyApi _pagedApi({
         },
       ),
     );
-  return EmbyApi(_session, dio: dio);
+  return EmbyApi(_session, dio: dio, realtimeConnector: realtimeConnector);
 }
 
 EmbyApi _sectionApi() {
@@ -301,6 +462,90 @@ int _percentage(WidgetTester tester) {
       .widget<Text>(find.byKey(const ValueKey('library-position-percentage')))
       .data!;
   return int.parse(label.substring(0, label.length - 1));
+}
+
+class _ReadCounter {
+  int reads = 0;
+}
+
+class _CountingLibraryApi extends EmbyApi {
+  _CountingLibraryApi({required this.itemCount, required this.counter})
+    : super(_session, dio: Dio());
+
+  final int itemCount;
+  final _ReadCounter counter;
+
+  @override
+  Future<EmbyItemPage> getLibraryItems({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    LibraryBrowseOptions options = const LibraryBrowseOptions(),
+    String? genreId,
+    String? tagId,
+    bool favoritesFilter = false,
+    bool includeMediaSources = false,
+  }) async => EmbyItemPage(
+    items: [
+      for (var index = 0; index < itemCount; index++)
+        _CountingItem(index: index, counter: counter),
+    ],
+    totalRecordCount: itemCount,
+  );
+}
+
+class _CountingItem extends EmbyItem {
+  _CountingItem({required int index, required this.counter})
+    : _strm = index.isEven,
+      super(
+        id: 'counting-$index',
+        name: '计数项目 $index',
+        type: 'Movie',
+        mediaType: 'Video',
+        imageTags: const {},
+        backdropImageTags: const [],
+        genres: const [],
+        userData: const EmbyUserData(),
+      );
+
+  final bool _strm;
+  final _ReadCounter counter;
+
+  @override
+  bool get isStrm {
+    counter.reads++;
+    return _strm;
+  }
+}
+
+class _FakeEmbySocket implements EmbySocket {
+  final StreamController<dynamic> _messages =
+      StreamController<dynamic>.broadcast();
+  bool _closed = false;
+
+  @override
+  Stream<dynamic> get messages => _messages.stream;
+
+  void emitLibraryChanged() {
+    _messages.add(
+      jsonEncode({
+        'MessageType': 'LibraryChanged',
+        'Data': {
+          'ItemsUpdated': ['item-70'],
+        },
+      }),
+    );
+  }
+
+  @override
+  void add(String data) {}
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _messages.close();
+  }
 }
 
 const _library = EmbyItem(
