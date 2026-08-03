@@ -25,6 +25,7 @@ curl --fail --location --silent --show-error "$FORMULA_URL" --output "$formula_f
 printf '%s  %s\n' "$FORMULA_SHA256" "$formula_file" | shasum --algorithm 256 --check --strict
 grep -Fq "tag:      \"$SOURCE_TAG\"" "$formula_file"
 grep -Fq "revision: \"$SOURCE_REVISION\"" "$formula_file"
+grep -Fq "revision $FORMULA_REVISION" "$formula_file"
 
 # Homebrew rejects a standalone .rb path, so install the already-verified
 # Homebrew Core formula through an ephemeral local tap. No alternate ldid
