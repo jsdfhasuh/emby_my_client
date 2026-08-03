@@ -3,13 +3,20 @@ import 'package:flutter/material.dart';
 import '../data/emby_api.dart';
 import '../discovery/emby_server_discovery.dart';
 import '../models/discovered_server.dart';
+import '../platform/platform_capabilities.dart';
 import '../state/app_controller.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key, required this.controller, this.discovery});
+  const LoginScreen({
+    super.key,
+    required this.controller,
+    this.discovery,
+    this.capabilities,
+  });
 
   final AppController controller;
   final EmbyServerDiscovery? discovery;
+  final PlatformCapabilities? capabilities;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -22,6 +29,8 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   late final EmbyServerDiscovery _discovery =
       widget.discovery ?? EmbyServerDiscovery();
+  late final PlatformCapabilities _capabilities =
+      widget.capabilities ?? PlatformCapabilities.current();
   List<DiscoveredServer> _discoveredServers = const [];
   bool _obscurePassword = true;
   bool _isSubmitting = false;
@@ -32,7 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    _startDiscovery();
+    if (_capabilities.supportsLanUdpDiscovery) _startDiscovery();
   }
 
   @override
@@ -239,6 +248,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Widget _buildDiscoverySection() {
+    if (!_capabilities.supportsLanUdpDiscovery) return const SizedBox.shrink();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

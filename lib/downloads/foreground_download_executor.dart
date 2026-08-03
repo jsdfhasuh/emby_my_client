@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -17,6 +16,7 @@ import 'download_preflight.dart';
 import 'download_repository.dart';
 import 'download_service.dart';
 import 'download_settings.dart';
+import '../platform/platform_capabilities.dart';
 
 const _notificationServiceId = 8101;
 const _pauseButtonId = 'pause_current';
@@ -40,11 +40,20 @@ void startDownloadForegroundService() {
 }
 
 class ForegroundDownloadExecutor implements DownloadExecutor {
-  ForegroundDownloadExecutor() {
-    FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+  ForegroundDownloadExecutor({PlatformCapabilities? capabilities})
+    : _capabilities = capabilities ?? PlatformCapabilities.current() {
+    if (_capabilities.supportsAndroidForegroundDownloadExecutor) {
+      FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+      _callbackRegistered = true;
+    }
   }
 
-  static void initializePlatform() {
+  final PlatformCapabilities _capabilities;
+  bool _callbackRegistered = false;
+
+  static void initializePlatform([PlatformCapabilities? capabilities]) {
+    final resolved = capabilities ?? PlatformCapabilities.current();
+    if (!resolved.supportsAndroidForegroundDownloadExecutor) return;
     FlutterForegroundTask.initCommunicationPort();
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
@@ -71,11 +80,14 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
 
   @override
   Future<bool> get isRunning async =>
-      Platform.isAndroid && await FlutterForegroundTask.isRunningService;
+      _capabilities.supportsAndroidForegroundDownloadExecutor &&
+      await FlutterForegroundTask.isRunningService;
 
   @override
   Future<void> start() async {
-    if (_disposed || !Platform.isAndroid) return;
+    if (_disposed || !_capabilities.supportsAndroidForegroundDownloadExecutor) {
+      return;
+    }
     if (await FlutterForegroundTask.isRunningService) {
       await send(DownloadExecutorCommand.wake);
       return;
@@ -103,7 +115,9 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
 
   @override
   Future<void> send(DownloadExecutorCommand command, {String? taskId}) async {
-    if (_disposed || !Platform.isAndroid) return;
+    if (_disposed || !_capabilities.supportsAndroidForegroundDownloadExecutor) {
+      return;
+    }
     if (!await FlutterForegroundTask.isRunningService) return;
     final data = <String, Object>{'command': command.name};
     if (taskId != null) data['taskId'] = taskId;
@@ -112,7 +126,8 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
 
   @override
   Future<void> stop() async {
-    if (!Platform.isAndroid || !await FlutterForegroundTask.isRunningService) {
+    if (!_capabilities.supportsAndroidForegroundDownloadExecutor ||
+        !await FlutterForegroundTask.isRunningService) {
       return;
     }
     final result = await FlutterForegroundTask.stopService();
@@ -140,7 +155,10 @@ class ForegroundDownloadExecutor implements DownloadExecutor {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    if (_callbackRegistered) {
+      FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+      _callbackRegistered = false;
+    }
     await _changes.close();
   }
 

@@ -14,6 +14,7 @@ import '../downloads/download_service.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_playback_reporter.dart';
 import '../offline/offline_playback_resolver.dart';
+import '../platform/platform_capabilities.dart';
 import '../playback/emby_stream_resolver.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_engine.dart';
@@ -33,6 +34,7 @@ class PlayerScreen extends StatefulWidget {
     this.queue,
     this.offlineItem,
     this.downloads,
+    this.capabilities,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -43,6 +45,7 @@ class PlayerScreen extends StatefulWidget {
   final PlaybackQueue? queue;
   final OfflineMediaItem? offlineItem;
   final DownloadService? downloads;
+  final PlatformCapabilities? capabilities;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -53,6 +56,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   late Player _player;
   late VideoController _videoController;
   late final PictureInPictureController _pipController;
+  late final PlatformCapabilities _capabilities =
+      widget.capabilities ?? PlatformCapabilities.current();
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
   final PlaybackSettingsStore _settingsStore = PlaybackSettingsStore();
@@ -105,6 +110,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _createPlayer();
     _pipController = PictureInPictureController(
+      capabilities: _capabilities,
       onToggle: _togglePlay,
       onClose: () {
         if (mounted) Navigator.of(context).maybePop();
@@ -1561,11 +1567,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                       ),
                     ),
                   const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: '画中画',
-                    onPressed: _enterPictureInPicture,
-                    icon: const Icon(Icons.picture_in_picture_alt),
-                  ),
+                  if (_capabilities.supportsPictureInPicture)
+                    IconButton(
+                      tooltip: '画中画',
+                      onPressed: _enterPictureInPicture,
+                      icon: const Icon(Icons.picture_in_picture_alt),
+                    ),
                   IconButton(
                     tooltip: '播放设置',
                     onPressed: _showPlaybackOptions,

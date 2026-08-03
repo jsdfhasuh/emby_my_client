@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/widgets.dart';
 
@@ -20,6 +19,7 @@ import '../downloads/download_settings.dart';
 import '../downloads/foreground_download_executor.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
+import '../platform/platform_capabilities.dart';
 import '../settings/library_category_settings.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
@@ -29,10 +29,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     ClientRegistry<EmbyApi>? clients,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
     AccountDataCleanup? accountDataCleanup,
-  }) : _store = store ?? SessionStore(),
+    PlatformCapabilities? capabilities,
+  }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
        _accountDataCleanup = accountDataCleanup,
+       _capabilities = capabilities ?? PlatformCapabilities.current(),
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -41,6 +43,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   final SessionStore _store;
+  final PlatformCapabilities _capabilities;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -382,7 +385,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       assetService: EmbyDownloadAssetService(api),
       preflight: PlatformDownloadPreflight(),
       settingsStore: SharedPreferencesDownloadSettingsStore(),
-      executor: Platform.isAndroid ? ForegroundDownloadExecutor() : null,
+      executor: _capabilities.supportsAndroidForegroundDownloadExecutor
+          ? ForegroundDownloadExecutor(capabilities: _capabilities)
+          : null,
     );
     try {
       await service.initialize();
@@ -414,8 +419,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       if (requireExecutorStopped && !stopped) {
         throw StateError('Android 下载服务仍在运行，请稍后重试');
       }
-    } else if (service == null && stopExecutor && Platform.isAndroid) {
-      final executor = ForegroundDownloadExecutor();
+    } else if (service == null &&
+        stopExecutor &&
+        _capabilities.supportsAndroidForegroundDownloadExecutor) {
+      final executor = ForegroundDownloadExecutor(capabilities: _capabilities);
       try {
         await executor.stop();
         if (requireExecutorStopped && await executor.isRunning) {
@@ -441,6 +448,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         if (realtime != null) unawaited(realtime.setForeground(true));
+        if (_downloads != null) unawaited(_downloads!.refresh());
         unawaited(_syncOfflineProgress());
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:

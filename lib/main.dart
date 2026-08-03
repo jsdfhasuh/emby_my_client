@@ -6,15 +6,17 @@ import 'package:media_kit/media_kit.dart';
 import 'app.dart';
 import 'core/diagnostic_log.dart';
 import 'downloads/foreground_download_executor.dart';
+import 'platform/platform_capabilities.dart';
 import 'state/app_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
-  ForegroundDownloadExecutor.initializePlatform();
+  final capabilities = PlatformCapabilities.current();
+  ForegroundDownloadExecutor.initializePlatform(capabilities);
   await DiagnosticLog.instance.initialize();
 
-  final controller = AppController();
+  final controller = AppController(capabilities: capabilities);
   runApp(EmbyClientApp(controller: controller));
   unawaited(controller.initialize());
 }

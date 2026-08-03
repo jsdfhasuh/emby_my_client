@@ -1,5 +1,6 @@
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
 import 'package:emby_my_client/models/discovered_server.dart';
+import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:emby_my_client/ui/login_screen.dart';
 import 'package:flutter/material.dart';
@@ -18,6 +19,7 @@ void main() {
         home: LoginScreen(
           controller: AppController(),
           discovery: _FakeDiscovery(),
+          capabilities: PlatformCapabilities.android,
         ),
       ),
     );
