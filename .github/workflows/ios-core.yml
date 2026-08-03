@@ -1,0 +1,221 @@
+name: iOS Core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - agent/ios-core-adaptation
+  pull_request:
+    paths:
+      - '.metadata'
+      - 'lib/**'
+      - 'test/**'
+      - 'ios/**'
+      - 'scripts/ios/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'Gemfile'
+      - 'Gemfile.lock'
+      - '.github/workflows/ios-core.yml'
+      - 'docs/plans/**'
+      - 'docs/acceptance/**'
+
+concurrency:
+  group: ios-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_REVISION: 67323de285b00232883f53b84095eb72be97d35c
+  DART_VERSION: 3.10.8
+  COCOAPODS_VERSION: 1.16.2
+  LDID_VERSION: 2.1.5
+
+jobs:
+  quality-and-android:
+    name: Quality and Android
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install fixed Flutter revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter_dir="$RUNNER_TEMP/flutter"
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git "$flutter_dir"
+          git -C "$flutter_dir" fetch --depth=1 origin "$FLUTTER_REVISION"
+          git -C "$flutter_dir" checkout --detach "$FLUTTER_REVISION"
+          test "$(git -C "$flutter_dir" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          echo "$flutter_dir/bin" >> "$GITHUB_PATH"
+          echo "FLUTTER_ROOT=$flutter_dir" >> "$GITHUB_ENV"
+          "$flutter_dir/bin/flutter" precache --android
+
+      - name: Report fixed toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter --version
+          dart --version
+          test "$(git -C "$FLUTTER_ROOT" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          dart_version="$(dart --version 2>&1)"
+          case "$dart_version" in
+            *"$DART_VERSION"*) ;;
+            *) echo "Expected Dart $DART_VERSION, got: $dart_version" >&2; exit 1 ;;
+          esac
+
+      - name: Resolve Dart dependencies without lock drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build Android debug APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build apk --debug
+          flutter build apk --debug --split-per-abi
+
+      - name: Upload Android APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apks-${{ github.run_number }}
+          if-no-files-found: error
+          path: build/app/outputs/flutter-apk/*.apk
+
+  ios-device-build:
+    name: iPadOS device IPA
+    needs: quality-and-android
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_app='/Applications/Xcode_16.4.app'
+          test -d "$xcode_app"
+          sudo xcode-select --switch "$xcode_app"
+          xcodebuild -version
+          test "$(xcodebuild -version | awk 'NR == 1 { print $2 }')" = '16.4'
+
+      - name: Install fixed Flutter revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter_dir="$RUNNER_TEMP/flutter"
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git "$flutter_dir"
+          git -C "$flutter_dir" fetch --depth=1 origin "$FLUTTER_REVISION"
+          git -C "$flutter_dir" checkout --detach "$FLUTTER_REVISION"
+          test "$(git -C "$flutter_dir" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          echo "$flutter_dir/bin" >> "$GITHUB_PATH"
+          echo "FLUTTER_ROOT=$flutter_dir" >> "$GITHUB_ENV"
+          "$flutter_dir/bin/flutter" precache --ios
+
+      - name: Set up Ruby and locked CocoaPods
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.6'
+          bundler: '2.5.22'
+          bundler-cache: true
+
+      - name: Report Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter --version
+          dart --version
+          xcodebuild -version
+          sw_vers
+          ruby --version
+          bundle exec pod --version
+          test "$(bundle exec pod --version)" = "$COCOAPODS_VERSION"
+          test "$(git -C "$FLUTTER_ROOT" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          dart_version="$(dart --version 2>&1)"
+          case "$dart_version" in
+            *"$DART_VERSION"*) ;;
+            *) echo "Expected Dart $DART_VERSION, got: $dart_version" >&2; exit 1 ;;
+          esac
+
+      - name: Resolve Dart dependencies without lock drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+
+      - name: Install CocoaPods with deployment lock
+        working-directory: ios
+        run: bundle exec pod install --deployment
+
+      - name: Check CocoaPods lock drift
+        run: git diff --exit-code -- ios/Podfile.lock
+
+      - name: Validate iPad project settings and entitlements
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ios/validate_project_settings.sh
+          bash scripts/ios/validate_entitlements.sh
+
+      - name: Build unsigned device Runner.app
+        run: flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
+
+      - name: Install and verify Homebrew Core ldid 2.1.5
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ios/install_ldid.sh
+          bash scripts/ios/verify_ldid.sh
+
+      - name: Create and verify TrollStore IPA
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: bash scripts/ios/build_trollstore_ipa.sh
+
+      - name: Upload IPA and SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-core-ipa-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            build/ios/artifacts/*.ipa
+            build/ios/artifacts/*.ipa.sha256
+
+      - name: Upload dSYM
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-core-dsym-${{ github.run_number }}
+          if-no-files-found: error
+          path: build/ios/artifacts/*.dSYM.zip
+
+      - name: Upload diagnostics and verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-core-diagnostics-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            build/ios/artifacts/*-diagnostics-*.zip
+            build/ios/artifacts/*.txt
+            build/ios/artifacts/*.plist
+            build/ios/artifacts/entitlements-fakesign/**
+            build/ios/artifacts/entitlements-final/**
