@@ -163,7 +163,11 @@ jobs:
 
       - name: Install CocoaPods with deployment lock
         working-directory: ios
-        run: bundle exec pod install --deployment
+        run: |
+          set -euo pipefail
+          bundle exec pod install --no-repo-update
+          git diff -- ios/Podfile.lock
+          exit 1
 
       - name: Check CocoaPods lock drift
         run: git diff --exit-code -- ios/Podfile.lock
