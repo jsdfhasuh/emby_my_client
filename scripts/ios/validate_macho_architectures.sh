@@ -35,7 +35,15 @@ while IFS= read -r -d '' path; do
         continue
       }
       output="$output$path: $info\n"
-      if ! lipo -verify_arch arm64 "$path" >/dev/null 2>&1; then
+      architectures="$(printf '%s\n' "$info" | sed -E 's/^.*(architecture|are): //')"
+      has_arm64=false
+      for architecture in $architectures; do
+        if [[ "$architecture" == 'arm64' ]]; then
+          has_arm64=true
+          break
+        fi
+      done
+      if [[ "$has_arm64" != true ]]; then
         echo "Mach-O is not arm64: $path ($info)" >&2
         failed=1
       fi
