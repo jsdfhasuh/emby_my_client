@@ -1,11 +1,13 @@
 # iOS Core 适配 Goal
 
-- 状态：待实施；本文作为首轮 iOS 适配的范围基线
+- 状态：待实施；审查修订版 v2
 - 日期：2026-08-03
-- 基线分支：`main`
-- 基线提交：`9dccdead0f477d95abbcb19711a9a2908e1f80eb`
-- 目标设备：支持 TrollStore 的 iPad 真机
-- 构建环境：GitHub Actions macOS Runner；本地没有 macOS/Xcode
+- 实施基线：包含本 Goal 最新修订版本的 `main` HEAD
+- 实际基线 SHA：在创建实现分支时记录到 PR 描述和验收文档，不在本文件中写死
+- 建议实现分支：`agent/ios-core-adaptation`
+- 首轮目标设备：支持 TrollStore 的 iPad 真机
+- 首轮设备族：仅 iPad（`TARGETED_DEVICE_FAMILY = 2`）
+- 构建环境：GitHub Actions；本地没有 macOS/Xcode
 
 ## 1. 背景
 
@@ -13,25 +15,66 @@
 
 仓库当前只有 Android 平台工程，`.metadata` 尚未登记 iOS 平台，`pubspec.yaml` 也只引入了 `media_kit_libs_android_video`。此外，画中画、前台下载服务、局域网发现和设备标识中存在 Android 专用行为。
 
-本次不追求一次完成全部 iOS 能力，而是先交付一个可真实使用和持续验证的 **iOS Core** 版本。
+本次不追求一次完成全部 iOS 能力，而是先交付一个可以真实安装、持续构建和进行真机验证的 **iPadOS Core** 版本。
 
 ## 2. 总目标
 
-在不破坏现有 Android 功能的前提下，为项目加入受控的 iOS 平台支持，并通过 GitHub Actions 持续生成可供 TrollStore 真机安装验证的 IPA。
+在不破坏现有 Android 功能的前提下，为项目加入受控的 iPadOS 平台支持，并通过 GitHub Actions 持续生成可供 TrollStore 真机安装验证的 IPA。
 
-首轮完成后，iPad 应能够：
+首轮完成后，目标 iPad 应能够：
 
-1. 安装并正常启动应用；
+1. 安装、覆盖升级并正常启动应用；
 2. 手动输入 Emby 服务器地址并登录；
 3. 浏览首页、媒体库、搜索、详情和人物作品；
 4. 在线播放视频，完成暂停、拖动、续播、音轨和字幕选择；
 5. 在应用前台完成离线下载，并可离线播放；
 6. 重启应用后恢复登录会话；
-7. 在诊断日志中提供足够的信息定位真机问题。
+7. 在诊断日志和构建 Artifact 中提供足够的信息定位真机问题。
 
-## 3. 成功标准
+## 3. 状态定义与责任边界
 
-### 3.1 自动化构建门禁
+### 3.1 `IMPLEMENTATION_COMPLETE`
+
+由实现者完成并声明，必须满足：
+
+- 代码、自动测试、Android 回归和 iOS 构建全部通过；
+- GitHub Actions 可生成 TrollStore 测试 IPA；
+- 已提供真机验收清单、安装说明和诊断 Artifact；
+- 尚未要求实现者声称真实 iPad 功能已经通过。
+
+### 3.2 `ACCEPTED`
+
+由设备所有者在目标 iPad 上完成验收后确认，必须满足：
+
+- IPA 可以安装、启动和覆盖升级；
+- 登录、浏览、播放、会话恢复、前台下载和离线播放通过；
+- 验收结果已经写入仓库；
+- 失败项已经修复，或被明确记录为本 Goal 允许的限制。
+
+只有进入 `ACCEPTED`，本 Goal 才能关闭。README 也只有在 `ACCEPTED` 后才能写入“实验性 iPadOS 支持”，不得提前泛化为“已支持 iOS”。
+
+## 4. 固定工具链
+
+首轮实现使用以下固定基线：
+
+- Flutter revision：`67323de285b00232883f53b84095eb72be97d35c`
+- Dart SDK：`3.10.8`
+- Linux 门禁 Runner：`ubuntu-24.04`
+- iOS 构建 Runner：`macos-15`
+- 初始 Xcode 目标：`16.4`
+- 初始 CocoaPods 目标：`1.16.2`
+
+要求：
+
+- 工作流不得仅使用会长期漂移的 `stable`、`macos-latest` 或未固定版本的 CocoaPods；
+- CI 必须输出 Flutter、Dart、Xcode、macOS、Ruby 和 CocoaPods 的实际版本；
+- CocoaPods 应通过 `Gemfile` / Bundler 或同等可复现方式固定；
+- 如果 GitHub Runner 不再提供指定 Xcode，必须先更新本 Goal 或在 PR 中给出兼容性证据，不得静默切换；
+- 生成 `ios/` 工程时必须使用上述 Flutter revision，避免模板漂移。
+
+## 5. 成功标准
+
+### 5.1 自动化门禁
 
 以下项目必须全部通过：
 
@@ -40,43 +83,64 @@
 - `flutter test`
 - 现有 Android Debug APK 构建继续成功；如当前流程包含分 ABI 构建，必须继续保留
 - `flutter build ios --release --no-codesign` 成功
-- GitHub Actions 生成包含 `Payload/Runner.app` 的 IPA Artifact
-- IPA 内必须是设备版 `arm64` 应用，而不是模拟器产物
-- 工作流不得依赖 Apple 开发者证书、私钥或手工上传的签名 Secret
-- 工作流使用明确固定的 Flutter 版本，不使用长期漂移的 `stable` 作为唯一版本约束
+- GitHub Actions 生成标准 `Payload/Runner.app` 结构的 IPA
+- IPA 内必须是设备版 `arm64` 应用，不得上传模拟器产物
+- 工作流不得依赖 Apple 开发者证书、私钥、Provisioning Profile 或手工签名 Secret
+- 最终 Artifact 必须包含 IPA、SHA-256、dSYM、版本信息、Info.plist 摘要、entitlement dump 和架构检查结果
 
-### 3.2 TrollStore 真机验收
+### 5.2 TrollStore 真机验收
 
 必须在真实 iPad 上完成并记录结果：
 
 - IPA 可由 TrollStore 安装、覆盖升级和启动
 - 冷启动无崩溃、白屏或无限加载
 - Keychain 写入真实生效；登录后杀掉应用并重新启动仍可恢复会话
+- 覆盖升级后 Bundle ID、Keychain access group、数据库和离线记录保持连续
+- 首次连接局域网服务器时，本地网络授权流程可理解且可恢复
+- 拒绝本地网络权限时，应用不得无限加载；重新授权后可继续使用
 - 可通过局域网 HTTP 地址手动登录
 - 可通过正常证书的 HTTPS 地址登录
 - 首页、媒体库、搜索和详情页图片可加载
-- DirectPlay、DirectStream 或 Transcode 至少有一条实际播放路径可用
+- H.264 + AAC 的 MP4 至少完成 DirectPlay 或 DirectStream
+- 通过降低最大码率等可控方式至少完成一次 Transcode 播放
 - 播放器可以暂停、继续、拖动并正确回报进度
 - 内嵌音轨、内嵌字幕和外挂字幕分别完成至少一次验证
 - 亮度和音量手势不会导致崩溃；若插件在目标系统不支持，必须安全降级
 - 应用前台下载、暂停、继续、删除和离线播放可用
 - 切换前后台后，播放器、WebSocket 和下载状态不会进入不可恢复状态
 
-只有自动化构建和真机验收同时通过，README 才能把 iOS 标记为“已支持”。
+DirectStream 可根据媒体和服务器条件标记为“不适用”，但不能只用 Transcode 成功来代替 DirectPlay/DirectStream 验收。
 
-## 4. 首轮范围
+## 6. 首轮范围
 
-### 4.1 加入 iOS 工程
+### 6.1 建立受审查的 iOS 工程
 
-- 从基线提交创建独立实现分支，建议命名：`agent/ios-core-adaptation`
-- 使用与项目固定版本一致的 Flutter SDK 生成 iOS 平台工程
-- 允许使用 `flutter create --platforms=ios .`，但必须逐项审查 diff
-- 不得接受模板对 Android、Dart 业务代码、包名或已有配置的无关覆盖
-- 将 iOS Deployment Target 统一设置为 `13.0` 或插件要求的更高版本；若提高，必须在提交说明中给出原因
-- iOS Bundle Identifier 使用稳定的非 `com.example` 标识；默认采用 `com.jsdfhasuh.embyclient`
+- 从包含本 Goal 最新版本的 `main` HEAD 创建实现分支
+- 在首个实现提交或 PR 描述中记录实际基线 SHA
+- 使用固定 Flutter revision 运行 `flutter create --platforms=ios .`
+- 逐项审查生成 diff，不得接受模板对 Android、Dart 业务代码、包名或已有配置的无关覆盖
+- iOS Deployment Target 统一设置为 `13.0`；若插件要求提高，必须给出证据并更新验收设备要求
+- Bundle Identifier 固定为 `com.jsdfhasuh.embyclient`
+- 设备族首轮固定为 iPad-only：`TARGETED_DEVICE_FAMILY = 2`
 - 保留应用现有中文名称和深色主题，不在本里程碑重做视觉设计
 
-### 4.2 播放器原生依赖
+同时修复 `.metadata`：
+
+- 正确登记 iOS migration platform；
+- 审查并移除当前遗留的 `ios/Runner.xcodeproj/project.pbxproj` unmanaged 标记；
+- 如果确有必要保留 unmanaged 项，必须写明原因、影响和后续 Flutter 升级责任。
+
+### 6.2 iPad 全屏与方向策略
+
+现有播放器依赖 `SystemChrome.setPreferredOrientations` 在进入播放时切换横屏。首轮为保证该契约可验证：
+
+- iPadOS Core 设置 `UIRequiresFullScreen = true`；
+- `UISupportedInterfaceOrientations~ipad` 应允许应用所需的竖屏和横屏方向；
+- 首轮明确不支持 Split View、Slide Over、Stage Manager 可调整窗口或其他多任务窗口模式；
+- 播放器进入横屏、退出后恢复应用方向必须完成真机验收；
+- `UIRequiresFullScreen` 仅作为当前 TrollStore Core 的过渡策略，后续正式多任务适配另立 Goal。
+
+### 6.3 播放器原生依赖
 
 将 Android 专用依赖：
 
@@ -84,10 +148,12 @@
 media_kit_libs_android_video
 ```
 
-替换为官方跨平台视频依赖：
+替换为跨平台依赖，并在锁文件中固定解析结果：
 
 ```yaml
-media_kit_libs_video
+media_kit: ^1.2.6
+media_kit_video: ^2.0.1
+media_kit_libs_video: ^1.0.7
 ```
 
 要求：
@@ -97,19 +163,21 @@ media_kit_libs_video
 - 继续复用现有 `PlaybackEngine`、`PlaybackController` 和 Emby 播放协商，不在首轮引入第二套 AVPlayer 播放架构
 - iOS 真机重点验证 HTTP Header 鉴权、音轨、字幕、外部字幕、倍速、音频延迟和字幕延迟
 - 原生 mpv 属性在 iOS 不支持时必须安全失败，不得导致整个播放会话退出
+- 不允许为了通过 iOS 构建而删除现有 Android 播放能力
 
-### 4.3 平台能力边界
+### 6.4 平台能力边界
 
-新增一个轻量、可测试的平台能力层，至少表达：
+新增一个轻量、可注入、可测试的平台能力层，至少表达：
 
 - 当前平台是否支持 Android 前台下载执行器
 - 当前平台是否启用局域网 UDP 自动发现
 - 当前平台是否支持现有画中画实现
 - 新设备 ID 使用的平台名称
+- 当前平台的目标设备族和已知限制
 
-避免让 UI 到处新增零散的 `Platform.isAndroid` / `Platform.isIOS` 判断。底层确实只属于单个平台的代码仍可保留平台判断。
+避免让 UI 和业务层到处新增零散的 `Platform.isAndroid` / `Platform.isIOS` 判断。底层确实只属于单个平台的代码仍可保留最小平台判断。
 
-### 4.4 Android 前台下载隔离
+### 6.5 Android 前台下载隔离
 
 当前 Android 前台下载服务必须继续工作，但 iOS 不得初始化或调用 Android 服务流程。
 
@@ -118,22 +186,24 @@ media_kit_libs_video
 - `ForegroundDownloadExecutor.initializePlatform()` 只在 Android 执行
 - `ForegroundDownloadExecutor` 只在 Android 注入 `DownloadService`
 - iOS 使用现有应用内下载执行流程，定义为“前台下载”
-- iOS 进入后台后允许系统挂起下载；回到前台后必须能够刷新状态并继续
+- 应用被系统挂起但进程仍保留时，回到前台后刷新状态并继续或允许继续
+- 应用进程被终止后，未完成任务恢复为 `paused/processInterrupted` 或等价明确状态，由用户手动继续
+- 不要求进程终止后自动继续下载
 - 不得伪装成已经支持可靠的 iOS 后台持续下载
 
-### 4.5 画中画安全降级
+### 6.6 画中画安全降级
 
 现有 `emby_my_client/picture_in_picture` MethodChannel 只有 Android 原生实现。首轮不实现 iOS 画中画，但必须消除缺失插件导致的异常。
 
 要求：
 
 - iOS 上 `isSupported` 稳定返回 `false`
-- `updatePlaying` 在原生通道不存在时必须安全 no-op
+- `updatePlaying` 在原生通道不存在时安全 no-op
 - 不得产生未处理的 `MissingPluginException`
 - iOS UI 隐藏或禁用画中画入口
 - Android 现有画中画行为和控制按钮保持不变
 
-### 4.6 局域网访问与服务器发现
+### 6.7 局域网访问与服务器发现
 
 首轮必须支持手动输入局域网服务器地址，但暂不要求 iOS UDP 自动发现。
 
@@ -146,16 +216,21 @@ media_kit_libs_video
 - Android 保持现有 UDP 自动发现
 - iOS 首轮关闭自动广播扫描，登录页继续允许手动输入地址
 - iOS 自动发现作为后续独立里程碑，不在本轮申请或依赖 multicast entitlement
+- 本地网络权限被拒绝时必须显示可恢复错误，不得无限加载或反复弹出无意义请求
 
-### 4.7 会话、Keychain 与设备标识
+### 6.8 会话、Keychain 与设备标识
 
-- 为 `flutter_secure_storage` 配置 iOS Debug/Profile/Release 所需的 Keychain entitlement
-- 真机验证写入、读取、退出登录清理和覆盖安装后的行为
+- 为 `flutter_secure_storage` 配置 Debug/Profile/Release 所需的 iOS Keychain entitlement
+- Keychain access group 必须与稳定 Bundle ID 和最终 fakesign entitlement 保持一致
+- 不硬编码未知 Apple Team ID，不依赖不存在的 Provisioning Profile
+- 真机验证写入、读取、退出登录清理、杀进程恢复和覆盖安装后的行为
 - 已存在的 Android 设备 ID 必须保持不变
-- 新生成设备 ID 不再硬编码 `emby-android-`；根据平台生成 `emby-android-` 或 `emby-ios-`，或使用经过说明的平台中立前缀
+- 新生成设备 ID 不再对所有平台硬编码 `emby-android-`
+- 新 Android ID 使用 `emby-android-`，新 iOS ID 使用 `emby-ios-`，或采用经过说明的平台中立前缀
 - 不进行已有 Android 用户设备 ID 迁移
+- Keychain 失败时不得回退到明文 SharedPreferences 保存访问令牌
 
-### 4.8 数据库、缓存和离线文件
+### 6.9 数据库、缓存和离线文件
 
 继续使用现有：
 
@@ -166,11 +241,12 @@ media_kit_libs_video
 要求：
 
 - iOS 不引入 `sqflite_common_ffi` 作为运行时依赖
-- 数据库迁移和 WAL 配置必须在 iOS 真机验证
+- 数据库迁移、foreign key 和 WAL 配置必须在 iOS 真机验证
 - 离线媒体路径不得依赖 Android 外部存储路径
 - 下载完整性、临时文件恢复和账号数据清理继续通过现有测试
+- 覆盖升级后数据库和离线记录必须保持可读
 
-### 4.9 iPad 基础适配
+### 6.10 iPad 基础适配
 
 首轮只做阻塞性修正，不重构全部 UI：
 
@@ -179,33 +255,89 @@ media_kit_libs_video
 - 安全区域、Home Indicator、状态栏和底部弹层不得遮挡关键操作
 - 现有底部 `NavigationBar` 可以继续使用
 - `NavigationRail`、双栏详情页和完整宽屏布局后置
+- 首轮不声明 iPhone 支持，也不要求 iPhone 专项 UI 验收
 
-### 4.10 GitHub Actions iOS 工作流
+## 7. TrollStore IPA 与签名方案
 
-新增独立工作流，例如 `.github/workflows/ios-core.yml`。
+TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把普通 ad-hoc `codesign --sign -` 与 TrollStore `ldid` fakesign 视为等价。
+
+标准流程：
+
+1. 执行 `flutter build ios --release --no-codesign`；
+2. 生成只包含本应用所需能力的最小 entitlement 文件；
+3. 使用固定版本或固定 commit 的 `ldid`，并校验下载文件 SHA-256；
+4. 如存在嵌入式 Framework、App Extension 或其他 Mach-O，按由内到外顺序处理签名；
+5. 使用 `ldid -e`、`codesign -d --entitlements :-` 或等价工具导出并检查最终 entitlement；
+6. 确认主应用保持稳定 Bundle ID、Keychain access group 和应用沙盒；
+7. 按 `Payload/Runner.app` 结构打包 IPA；
+8. 生成 SHA-256 校验文件并上传 Artifact。
+
+禁止加入与本项目无关的高权限 entitlement，包括但不限于：
+
+- `platform-application`
+- 解除应用沙盒的私有能力
+- root helper 能力
+- JIT entitlement
+- 任意未说明的系统私有 entitlement
+
+若 Keychain entitlement 无法在 TrollStore 产物中稳定工作，状态只能停留在 `IMPLEMENTATION_COMPLETE` 之前，不得通过降低安全性绕过。
+
+## 8. GitHub Actions 工作流
+
+新增独立工作流，例如 `.github/workflows/ios-core.yml`，并拆为两个主要 Job。
+
+### 8.1 `quality-and-android`
+
+- Runner：`ubuntu-24.04`
+- 执行格式检查、静态分析、全量测试和 Android Debug APK 构建
+- 保留现有分 ABI 构建要求
+
+### 8.2 `ios-device-build`
+
+- Runner：`macos-15`
+- `needs: quality-and-android`
+- 使用固定 Flutter revision、Xcode 和 CocoaPods
+- 无签名构建设备版 Release
+- 执行 `ldid` fakesign、entitlement 检查和 IPA 打包
+- 上传 IPA、dSYM、SHA-256、最终 Info.plist、entitlement dump、架构检查和工具版本信息
 
 触发条件至少包括：
 
 - `workflow_dispatch`
-- 修改 iOS、播放、存储、网络、依赖或工作流相关文件的 Pull Request
-- 实现分支按需 push
+- 实现分支 push
+- Pull Request 中修改以下范围：
+  - `lib/**`
+  - `test/**`
+  - `ios/**`
+  - `pubspec.yaml`
+  - `pubspec.lock`
+  - `Gemfile`
+  - `Gemfile.lock`
+  - `.github/workflows/ios-core.yml`
+  - 与打包脚本相关的路径
 
-工作流必须：
+工作流必须配置 concurrency，在同一分支出现新提交时取消旧的未完成运行。
 
-1. checkout 仓库；
-2. 安装固定 Flutter 版本；
-3. 输出 `flutter --version` 和 Xcode 版本；
-4. 执行依赖解析、格式检查、静态分析和测试；
-5. 无签名构建设备版 Release `Runner.app`；
-6. 检查 Bundle ID、最低系统版本和 `arm64` 架构；
-7. 按标准 `Payload/Runner.app` 结构打包 IPA；
-8. 保留应用需要的最小 entitlement；
-9. 生成 SHA-256 校验文件；
-10. 上传 IPA、校验文件和必要的构建诊断信息。
+## 9. 版本与 Artifact 规则
 
-TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign` 产物无法保留 Keychain 等 entitlement，可在工作流中增加明确、可复现的 ad-hoc/fakesign 步骤，但不得引入私有证书。
+- `CFBundleShortVersionString` 沿用 `pubspec.yaml` 的版本名
+- `CFBundleVersion` 使用 GitHub `run_number` 或其他单调递增整数
+- Bundle ID 固定为 `com.jsdfhasuh.embyclient`
+- Keychain access group 在所有构建之间保持稳定
+- IPA 文件名：`emby-ios-core-<short-sha>-<run-number>.ipa`
+- 诊断包文件名：`emby-ios-core-diagnostics-<short-sha>-<run-number>.zip`
 
-## 5. 明确不在首轮范围内
+诊断包至少包含：
+
+- `Runner.app.dSYM`
+- commit SHA
+- Flutter / Dart / Xcode / macOS / Ruby / CocoaPods / ldid 版本
+- 最终 `Info.plist`
+- 最终 entitlement dump
+- 主二进制及嵌入式 Mach-O 架构检查结果
+- IPA SHA-256
+
+## 10. 明确不在首轮范围内
 
 以下内容不得为了“顺便完成”而扩大本次改动：
 
@@ -214,23 +346,25 @@ TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign
 - iOS 原生画中画
 - iOS 局域网 UDP 自动发现和 multicast entitlement
 - AirPlay、投屏、Live TV、SyncPlay 或新功能开发
-- iPhone 专项 UI 优化
+- iPhone 设备支持和专项 UI 优化
+- iPad Split View、Slide Over、Stage Manager 和可调整窗口支持
 - iPad `NavigationRail`、双栏和桌面级布局重构
 - macOS、Windows、Linux 或 Web 平台适配
 - 播放器整体替换
 - 无效证书、自签名 HTTPS 的全局信任绕过
 - 与 iOS 适配无关的 Android 重构
 
-## 6. 实施阶段
+## 11. 实施阶段
 
 ### 阶段 A：平台骨架与编译闭环
 
-- 建立实现分支
-- 生成并审查 `ios/`
-- 固定 Bundle ID 和 iOS 13 最低版本
+- 建立实现分支并记录实际基线 SHA
+- 使用固定 Flutter revision 生成并审查 `ios/`
+- 修复 `.metadata` iOS migration 信息
+- 固定 Bundle ID、iPad-only、iOS 13 和全屏方向策略
 - 配置 Keychain、本地网络和 ATS
 - 切换到跨平台 `media_kit_libs_video`
-- GitHub Actions 能无签名生成 `Runner.app`
+- GitHub Actions 能无签名生成设备版 `Runner.app`
 
 完成条件：iOS Release 构建通过，Android 门禁保持通过。
 
@@ -238,7 +372,7 @@ TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign
 
 - 引入轻量平台能力层
 - 隔离 Android 前台下载初始化
-- 修正设备 ID 前缀
+- 修正新设备 ID 前缀
 - iOS 禁用自动发现
 - 画中画通道安全降级
 - 增加相应单元和 Widget 测试
@@ -247,36 +381,41 @@ TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign
 
 ### 阶段 C：TrollStore Artifact
 
-- 标准化 IPA 打包
-- 校验架构和 Info.plist
-- 保留必要 entitlement
-- 上传 Artifact 和 SHA-256
+- 固定并校验 `ldid`
+- 标准化 fakesign 和 IPA 打包
+- 校验架构、Info.plist 和 entitlement
+- 上传 IPA、dSYM、SHA-256 和诊断包
 - 记录安装步骤及已知限制
 
-完成条件：iPad 可安装、启动并覆盖升级。
+完成条件：实现者达到可交付真机验证的 `IMPLEMENTATION_COMPLETE` 候选状态。
 
 ### 阶段 D：核心在线功能验收
+
+由设备所有者在真实 iPad 验收：
 
 - 登录与会话恢复
 - 首页、媒体库、搜索和详情
 - 图片与 WebSocket
-- DirectPlay / DirectStream / Transcode
+- H.264 + AAC DirectPlay 或 DirectStream
+- 强制 Transcode 路径
 - 音轨、字幕、拖动、续播和播放进度
-- 生命周期切换
+- 生命周期切换和方向恢复
 
-完成条件：至少一部电影和一集电视剧完整完成核心播放流程。
+完成条件：至少一部电影和一集电视剧完成核心播放流程，两类播放路径均有证据。
 
 ### 阶段 E：离线与回归
 
 - 前台下载、暂停、恢复和删除
+- 进程终止后的中断任务状态恢复
 - 离线播放和进度同步
 - 存储空间和文件完整性
+- 覆盖升级后的数据库、Keychain 和离线记录连续性
 - iPad 横竖屏和安全区域
 - Android 全量回归
 
-完成条件：自动测试、Android APK 和 iPad 验收清单全部通过。
+完成条件：自动测试、Android APK 和 iPad 验收清单全部通过，状态进入 `ACCEPTED`。
 
-## 7. 测试要求
+## 12. 自动测试要求
 
 至少补充以下自动测试：
 
@@ -286,29 +425,45 @@ TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign
 - iOS 登录页不会自动启动 UDP 广播发现
 - 画中画原生通道缺失时 `isSupported` 和 `updatePlaying` 安全降级
 - Android 能力配置仍启用前台下载和服务器发现
+- 平台能力对象可注入，不依赖当前测试宿主的真实平台
+- 应用进程中断后的无 executor 下载任务恢复为明确的可继续状态
 - 平台分支不影响现有下载、离线播放和播放器控制测试
+- Bundle ID、目标设备族、最低系统版本和关键 Info.plist 项可由脚本验证
+- 打包脚本拒绝非 `arm64` 主应用和缺少必要 entitlement 的产物
 
-真机验收结果应写入独立文档或 PR 描述，至少记录：
+## 13. 真机验收记录
+
+真机验收结果应写入独立文档，例如：
+
+`docs/acceptance/2026-08-ios-core-ipad-acceptance.md`
+
+至少记录：
 
 - iPad 型号与 iPadOS 版本
 - TrollStore 版本
-- IPA 对应提交 SHA
+- IPA 对应 commit SHA、run number 和 SHA-256
 - Emby Server 版本
+- Bundle ID、应用版本和构建号
 - 测试媒体的容器、视频编码、音频编码和字幕类型
+- DirectPlay / DirectStream / Transcode 的实际选择结果
 - 每项通过、失败或未测状态
-- 失败时的诊断日志摘要
+- 覆盖升级前后的会话、数据库和离线记录状态
+- 失败时的诊断日志摘要和原生崩溃日志符号化结果
 
-## 8. 提交与审查规则
+Codex 或其他实现者只能创建验收模板，不得代替设备所有者填写虚假的通过结果。
+
+## 14. 提交与审查规则
 
 建议按可独立审查的提交拆分：
 
-1. `build: add audited iOS runner`
+1. `build: add audited iPadOS runner`
 2. `build: use cross-platform media kit video libs`
 3. `refactor: isolate mobile platform capabilities`
-4. `fix: make unsupported iOS platform features safe`
-5. `ci: build TrollStore iOS artifact`
-6. `test: cover iOS platform boundaries`
-7. `docs: record iOS device acceptance`
+4. `fix: make unsupported iPadOS features safe`
+5. `ci: build fakesigned TrollStore artifact`
+6. `test: cover iPadOS platform boundaries`
+7. `docs: add iPad acceptance template`
+8. `docs: record device acceptance`（只能在用户真机验收后提交）
 
 约束：
 
@@ -316,54 +471,76 @@ TrollStore 打包方案必须以真机安装结果为准。若纯 `--no-codesign
 - 不得把大量生成文件和业务修复混在同一个提交中
 - 不得删除或弱化 Android 测试来使 iOS 构建通过
 - 遇到插件不兼容时先记录根因，再做最小替换；禁止无说明地更换整套架构
-- README 只有在真机核心验收完成后才能修改项目定位
+- README 只有在状态进入 `ACCEPTED` 后才能修改项目定位
 
-## 9. 风险与处理原则
+## 15. 风险与处理原则
 
 ### 播放器能编译但真机黑屏或崩溃
 
-先确认原生库、设备架构、渲染和 HTTP Header，再检查具体编码。允许通过 Emby Transcode 路径完成 Core 验收，但必须记录 DirectPlay 的失败媒体特征。首轮不同时引入第二播放器。
+先确认原生库、设备架构、渲染和 HTTP Header，再检查具体编码。Transcode 成功不能单独证明播放器 Core 完成；仍需完成 H.264 + AAC DirectPlay 或 DirectStream。首轮不同时引入第二播放器。
 
 ### IPA 可安装但 Keychain 不持久
 
-检查 Runner entitlement、打包后的签名 entitlement 和 Bundle ID 是否一致。会话恢复是 Core 的硬性验收项，不得通过改用明文 SharedPreferences 绕过。
+检查 Runner entitlement、fakesign 后的最终 entitlement、Bundle ID 和 Keychain access group 是否一致。会话恢复是 Core 的硬性验收项，不得通过改用明文 SharedPreferences 绕过。
 
 ### HTTP 局域网地址无法访问
 
 检查本地网络权限和 ATS 配置。不得关闭 TLS 校验或全局信任任意证书作为修复。
 
+### iPad 无法按现有逻辑切换横屏
+
+确认 `UIRequiresFullScreen`、支持方向和 Xcode 配置一致。首轮不以牺牲播放器方向契约为代价同时支持多任务窗口；多任务适配后置。
+
 ### iOS 后台中断下载
 
-这是首轮已知限制。恢复前台后应刷新并继续；可靠后台下载另立 Goal。
+普通挂起后回到前台应刷新状态并继续或允许继续；进程终止后任务应进入明确的中断状态并允许手动恢复。可靠后台下载另立 Goal。
 
 ### 平台判断难以自动测试
 
 通过注入轻量平台能力对象解决，不使用依赖真实宿主平台的脆弱测试。
 
-## 10. 最终交付物
+### GitHub Runner 或工具版本失效
+
+不得静默升级。先记录失败原因，选择新的固定版本，并在同一 PR 中更新 Goal、工作流和工具链记录。
+
+## 16. 最终交付物
 
 - 受审查的 `ios/` 平台工程
+- 修正后的 `.metadata`
 - 跨平台播放器原生依赖配置
-- iOS 平台边界和安全降级实现
-- GitHub Actions iOS 构建及 IPA Artifact
+- iPadOS 平台边界和安全降级实现
+- GitHub Actions Linux 门禁与 macOS iOS 构建
+- 可复现的 `ldid` fakesign 和 IPA 打包脚本
+- IPA、dSYM、SHA-256 和诊断 Artifact
 - 新增平台相关自动测试
-- TrollStore iPad 真机验收记录
+- TrollStore iPad 真机验收模板和最终验收记录
 - Android 回归结果
-- 经过真机验收后更新的 README
+- 真机验收后更新的 README
 
-## 11. 完成定义
+## 17. 完成定义
 
-只有同时满足以下条件，本 Goal 才能关闭：
+### `IMPLEMENTATION_COMPLETE`
+
+必须同时满足：
 
 - 所有自动化门禁通过
 - Android 现有核心功能无回归
-- GitHub Actions 可重复生成同类 iOS Artifact
-- TrollStore iPad 可安装、启动和覆盖升级
-- 手动登录、浏览、在线播放、会话恢复、前台下载和离线播放完成真机验收
+- GitHub Actions 可重复生成同类 iPadOS Artifact
+- Artifact 包含 IPA、dSYM、SHA-256、版本、架构和 entitlement 证据
 - 所有未实现能力在 UI 或文档中明确降级，不出现伪支持
-- 验收结果和已知限制已经入库
+- 已提交真机验收模板和安装说明
 
-## 12. 参考资料
+### `ACCEPTED`
+
+在 `IMPLEMENTATION_COMPLETE` 基础上，还必须满足：
+
+- TrollStore iPad 可安装、启动和覆盖升级
+- Keychain 会话恢复和覆盖升级连续性通过
+- 手动登录、浏览、两类在线播放路径、前台下载和离线播放完成真机验收
+- 验收结果和已知限制已经入库
+- README 仅以“实验性 iPadOS 支持”表述已经验收的范围
+
+## 18. 参考资料
 
 - Flutter iOS 构建与发布：<https://docs.flutter.dev/deployment/ios>
 - Flutter iOS 开发环境：<https://docs.flutter.dev/platform-integration/ios/setup>
