@@ -2,6 +2,9 @@ name: Pod lock probe
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/ios-podlock-probe
 
 jobs:
   pod-probe:
