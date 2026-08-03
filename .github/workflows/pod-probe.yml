@@ -1,0 +1,50 @@
+name: Pod lock probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pod-probe:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 16.4
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_16.4.app
+          xcodebuild -version
+      - name: Install fixed Flutter revision
+        run: |
+          set -euo pipefail
+          flutter_dir="$RUNNER_TEMP/flutter"
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git "$flutter_dir"
+          git -C "$flutter_dir" fetch --depth=1 origin 67323de285b00232883f53b84095eb72be97d35c
+          git -C "$flutter_dir" checkout --detach 67323de285b00232883f53b84095eb72be97d35c
+          echo "$flutter_dir/bin" >> "$GITHUB_PATH"
+          echo "FLUTTER_ROOT=$flutter_dir" >> "$GITHUB_ENV"
+          "$flutter_dir/bin/flutter" precache --ios
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.6'
+          bundler: '2.5.22'
+          bundler-cache: true
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Install pods and print all lock state
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          bundle exec pod install --no-repo-update
+          cd ..
+          echo '--- git status ---'
+          git status --short
+          echo '--- lock diff name status ---'
+          git diff --name-status -- ios/Podfile.lock
+          echo '--- lock diff ---'
+          git diff -- ios/Podfile.lock
+          echo '--- Podfile.lock checksums ---'
+          sed -n '/SPEC CHECKSUMS:/,/PODFILE CHECKSUM:/p' ios/Podfile.lock
+          echo '--- Pods manifest checksum ---'
+          shasum -a 256 ios/Pods/Manifest.lock 2>/dev/null || true
+          echo '--- Podfile lock checksum ---'
+          shasum -a 256 ios/Podfile.lock
