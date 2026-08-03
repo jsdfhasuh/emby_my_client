@@ -1,6 +1,6 @@
 # iOS Core 适配 Goal
 
-- 状态：待实施；审查修订版 v2
+- 状态：待实施；最终审查修订版 v3（实施前冻结）
 - 日期：2026-08-03
 - 实施基线：包含本 Goal 最新修订版本的 `main` HEAD
 - 实际基线 SHA：在创建实现分支时记录到 PR 描述和验收文档，不在本文件中写死
@@ -46,6 +46,7 @@
 
 由设备所有者在目标 iPad 上完成验收后确认，必须满足：
 
+- 使用合并后 `main` 工作流生成的 IPA 完成验收；
 - IPA 可以安装、启动和覆盖升级；
 - 登录、浏览、播放、会话恢复、前台下载和离线播放通过；
 - 验收结果已经写入仓库；
@@ -61,15 +62,20 @@
 - Dart SDK：`3.10.8`
 - Linux 门禁 Runner：`ubuntu-24.04`
 - iOS 构建 Runner：`macos-15`
-- 初始 Xcode 目标：`16.4`
-- 初始 CocoaPods 目标：`1.16.2`
+- Xcode：`16.4`
+- CocoaPods：`1.16.2`
+- ldid 实现：Homebrew Core `ldid`，不得使用 `ldid-procursus`
+- ldid 版本：`2.1.5`
 
 要求：
 
 - 工作流不得仅使用会长期漂移的 `stable`、`macos-latest` 或未固定版本的 CocoaPods；
-- CI 必须输出 Flutter、Dart、Xcode、macOS、Ruby 和 CocoaPods 的实际版本；
-- CocoaPods 应通过 `Gemfile` / Bundler 或同等可复现方式固定；
-- 如果 GitHub Runner 不再提供指定 Xcode，必须先更新本 Goal 或在 PR 中给出兼容性证据，不得静默切换；
+- CI 必须输出 Flutter、Dart、Xcode、macOS、Ruby、CocoaPods 和 ldid 的实际版本；
+- CocoaPods 必须通过 `Gemfile` / `Gemfile.lock` 与 Bundler 固定；
+- ldid 的安装来源必须固定到 Homebrew formula commit，或固定 bottle/source URL 及 SHA-256；仅执行未约束版本的 `brew install ldid` 不足以满足本 Goal；
+- CI 必须拒绝不是 `2.1.5` 的 ldid，也不得根据 Runner 状态在 `ldid` 与 `ldid-procursus` 之间自动切换；
+- Xcode 必须显式选择 16.4，并通过 `xcodebuild -version` 验证；
+- 如果 GitHub Runner 不再提供指定工具链，必须先在同一 PR 中更新本 Goal、工作流和兼容性证据，不得静默升级；
 - 生成 `ios/` 工程时必须使用上述 Flutter revision，避免模板漂移。
 
 ## 5. 成功标准
@@ -81,12 +87,23 @@
 - `dart format --output=none --set-exit-if-changed .`
 - `flutter analyze`
 - `flutter test`
+- Dart/Flutter 依赖必须遵守已提交的 `pubspec.lock`
+- CocoaPods 依赖必须遵守已提交的 `ios/Podfile.lock`
+- 依赖安装后 `pubspec.lock` 与 `ios/Podfile.lock` 不得产生未提交变化
 - 现有 Android Debug APK 构建继续成功；如当前流程包含分 ABI 构建，必须继续保留
 - `flutter build ios --release --no-codesign` 成功
 - GitHub Actions 生成标准 `Payload/Runner.app` 结构的 IPA
 - IPA 内必须是设备版 `arm64` 应用，不得上传模拟器产物
 - 工作流不得依赖 Apple 开发者证书、私钥、Provisioning Profile 或手工签名 Secret
-- 最终 Artifact 必须包含 IPA、SHA-256、dSYM、版本信息、Info.plist 摘要、entitlement dump 和架构检查结果
+- 最终 Artifact 必须包含 IPA、SHA-256、dSYM、版本信息、Info.plist 摘要、entitlement 源文件哈希、最终 entitlement dump 和架构检查结果
+
+依赖锁定原则：
+
+- 优先使用固定 Flutter 支持的 lockfile 强制模式，例如 `flutter pub get --enforce-lockfile`；若该版本不支持，则执行普通依赖解析后通过 `git diff --exit-code -- pubspec.lock` 强制验证；
+- 提交 `ios/Podfile.lock`；
+- CI 使用 `bundle exec pod install --deployment`；
+- 普通 CI 禁止默认执行 `pod update` 或 `pod install --repo-update`；
+- Pod 解析完成后执行 `git diff --exit-code -- ios/Podfile.lock`。
 
 ### 5.2 TrollStore 真机验收
 
@@ -95,7 +112,7 @@
 - IPA 可由 TrollStore 安装、覆盖升级和启动
 - 冷启动无崩溃、白屏或无限加载
 - Keychain 写入真实生效；登录后杀掉应用并重新启动仍可恢复会话
-- 覆盖升级后 Bundle ID、Keychain access group、数据库和离线记录保持连续
+- 覆盖升级后 Bundle ID、有效 Keychain 身份、数据库和离线记录保持连续
 - 首次连接局域网服务器时，本地网络授权流程可理解且可恢复
 - 拒绝本地网络权限时，应用不得无限加载；重新授权后可继续使用
 - 可通过局域网 HTTP 地址手动登录
@@ -124,11 +141,13 @@ DirectStream 可根据媒体和服务器条件标记为“不适用”，但不�
 - 设备族首轮固定为 iPad-only：`TARGETED_DEVICE_FAMILY = 2`
 - 保留应用现有中文名称和深色主题，不在本里程碑重做视觉设计
 
-同时修复 `.metadata`：
+`.metadata` 处理规则：
 
-- 正确登记 iOS migration platform；
-- 审查并移除当前遗留的 `ios/Runner.xcodeproj/project.pbxproj` unmanaged 标记；
-- 如果确有必要保留 unmanaged 项，必须写明原因、影响和后续 Flutter 升级责任。
+- 必须正确登记 iOS migration platform；
+- 使用固定 Flutter revision 在干净临时目录生成同类 iOS 项目，以新生成的 `.metadata` 作为参考；
+- 不得无条件删除或保留当前 `ios/Runner.xcodeproj/project.pbxproj` unmanaged 标记；
+- 若固定版本的新模板不包含该项，则移除；若新模板仍包含，则保留并记录其属于 Flutter 模板行为；
+- 最终提交必须说明 `.metadata` 与固定 Flutter 模板之间的差异及原因。
 
 ### 6.2 iPad 全屏与方向策略
 
@@ -221,8 +240,14 @@ media_kit_libs_video: ^1.0.7
 ### 6.8 会话、Keychain 与设备标识
 
 - 为 `flutter_secure_storage` 配置 Debug/Profile/Release 所需的 iOS Keychain entitlement
-- Keychain access group 必须与稳定 Bundle ID 和最终 fakesign entitlement 保持一致
-- 不硬编码未知 Apple Team ID，不依赖不存在的 Provisioning Profile
+- 仓库中必须只有一个人工维护的 TrollStore entitlement 源，固定路径为 `scripts/ios/trollstore-entitlements.plist`
+- 若构建变量必须展开，可由脚本从该源生成临时 resolved entitlement；生成文件不得成为第二个人工维护来源
+- `ios/Runner/DebugProfile.entitlements`、`ios/Runner/Release.entitlements` 与 TrollStore fakesign entitlement 必须由同一源生成，或由 CI 自动比较关键项一致性
+- 初始配置遵循 `flutter_secure_storage` 官方最小要求：必须存在 `keychain-access-groups`；没有经过验证的共享组需求时保持空数组，不编造 Team ID、AppIdentifierPrefix 或自定义共享组
+- Bundle ID、最终应用标识和有效 Keychain 身份必须在所有构建之间保持稳定
+- 不依赖不存在的 Provisioning Profile
+- CI 必须比较：人工维护源、构建时 resolved entitlement、fakesign 后主二进制 entitlement，以及最终 IPA 解包后的主二进制 entitlement
+- 关键 Keychain 项缺失、不一致或出现未批准 entitlement 时构建失败
 - 真机验证写入、读取、退出登录清理、杀进程恢复和覆盖安装后的行为
 - 已存在的 Android 设备 ID 必须保持不变
 - 新生成设备 ID 不再对所有平台硬编码 `emby-android-`
@@ -261,16 +286,25 @@ media_kit_libs_video: ^1.0.7
 
 TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把普通 ad-hoc `codesign --sign -` 与 TrollStore `ldid` fakesign 视为等价。
 
+固定方案：
+
+- 只使用 Homebrew Core `ldid 2.1.5`
+- 不使用 `ldid-procursus`
+- 安装来源必须固定并校验 SHA-256
+- CI 检测到不同实现或版本时立即失败
+
 标准流程：
 
 1. 执行 `flutter build ios --release --no-codesign`；
-2. 生成只包含本应用所需能力的最小 entitlement 文件；
-3. 使用固定版本或固定 commit 的 `ldid`，并校验下载文件 SHA-256；
+2. 从 `scripts/ios/trollstore-entitlements.plist` 生成或取得唯一批准的最终 entitlement；
+3. 检查 entitlement 白名单，禁止未批准的高权限项；
 4. 如存在嵌入式 Framework、App Extension 或其他 Mach-O，按由内到外顺序处理签名；
-5. 使用 `ldid -e`、`codesign -d --entitlements :-` 或等价工具导出并检查最终 entitlement；
-6. 确认主应用保持稳定 Bundle ID、Keychain access group 和应用沙盒；
-7. 按 `Payload/Runner.app` 结构打包 IPA；
-8. 生成 SHA-256 校验文件并上传 Artifact。
+5. 使用固定的 `ldid 2.1.5` fakesign；
+6. 使用 `ldid -e`、`codesign -d --entitlements :-` 或等价工具导出并检查最终 entitlement；
+7. 解包最终 IPA 后再次检查主二进制和嵌入式 Mach-O；
+8. 确认主应用保持稳定 Bundle ID、有效 Keychain 身份和应用沙盒；
+9. 按 `Payload/Runner.app` 结构打包 IPA；
+10. 生成 SHA-256 校验文件并上传 Artifact。
 
 禁止加入与本项目无关的高权限 entitlement，包括但不限于：
 
@@ -291,39 +325,49 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 - Runner：`ubuntu-24.04`
 - 执行格式检查、静态分析、全量测试和 Android Debug APK 构建
 - 保留现有分 ABI 构建要求
+- 强制验证 `pubspec.lock` 未漂移
 
 ### 8.2 `ios-device-build`
 
 - Runner：`macos-15`
 - `needs: quality-and-android`
-- 使用固定 Flutter revision、Xcode 和 CocoaPods
+- 使用固定 Flutter revision、Xcode、CocoaPods 和 ldid
+- 使用 `bundle exec pod install --deployment`
+- 强制验证 `ios/Podfile.lock` 未漂移
 - 无签名构建设备版 Release
-- 执行 `ldid` fakesign、entitlement 检查和 IPA 打包
-- 上传 IPA、dSYM、SHA-256、最终 Info.plist、entitlement dump、架构检查和工具版本信息
+- 执行 entitlement 一致性检查、`ldid` fakesign 和 IPA 打包
+- 上传 IPA、dSYM、SHA-256、最终 Info.plist、entitlement 源及 dump、架构检查和工具版本信息
 
 触发条件至少包括：
 
 - `workflow_dispatch`
-- 实现分支 push
+- `push` 到实现分支
+- `push` 到 `main`
 - Pull Request 中修改以下范围：
   - `lib/**`
   - `test/**`
   - `ios/**`
+  - `scripts/ios/**`
   - `pubspec.yaml`
   - `pubspec.lock`
   - `Gemfile`
   - `Gemfile.lock`
   - `.github/workflows/ios-core.yml`
-  - 与打包脚本相关的路径
+  - 与打包脚本相关的其他路径
 
-工作流必须配置 concurrency，在同一分支出现新提交时取消旧的未完成运行。
+要求：
+
+- Pull Request 和实现分支 Artifact 用于实施验证；
+- 合并后 `main` 工作流必须重新构建，不得复用分支 IPA 冒充合并结果；
+- 真机 `ACCEPTED` 验收必须使用 `main` 对应提交生成的 IPA；
+- 工作流必须配置 concurrency，在同一分支出现新提交时取消旧的未完成运行。
 
 ## 9. 版本与 Artifact 规则
 
 - `CFBundleShortVersionString` 沿用 `pubspec.yaml` 的版本名
 - `CFBundleVersion` 使用 GitHub `run_number` 或其他单调递增整数
 - Bundle ID 固定为 `com.jsdfhasuh.embyclient`
-- Keychain access group 在所有构建之间保持稳定
+- 有效 Keychain 身份在所有构建之间保持稳定
 - IPA 文件名：`emby-ios-core-<short-sha>-<run-number>.ipa`
 - 诊断包文件名：`emby-ios-core-diagnostics-<short-sha>-<run-number>.zip`
 
@@ -332,8 +376,11 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 - `Runner.app.dSYM`
 - commit SHA
 - Flutter / Dart / Xcode / macOS / Ruby / CocoaPods / ldid 版本
+- `pubspec.lock` 与 `ios/Podfile.lock` 哈希
 - 最终 `Info.plist`
-- 最终 entitlement dump
+- `scripts/ios/trollstore-entitlements.plist` 及其 SHA-256
+- 构建时 resolved entitlement
+- fakesign 后及最终 IPA 中的 entitlement dump
 - 主二进制及嵌入式 Mach-O 架构检查结果
 - IPA SHA-256
 
@@ -360,13 +407,14 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 
 - 建立实现分支并记录实际基线 SHA
 - 使用固定 Flutter revision 生成并审查 `ios/`
-- 修复 `.metadata` iOS migration 信息
+- 按固定模板证据处理 `.metadata` iOS migration 信息
 - 固定 Bundle ID、iPad-only、iOS 13 和全屏方向策略
-- 配置 Keychain、本地网络和 ATS
+- 配置唯一 entitlement 源、Keychain、本地网络和 ATS
 - 切换到跨平台 `media_kit_libs_video`
+- 使用固定 CocoaPods 生成并提交 `ios/Podfile.lock`
 - GitHub Actions 能无签名生成设备版 `Runner.app`
 
-完成条件：iOS Release 构建通过，Android 门禁保持通过。
+完成条件：iOS Release 构建通过，锁文件无漂移，Android 门禁保持通过。
 
 ### 阶段 B：平台专用行为隔离
 
@@ -381,9 +429,9 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 
 ### 阶段 C：TrollStore Artifact
 
-- 固定并校验 `ldid`
-- 标准化 fakesign 和 IPA 打包
-- 校验架构、Info.plist 和 entitlement
+- 固定并校验 Homebrew Core `ldid 2.1.5`
+- 标准化唯一 entitlement 源、resolved entitlement、fakesign 和 IPA 打包
+- 校验架构、Info.plist、锁文件和 entitlement
 - 上传 IPA、dSYM、SHA-256 和诊断包
 - 记录安装步骤及已知限制
 
@@ -391,7 +439,7 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 
 ### 阶段 D：核心在线功能验收
 
-由设备所有者在真实 iPad 验收：
+由设备所有者使用合并后 `main` Artifact 在真实 iPad 验收：
 
 - 登录与会话恢复
 - 首页、媒体库、搜索和详情
@@ -417,7 +465,7 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 
 ## 12. 自动测试要求
 
-至少补充以下自动测试：
+至少补充以下自动测试或构建脚本门禁：
 
 - 已保存设备 ID 不因平台适配而改变
 - 新设备 ID 使用正确的平台前缀
@@ -429,7 +477,12 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 - 应用进程中断后的无 executor 下载任务恢复为明确的可继续状态
 - 平台分支不影响现有下载、离线播放和播放器控制测试
 - Bundle ID、目标设备族、最低系统版本和关键 Info.plist 项可由脚本验证
+- `.metadata` 与固定 Flutter 模板的处理结果有可审查证据
+- `pubspec.lock` 与 `ios/Podfile.lock` 在 CI 中不漂移
+- 人工维护 entitlement 源与 Xcode、resolved、fakesign 后、最终 IPA entitlement 的关键项一致
+- entitlement 白名单拒绝未批准的私有或高权限项
 - 打包脚本拒绝非 `arm64` 主应用和缺少必要 entitlement 的产物
+- ldid 实现或版本不是 Homebrew Core `2.1.5` 时构建失败
 
 ## 13. 真机验收记录
 
@@ -441,13 +494,13 @@ TrollStore 测试包必须采用明确、可复现的 fakesign 流程，不把�
 
 - iPad 型号与 iPadOS 版本
 - TrollStore 版本
-- IPA 对应 commit SHA、run number 和 SHA-256
+- IPA 对应 `main` commit SHA、run number 和 SHA-256
 - Emby Server 版本
 - Bundle ID、应用版本和构建号
 - 测试媒体的容器、视频编码、音频编码和字幕类型
 - DirectPlay / DirectStream / Transcode 的实际选择结果
 - 每项通过、失败或未测状态
-- 覆盖升级前后的会话、数据库和离线记录状态
+- 覆盖升级前后的会话、有效 Keychain 身份、数据库和离线记录状态
 - 失败时的诊断日志摘要和原生崩溃日志符号化结果
 
 Codex 或其他实现者只能创建验收模板，不得代替设备所有者填写虚假的通过结果。
@@ -457,19 +510,21 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 建议按可独立审查的提交拆分：
 
 1. `build: add audited iPadOS runner`
-2. `build: use cross-platform media kit video libs`
-3. `refactor: isolate mobile platform capabilities`
-4. `fix: make unsupported iPadOS features safe`
-5. `ci: build fakesigned TrollStore artifact`
-6. `test: cover iPadOS platform boundaries`
-7. `docs: add iPad acceptance template`
-8. `docs: record device acceptance`（只能在用户真机验收后提交）
+2. `build: lock iOS native dependencies`
+3. `build: use cross-platform media kit video libs`
+4. `refactor: isolate mobile platform capabilities`
+5. `fix: make unsupported iPadOS features safe`
+6. `ci: build fakesigned TrollStore artifact`
+7. `test: cover iPadOS platform boundaries`
+8. `docs: add iPad acceptance template`
+9. `docs: record device acceptance`（只能在用户真机验收后提交）
 
 约束：
 
 - 每个提交都必须保持 `flutter analyze` 和 `flutter test` 通过
 - 不得把大量生成文件和业务修复混在同一个提交中
 - 不得删除或弱化 Android 测试来使 iOS 构建通过
+- 不得通过修改或忽略锁文件来掩盖依赖解析问题
 - 遇到插件不兼容时先记录根因，再做最小替换；禁止无说明地更换整套架构
 - README 只有在状态进入 `ACCEPTED` 后才能修改项目定位
 
@@ -481,7 +536,11 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 
 ### IPA 可安装但 Keychain 不持久
 
-检查 Runner entitlement、fakesign 后的最终 entitlement、Bundle ID 和 Keychain access group 是否一致。会话恢复是 Core 的硬性验收项，不得通过改用明文 SharedPreferences 绕过。
+检查唯一 entitlement 源、resolved entitlement、fakesign 后和最终 IPA entitlement、Bundle ID 及有效 Keychain 身份是否一致。会话恢复是 Core 的硬性验收项，不得通过改用明文 SharedPreferences 绕过。
+
+### Pod 或 Dart 依赖在 CI 中漂移
+
+CI 必须失败。不得在普通构建中自动更新锁文件；需要升级依赖时应提交独立变更并说明影响。
 
 ### HTTP 局域网地址无法访问
 
@@ -506,11 +565,13 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 ## 16. 最终交付物
 
 - 受审查的 `ios/` 平台工程
-- 修正后的 `.metadata`
+- 基于固定 Flutter 模板证据处理后的 `.metadata`
+- `Gemfile`、`Gemfile.lock` 和已提交的 `ios/Podfile.lock`
 - 跨平台播放器原生依赖配置
 - iPadOS 平台边界和安全降级实现
+- 唯一人工维护的 `scripts/ios/trollstore-entitlements.plist`
 - GitHub Actions Linux 门禁与 macOS iOS 构建
-- 可复现的 `ldid` fakesign 和 IPA 打包脚本
+- 可复现的固定 `ldid 2.1.5` fakesign 和 IPA 打包脚本
 - IPA、dSYM、SHA-256 和诊断 Artifact
 - 新增平台相关自动测试
 - TrollStore iPad 真机验收模板和最终验收记录
@@ -525,8 +586,10 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 
 - 所有自动化门禁通过
 - Android 现有核心功能无回归
+- 依赖锁文件在 CI 中无漂移
+- 唯一 entitlement 源及最终 IPA entitlement 一致性门禁通过
 - GitHub Actions 可重复生成同类 iPadOS Artifact
-- Artifact 包含 IPA、dSYM、SHA-256、版本、架构和 entitlement 证据
+- Artifact 包含 IPA、dSYM、SHA-256、版本、锁文件、架构和 entitlement 证据
 - 所有未实现能力在 UI 或文档中明确降级，不出现伪支持
 - 已提交真机验收模板和安装说明
 
@@ -534,6 +597,7 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 
 在 `IMPLEMENTATION_COMPLETE` 基础上，还必须满足：
 
+- 使用合并后 `main` 对应提交生成的 IPA
 - TrollStore iPad 可安装、启动和覆盖升级
 - Keychain 会话恢复和覆盖升级连续性通过
 - 手动登录、浏览、两类在线播放路径、前台下载和离线播放完成真机验收
@@ -549,3 +613,4 @@ Codex 或其他实现者只能创建验收模板，不得代替设备所有者�
 - Apple ATS 本地网络例外：<https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking>
 - flutter_secure_storage：<https://pub.dev/packages/flutter_secure_storage>
 - TrollStore：<https://github.com/opa334/TrollStore>
+- Homebrew ldid：<https://formulae.brew.sh/formula/ldid>
