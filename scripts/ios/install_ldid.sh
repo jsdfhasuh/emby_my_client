@@ -10,7 +10,7 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-formula_file="$(mktemp "${TMPDIR:-/tmp}/ldid-formula.XXXXXX.rb")"
+formula_file="$(mktemp "${TMPDIR:-/tmp}/ldid-formula.XXXXXX")"
 tap_name='local/ldid-lock'
 tap_repo=''
 cleanup() {

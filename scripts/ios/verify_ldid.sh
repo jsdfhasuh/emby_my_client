@@ -40,7 +40,7 @@ case "$ldid_path" in
     ;;
 esac
 
-formula_file="$(mktemp "${TMPDIR:-/tmp}/ldid-formula.XXXXXX.rb")"
+formula_file="$(mktemp "${TMPDIR:-/tmp}/ldid-formula.XXXXXX")"
 trap 'rm -f "$formula_file"' EXIT
 curl --fail --location --silent --show-error "$FORMULA_URL" --output "$formula_file"
 printf '%s  %s\n' "$FORMULA_SHA256" "$formula_file" | shasum --algorithm 256 --check --strict
