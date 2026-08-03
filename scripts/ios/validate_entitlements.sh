@@ -22,9 +22,9 @@ trap 'rm -rf "$temp_dir"' EXIT
 plist_keys() {
   local file="$1"
   plutil -p "$file" | awk '
-    /^  "[^"]+" =>/ {
+    /^[[:space:]]*"[^"]+" =>/ {
       key = $1
-      sub(/^  "/, "", key)
+      sub(/^"/, "", key)
       sub(/"$/, "", key)
       print key
     }
