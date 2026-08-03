@@ -28,7 +28,18 @@ xcodebuild \
 
 setting() {
   local name="$1"
-  awk -F ' = ' -v key="$name" '$1 == key { value = $2 } END { print value }' "$settings_file"
+  awk -F ' = ' -v key="$name" '
+    {
+      lhs = $1
+      value = $2
+      gsub(/^[[:space:]]+/, "", lhs)
+      gsub(/[[:space:]]+$/, "", lhs)
+      gsub(/^[[:space:]]+/, "", value)
+      gsub(/[[:space:]]+$/, "", value)
+      if (lhs == key) value_for_key = value
+    }
+    END { print value_for_key }
+  ' "$settings_file"
 }
 
 require_setting() {
