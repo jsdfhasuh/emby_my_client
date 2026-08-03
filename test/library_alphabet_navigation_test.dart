@@ -181,7 +181,7 @@ void main() {
   });
 
   testWidgets(
-    'STRM plus M loads the next server page until a local match appears',
+    'STRM plus M refreshes through the next page to restore a local match',
     (tester) async {
       _setPhoneView(tester);
       final requests = <RequestOptions>[];
@@ -221,12 +221,31 @@ void main() {
       );
       expect(find.byType(CircularProgressIndicator), findsNothing);
 
+      await _refreshLibrary(tester);
+
+      final refreshedLetterRequests = _letterRequests(requests, 'M');
+      expect(
+        refreshedLetterRequests.map(
+          (request) => request.queryParameters['StartIndex'],
+        ),
+        [0, 60, 0, 60],
+      );
+      for (final request in refreshedLetterRequests) {
+        expect(request.queryParameters['NameStartsWith'], 'M');
+        expect(request.queryParameters, isNot(contains('NameLessThan')));
+      }
+      expect(
+        find.byKey(const ValueKey('library-item-m-strm-60')),
+        findsOneWidget,
+      );
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
       await tester.pumpWidget(const SizedBox.shrink());
       await api.dispose();
     },
   );
 
-  testWidgets('STRM plus M reaches an empty state after every page misses', (
+  testWidgets('STRM plus M refreshes to empty after every page misses', (
     tester,
   ) async {
     _setPhoneView(tester);
@@ -253,6 +272,19 @@ void main() {
         'M',
       ).map((request) => request.queryParameters['StartIndex']),
       [0, 60],
+    );
+    expect(find.text('没有 STRM 媒体'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(ErrorState), findsNothing);
+
+    await _refreshLibrary(tester);
+
+    expect(
+      _letterRequests(
+        requests,
+        'M',
+      ).map((request) => request.queryParameters['StartIndex']),
+      [0, 60, 0, 60],
     );
     expect(find.text('没有 STRM 媒体'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
@@ -612,6 +644,13 @@ Future<void> _selectMediaFilter(WidgetTester tester, String key) async {
   await tester.tap(find.byKey(const ValueKey('library-filter-button')));
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(ValueKey('library-filter-$key')));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _refreshLibrary(WidgetTester tester) async {
+  await tester.tap(find.byKey(const ValueKey('library-more-button')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const ValueKey('library-more-refresh')));
   await tester.pumpAndSettle();
 }
 

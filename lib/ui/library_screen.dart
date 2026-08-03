@@ -828,7 +828,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final previousOffset = restoreScrollPosition && _controller.hasClients
         ? _controller.offset
         : null;
-    _generation++;
+    final generation = ++_generation;
     setState(() {
       _items.clear();
       _loading = false;
@@ -839,17 +839,30 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     });
     _clearPosition(scrollToTop: !restoreScrollPosition);
     try {
-      while (mounted && _items.length < targetItemCount && _hasMore) {
+      while (mounted &&
+          generation == _generation &&
+          _items.length < targetItemCount &&
+          _hasMore) {
         final previousCount = _items.length;
-        await _loadMore();
+        await _loadMore(expectedGeneration: generation);
+        if (!mounted || generation != _generation) return;
         if (_error != null || _items.length <= previousCount) break;
+      }
+      if (!mounted || generation != _generation) return;
+      if (_filter != _LibraryMediaFilter.all &&
+          _displayedItems.isEmpty &&
+          _hasMore &&
+          _error == null) {
+        await _loadUntilFilterMatches(generation);
       }
     } finally {
       _reloading = false;
     }
-    if (previousOffset != null && mounted) {
+    if (previousOffset != null && mounted && generation == _generation) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_controller.hasClients) return;
+        if (!mounted || generation != _generation || !_controller.hasClients) {
+          return;
+        }
         final offset = previousOffset
             .clamp(0.0, _controller.position.maxScrollExtent)
             .toDouble();
