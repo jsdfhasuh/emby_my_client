@@ -5,8 +5,8 @@
 ## 状态
 
 - 当前状态：`NOT_ACCEPTED`
-- 实现状态：`IMPLEMENTATION_COMPLETE`（只有自动化门禁和 Artifact 生成完成后才能填写）
-- 实施基线 SHA：`77d91c4e80b7eb68e299d36473631b5a34b9824c`
+- 实现状态：`IMPLEMENTATION_IN_PROGRESS`（完整绿色 Actions 和全部 Artifact 生成后才能改为 `IMPLEMENTATION_COMPLETE`）
+- 实施基线 SHA：`6c906822055ef4cfd6740cbe97e00fb5a358d5f4`
 - 实现分支：`agent/ios-core-adaptation`
 - 验收责任人：待设备所有者填写
 - 验收日期：待设备所有者填写
