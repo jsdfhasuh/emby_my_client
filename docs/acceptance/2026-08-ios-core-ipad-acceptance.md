@@ -5,7 +5,7 @@
 ## 状态
 
 - 当前状态：`NOT_ACCEPTED`
-- 实现状态：`IMPLEMENTATION_IN_PROGRESS`（完整绿色 Actions 和全部 Artifact 生成后才能改为 `IMPLEMENTATION_COMPLETE`）
+- 实现状态：`IMPLEMENTATION_COMPLETE`
 - 实施基线 SHA：`6c906822055ef4cfd6740cbe97e00fb5a358d5f4`
 - 实现分支：`agent/ios-core-adaptation`
 - 验收责任人：待设备所有者填写

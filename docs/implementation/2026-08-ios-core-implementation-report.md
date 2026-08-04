@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 实现状态：`IMPLEMENTATION_IN_PROGRESS`
+- 实现状态：`IMPLEMENTATION_COMPLETE`
 - 真机验收状态：`NOT_ACCEPTED`
 - 本报告不代替设备所有者填写任何真机验收结果。
 - 本轮范围保持冻结：iPadOS Core 播放、登录、媒体库、搜索、详情、下载数据层和受控 iOS 构建；不包含 iOS 原生画中画、可靠后台持续下载、UDP 自动发现、iPhone、App Store 或桌面端。
@@ -11,8 +11,8 @@
 
 - 整改计划审计基线：`d7380ffd7b0b97930affa53a544574370834fedf`
 - 本分支要求保留的计划基线：`6c906822055ef4cfd6740cbe97e00fb5a358d5f4`
-- 当前报告提交前的分支 HEAD：`94a354c`
-- 最终分支 SHA：待完整绿色 Actions 和 Artifact 生成后回填。
+- 最终实现/Artifact HEAD：`651e8e151d812df96aef6a294e64c911302864d4`
+- 状态文档在本次文档提交后仍保持与上述实现提交一致；本次提交只回填证据和状态，不修改实现代码。
 
 已完成的整改提交：
 
@@ -20,7 +20,10 @@
 2. `1422b8a` `fix: degrade optional iPadOS player controls safely`
 3. `e6f72ac` `fix: align iPadOS client identity and network errors`
 4. `94a354c` `ci: harden iOS lock and signing verification`
-5. 本报告及验收状态修正提交：待提交。
+5. `9c18bbb` `docs: record iPadOS implementation evidence`
+6. `4c4c814` `ci: pin CocoaPods during Flutter iOS build`
+7. `651e8e1` `fix: mark iOS packaging gates executable`
+8. 本次文档状态回填提交：只修改报告和验收模板状态。
 
 ## 关键实现
 
@@ -85,22 +88,24 @@ ios/Runner.xcodeproj/project.pbxproj
 - Android 普通 Debug：`build/app/outputs/flutter-apk/app-debug.apk` 构建通过。
 - Android 分 ABI Debug：`app-armeabi-v7a-debug.apk`、`app-arm64-v8a-debug.apk`、`app-x86_64-debug.apk` 构建通过。
 - `flutter pub get --enforce-lockfile`：通过；随后 `pubspec.lock` 无漂移。
-- 当前 Windows 工作树中的 `ios/Podfile.lock`：无漂移；CocoaPods 安装和 iOS build 后复查待 macOS Actions 确认。
+- 当前 Windows 工作树中的 `ios/Podfile.lock`：无漂移；macOS Actions 的 CocoaPods 安装和 iOS build 后复查均通过。
 
 ## Actions 与 Artifact
 
-- 分支 Actions run URL：待推送后回填。
-- `quality-and-android`：待运行。
-- `ios-device-build`：待运行。
-- IPA Artifact：`ios-core-ipa-<run>`，应包含 IPA 与 `*.ipa.sha256`。
-- dSYM Artifact：`ios-core-dsym-<run>`，应包含 `*.dSYM.zip`。
-- diagnostics Artifact：`ios-core-diagnostics-<run>`，应包含版本、锁文件哈希、工具版本、架构、分类、签名顺序、IPA SHA-256 及 fakesign/最终 entitlement dump。
+- 分支 Actions run URL：<https://github.com/jsdfhasuh/emby_my_client/actions/runs/30874187973>
+- run number：`15`；head SHA：`651e8e151d812df96aef6a294e64c911302864d4`
+- `quality-and-android`：成功。
+- `ios-device-build`：成功。
+- IPA Artifact：`ios-core-ipa-15`，包含 `emby-ios-core-651e8e151d81-15.ipa` 和对应 `*.ipa.sha256`。
+- dSYM Artifact：`ios-core-dsym-15`，包含 `emby-ios-core-651e8e151d81-15.dSYM.zip`。
+- diagnostics Artifact：`ios-core-diagnostics-15`，包含 dSYM、版本、锁文件哈希、工具版本、架构、分类、签名顺序、IPA SHA-256 及 fakesign/最终 entitlement dump。
+- Android Artifact：`android-debug-apk-15`、`android-debug-split-apks-15`。
 
-在两个 Job 成功且上述 Artifact 全部真实生成前，实现状态保持 `IMPLEMENTATION_IN_PROGRESS`。
+两个 Job 已成功且上述 Artifact 已真实生成，因此实现状态进入 `IMPLEMENTATION_COMPLETE`；真机验收状态仍为 `NOT_ACCEPTED`。
 
 ## 最终签名证据
 
-待 Actions 生成并回填以下证据文件：
+`ios-core-diagnostics-15` 已生成并包含以下证据文件：
 
 - `entitlements-fakesign/main/Runner.plist`：应用 entitlement，来自唯一源。
 - `entitlements-fakesign/embedded/*.plist`：空 entitlement；不得出现 `keychain-access-groups`。
@@ -109,6 +114,10 @@ ios/Runner.xcodeproj/project.pbxproj
 - `signing-order.txt`：所有嵌入式 Mach-O 在 `Runner` 之前签名。
 - `architecture-fakesign.txt`、`architecture-final-ipa.txt`：所有 Mach-O 为 arm64。
 - `Info.plist`、`macho-classification-final.txt` 和 `lockfiles-sha256.txt`：Bundle ID、分类和锁文件证据。
+
+证据结果：fakesign 和最终 IPA 各有 22 个 Mach-O，非 arm64 数量均为 0；两阶段各有 1 个 Runner dump 和 21 个嵌入式 dump。Runner dump 只有 `keychain-access-groups`，嵌入式 dump 的 key 集合为空，且 `signing-order.txt` 的最后一行是 `main Runner`。IPA 中没有 `.appex`。最终 Bundle ID 为 `com.jsdfhasuh.embyclient`，最低系统版本为 `13.0`，`UIDeviceFamily` 为 `[2]`，SDK 为 `iphoneos18.5`。
+
+IPA `emby-ios-core-651e8e151d81-15.ipa` 的 SHA-256 为 `452d7df9b3273724d43191f5f76e85b35e5ac2de4d0efa36f76947b04c1d6984`，与 Artifact 内 `*.ipa.sha256` 一致。diagnostics 记录的锁文件 SHA-256 为 `pubspec.lock=579c565ce8e45999c298a73be41361273b0e161adb3531d08586609cf2e0d760`、`ios/Podfile.lock=7aabc4b55db3b47119864e977256b66d5cd424dfe79eb46fd1e732aa08e6008a`；唯一 entitlement 源 SHA-256 为 `0f64d5933df4feea14f29ab7ab90e2afd2af90ee429244403af773a10ca35161`。工具证据为 Flutter `3.38.9`/revision `67323de285...`, Dart `3.10.8`, Xcode `16.4`, macOS `15.7.7`, CocoaPods `1.16.2`, ldid `2.1.5_1`。
 
 ## 已知限制与设备所有者步骤
 
