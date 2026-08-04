@@ -42,6 +42,10 @@ for command_name in ditto file ldid lipo plutil shasum unzip zip; do
     exit 1
   fi
 done
+if [[ ! -f "$SOURCE_ENTITLEMENTS" ]]; then
+  echo "Missing entitlement source: $SOURCE_ENTITLEMENTS" >&2
+  exit 1
+fi
 if [[ ! -d "$APP_PATH" || ! -d "$DSYM_PATH" ]]; then
   echo "A device Runner.app and dSYM are required" >&2
   echo "app=${APP_PATH:-<missing>}" >&2
@@ -57,7 +61,11 @@ ditto "$APP_PATH" "$staged_app"
 
 preflight_file="$ARTIFACT_DIR/entitlements-preflight.txt"
 {
-  "$ROOT_DIR/scripts/ios/sync_entitlements.sh" "$work_dir/resolved-entitlements.plist"
+  ENTITLEMENTS_SOURCE="$SOURCE_ENTITLEMENTS" \
+    "$ROOT_DIR/scripts/ios/sync_entitlements.sh" \
+    "$work_dir/resolved-entitlements.plist"
+  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
+    "$SOURCE_ENTITLEMENTS" "$work_dir/resolved-entitlements.plist"
   "$ROOT_DIR/scripts/ios/validate_entitlements.sh" "$SOURCE_ENTITLEMENTS"
 } | tee "$preflight_file"
 
@@ -76,56 +84,126 @@ build_version="$(plutil -extract CFBundleVersion raw -o - "$staged_app/Info.plis
 printf 'bundle_id=%s\nshort_version=%s\nbuild_version=%s\n' \
   "$bundle_id" "$short_version" "$build_version" >"$ARTIFACT_DIR/version.txt"
 
-machos_file="$work_dir/machos.txt"
-sorted_machos_file="$work_dir/machos-sorted.txt"
-paths_file="$work_dir/all-paths"
-find "$staged_app" -type f -print0 >"$paths_file"
-while IFS= read -r -d '' path; do
-  if [[ "$(file -b "$path")" == *Mach-O* ]]; then
-    depth="$(printf '%s\n' "$path" | awk -F/ '{print NF}')"
-    printf '%08d\t%s\n' "$depth" "$path" >>"$machos_file"
-  fi
-done <"$paths_file"
-if [[ ! -s "$machos_file" ]]; then
-  echo "No Mach-O files found in staged application" >&2
+appex_path="$(find "$staged_app" -type d -name '*.appex' -print -quit)"
+if [[ -n "$appex_path" ]]; then
+  echo "Unsupported App Extension found: $appex_path" >&2
+  echo "No App Extension entitlement/signing policy is defined for this Core build" >&2
   exit 1
 fi
-sort -rn "$machos_file" >"$sorted_machos_file"
 
-while IFS=$'\t' read -r _ path; do
-  echo "fakesign=$path"
-  ldid -S"$work_dir/resolved-entitlements.plist" "$path"
-done <"$sorted_machos_file"
+collect_machos() {
+  local app_dir="$1"
+  local inventory_file="$2"
+  local classification_file="$3"
+  local paths_file="$4"
+  local path
+  local relative
+  local depth
+  local role
+  local main_found=false
 
-fakesign_dump_dir="$ARTIFACT_DIR/entitlements-fakesign"
-rm -rf "$fakesign_dump_dir"
-mkdir -p "$fakesign_dump_dir"
+  : >"$inventory_file"
+  : >"$classification_file"
+  find "$app_dir" -type f -print0 >"$paths_file"
+  while IFS= read -r -d '' path; do
+    if [[ "$(file -b "$path")" != *Mach-O* ]]; then
+      continue
+    fi
+    relative="${path#"$app_dir"/}"
+    depth="$(printf '%s\n' "$path" | awk -F/ '{print NF}')"
+    if [[ "$path" == "$app_dir/Runner" ]]; then
+      role='main'
+      main_found=true
+    else
+      role='embedded'
+    fi
+    printf '%08d\t%s\t%s\n' "$depth" "$role" "$path" >>"$inventory_file"
+    printf '%s\t%s\n' "$role" "$relative" >>"$classification_file"
+  done <"$paths_file"
+
+  if [[ "$main_found" != true ]]; then
+    echo "Runner.app/Runner is not a Mach-O executable" >&2
+    exit 1
+  fi
+  sort -rn "$inventory_file" -o "$inventory_file"
+}
+
+inventory_file="$work_dir/machos-sorted.txt"
+classification_file="$ARTIFACT_DIR/macho-classification.txt"
+collect_machos "$staged_app" "$inventory_file" "$classification_file" \
+  "$work_dir/all-paths"
+
+embedded_entitlements="$work_dir/embedded-entitlements.plist"
+printf '%s\n' \
+  '<?xml version="1.0" encoding="UTF-8"?>' \
+  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+  '<plist version="1.0"><dict/></plist>' >"$embedded_entitlements"
+
+signing_order_file="$ARTIFACT_DIR/signing-order.txt"
+: >"$signing_order_file"
+while IFS=$'\t' read -r _ role path; do
+  if [[ "$role" == 'main' ]]; then
+    continue
+  fi
+  printf 'embedded\t%s\n' "${path#"$staged_app"/}" >>"$signing_order_file"
+  ldid -S"$embedded_entitlements" "$path"
+done <"$inventory_file"
+
+printf 'main\tRunner\n' >>"$signing_order_file"
+ldid -S"$work_dir/resolved-entitlements.plist" "$staged_app/Runner"
+
 dump_entitlements() {
   local app_dir="$1"
   local destination_dir="$2"
-  local list_file="$work_dir/dump-paths"
+  local list_file="$3"
+  local paths_file="$4"
   local path
   local relative
   local safe_name
-  find "$app_dir" -type f -print0 >"$list_file"
+  local destination
+
+  mkdir -p "$destination_dir/main" "$destination_dir/embedded"
+  : >"$list_file"
+  find "$app_dir" -type f -print0 >"$paths_file"
   while IFS= read -r -d '' path; do
-    if [[ "$(file -b "$path")" == *Mach-O* ]]; then
-      relative="${path#"$app_dir"/}"
-      safe_name="${relative//\//__}.plist"
-      mkdir -p "$destination_dir"
-      ldid -e "$path" >"$destination_dir/$safe_name"
-      echo "$destination_dir/$safe_name"
+    if [[ "$(file -b "$path")" != *Mach-O* ]]; then
+      continue
+    fi
+    relative="${path#"$app_dir"/}"
+    if [[ "$path" == "$app_dir/Runner" ]]; then
+      destination="$destination_dir/main/Runner.plist"
+    else
+      safe_name="${relative//\//__}"
+      destination="$destination_dir/embedded/${safe_name}.plist"
+    fi
+    ldid -e "$path" >"$destination"
+    printf '%s\0' "$destination" >>"$list_file"
+  done <"$paths_file"
+}
+
+validate_dumps() {
+  local list_file="$1"
+  local dump
+  while IFS= read -r -d '' dump; do
+    if [[ "$dump" == */main/* ]]; then
+      "$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
+        "$SOURCE_ENTITLEMENTS" "$dump" >/dev/null
+    else
+      "$ROOT_DIR/scripts/ios/validate_embedded_entitlements.sh" "$dump" >/dev/null
     fi
   done <"$list_file"
 }
 
-fakesign_dumps="$(dump_entitlements "$staged_app" "$fakesign_dump_dir")"
-for dump in $fakesign_dumps; do
-  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" "$SOURCE_ENTITLEMENTS" "$dump" >/dev/null
-done
+fakesign_dump_dir="$ARTIFACT_DIR/entitlements-fakesign"
+rm -rf "$fakesign_dump_dir"
+mkdir -p "$fakesign_dump_dir"
+dump_entitlements "$staged_app" "$fakesign_dump_dir" \
+  "$work_dir/fakesign-dumps" "$work_dir/fakesign-paths"
+validate_dumps "$work_dir/fakesign-dumps"
 
 architecture_file="$ARTIFACT_DIR/architecture-fakesign.txt"
-"$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" "$staged_app" "$architecture_file"
+"$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" \
+  "$staged_app" "$architecture_file"
 
 package_dir="$work_dir/package"
 mkdir -p "$package_dir/Payload"
@@ -147,17 +225,25 @@ if [[ "$final_bundle_id" != "$bundle_id" ]]; then
   echo "Bundle ID changed during IPA packaging: $final_bundle_id" >&2
   exit 1
 fi
+final_appex_path="$(find "$final_app" -type d -name '*.appex' -print -quit)"
+if [[ -n "$final_appex_path" ]]; then
+  echo "Unsupported App Extension found after IPA packaging: $final_appex_path" >&2
+  exit 1
+fi
 
+final_classification_file="$ARTIFACT_DIR/macho-classification-final.txt"
+collect_machos "$final_app" "$work_dir/final-machos-sorted.txt" \
+  "$final_classification_file" "$work_dir/final-all-paths"
 final_dump_dir="$ARTIFACT_DIR/entitlements-final"
 rm -rf "$final_dump_dir"
 mkdir -p "$final_dump_dir"
-final_dumps="$(dump_entitlements "$final_app" "$final_dump_dir")"
-for dump in $final_dumps; do
-  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" "$SOURCE_ENTITLEMENTS" "$dump" >/dev/null
-done
+dump_entitlements "$final_app" "$final_dump_dir" \
+  "$work_dir/final-dumps" "$work_dir/final-paths"
+validate_dumps "$work_dir/final-dumps"
 cp "$final_app/Info.plist" "$ARTIFACT_DIR/Info.plist"
 final_architecture_file="$ARTIFACT_DIR/architecture-final-ipa.txt"
-"$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" "$final_app" "$final_architecture_file"
+"$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" \
+  "$final_app" "$final_architecture_file"
 
 ipa_sha256="$ipa_path.sha256"
 shasum -a 256 "$ipa_path" >"$ipa_sha256"
@@ -197,6 +283,9 @@ cp "$work_dir/resolved-entitlements.plist" "$diagnostics_dir/"
 cp "$preflight_file" "$diagnostics_dir/"
 cp "$architecture_file" "$diagnostics_dir/"
 cp "$final_architecture_file" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/macho-classification.txt" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/macho-classification-final.txt" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/signing-order.txt" "$diagnostics_dir/"
 cp "$ipa_sha256" "$diagnostics_dir/"
 cp "$ARTIFACT_DIR/lockfiles-sha256.txt" "$diagnostics_dir/"
 cp -R "$fakesign_dump_dir/." "$diagnostics_dir/entitlements-fakesign/"
