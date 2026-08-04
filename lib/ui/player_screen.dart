@@ -26,6 +26,115 @@ import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
 
+abstract interface class PlayerSystemControls {
+  Future<double> readBrightness();
+
+  Future<void> setBrightness(double value);
+
+  Future<void> resetBrightness();
+
+  Future<double> readVolume();
+
+  Future<void> setVolume(double value);
+}
+
+class PluginPlayerSystemControls implements PlayerSystemControls {
+  const PluginPlayerSystemControls();
+
+  @override
+  Future<double> readBrightness() => ScreenBrightness.instance.application;
+
+  @override
+  Future<void> setBrightness(double value) =>
+      ScreenBrightness.instance.setApplicationScreenBrightness(value);
+
+  @override
+  Future<void> resetBrightness() =>
+      ScreenBrightness.instance.resetApplicationScreenBrightness();
+
+  @override
+  Future<double> readVolume() => VolumeController.instance.getVolume();
+
+  @override
+  Future<void> setVolume(double value) =>
+      VolumeController.instance.setVolume(value);
+}
+
+class SafePlayerSystemControls {
+  SafePlayerSystemControls(
+    this.delegate, {
+    void Function({required bool brightness, required Object error})? onFailure,
+  }) : _onFailure = onFailure;
+
+  final PlayerSystemControls delegate;
+  final void Function({required bool brightness, required Object error})?
+  _onFailure;
+  bool brightnessAvailable = true;
+  bool volumeAvailable = true;
+
+  Future<double?> readBrightness() async {
+    if (!brightnessAvailable) return null;
+    try {
+      return await delegate.readBrightness();
+    } catch (error) {
+      _disable(brightness: true, error: error);
+      return null;
+    }
+  }
+
+  Future<void> setBrightness(double value) async {
+    if (!brightnessAvailable) return;
+    try {
+      await delegate.setBrightness(value);
+    } catch (error) {
+      _disable(brightness: true, error: error);
+    }
+  }
+
+  Future<void> resetBrightness() async {
+    if (!brightnessAvailable) return;
+    try {
+      await delegate.resetBrightness();
+    } catch (error) {
+      _disable(brightness: true, error: error);
+    }
+  }
+
+  Future<double?> readVolume() async {
+    if (!volumeAvailable) return null;
+    try {
+      return await delegate.readVolume();
+    } catch (error) {
+      _disable(brightness: false, error: error);
+      return null;
+    }
+  }
+
+  Future<void> setVolume(double value) async {
+    if (!volumeAvailable) return;
+    try {
+      await delegate.setVolume(value);
+    } catch (error) {
+      _disable(brightness: false, error: error);
+    }
+  }
+
+  void _disable({required bool brightness, required Object error}) {
+    if (brightness) {
+      if (!brightnessAvailable) return;
+      brightnessAvailable = false;
+    } else {
+      if (!volumeAvailable) return;
+      volumeAvailable = false;
+    }
+    try {
+      _onFailure?.call(brightness: brightness, error: error);
+    } catch (_) {
+      // A diagnostic/UI callback must not reintroduce a plugin exception.
+    }
+  }
+}
+
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
     super.key,
@@ -35,6 +144,7 @@ class PlayerScreen extends StatefulWidget {
     this.offlineItem,
     this.downloads,
     this.capabilities,
+    this.systemControls,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -46,6 +156,7 @@ class PlayerScreen extends StatefulWidget {
   final OfflineMediaItem? offlineItem;
   final DownloadService? downloads;
   final PlatformCapabilities? capabilities;
+  final PlayerSystemControls? systemControls;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -58,6 +169,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PictureInPictureController _pipController;
   late final PlatformCapabilities _capabilities =
       widget.capabilities ?? PlatformCapabilities.current();
+  late final PlayerSystemControls _systemControls =
+      widget.systemControls ?? const PluginPlayerSystemControls();
+  late final SafePlayerSystemControls _safeSystemControls =
+      SafePlayerSystemControls(
+        _systemControls,
+        onFailure: _handleSystemControlFailure,
+      );
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
   final PlaybackSettingsStore _settingsStore = PlaybackSettingsStore();
@@ -93,6 +211,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _autoPlayedCount = 0;
   String? _error;
   String? _playbackStatus;
+  bool _brightnessFailureReported = false;
+  bool _volumeFailureReported = false;
 
   @override
   void initState() {
@@ -122,9 +242,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       },
     );
     unawaited(_pipController.initialize());
-    VolumeController.instance.showSystemUI = false;
+    try {
+      VolumeController.instance.showSystemUI = false;
+    } catch (error) {
+      _handleSystemControlFailure(brightness: false, error: error);
+    }
     _enterFullscreen();
-    unawaited(_initializePlayback());
+    unawaited(_initializePlaybackSafely());
   }
 
   void _createPlayer() {
@@ -140,6 +264,26 @@ class _PlayerScreenState extends State<PlayerScreen>
     _settings = settings;
     _videoFit = _boxFit(settings.videoFit);
     await _startCurrentItem();
+  }
+
+  Future<void> _initializePlaybackSafely() async {
+    try {
+      await _initializePlayback();
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'player',
+        'Unexpected playback initialization failure',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (!mounted) return;
+      setState(() {
+        _error = '播放器初始化失败，请返回后重试';
+        _buffering = false;
+        _playing = false;
+        _playbackStatus = null;
+      });
+    }
   }
 
   Future<void> _startCurrentItem() async {
@@ -431,7 +575,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else {
       unawaited(_player.dispose());
     }
-    unawaited(ScreenBrightness.instance.resetApplicationScreenBrightness());
+    unawaited(_resetBrightnessSafely());
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     unawaited(
       SystemChrome.setPreferredOrientations(const [
@@ -521,35 +665,42 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_controlsLocked || details.localPosition.dy < 32) return;
     _verticalDragIsBrightness =
         details.localPosition.dx < MediaQuery.sizeOf(context).width / 2;
+    if (_verticalDragIsBrightness
+        ? !_safeSystemControls.brightnessAvailable
+        : !_safeSystemControls.volumeAvailable) {
+      return;
+    }
     _verticalDragStartY = details.localPosition.dy;
     unawaited(_loadVerticalDragValue());
   }
 
   Future<void> _loadVerticalDragValue() async {
-    try {
-      final value = _verticalDragIsBrightness
-          ? await ScreenBrightness.instance.application
-          : await VolumeController.instance.getVolume();
-      if (!mounted || _verticalDragStartY == null) return;
-      setState(() {
-        _verticalDragStartValue = value;
-        _verticalDragValue = value;
-        _controlsVisible = false;
-      });
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'player',
-        'Failed to read ${_verticalDragIsBrightness ? 'brightness' : 'volume'}',
-        error: error,
-        stackTrace: stackTrace,
-      );
+    final isBrightness = _verticalDragIsBrightness;
+    if (isBrightness
+        ? !_safeSystemControls.brightnessAvailable
+        : !_safeSystemControls.volumeAvailable) {
+      return;
     }
+    final value = isBrightness
+        ? await _safeSystemControls.readBrightness()
+        : await _safeSystemControls.readVolume();
+    if (!mounted || _verticalDragStartY == null || value == null) return;
+    setState(() {
+      _verticalDragStartValue = value;
+      _verticalDragValue = value;
+      _controlsVisible = false;
+    });
   }
 
   void _onVerticalDragUpdate(DragUpdateDetails details) {
     final startY = _verticalDragStartY;
     final startValue = _verticalDragStartValue;
     if (startY == null || startValue == null) return;
+    if (_verticalDragIsBrightness
+        ? !_safeSystemControls.brightnessAvailable
+        : !_safeSystemControls.volumeAvailable) {
+      return;
+    }
     final height = MediaQuery.sizeOf(context).height;
     if (height <= 0) return;
     final value = (startValue + (startY - details.localPosition.dy) / height)
@@ -557,11 +708,55 @@ class _PlayerScreenState extends State<PlayerScreen>
         .toDouble();
     setState(() => _verticalDragValue = value);
     if (_verticalDragIsBrightness) {
-      unawaited(
-        ScreenBrightness.instance.setApplicationScreenBrightness(value),
-      );
+      unawaited(_setBrightnessSafely(value));
     } else {
-      unawaited(VolumeController.instance.setVolume(value));
+      unawaited(_setVolumeSafely(value));
+    }
+  }
+
+  Future<void> _setBrightnessSafely(double value) async {
+    await _safeSystemControls.setBrightness(value);
+  }
+
+  Future<void> _setVolumeSafely(double value) async {
+    await _safeSystemControls.setVolume(value);
+  }
+
+  Future<void> _resetBrightnessSafely() async {
+    await _safeSystemControls.resetBrightness();
+  }
+
+  void _handleSystemControlFailure({
+    required bool brightness,
+    required Object error,
+  }) {
+    var shouldReport = false;
+    if (brightness) {
+      shouldReport = !_brightnessFailureReported;
+      _brightnessFailureReported = true;
+    } else {
+      shouldReport = !_volumeFailureReported;
+      _volumeFailureReported = true;
+    }
+    if (shouldReport) {
+      DiagnosticLog.instance.warning(
+        'player',
+        '${brightness ? 'Brightness' : 'Volume'} control disabled '
+            'after plugin failure errorType=${error.runtimeType}',
+      );
+    }
+
+    void clearDrag() {
+      _verticalDragStartValue = null;
+      _verticalDragValue = null;
+      _verticalDragStartY = null;
+      _controlsVisible = true;
+    }
+
+    if (mounted) {
+      setState(clearDrag);
+    } else {
+      clearDrag();
     }
   }
 

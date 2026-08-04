@@ -171,6 +171,7 @@ class PlaybackController extends ChangeNotifier {
         return;
       } catch (error, stackTrace) {
         if (!_isCurrent(token)) return;
+        _discardReadyWaitAfterStartupError();
         final canRetry =
             !retriedWithTranscode &&
             resolver.canForceTranscode &&
@@ -621,6 +622,12 @@ class PlaybackController extends ChangeNotifier {
     _sawBuffering = false;
     _startupFailureSignaled = false;
     _readyCompleter = Completer<void>();
+  }
+
+  void _discardReadyWaitAfterStartupError() {
+    final completer = _readyCompleter;
+    if (completer != null && !completer.isCompleted) completer.complete();
+    _readyCompleter = null;
   }
 
   void _markReady() {

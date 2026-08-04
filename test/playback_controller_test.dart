@@ -38,6 +38,26 @@ void main() {
     await controller.shutdown();
   });
 
+  test(
+    'player.open errors remain in the existing playback failure path',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final engine = _FakeEngine()..openError = StateError('open failed');
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+      );
+
+      await controller.start();
+
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, isNotEmpty);
+      await controller.shutdown();
+    },
+  );
+
   test('retries DirectPlay once with Transcode when ready times out', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -329,6 +349,7 @@ class _FakeEngine implements PlaybackEngine {
   int playCalls = 0;
   int stopCalls = 0;
   int disposeCalls = 0;
+  Object? openError;
 
   @override
   Stream<Duration> get positionStream => positionController.stream;
@@ -371,6 +392,7 @@ class _FakeEngine implements PlaybackEngine {
     openPlayValues.add(play);
     openUris.add(uri);
     openHeaders.add(Map<String, String>.from(headers));
+    if (openError != null) throw openError!;
     onOpen?.call(openPlayValues.length);
   }
 

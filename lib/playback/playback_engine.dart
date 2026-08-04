@@ -1,5 +1,34 @@
 import 'package:media_kit/media_kit.dart';
 
+import '../core/diagnostic_log.dart';
+
+typedef NativePropertyWriter =
+    Future<void> Function(String property, String value);
+
+class SafeNativePropertyWriter {
+  const SafeNativePropertyWriter(this.writer);
+
+  final NativePropertyWriter writer;
+
+  Future<void> write(String property, String value) async {
+    try {
+      await writer(property, value);
+    } catch (error) {
+      _logFailure(property, error);
+    }
+  }
+
+  static void _logFailure(String property, Object error) {
+    // These properties affect presentation only. An unsupported mpv
+    // property must not turn a playable media source into a failed session.
+    DiagnosticLog.instance.warning(
+      'player',
+      'Optional mpv property failed property=$property '
+          'errorType=${error.runtimeType}',
+    );
+  }
+}
+
 class EngineTrack {
   const EngineTrack({
     required this.id,
@@ -56,9 +85,10 @@ abstract interface class PlaybackEngine {
 }
 
 class MediaKitPlaybackEngine implements PlaybackEngine {
-  const MediaKitPlaybackEngine(this.player);
+  const MediaKitPlaybackEngine(this.player, {this.nativePropertyWriter});
 
   final Player player;
+  final NativePropertyWriter? nativePropertyWriter;
 
   @override
   Stream<Duration> get positionStream => player.stream.position;
@@ -193,9 +223,18 @@ class MediaKitPlaybackEngine implements PlaybackEngine {
   }
 
   Future<void> _setNativeProperty(String property, String value) async {
-    final platform = player.platform;
-    if (platform is NativePlayer) {
-      await platform.setProperty(property, value);
+    try {
+      final writer = nativePropertyWriter;
+      if (writer != null) {
+        await SafeNativePropertyWriter(writer).write(property, value);
+        return;
+      }
+      final platform = player.platform;
+      if (platform is NativePlayer) {
+        await platform.setProperty(property, value);
+      }
+    } catch (error) {
+      SafeNativePropertyWriter._logFailure(property, error);
     }
   }
 
