@@ -36,13 +36,26 @@ void main() {
 
   test('Android capabilities keep the existing platform behaviors', () {
     expect(PlatformCapabilities.android.platformName, 'android');
+    expect(PlatformCapabilities.android.embyDeviceName, 'Android');
     expect(
       PlatformCapabilities.android.supportsAndroidForegroundDownloadExecutor,
       isTrue,
     );
     expect(PlatformCapabilities.android.supportsLanUdpDiscovery, isTrue);
     expect(PlatformCapabilities.android.supportsPictureInPicture, isTrue);
+    expect(
+      PlatformCapabilities.android.supportsLocalNetworkPermissionRecovery,
+      isFalse,
+    );
     expect(PlatformCapabilities.android.deviceIdPrefix, 'emby-android-');
+  });
+
+  test('iPadOS uses its own Emby device display name', () {
+    expect(PlatformCapabilities.ipad.embyDeviceName, 'iPadOS');
+    expect(
+      PlatformCapabilities.ipad.supportsLocalNetworkPermissionRecovery,
+      isTrue,
+    );
   });
 
   test(

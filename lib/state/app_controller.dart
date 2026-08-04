@@ -119,6 +119,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       username: username.trim(),
       password: password,
       deviceId: deviceId,
+      deviceName: _capabilities.embyDeviceName,
     );
     final scope = ServerScope.fromSession(session);
     final libraryCategorySettings = await _restoreLibraryCategorySettings(
@@ -294,6 +295,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     late final EmbyApi api;
     api = EmbyApi(
       session,
+      deviceName: _capabilities.embyDeviceName,
       onSessionExpired: () => _expireSession(scope, api),
       onRemoteCapabilitiesReported: () => _confirmRemoteControl(scope, api),
       onRealtimeConnected: () async {

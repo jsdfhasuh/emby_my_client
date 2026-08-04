@@ -104,15 +104,34 @@ void main() {
       isNull,
     );
   });
+
+  test('authorization headers use the explicit Emby device display name', () {
+    final android = _api((options, handler) {}, deviceName: 'Android');
+    final ipad = _api((options, handler) {}, deviceName: 'iPadOS');
+
+    expect(
+      android.playbackHeaders['X-Emby-Authorization'],
+      contains('Device="Android"'),
+    );
+    expect(
+      ipad.playbackHeaders['X-Emby-Authorization'],
+      contains('Device="iPadOS"'),
+    );
+    expect(
+      ipad.playbackHeaders['X-Emby-Authorization'],
+      contains('Token="${_session.accessToken}"'),
+    );
+  });
 }
 
 EmbyApi _api(
   void Function(RequestOptions options, RequestInterceptorHandler handler)
-  onRequest,
-) {
+  onRequest, {
+  String deviceName = 'Android',
+}) {
   final dio = Dio();
   dio.interceptors.add(InterceptorsWrapper(onRequest: onRequest));
-  return EmbyApi(_session, dio: dio);
+  return EmbyApi(_session, dio: dio, deviceName: deviceName);
 }
 
 const _itemJson = {

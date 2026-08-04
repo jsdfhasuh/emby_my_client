@@ -89,7 +89,12 @@ class _LoginScreenState extends State<LoginScreen> {
         password: _passwordController.text,
       );
     } on EmbyApiException catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      final message =
+          _capabilities.supportsLocalNetworkPermissionRecovery &&
+              error.isLocalNetworkConnectionFailure
+          ? '无法访问局域网服务器。请确认已在“设置 → 隐私与安全性 → 本地网络”中允许本应用，然后重试。'
+          : error.message;
+      if (mounted) setState(() => _error = message);
     } catch (_) {
       if (mounted) setState(() => _error = '登录失败，请稍后重试');
     } finally {

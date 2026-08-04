@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
@@ -12,13 +13,54 @@ import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
 import 'emby_user_data_service.dart';
 
+bool isLocalNetworkAddress(String raw) {
+  var value = raw.trim();
+  if (value.isEmpty) return false;
+  if (!value.contains('://')) value = 'http://$value';
+  final uri = Uri.tryParse(value);
+  if (uri == null || !uri.hasAuthority) return false;
+
+  final host = uri.host.toLowerCase();
+  if (host == 'localhost' || host == 'localhost.') return true;
+  final address = InternetAddress.tryParse(host.split('%').first);
+  if (address == null) return false;
+
+  final bytes = address.rawAddress;
+  if (address.type == InternetAddressType.IPv4) {
+    final first = bytes[0];
+    final second = bytes[1];
+    return first == 127 ||
+        first == 10 ||
+        (first == 172 && second >= 16 && second <= 31) ||
+        (first == 192 && second == 168);
+  }
+
+  final isLoopback =
+      bytes.take(15).every((value) => value == 0) && bytes.last == 1;
+  final isLinkLocal = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
+  final isUniqueLocal = (bytes[0] & 0xfe) == 0xfc;
+  return isLoopback || isLinkLocal || isUniqueLocal;
+}
+
 class EmbyApiException implements Exception {
-  const EmbyApiException(this.message, {this.statusCode});
+  const EmbyApiException(
+    this.message, {
+    this.statusCode,
+    this.serverUrl,
+    this.isConnectionFailure = false,
+  });
 
   final String message;
   final int? statusCode;
+  final String? serverUrl;
+  final bool isConnectionFailure;
 
   bool get isAuthenticationFailure => statusCode == 401 || statusCode == 403;
+
+  bool get isLocalNetworkConnectionFailure =>
+      isConnectionFailure &&
+      serverUrl != null &&
+      isLocalNetworkAddress(serverUrl!);
 
   bool get allowsPlaybackInfoFallback =>
       statusCode == 400 || statusCode == 422 || statusCode == 500;
@@ -44,16 +86,18 @@ class EmbyApi {
   EmbyApi(
     this.session, {
     Dio? dio,
+    String deviceName = 'Android',
     FutureOr<void> Function()? onSessionExpired,
     FutureOr<void> Function()? onRemoteCapabilitiesReported,
     FutureOr<void> Function()? onRealtimeConnected,
     EmbySocketConnector? realtimeConnector,
-  }) : _dio = dio ?? _createDio(session),
+  }) : _deviceName = deviceName,
+       _dio = dio ?? _createDio(session, deviceName),
        _onSessionExpired = onSessionExpired,
        _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported,
        _onRealtimeConnected = onRealtimeConnected {
     if (dio != null) {
-      _configureDio(dio, session);
+      _configureDio(dio, session, deviceName);
     }
     userData = EmbyUserDataService(
       session: session,
@@ -80,6 +124,7 @@ class EmbyApi {
       'ProductionYear,ProviderIds,ParentId,Path,Container,Chapters,Trickplay';
 
   final EmbySession session;
+  final String _deviceName;
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
   final FutureOr<void> Function()? _onRemoteCapabilitiesReported;
@@ -94,6 +139,7 @@ class EmbyApi {
     'X-Emby-Token': session.accessToken,
     'X-Emby-Authorization': _authorizationHeader(
       session.deviceId,
+      deviceName: _deviceName,
       token: session.accessToken,
     ),
   };
@@ -164,6 +210,7 @@ class EmbyApi {
     required String username,
     required String password,
     required String deviceId,
+    String deviceName = 'Android',
   }) async {
     final normalized = normalizeServerUrl(serverUrl);
     DiagnosticLog.instance.info('auth', 'Connecting to $normalized');
@@ -175,7 +222,10 @@ class EmbyApi {
         sendTimeout: const Duration(seconds: 20),
         headers: {
           'Accept': 'application/json',
-          'X-Emby-Authorization': _authorizationHeader(deviceId),
+          'X-Emby-Authorization': _authorizationHeader(
+            deviceId,
+            deviceName: deviceName,
+          ),
         },
       ),
     );
@@ -209,7 +259,7 @@ class EmbyApi {
     } on EmbyApiException {
       rethrow;
     } on DioException catch (error) {
-      throw _friendlyError(error, duringLogin: true);
+      throw _friendlyError(error, duringLogin: true, serverUrl: normalized);
     } on FormatException {
       throw const EmbyApiException('服务器返回了无法识别的数据');
     }
@@ -235,7 +285,7 @@ class EmbyApi {
     return '${uri.scheme}://${uri.authority}$path';
   }
 
-  static Dio _createDio(EmbySession session) => Dio(
+  static Dio _createDio(EmbySession session, String deviceName) => Dio(
     BaseOptions(
       baseUrl: session.serverUrl,
       connectTimeout: const Duration(seconds: 12),
@@ -246,13 +296,14 @@ class EmbyApi {
         'X-Emby-Token': session.accessToken,
         'X-Emby-Authorization': _authorizationHeader(
           session.deviceId,
+          deviceName: deviceName,
           token: session.accessToken,
         ),
       },
     ),
   );
 
-  static void _configureDio(Dio dio, EmbySession session) {
+  static void _configureDio(Dio dio, EmbySession session, String deviceName) {
     if (dio.options.baseUrl.isEmpty) {
       dio.options.baseUrl = session.serverUrl;
     }
@@ -261,14 +312,20 @@ class EmbyApi {
       'X-Emby-Token': session.accessToken,
       'X-Emby-Authorization': _authorizationHeader(
         session.deviceId,
+        deviceName: deviceName,
         token: session.accessToken,
       ),
     });
   }
 
-  static String _authorizationHeader(String deviceId, {String? token}) {
+  static String _authorizationHeader(
+    String deviceId, {
+    required String deviceName,
+    String? token,
+  }) {
     final safeId = deviceId.replaceAll('"', '');
-    return 'MediaBrowser Client="$clientName", Device="Android", '
+    final safeDeviceName = deviceName.replaceAll('"', '');
+    return 'MediaBrowser Client="$clientName", Device="$safeDeviceName", '
         'DeviceId="$safeId", Version="$clientVersion"'
         '${token == null ? '' : ', Token="$token"'}';
   }
@@ -1367,6 +1424,7 @@ class EmbyApi {
   static EmbyApiException _friendlyError(
     DioException error, {
     bool duringLogin = false,
+    String? serverUrl,
   }) {
     final status = error.response?.statusCode;
     if (status == 401 || status == 403) {
@@ -1382,16 +1440,30 @@ class EmbyApi {
         statusCode: status,
       );
     }
+    final isConnectionFailure = switch (error.type) {
+      DioExceptionType.connectionError ||
+      DioExceptionType.connectionTimeout ||
+      DioExceptionType.sendTimeout ||
+      DioExceptionType.receiveTimeout => true,
+      DioExceptionType.unknown => error.error is SocketException,
+      _ => false,
+    };
     return switch (error.type) {
       DioExceptionType.connectionTimeout ||
       DioExceptionType.sendTimeout ||
-      DioExceptionType.receiveTimeout => const EmbyApiException(
+      DioExceptionType.receiveTimeout => EmbyApiException(
         '连接服务器超时，请检查地址和网络',
+        serverUrl: serverUrl,
+        isConnectionFailure: true,
       ),
       DioExceptionType.badCertificate => const EmbyApiException(
         '服务器 HTTPS 证书无效',
       ),
-      _ => const EmbyApiException('无法连接 Emby 服务器，请检查地址和网络'),
+      _ => EmbyApiException(
+        '无法连接 Emby 服务器，请检查地址和网络',
+        serverUrl: serverUrl,
+        isConnectionFailure: isConnectionFailure,
+      ),
     };
   }
 
