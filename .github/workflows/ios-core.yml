@@ -75,6 +75,21 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
 
+      - name: Install shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes shellcheck
+
+      - name: Validate iOS shell scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/ios/*.sh
+          shellcheck --version
+          shellcheck scripts/ios/*.sh
+
       - name: Format
         run: dart format --output=none --set-exit-if-changed .
 
@@ -91,12 +106,19 @@ jobs:
           flutter build apk --debug
           flutter build apk --debug --split-per-abi
 
-      - name: Upload Android APKs
+      - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: android-debug-apks-${{ github.run_number }}
+          name: android-debug-apk-${{ github.run_number }}
           if-no-files-found: error
-          path: build/app/outputs/flutter-apk/*.apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+
+      - name: Upload Android split-per-ABI APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-split-apks-${{ github.run_number }}
+          if-no-files-found: error
+          path: build/app/outputs/flutter-apk/app-*-debug.apk
 
   ios-device-build:
     name: iPadOS device IPA
@@ -168,6 +190,15 @@ jobs:
       - name: Check CocoaPods lock drift
         run: git diff --exit-code -- ios/Podfile.lock
 
+      - name: Generate Runner entitlement mirrors
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ios/sync_entitlements.sh --runner-files
+          git diff --exit-code -- \
+            ios/Runner/DebugProfile.entitlements \
+            ios/Runner/Release.entitlements
+
       - name: Validate iPad project settings and entitlements
         shell: bash
         run: |
@@ -178,12 +209,20 @@ jobs:
       - name: Build unsigned device Runner.app
         run: flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
 
+      - name: Check lock drift after iOS build
+        shell: bash
+        run: git diff --exit-code -- pubspec.lock ios/Podfile.lock
+
       - name: Install and verify Homebrew Core ldid 2.1.5
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/ios/install_ldid.sh
           bash scripts/ios/verify_ldid.sh
+
+      - name: Run packaging negative gates
+        shell: bash
+        run: bash scripts/ios/test_packaging_negative_gates.sh
 
       - name: Create and verify TrollStore IPA
         shell: bash
