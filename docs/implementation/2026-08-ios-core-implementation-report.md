@@ -11,7 +11,7 @@
 
 - 整改计划审计基线：`d7380ffd7b0b97930affa53a544574370834fedf`
 - 本分支要求保留的计划基线：`6c906822055ef4cfd6740cbe97e00fb5a358d5f4`
-- 最终实现/Artifact HEAD：`651e8e151d812df96aef6a294e64c911302864d4`
+- 最终实现/Artifact HEAD：`3f6d00358b0b2d00c2559a11307cd735ae3827d9`
 - 状态文档在本次文档提交后仍保持与上述实现提交一致；本次提交只回填证据和状态，不修改实现代码。
 
 已完成的整改提交：
@@ -23,7 +23,9 @@
 5. `9c18bbb` `docs: record iPadOS implementation evidence`
 6. `4c4c814` `ci: pin CocoaPods during Flutter iOS build`
 7. `651e8e1` `fix: mark iOS packaging gates executable`
-8. 本次文档状态回填提交：只修改报告和验收模板状态。
+8. `d67cd59` `fix: make iOS IPA checksum portable`
+9. `3f6d003` `fix: restore modified brightness after control failure`
+10. 本次文档状态回填提交：只修改本报告的最终证据。
 
 ## 关键实现
 
@@ -40,6 +42,7 @@
 
 - mpv 音频延迟、字幕延迟和字幕样式属性按属性独立捕获异常并安全降级；`open`、`play`、`pause`、`seek` 等核心播放错误仍进入失败路径。
 - 亮度和音量读取/设置失败只触发本地安全降级，不形成未处理异步异常，也不阻止播放器启动。
+- 亮度控制单独记录本次会话是否曾成功修改；后续设置失败禁用手势后，退出时仍会 best-effort 恢复一次；恢复失败只记录脱敏错误类型并清除恢复状态。
 - 播放器初始化有顶层错误边界，初始化失败会进入可观察的失败状态。
 - iPadOS Emby Header 使用 `Device="iPadOS"`；Android 继续使用 `Device="Android"`，已有 Android device ID 不迁移。
 - iPadOS 私网 IPv4/IPv6 连接失败会提供可恢复的本地网络权限提示；Android 既有错误策略保持不变。
@@ -49,7 +52,8 @@
 - `quality-and-android` 固定 Flutter revision，执行 lockfile、format、analyze、全量测试、shell 脚本检查和 Android 双构建。
 - 普通 APK 与分 ABI APK 使用独立 Artifact 名称：`android-debug-apk-<run>`、`android-debug-split-apks-<run>`。
 - `ios-device-build` 使用 Xcode 16.4、CocoaPods 1.16.2 和 Homebrew Core ldid 2.1.5，并在 iOS build 后再次检查 `pubspec.lock` 与 `ios/Podfile.lock` 无漂移。
-- `test_packaging_negative_gates.sh` 覆盖错误 Bundle ID、无策略 `.appex`、嵌入式应用 entitlement 和非 arm64 架构拒绝。
+- `test_packaging_negative_gates.sh` 覆盖错误 Bundle ID、无策略 `.appex`、嵌入式应用 entitlement、非 arm64 架构拒绝和 IPA checksum basename/绝对路径门禁。
+- `build_trollstore_ipa.sh` 在 Artifact 目录内生成便携 `*.ipa.sha256`，并由 `verify_ipa_checksum.sh` 在同目录执行 `shasum -a 256 -c`；diagnostics 复制的校验文件使用同一相对文件名。
 
 ## `.metadata` 模板比较
 
@@ -81,7 +85,7 @@ ios/Runner.xcodeproj/project.pbxproj
 - `connectivity_plus`：`7.0.0`；`7.1+` 要求 Xcode 26，与本轮固定 Xcode 16.4 不兼容，因此锁定兼容版本。
 - `dart format --output=none --set-exit-if-changed .`：通过，127 个文件检查、0 个文件改动。
 - `flutter analyze`：通过，无 issues。
-- `flutter test`：通过，`+282`。
+- `flutter test`：通过，`+284`；其中亮度恢复新增 2 个测试全部通过。
 - `git diff --check`：通过。
 - Git Bash `bash -n scripts/ios/*.sh`：通过。
 - ShellCheck `0.11.0`：通过全部 `scripts/ios/*.sh`；Ubuntu CI Job 也会安装、打印版本并执行同一检查。
@@ -92,14 +96,14 @@ ios/Runner.xcodeproj/project.pbxproj
 
 ## Actions 与 Artifact
 
-- 分支 Actions run URL：<https://github.com/jsdfhasuh/emby_my_client/actions/runs/30874187973>
-- run number：`15`；head SHA：`651e8e151d812df96aef6a294e64c911302864d4`
+- 分支 Actions run URL：<https://github.com/jsdfhasuh/emby_my_client/actions/runs/30886093363>
+- run number：`17`；head SHA：`3f6d00358b0b2d00c2559a11307cd735ae3827d9`
 - `quality-and-android`：成功。
 - `ios-device-build`：成功。
-- IPA Artifact：`ios-core-ipa-15`，包含 `emby-ios-core-651e8e151d81-15.ipa` 和对应 `*.ipa.sha256`。
-- dSYM Artifact：`ios-core-dsym-15`，包含 `emby-ios-core-651e8e151d81-15.dSYM.zip`。
-- diagnostics Artifact：`ios-core-diagnostics-15`，包含 dSYM、版本、锁文件哈希、工具版本、架构、分类、签名顺序、IPA SHA-256 及 fakesign/最终 entitlement dump。
-- Android Artifact：`android-debug-apk-15`、`android-debug-split-apks-15`。
+- IPA Artifact：`ios-core-ipa-17`，包含 `emby-ios-core-3f6d00358b0b-17.ipa` 和 `emby-ios-core-3f6d00358b0b-17.ipa.sha256`。
+- dSYM Artifact：`ios-core-dsym-17`，包含 `emby-ios-core-3f6d00358b0b-17.dSYM.zip`。
+- diagnostics Artifact：`ios-core-diagnostics-17`，包含 `emby-ios-core-diagnostics-3f6d00358b0b-17.zip`、版本、锁文件哈希、工具版本、架构、分类、签名顺序、IPA SHA-256 及 fakesign/最终 entitlement dump。
+- Android Artifact：`android-debug-apk-17`、`android-debug-split-apks-17`。
 
 两个 Job 已成功且上述 Artifact 已真实生成，因此实现状态进入 `IMPLEMENTATION_COMPLETE`；真机验收状态仍为 `NOT_ACCEPTED`。
 
@@ -117,7 +121,13 @@ ios/Runner.xcodeproj/project.pbxproj
 
 证据结果：fakesign 和最终 IPA 各有 22 个 Mach-O，非 arm64 数量均为 0；两阶段各有 1 个 Runner dump 和 21 个嵌入式 dump。Runner dump 只有 `keychain-access-groups`，嵌入式 dump 的 key 集合为空，且 `signing-order.txt` 的最后一行是 `main Runner`。IPA 中没有 `.appex`。最终 Bundle ID 为 `com.jsdfhasuh.embyclient`，最低系统版本为 `13.0`，`UIDeviceFamily` 为 `[2]`，SDK 为 `iphoneos18.5`。
 
-IPA `emby-ios-core-651e8e151d81-15.ipa` 的 SHA-256 为 `452d7df9b3273724d43191f5f76e85b35e5ac2de4d0efa36f76947b04c1d6984`，与 Artifact 内 `*.ipa.sha256` 一致。diagnostics 记录的锁文件 SHA-256 为 `pubspec.lock=579c565ce8e45999c298a73be41361273b0e161adb3531d08586609cf2e0d760`、`ios/Podfile.lock=7aabc4b55db3b47119864e977256b66d5cd424dfe79eb46fd1e732aa08e6008a`；唯一 entitlement 源 SHA-256 为 `0f64d5933df4feea14f29ab7ab90e2afd2af90ee429244403af773a10ca35161`。工具证据为 Flutter `3.38.9`/revision `67323de285...`, Dart `3.10.8`, Xcode `16.4`, macOS `15.7.7`, CocoaPods `1.16.2`, ldid `2.1.5_1`。
+IPA `emby-ios-core-3f6d00358b0b-17.ipa` 的 SHA-256 为 `56db549e9b69809c03996624499a91c6361c053f37a5a2baad83d468014bfd6f`，与 Artifact 内 `emby-ios-core-3f6d00358b0b-17.ipa.sha256` 一致。校验文件实际内容为：
+
+```text
+56db549e9b69809c03996624499a91c6361c053f37a5a2baad83d468014bfd6f  emby-ios-core-3f6d00358b0b-17.ipa
+```
+
+在下载后的 IPA Artifact 目录执行 `shasum -a 256 -c emby-ios-core-3f6d00358b0b-17.ipa.sha256` 返回 `OK`；diagnostics zip 中复制的同名校验文件也只包含该相对 basename，未包含 `/Users/runner`、工作区或其他绝对路径。diagnostics 记录的锁文件 SHA-256 为 `pubspec.lock=579c565ce8e45999c298a73be41361273b0e161adb3531d08586609cf2e0d760`、`ios/Podfile.lock=7aabc4b55db3b47119864e977256b66d5cd424dfe79eb46fd1e732aa08e6008a`；唯一 entitlement 源 SHA-256 为 `0f64d5933df4feea14f29ab7ab90e2afd2af90ee429244403af773a10ca35161`。工具证据为 Flutter `3.38.9`/revision `67323de285...`, Dart `3.10.8`, Xcode `16.4`, macOS `15.7.7`, CocoaPods `1.16.2`, ldid `2.1.5_1`。
 
 ## 已知限制与设备所有者步骤
 
