@@ -231,6 +231,14 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
         run: bash scripts/ios/build_trollstore_ipa.sh
 
+      - name: Verify portable IPA checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          ipa_path="$(find build/ios/artifacts -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          test -n "$ipa_path"
+          bash scripts/ios/verify_ipa_checksum.sh "$ipa_path" "$ipa_path.sha256"
+
       - name: Upload IPA and SHA-256
         uses: actions/upload-artifact@v4
         with:

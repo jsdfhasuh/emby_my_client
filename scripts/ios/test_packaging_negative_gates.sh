@@ -110,4 +110,29 @@ chmod +x "$TEMP_DIR/fake-bin/brew"
 assert_fails env PATH="$TEMP_DIR/fake-bin:$PATH" \
   "$ROOT_DIR/scripts/ios/verify_ldid.sh"
 
+checksum_artifacts="$TEMP_DIR/checksum-artifacts"
+mkdir -p "$checksum_artifacts"
+printf '%s\n' 'fake ipa payload' >"$checksum_artifacts/example.ipa"
+(
+  cd "$checksum_artifacts"
+  shasum -a 256 example.ipa >example.ipa.sha256
+)
+"$ROOT_DIR/scripts/ios/verify_ipa_checksum.sh" \
+  "$checksum_artifacts/example.ipa" \
+  "$checksum_artifacts/example.ipa.sha256" >/dev/null
+
+printf '%s\n' \
+  "$(shasum -a 256 "$checksum_artifacts/example.ipa" | awk '{print $1}')  $checksum_artifacts/example.ipa" \
+  >"$checksum_artifacts/absolute.ipa.sha256"
+assert_fails "$ROOT_DIR/scripts/ios/verify_ipa_checksum.sh" \
+  "$checksum_artifacts/example.ipa" \
+  "$checksum_artifacts/absolute.ipa.sha256"
+
+printf '%s\n' \
+  "$(shasum -a 256 "$checksum_artifacts/example.ipa" | awk '{print $1}')  wrong.ipa" \
+  >"$checksum_artifacts/wrong-reference.ipa.sha256"
+assert_fails "$ROOT_DIR/scripts/ios/verify_ipa_checksum.sh" \
+  "$checksum_artifacts/example.ipa" \
+  "$checksum_artifacts/wrong-reference.ipa.sha256"
+
 echo 'Packaging negative gates passed'

@@ -245,8 +245,13 @@ final_architecture_file="$ARTIFACT_DIR/architecture-final-ipa.txt"
 "$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" \
   "$final_app" "$final_architecture_file"
 
-ipa_sha256="$ipa_path.sha256"
-shasum -a 256 "$ipa_path" >"$ipa_sha256"
+ipa_basename="$(basename "$ipa_path")"
+ipa_sha256="$ARTIFACT_DIR/$ipa_basename.sha256"
+(
+  cd "$ARTIFACT_DIR"
+  shasum -a 256 "$ipa_basename" >"$(basename "$ipa_sha256")"
+)
+"$ROOT_DIR/scripts/ios/verify_ipa_checksum.sh" "$ipa_path" "$ipa_sha256"
 shasum -a 256 "$SOURCE_ENTITLEMENTS" >"$ARTIFACT_DIR/trollstore-entitlements.plist.sha256"
 {
   shasum -a 256 "$ROOT_DIR/pubspec.lock"
