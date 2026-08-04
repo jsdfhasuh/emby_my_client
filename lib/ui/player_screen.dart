@@ -71,6 +71,7 @@ class SafePlayerSystemControls {
   _onFailure;
   bool brightnessAvailable = true;
   bool volumeAvailable = true;
+  bool brightnessModified = false;
 
   Future<double?> readBrightness() async {
     if (!brightnessAvailable) return null;
@@ -86,17 +87,27 @@ class SafePlayerSystemControls {
     if (!brightnessAvailable) return;
     try {
       await delegate.setBrightness(value);
+      brightnessModified = true;
     } catch (error) {
       _disable(brightness: true, error: error);
     }
   }
 
   Future<void> resetBrightness() async {
-    if (!brightnessAvailable) return;
+    if (!brightnessModified) return;
     try {
       await delegate.resetBrightness();
     } catch (error) {
-      _disable(brightness: true, error: error);
+      try {
+        DiagnosticLog.instance.warning(
+          'player',
+          'Brightness reset failed errorType=${error.runtimeType}',
+        );
+      } catch (_) {
+        // A diagnostic failure must not affect player shutdown.
+      }
+    } finally {
+      brightnessModified = false;
     }
   }
 
