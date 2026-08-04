@@ -109,7 +109,7 @@ ios/Runner.xcodeproj/project.pbxproj
 
 ## 最终签名证据
 
-`ios-core-diagnostics-15` 已生成并包含以下证据文件：
+`ios-core-diagnostics-17` 已生成并包含以下证据文件：
 
 - `entitlements-fakesign/main/Runner.plist`：应用 entitlement，来自唯一源。
 - `entitlements-fakesign/embedded/*.plist`：空 entitlement；不得出现 `keychain-access-groups`。
