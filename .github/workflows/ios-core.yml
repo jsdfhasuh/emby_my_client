@@ -207,7 +207,7 @@ jobs:
           bash scripts/ios/validate_entitlements.sh
 
       - name: Build unsigned device Runner.app
-        run: flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
+        run: bundle exec flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Check lock drift after iOS build
         shell: bash
