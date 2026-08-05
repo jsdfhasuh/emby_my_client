@@ -213,7 +213,7 @@ Luna 不得依赖二手博客或自行想象签名行为。开始 Keychain/entit
 
 - Apple `errSecMissingEntitlement`：<https://developer.apple.com/documentation/security/errsecmissingentitlement>
 - Apple 对有效 Keychain access-group 组成的说明：<https://developer.apple.com/forums/thread/67047>
-- 本项目锁定的 `flutter_secure_storage 10.0.0` iOS Keychain 配置：<https://github.com/juliansteenbakker/flutter_secure_storage/blob/v10.0.0/flutter_secure_storage/README.md>
+- 本项目锁定的 `flutter_secure_storage 10.3.1` iOS Keychain 配置：<https://github.com/juliansteenbakker/flutter_secure_storage/blob/v10.3.1/flutter_secure_storage/README.md>；锁文件中的 `flutter_secure_storage_darwin` 为 `0.3.2`，对应上游目录：<https://github.com/juliansteenbakker/flutter_secure_storage/tree/v10.3.1/flutter_secure_storage_darwin>
 - TrollStore 主程序无 entitlement 时的 fallback 实现，固定参考提交 `88424f683b2a08f34a3f88985f790f97d84ce1df`：<https://github.com/opa334/TrollStore/blob/88424f683b2a08f34a3f88985f790f97d84ce1df/RootHelper/main.m>
 - Flutter `MediaQuery.viewInsets`：<https://api.flutter.dev/flutter/widgets/MediaQueryData/viewInsets.html>
 - Flutter `Scrollable.ensureVisible`：<https://api.flutter.dev/flutter/widgets/Scrollable/ensureVisible.html>
@@ -429,6 +429,8 @@ iPadOS 的 `LoginScreen` 至少映射：
 - UI 分别展示安全存储、网络、认证、激活和未知错误的正确安全文案；
 - iPadOS 未登录页面对三个 missing-entitlement stage 显示上表精确诊断码，设备所有者无需登录或读取内部日志即可抄录；
 - Android 收到等价 PlatformException 时仍显示现有通用兜底，不出现 iPadOS 安全存储恢复文案或 iPadOS 诊断码。
+
+本分支阶段 1 诊断专项测试的实际证据为：本轮新增 6 项，`test/sign_in_diagnostics_test.dart` 最终通过 22 项，全量 `flutter test` 最终通过 306 项；此前“新增阶段诊断测试 17 项”的记录不准确，不作为证据。
 
 提交信息：`fix: classify iPadOS sign-in failures safely`。
 
