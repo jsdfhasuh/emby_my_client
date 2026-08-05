@@ -5,9 +5,10 @@
 ## 状态
 
 - 当前状态：`NOT_ACCEPTED`
-- 实现状态：`IMPLEMENTATION_COMPLETE`
+- 实现状态：`IMPLEMENTATION_IN_PROGRESS`
 - 实施基线 SHA：`6c906822055ef4cfd6740cbe97e00fb5a358d5f4`
-- 实现分支：`agent/ios-core-adaptation`
+- 本次整改分支基线 SHA：`9b74b6216e25375ee2e44e8019bfbff9546a5f51`
+- 实现分支：`agent/ios-core-real-device-remediation`
 - 验收责任人：待设备所有者填写
 - 验收日期：待设备所有者填写
 
@@ -27,6 +28,19 @@
 - Bundle ID：`com.jsdfhasuh.embyclient`
 - 应用版本（CFBundleShortVersionString）：待填写
 - 构建号（CFBundleVersion）：待填写
+
+## 2026-08-05 基线失败记录
+
+以下记录来自设备所有者对合并后 `main` IPA 的脱敏报告，不是实现者代填的最终验收结果：
+
+| 项目 | 基线结果 | 证据/备注 |
+| --- | --- | --- |
+| TrollStore 安装和启动 | 初步成功证据 | 具体设备信息和正式验收仍待填写 |
+| 局域网手动登录 | `FAIL` | 输入局域网地址、用户名和密码后显示“登录失败，请稍后重试” |
+| 横屏软件键盘下登录页可达性 | `FAIL` | 键盘弹出后服务器、用户名、密码和登录按钮被遮挡 |
+| 竖屏及旋转后的登录页可达性 | `NOT_TESTED` | 尚无设备所有者的逐项结果 |
+
+原始真机照片含有明文凭据，禁止提交；本表只保留上述脱敏事实。Keychain entitlement 仍为 `SUSPECTED_ROOT_CAUSE`，不能据此确认根因。
 
 ## 安装说明
 
@@ -60,6 +74,8 @@
 | 局域网权限允许后可手动登录 HTTP | 待填写 | |
 | 正常证书 HTTPS 登录 | 待填写 | |
 | 拒绝本地网络权限后错误可恢复 | 待填写 | |
+| 横屏键盘弹出后当前字段和登录按钮可达 | 待填写 | 基线记录为 `FAIL`；整改结果另行记录 |
+| 竖屏/旋转后当前字段和登录按钮可达 | 待填写 | 基线记录为 `NOT_TESTED`；整改结果另行记录 |
 | 登录后杀进程并重启，Keychain 会话恢复 | 待填写 | |
 | 覆盖升级后会话、数据库和离线记录连续 | 待填写 | |
 | 首页图片加载 | 待填写 | |

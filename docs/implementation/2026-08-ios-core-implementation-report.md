@@ -2,7 +2,7 @@
 
 ## 状态
 
-- 实现状态：`IMPLEMENTATION_COMPLETE`
+- 实现状态：`IMPLEMENTATION_IN_PROGRESS`
 - 真机验收状态：`NOT_ACCEPTED`
 - 本报告不代替设备所有者填写任何真机验收结果。
 - 本轮范围保持冻结：iPadOS Core 播放、登录、媒体库、搜索、详情、下载数据层和受控 iOS 构建；不包含 iOS 原生画中画、可靠后台持续下载、UDP 自动发现、iPhone、App Store 或桌面端。
@@ -26,6 +26,33 @@
 8. `d67cd59` `fix: make iOS IPA checksum portable`
 9. `3f6d003` `fix: restore modified brightness after control failure`
 10. 本次文档状态回填提交：只修改本报告的最终证据。
+
+## 合并后 main 基线证据
+
+2026-08-04 合并后的 `main` 基线已由 GitHub Artifact 独立核验。该构建仍保留为历史基线，不代表真实 iPad 登录或键盘验收通过：
+
+- main commit：`9b74b6216e25375ee2e44e8019bfbff9546a5f51`。
+- Actions run：<https://github.com/jsdfhasuh/emby_my_client/actions/runs/30895939051>，run number `20`。
+- `quality-and-android`：成功；`ios-device-build`：成功。
+- Android Artifact：`android-debug-apk-20`、`android-debug-split-apks-20`。
+- IPA Artifact：`ios-core-ipa-20`，文件 `emby-ios-core-9b74b6216e25-20.ipa`。
+- dSYM Artifact：`ios-core-dsym-20`，文件 `emby-ios-core-9b74b6216e25-20.dSYM.zip`。
+- diagnostics Artifact：`ios-core-diagnostics-20`，文件 `emby-ios-core-diagnostics-9b74b6216e25-20.zip`。
+- IPA SHA-256：`968ca0be95ecf607dfb58d162db38396f2ac78fa587b20556f485275945d9bc7`。
+
+## 2026-08-05 真机失败基线
+
+设备所有者使用上述合并后 `main` IPA 在真实 iPad/TrollStore 上报告了以下脱敏事实：
+
+- IPA 可以安装和启动；
+- 手动输入局域网 Emby 地址、用户名和密码后显示“登录失败，请稍后重试”；
+- 软件键盘弹出后，服务器、用户名、密码及登录按钮被遮挡，屏幕只剩品牌图标可见；
+- 系统键盘方向和按键渲染没有异常证据，已确认的是登录页短视口避让和焦点滚动失败；
+- 局域网手动登录：`FAIL`；iPad 横屏键盘可达性：`FAIL`；竖屏/旋转：`NOT_TESTED`；
+- Keychain entitlement 只能记录为 `SUSPECTED_ROOT_CAUSE`，尚未确认根因；
+- 原始照片包含明文凭据，不提交到仓库、Issue、PR、Actions Artifact 或诊断日志。
+
+上述登录和键盘问题是当前整改阻塞项。当前实现状态保持 `IMPLEMENTATION_IN_PROGRESS`，真机验收状态保持 `NOT_ACCEPTED`。
 
 ## 关键实现
 
@@ -105,7 +132,7 @@ ios/Runner.xcodeproj/project.pbxproj
 - diagnostics Artifact：`ios-core-diagnostics-17`，包含 `emby-ios-core-diagnostics-3f6d00358b0b-17.zip`、版本、锁文件哈希、工具版本、架构、分类、签名顺序、IPA SHA-256 及 fakesign/最终 entitlement dump。
 - Android Artifact：`android-debug-apk-17`、`android-debug-split-apks-17`。
 
-两个 Job 已成功且上述 Artifact 已真实生成，因此实现状态进入 `IMPLEMENTATION_COMPLETE`；真机验收状态仍为 `NOT_ACCEPTED`。
+两个 Job 已成功且上述历史 Artifact 已真实生成；但 2026-08-05 真机基线存在登录和键盘阻塞，因此当前实现状态为 `IMPLEMENTATION_IN_PROGRESS`，真机验收状态仍为 `NOT_ACCEPTED`。
 
 ## 最终签名证据
 
