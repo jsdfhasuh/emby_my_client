@@ -32,6 +32,9 @@ typedef SignInAuthenticator =
       required String deviceName,
     });
 
+typedef SignInApiFactory =
+    EmbyApi Function(EmbySession session, ServerScope scope);
+
 Future<EmbySession> _defaultAuthenticate({
   required String serverUrl,
   required String username,
@@ -55,12 +58,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
     SignInAuthenticator? authenticator,
+    SignInApiFactory? apiFactory,
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
        _accountDataCleanup = accountDataCleanup,
        _capabilities = capabilities ?? PlatformCapabilities.current(),
        _authenticate = authenticator ?? _defaultAuthenticate,
+       _apiFactory = apiFactory,
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -71,6 +76,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final SessionStore _store;
   final PlatformCapabilities _capabilities;
   final SignInAuthenticator _authenticate;
+  final SignInApiFactory? _apiFactory;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -227,7 +233,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
     final prepared =
         await _runSignInStage<
-          ({ServerScope scope, LibraryCategorySettings settings, EmbyApi api})
+          ({
+            ServerScope scope,
+            LibraryCategorySettings settings,
+            ServerCapabilities capabilities,
+            EmbyApi api,
+          })
         >(
           stage: SignInStage.sessionPrepare,
           fallbackReason: SignInFailureReason.sessionPrepareFailed,
@@ -237,49 +248,107 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
               scope,
               safeLogging: true,
             );
-            final api = _createApi(session, scope);
-            return (scope: scope, settings: settings, api: api);
+            final capabilities = await _restoreCapabilities(
+              session,
+              safeLogging: true,
+            );
+            final api =
+                _apiFactory?.call(session, scope) ?? _createApi(session, scope);
+            try {
+              _clients.register(scope, api);
+            } catch (_) {
+              await _disposeAttemptApi(api);
+              rethrow;
+            }
+            return (
+              scope: scope,
+              settings: settings,
+              capabilities: capabilities,
+              api: api,
+            );
           },
         );
 
-    await _runSignInStage<void>(
-      stage: SignInStage.sessionSave,
-      fallbackReason: SignInFailureReason.sessionSaveFailed,
-      action: () => _store.saveSession(session),
-    );
+    try {
+      await _runSignInStage<void>(
+        stage: SignInStage.sessionSave,
+        fallbackReason: SignInFailureReason.sessionSaveFailed,
+        action: () => _store.saveSession(session),
+      );
+    } catch (_) {
+      await _rollbackSignInAttempt(prepared.scope, prepared.api);
+      rethrow;
+    }
 
-    await _runSignInStage<void>(
-      stage: SignInStage.activate,
-      fallbackReason: SignInFailureReason.activationFailed,
-      action: () => _activateSignIn(
-        session: session,
-        scope: prepared.scope,
-        settings: prepared.settings,
-        api: prepared.api,
-      ),
+    _commitSignIn(
+      session: session,
+      scope: prepared.scope,
+      settings: prepared.settings,
+      capabilities: prepared.capabilities,
+      api: prepared.api,
     );
   }
 
-  Future<void> _activateSignIn({
+  void _commitSignIn({
     required EmbySession session,
     required ServerScope scope,
     required LibraryCategorySettings settings,
+    required ServerCapabilities capabilities,
     required EmbyApi api,
-  }) async {
-    final previousScope = _scope;
-    await _shutdownDownloads(stopExecutor: true);
-    if (previousScope != null) await _clients.unregister(previousScope);
+  }) {
     _session = session;
     _scope = scope;
-    _serverCapabilities = await _restoreCapabilities(
-      session,
-      safeLogging: true,
-    );
+    _serverCapabilities = capabilities;
     _libraryCategorySettings = settings;
-    _clients.register(scope, api);
-    await _activateDownloads(api, scope, safeLogging: true);
-    unawaited(_startRealtimeSafely(api));
     if (!_disposed) notifyListeners();
+    unawaited(_activateDownloadsSafely(api, scope));
+    unawaited(_startRealtimeSafely(api));
+  }
+
+  Future<void> _activateDownloadsSafely(EmbyApi api, ServerScope scope) async {
+    try {
+      await _activateDownloads(api, scope, safeLogging: true);
+    } catch (_) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.auth,
+        event: SafeDiagnosticEvent.signInFailure,
+        stage: SignInStage.activate,
+        reason: SafeDiagnosticReason.activationFailed,
+        errorType: SafeDiagnosticErrorType.signInFailure,
+      );
+    }
+  }
+
+  Future<void> _rollbackSignInAttempt(ServerScope scope, EmbyApi api) async {
+    try {
+      if (_clients.contains(scope)) {
+        await _clients.unregister(scope);
+      } else {
+        await _disposeAttemptApi(api);
+      }
+    } catch (_) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.auth,
+        event: SafeDiagnosticEvent.signInFailure,
+        stage: SignInStage.rollback,
+        reason: SafeDiagnosticReason.unknown,
+        errorType: SafeDiagnosticErrorType.signInFailure,
+      );
+    }
+  }
+
+  Future<void> _disposeAttemptApi(EmbyApi api) async {
+    try {
+      await api.dispose();
+    } catch (_) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.auth,
+        event: SafeDiagnosticEvent.signInFailure,
+        stage: SignInStage.rollback,
+        reason: SafeDiagnosticReason.unknown,
+        errorType: SafeDiagnosticErrorType.signInFailure,
+      );
+    }
   }
 
   Future<void> _startRealtimeSafely(EmbyApi api) async {
@@ -657,6 +726,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     );
     try {
       await service.initialize();
+      if (_disposed ||
+          _scope != scope ||
+          !identical(_clients.clientFor(scope), api)) {
+        await service.shutdown();
+        service.dispose();
+        return;
+      }
       _downloads = service;
       _offlineProgressSync = OfflineProgressSync(
         api: api,
