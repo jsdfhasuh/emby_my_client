@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import '../core/diagnostic_log.dart';
 import '../core/server_capabilities.dart';
 import '../core/server_scope.dart';
+import '../core/sign_in_diagnostics.dart';
 import '../data/account_data_cleanup.dart';
 import '../data/client_registry.dart';
 import '../data/emby_api.dart';
@@ -22,6 +23,29 @@ import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
 import '../settings/library_category_settings.dart';
 
+typedef SignInAuthenticator =
+    Future<EmbySession> Function({
+      required String serverUrl,
+      required String username,
+      required String password,
+      required String deviceId,
+      required String deviceName,
+    });
+
+Future<EmbySession> _defaultAuthenticate({
+  required String serverUrl,
+  required String username,
+  required String password,
+  required String deviceId,
+  required String deviceName,
+}) => EmbyApi.authenticate(
+  serverUrl: serverUrl,
+  username: username,
+  password: password,
+  deviceId: deviceId,
+  deviceName: deviceName,
+);
+
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({
     SessionStore? store,
@@ -30,11 +54,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
+    SignInAuthenticator? authenticator,
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
        _accountDataCleanup = accountDataCleanup,
        _capabilities = capabilities ?? PlatformCapabilities.current(),
+       _authenticate = authenticator ?? _defaultAuthenticate,
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -44,6 +70,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   final SessionStore _store;
   final PlatformCapabilities _capabilities;
+  final SignInAuthenticator _authenticate;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -66,6 +93,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   bool _disposed = false;
   Future<void>? _initialization;
   Future<void>? _accountDataDeletion;
+  bool _signInInProgress = false;
 
   EmbySession? get session => _session;
   ServerScope? get scope => _scope;
@@ -83,7 +111,17 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _initialize() async {
     try {
       await _openLocalDatabase();
+      _recordSafeStage(
+        component: SafeDiagnosticComponent.storage,
+        event: SafeDiagnosticEvent.signInStageStart,
+        stage: SignInStage.sessionRead,
+      );
       final session = await _store.loadSession();
+      _recordSafeStage(
+        component: SafeDiagnosticComponent.storage,
+        event: SafeDiagnosticEvent.signInStageSuccess,
+        stage: SignInStage.sessionRead,
+      );
       if (session != null) {
         await _activateSession(session);
       }
@@ -91,17 +129,24 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         WidgetsBinding.instance.addObserver(this);
         _observingLifecycle = true;
       }
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'startup',
-        'Failed to restore the Emby session',
-        error: error,
-        stackTrace: stackTrace,
+    } on SecureStorageFailure catch (error) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.storage,
+        event: SafeDiagnosticEvent.sessionRestoreFailure,
+        stage: SignInStage.sessionRead,
+        reason: safeReasonForStorage(error.reason),
+        errorType: SafeDiagnosticErrorType.secureStorageFailure,
       );
-      _session = null;
-      _scope = null;
-      _serverCapabilities = null;
-      _libraryCategorySettings = const LibraryCategorySettings();
+      _resetSessionState();
+    } catch (_) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.storage,
+        event: SafeDiagnosticEvent.sessionRestoreFailure,
+        stage: SignInStage.sessionRead,
+        reason: SafeDiagnosticReason.unknown,
+        errorType: SafeDiagnosticErrorType.unknown,
+      );
+      _resetSessionState();
     } finally {
       _isInitializing = false;
       if (!_disposed) notifyListeners();
@@ -112,34 +157,225 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     required String serverUrl,
     required String username,
     required String password,
-  }) async {
-    final deviceId = await _store.getOrCreateDeviceId();
-    final session = await EmbyApi.authenticate(
+  }) {
+    _recordSafeStage(
+      event: SafeDiagnosticEvent.signInStageStart,
+      stage: SignInStage.preflight,
+    );
+    if (_signInInProgress) {
+      final failure = const SignInFailure(
+        stage: SignInStage.preflight,
+        reason: SignInFailureReason.alreadyInProgress,
+      );
+      _recordSignInFailure(failure);
+      return Future<void>.error(failure);
+    }
+    if (_session != null || _scope != null || _clients.scopes.isNotEmpty) {
+      final failure = const SignInFailure(
+        stage: SignInStage.preflight,
+        reason: SignInFailureReason.alreadySignedIn,
+      );
+      _recordSignInFailure(failure);
+      return Future<void>.error(failure);
+    }
+
+    _recordSafeStage(
+      event: SafeDiagnosticEvent.signInStageSuccess,
+      stage: SignInStage.preflight,
+    );
+    _signInInProgress = true;
+    final operation = _runSignIn(
       serverUrl: serverUrl,
-      username: username.trim(),
+      username: username,
       password: password,
-      deviceId: deviceId,
-      deviceName: _capabilities.embyDeviceName,
     );
-    final scope = ServerScope.fromSession(session);
-    final libraryCategorySettings = await _restoreLibraryCategorySettings(
-      scope,
+    return operation.whenComplete(() => _signInInProgress = false);
+  }
+
+  Future<void> _runSignIn({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final existingDeviceId = await _runSignInStage<String?>(
+      stage: SignInStage.deviceIdRead,
+      fallbackReason: SignInFailureReason.secureStorageUnexpected,
+      action: _store.readDeviceId,
     );
-    await _store.saveSession(session);
-    final api = _createApi(session, scope);
+    final deviceId = existingDeviceId == null || existingDeviceId.isEmpty
+        ? _store.generateDeviceId()
+        : existingDeviceId;
+    if (existingDeviceId == null || existingDeviceId.isEmpty) {
+      await _runSignInStage<void>(
+        stage: SignInStage.deviceIdWrite,
+        fallbackReason: SignInFailureReason.secureStorageUnexpected,
+        action: () => _store.writeDeviceId(deviceId),
+      );
+    }
+
+    final session = await _runSignInStage<EmbySession>(
+      stage: SignInStage.authenticate,
+      fallbackReason: SignInFailureReason.unknown,
+      action: () => _authenticate(
+        serverUrl: serverUrl,
+        username: username.trim(),
+        password: password,
+        deviceId: deviceId,
+        deviceName: _capabilities.embyDeviceName,
+      ),
+    );
+
+    final prepared =
+        await _runSignInStage<
+          ({ServerScope scope, LibraryCategorySettings settings, EmbyApi api})
+        >(
+          stage: SignInStage.sessionPrepare,
+          fallbackReason: SignInFailureReason.sessionPrepareFailed,
+          action: () async {
+            final scope = ServerScope.fromSession(session);
+            final settings = await _restoreLibraryCategorySettings(
+              scope,
+              safeLogging: true,
+            );
+            final api = _createApi(session, scope);
+            return (scope: scope, settings: settings, api: api);
+          },
+        );
+
+    await _runSignInStage<void>(
+      stage: SignInStage.sessionSave,
+      fallbackReason: SignInFailureReason.sessionSaveFailed,
+      action: () => _store.saveSession(session),
+    );
+
+    await _runSignInStage<void>(
+      stage: SignInStage.activate,
+      fallbackReason: SignInFailureReason.activationFailed,
+      action: () => _activateSignIn(
+        session: session,
+        scope: prepared.scope,
+        settings: prepared.settings,
+        api: prepared.api,
+      ),
+    );
+  }
+
+  Future<void> _activateSignIn({
+    required EmbySession session,
+    required ServerScope scope,
+    required LibraryCategorySettings settings,
+    required EmbyApi api,
+  }) async {
     final previousScope = _scope;
     await _shutdownDownloads(stopExecutor: true);
-    if (previousScope != null) {
-      await _clients.unregister(previousScope);
-    }
+    if (previousScope != null) await _clients.unregister(previousScope);
     _session = session;
     _scope = scope;
-    _serverCapabilities = await _restoreCapabilities(session);
-    _libraryCategorySettings = libraryCategorySettings;
+    _serverCapabilities = await _restoreCapabilities(
+      session,
+      safeLogging: true,
+    );
+    _libraryCategorySettings = settings;
     _clients.register(scope, api);
-    await _activateDownloads(api, scope);
-    unawaited(api.realtime.start());
+    await _activateDownloads(api, scope, safeLogging: true);
+    unawaited(_startRealtimeSafely(api));
     if (!_disposed) notifyListeners();
+  }
+
+  Future<void> _startRealtimeSafely(EmbyApi api) async {
+    try {
+      await api.realtime.start();
+    } catch (_) {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.auth,
+        event: SafeDiagnosticEvent.signInFailure,
+        stage: SignInStage.activate,
+        reason: SafeDiagnosticReason.activationFailed,
+        errorType: SafeDiagnosticErrorType.signInFailure,
+      );
+    }
+  }
+
+  Future<T> _runSignInStage<T>({
+    required SignInStage stage,
+    required SignInFailureReason fallbackReason,
+    required Future<T> Function() action,
+  }) async {
+    _recordSafeStage(event: SafeDiagnosticEvent.signInStageStart, stage: stage);
+    try {
+      final result = await action();
+      _recordSafeStage(
+        event: SafeDiagnosticEvent.signInStageSuccess,
+        stage: stage,
+      );
+      return result;
+    } on SecureStorageFailure catch (error) {
+      final failure = SignInFailure.fromSecureStorage(stage, error);
+      _recordSignInFailure(failure);
+      throw failure;
+    } on EmbyApiException {
+      _recordSafeFailure(
+        component: SafeDiagnosticComponent.auth,
+        event: SafeDiagnosticEvent.signInFailure,
+        stage: stage,
+        reason: SafeDiagnosticReason.embyApiFailure,
+        errorType: SafeDiagnosticErrorType.embyApiException,
+      );
+      rethrow;
+    } catch (_) {
+      final failure = SignInFailure(stage: stage, reason: fallbackReason);
+      _recordSignInFailure(failure);
+      throw failure;
+    }
+  }
+
+  void _recordSignInFailure(SignInFailure failure) {
+    _recordSafeFailure(
+      component: SafeDiagnosticComponent.auth,
+      event: SafeDiagnosticEvent.signInFailure,
+      stage: failure.stage,
+      reason: safeReasonForSignIn(failure.reason),
+      errorType: failure.errorType == 'SecureStorageFailure'
+          ? SafeDiagnosticErrorType.secureStorageFailure
+          : SafeDiagnosticErrorType.signInFailure,
+    );
+  }
+
+  void _recordSafeFailure({
+    required SafeDiagnosticComponent component,
+    required SafeDiagnosticEvent event,
+    required SignInStage stage,
+    required SafeDiagnosticReason reason,
+    required SafeDiagnosticErrorType errorType,
+  }) {
+    DiagnosticLog.instance.safeFailure(
+      component: component,
+      event: event,
+      stage: stage,
+      reason: reason,
+      errorType: errorType,
+    );
+  }
+
+  void _recordSafeStage({
+    SafeDiagnosticComponent component = SafeDiagnosticComponent.auth,
+    required SafeDiagnosticEvent event,
+    required SignInStage stage,
+  }) {
+    DiagnosticLog.instance.safeStage(
+      component: component,
+      event: event,
+      stage: stage,
+      reason: SafeDiagnosticReason.unknown,
+      errorType: SafeDiagnosticErrorType.unknown,
+    );
+  }
+
+  void _resetSessionState() {
+    _session = null;
+    _scope = null;
+    _serverCapabilities = null;
+    _libraryCategorySettings = const LibraryCategorySettings();
   }
 
   Future<void> signOut() async {
@@ -266,17 +502,28 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<LibraryCategorySettings> _restoreLibraryCategorySettings(
-    ServerScope scope,
-  ) async {
+    ServerScope scope, {
+    bool safeLogging = false,
+  }) async {
     try {
       return await _categorySettingsStore.load(scope);
     } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'storage',
-        'Failed to restore library category settings',
-        error: error,
-        stackTrace: stackTrace,
-      );
+      if (safeLogging) {
+        _recordSafeFailure(
+          component: SafeDiagnosticComponent.storage,
+          event: SafeDiagnosticEvent.signInFailure,
+          stage: SignInStage.sessionPrepare,
+          reason: SafeDiagnosticReason.sessionPrepareFailed,
+          errorType: SafeDiagnosticErrorType.signInFailure,
+        );
+      } else {
+        DiagnosticLog.instance.error(
+          'storage',
+          'Failed to restore library category settings',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
       return const LibraryCategorySettings();
     }
   }
@@ -310,7 +557,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return api;
   }
 
-  Future<ServerCapabilities> _restoreCapabilities(EmbySession session) async {
+  Future<ServerCapabilities> _restoreCapabilities(
+    EmbySession session, {
+    bool safeLogging = false,
+  }) async {
     final baseline = ServerCapabilities.fromSession(session);
     if (!_localDatabaseAvailable) return baseline;
     try {
@@ -324,12 +574,22 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       await _capabilitiesRepository.save(result);
       return result;
     } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'storage',
-        'Failed to restore server capability metadata',
-        error: error,
-        stackTrace: stackTrace,
-      );
+      if (safeLogging) {
+        _recordSafeFailure(
+          component: SafeDiagnosticComponent.storage,
+          event: SafeDiagnosticEvent.signInFailure,
+          stage: SignInStage.activate,
+          reason: SafeDiagnosticReason.activationFailed,
+          errorType: SafeDiagnosticErrorType.signInFailure,
+        );
+      } else {
+        DiagnosticLog.instance.error(
+          'storage',
+          'Failed to restore server capability metadata',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
       return baseline;
     }
   }
@@ -378,7 +638,11 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _activateDownloads(EmbyApi api, ServerScope scope) async {
+  Future<void> _activateDownloads(
+    EmbyApi api,
+    ServerScope scope, {
+    bool safeLogging = false,
+  }) async {
     if (!_localDatabaseAvailable) return;
     final service = DownloadService(
       api: api,
@@ -402,12 +666,22 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_syncOfflineProgress());
     } catch (error, stackTrace) {
       service.dispose();
-      DiagnosticLog.instance.error(
-        'download',
-        'Failed to initialize offline downloads',
-        error: error,
-        stackTrace: stackTrace,
-      );
+      if (safeLogging) {
+        _recordSafeFailure(
+          component: SafeDiagnosticComponent.auth,
+          event: SafeDiagnosticEvent.signInFailure,
+          stage: SignInStage.activate,
+          reason: SafeDiagnosticReason.activationFailed,
+          errorType: SafeDiagnosticErrorType.signInFailure,
+        );
+      } else {
+        DiagnosticLog.instance.error(
+          'download',
+          'Failed to initialize offline downloads',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
     }
   }
 

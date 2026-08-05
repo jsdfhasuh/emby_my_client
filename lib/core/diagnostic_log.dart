@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'sign_in_diagnostics.dart';
+
 class DiagnosticLog {
   DiagnosticLog._();
 
@@ -56,6 +58,36 @@ class DiagnosticLog {
       if (stackTrace != null) stackTrace.toString(),
     ].join('\n');
     _write('ERROR', component, details);
+  }
+
+  void safeFailure({
+    required SafeDiagnosticComponent component,
+    required SafeDiagnosticEvent event,
+    required SignInStage stage,
+    required SafeDiagnosticReason reason,
+    required SafeDiagnosticErrorType errorType,
+  }) {
+    _write(
+      'ERROR',
+      component.code,
+      'event=${event.code} stage=${stage.code} '
+          'reason=${reason.code} errorType=${errorType.code}',
+    );
+  }
+
+  void safeStage({
+    required SafeDiagnosticComponent component,
+    required SafeDiagnosticEvent event,
+    required SignInStage stage,
+    required SafeDiagnosticReason reason,
+    required SafeDiagnosticErrorType errorType,
+  }) {
+    _write(
+      'INFO',
+      component.code,
+      'event=${event.code} stage=${stage.code} '
+          'reason=${reason.code} errorType=${errorType.code}',
+    );
   }
 
   Future<String> read() async {
@@ -115,6 +147,27 @@ class DiagnosticLog {
     );
     result = result.replaceAllMapped(
       RegExp(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', caseSensitive: false),
+      (match) => '${match[1]}<redacted>',
+    );
+    result = result.replaceAllMapped(
+      RegExp(
+        r'''((?:["']?authorization["']?\s*[:=]\s*))[^,\s}\]]+''',
+        caseSensitive: false,
+      ),
+      (match) => '${match[1]}<redacted>',
+    );
+    result = result.replaceAllMapped(
+      RegExp(
+        r'''((?:["']?(?:password|pw|accesstoken|api_key|x-emby-token|username|deviceid)["']?\s*(?:=|:|%3d)\s*)["'])([^"']*)(["'])''',
+        caseSensitive: false,
+      ),
+      (match) => '${match[1]}<redacted>${match[3]}',
+    );
+    result = result.replaceAllMapped(
+      RegExp(
+        r'''(\b(?:password|pw|accesstoken|api_key|x-emby-token|username|deviceid)\b\s*(?:=|:|%3d)\s*)([^&\s,}\]]+)''',
+        caseSensitive: false,
+      ),
       (match) => '${match[1]}<redacted>',
     );
     result = result.replaceAllMapped(

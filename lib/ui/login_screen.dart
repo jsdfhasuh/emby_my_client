@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
+import '../core/sign_in_diagnostics.dart';
 import '../discovery/emby_server_discovery.dart';
 import '../models/discovered_server.dart';
 import '../platform/platform_capabilities.dart';
@@ -37,6 +38,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isDiscovering = false;
   int _discoveryGeneration = 0;
   String? _error;
+  String? _diagnosticCode;
 
   @override
   void initState() {
@@ -81,6 +83,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() {
       _isSubmitting = true;
       _error = null;
+      _diagnosticCode = null;
     });
     try {
       await widget.controller.signIn(
@@ -94,9 +97,26 @@ class _LoginScreenState extends State<LoginScreen> {
               error.isLocalNetworkConnectionFailure
           ? '无法访问局域网服务器。请确认已在“设置 → 隐私与安全性 → 本地网络”中允许本应用，然后重试。'
           : error.message;
-      if (mounted) setState(() => _error = message);
+      if (mounted) {
+        setState(() {
+          _error = message;
+          _diagnosticCode = _isIpadOS ? 'LOGIN-AUTH' : null;
+        });
+      }
+    } on SignInFailure catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = _signInFailureMessage(error);
+          _diagnosticCode = _isIpadOS ? error.diagnosticCode : null;
+        });
+      }
     } catch (_) {
-      if (mounted) setState(() => _error = '登录失败，请稍后重试');
+      if (mounted) {
+        setState(() {
+          _error = '登录失败，请稍后重试';
+          _diagnosticCode = null;
+        });
+      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -217,11 +237,27 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                             const SizedBox(width: 9),
                             Expanded(
-                              child: Text(
-                                _error!,
-                                style: const TextStyle(
-                                  color: Color(0xFFFFC2BC),
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _error!,
+                                    style: const TextStyle(
+                                      color: Color(0xFFFFC2BC),
+                                    ),
+                                  ),
+                                  if (_diagnosticCode != null) ...[
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      _diagnosticCode!,
+                                      style: const TextStyle(
+                                        color: Color(0xFFFFC2BC),
+                                        fontFamily: 'monospace',
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                           ],
@@ -251,6 +287,28 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
+
+  bool get _isIpadOS => _capabilities.platformName == 'ios';
+
+  String _signInFailureMessage(SignInFailure failure) =>
+      switch (failure.reason) {
+        SignInFailureReason.secureStorageMissingEntitlement ||
+        SignInFailureReason.secureStorageUnavailable ||
+        SignInFailureReason.secureStorageAccessDenied ||
+        SignInFailureReason.secureStorageUnexpected =>
+          _isIpadOS
+              ? '无法使用系统安全存储，登录信息不能安全保存。请记录诊断码并安装修复构建；除非验收步骤明确要求，请不要卸载现有版本。'
+              : '登录失败，请稍后重试',
+        SignInFailureReason.sessionPrepareFailed =>
+          _isIpadOS ? '登录准备失败，请重试；如持续出现，请提供诊断码。' : '登录失败，请稍后重试',
+        SignInFailureReason.sessionSaveFailed =>
+          _isIpadOS ? '登录信息保存失败，请重试；如持续出现，请提供诊断码。' : '登录失败，请稍后重试',
+        SignInFailureReason.activationFailed =>
+          _isIpadOS ? '登录初始化失败，请重试；如持续出现，请提供诊断码。' : '登录失败，请稍后重试',
+        SignInFailureReason.alreadyInProgress ||
+        SignInFailureReason.alreadySignedIn ||
+        SignInFailureReason.unknown => '登录失败，请稍后重试',
+      };
 
   Widget _buildDiscoverySection() {
     if (!_capabilities.supportsLanUdpDiscovery) return const SizedBox.shrink();
