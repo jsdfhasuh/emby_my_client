@@ -140,6 +140,9 @@ void main() {
   });
 
   test('startup session read failure stays logged out', () async {
+    final logLines = <String>[];
+    DiagnosticLog.instance.setTestSink(logLines.add);
+    addTearDown(() => DiagnosticLog.instance.setTestSink(null));
     final storage = _FakeSessionStorage()
       ..readFailures['emby_session_v1'] = StateError(
         'password=secret AccessToken=token-secret',
@@ -156,9 +159,23 @@ void main() {
       reason: SecureStorageFailureReason.unexpected,
     );
     expect(failure.toString(), isNot(contains('secret')));
+    final logText = logLines.join('\n');
+    expect(
+      logLines.any(
+        (line) =>
+            line.contains('event=session_restore_failure') &&
+            line.contains('stage=SESSION_READ'),
+      ),
+      isTrue,
+    );
+    expect(logText, isNot(contains('secret')));
+    expect(logText, isNot(contains('token-secret')));
   });
 
   test('corrupt session cleanup failure is contained and classified', () async {
+    final logLines = <String>[];
+    DiagnosticLog.instance.setTestSink(logLines.add);
+    addTearDown(() => DiagnosticLog.instance.setTestSink(null));
     final storage = _FakeSessionStorage()
       ..values['emby_session_v1'] = '{not-json'
       ..deleteFailures['emby_session_v1'] = PlatformException(
@@ -169,6 +186,18 @@ void main() {
 
     await expectLater(store.loadSession(), completion(isNull));
     expect(storage.deleteCalls, 1);
+    final logText = logLines.join('\n');
+    expect(
+      logLines.any(
+        (line) =>
+            line.contains('stage=SESSION_DELETE') &&
+            line.contains('event=session_delete_failure') &&
+            line.contains('reason=secure_storage_unexpected'),
+      ),
+      isTrue,
+    );
+    expect(logText, isNot(contains('delete_failed')));
+    expect(logText, isNot(contains('token-secret')));
   });
 
   test(
@@ -250,6 +279,23 @@ void main() {
     },
   );
 
+  test('diagnostic redaction covers Authorization header forms', () {
+    const basicCredential = 'basic-credential-secret';
+    const bearerToken = 'bearer-token-secret';
+    final redacted = DiagnosticLog.redact(
+      'Authorization: Basic $basicCredential\n'
+      'Authorization: Bearer $bearerToken\n'
+      '{"Authorization":"Bearer $bearerToken",'
+      '"authorization":"Basic $basicCredential"}',
+    );
+
+    expect(redacted, isNot(contains(basicCredential)));
+    expect(redacted, isNot(contains(bearerToken)));
+    expect(redacted, contains('Authorization: <redacted>'));
+    expect(redacted, contains('"Authorization":"<redacted>"'));
+    expect(redacted, contains('"authorization":"<redacted>"'));
+  });
+
   test(
     'EmbyApiException remains the original authentication failure type',
     () async {
@@ -281,6 +327,62 @@ void main() {
       );
     },
   );
+
+  test('unexpected sign-in errors use only fixed safe log fields', () async {
+    final logLines = <String>[];
+    DiagnosticLog.instance.setTestSink(logLines.add);
+    addTearDown(() => DiagnosticLog.instance.setTestSink(null));
+    final storage = _FakeSessionStorage()
+      ..values['emby_device_id_v1'] = 'existing-device';
+    const rawDetails =
+        'error=raw-error message=raw-message details=raw-details '
+        'stackTrace=raw-stack';
+    final controller = _controller(
+      storage,
+      authenticator:
+          ({
+            required serverUrl,
+            required username,
+            required password,
+            required deviceId,
+            required deviceName,
+          }) async {
+            throw StateError(rawDetails);
+          },
+    );
+    addTearDown(controller.dispose);
+
+    await expectLater(
+      controller.signIn(
+        serverUrl: 'http://192.168.1.20:8096',
+        username: 'user',
+        password: 'password',
+      ),
+      throwsA(
+        isA<SignInFailure>()
+            .having((error) => error.stage, 'stage', SignInStage.authenticate)
+            .having(
+              (error) => error.reason,
+              'reason',
+              SignInFailureReason.unknown,
+            ),
+      ),
+    );
+
+    final logText = logLines.join('\n');
+    expect(
+      logLines.any(
+        (line) =>
+            line.contains('event=sign_in_failure') &&
+            line.contains('stage=AUTHENTICATE'),
+      ),
+      isTrue,
+    );
+    expect(logText, isNot(contains('raw-error')));
+    expect(logText, isNot(contains('raw-message')));
+    expect(logText, isNot(contains('raw-details')));
+    expect(logText, isNot(contains('raw-stack')));
+  });
 
   test(
     'already signed-in state rejects without clearing or authenticating',
@@ -396,6 +498,45 @@ void main() {
     expect(find.text('LOGIN-DID-READ-KC-MISSING'), findsOneWidget);
   });
 
+  testWidgets('iPad device ID write failure shows its Gate A code', (
+    tester,
+  ) async {
+    final controller = _UiFailureController(
+      const SignInFailure(
+        stage: SignInStage.deviceIdWrite,
+        reason: SignInFailureReason.secureStorageMissingEntitlement,
+      ),
+    );
+    addTearDown(controller.dispose);
+    await _submit(tester, controller, PlatformCapabilities.ipad);
+
+    expect(find.text('登录失败，请稍后重试'), findsNothing);
+    expect(
+      find.text('无法使用系统安全存储，登录信息不能安全保存。请记录诊断码并安装修复构建；除非验收步骤明确要求，请不要卸载现有版本。'),
+      findsOneWidget,
+    );
+    expect(find.text('LOGIN-DID-WRITE-KC-MISSING'), findsOneWidget);
+  });
+
+  testWidgets('iPad session save failure shows its Gate A code', (
+    tester,
+  ) async {
+    final controller = _UiFailureController(
+      const SignInFailure(
+        stage: SignInStage.sessionSave,
+        reason: SignInFailureReason.secureStorageMissingEntitlement,
+      ),
+    );
+    addTearDown(controller.dispose);
+    await _submit(tester, controller, PlatformCapabilities.ipad);
+
+    expect(
+      find.text('无法使用系统安全存储，登录信息不能安全保存。请记录诊断码并安装修复构建；除非验收步骤明确要求，请不要卸载现有版本。'),
+      findsOneWidget,
+    );
+    expect(find.text('LOGIN-SESSION-SAVE-KC-MISSING'), findsOneWidget);
+  });
+
   testWidgets('Android secure storage failure keeps the generic fallback', (
     tester,
   ) async {
@@ -456,6 +597,30 @@ void main() {
 
     expect(find.text('登录失败，请稍后重试'), findsOneWidget);
     expect(find.text('LOGIN-UNKNOWN'), findsOneWidget);
+  });
+
+  testWidgets('iPad raw StateError gets the fixed unknown diagnostic code', (
+    tester,
+  ) async {
+    final controller = _UiRawFailureController(StateError('raw-secret-error'));
+    addTearDown(controller.dispose);
+    await _submit(tester, controller, PlatformCapabilities.ipad);
+
+    expect(find.text('登录失败，请稍后重试'), findsOneWidget);
+    expect(find.text('LOGIN-UNKNOWN'), findsOneWidget);
+    expect(find.textContaining('raw-secret-error'), findsNothing);
+  });
+
+  testWidgets('Android raw Exception keeps the generic fallback', (
+    tester,
+  ) async {
+    final controller = _UiRawFailureController(Exception('raw-secret-error'));
+    addTearDown(controller.dispose);
+    await _submit(tester, controller, PlatformCapabilities.android);
+
+    expect(find.text('登录失败，请稍后重试'), findsOneWidget);
+    expect(find.textContaining('LOGIN-'), findsNothing);
+    expect(find.textContaining('raw-secret-error'), findsNothing);
   });
 }
 
@@ -561,6 +726,22 @@ class _UiApiFailureController extends AppController {
     : super(capabilities: PlatformCapabilities.android);
 
   final EmbyApiException failure;
+
+  @override
+  Future<void> signIn({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    throw failure;
+  }
+}
+
+class _UiRawFailureController extends AppController {
+  _UiRawFailureController(this.failure)
+    : super(capabilities: PlatformCapabilities.android);
+
+  final Object failure;
 
   @override
   Future<void> signIn({

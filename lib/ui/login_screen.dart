@@ -114,7 +114,7 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted) {
         setState(() {
           _error = '登录失败，请稍后重试';
-          _diagnosticCode = null;
+          _diagnosticCode = _isIpadOS ? 'LOGIN-UNKNOWN' : null;
         });
       }
     } finally {

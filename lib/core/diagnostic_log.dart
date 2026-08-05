@@ -6,6 +6,8 @@ import 'package:path_provider/path_provider.dart';
 
 import 'sign_in_diagnostics.dart';
 
+typedef DiagnosticLogTestSink = void Function(String line);
+
 class DiagnosticLog {
   DiagnosticLog._();
 
@@ -15,6 +17,7 @@ class DiagnosticLog {
 
   File? _file;
   Future<void> _pendingWrite = Future.value();
+  DiagnosticLogTestSink? _testSink;
 
   Future<void> initialize() async {
     try {
@@ -106,11 +109,15 @@ class DiagnosticLog {
 
   String? get path => _file?.path;
 
+  @visibleForTesting
+  void setTestSink(DiagnosticLogTestSink? sink) => _testSink = sink;
+
   void _write(String level, String component, String message) {
     final clean = redact(message).replaceAll('\r', '');
     final timestamp = DateTime.now().toIso8601String();
     final line = '$timestamp [$level] [$component] $clean\n';
     debugPrint(line.trimRight());
+    _testSink?.call(line.trimRight());
 
     final file = _file;
     if (file == null) return;
@@ -146,14 +153,14 @@ class DiagnosticLog {
       (match) => '${match[1]}<redacted>${match[2]}',
     );
     result = result.replaceAllMapped(
-      RegExp(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', caseSensitive: false),
-      (match) => '${match[1]}<redacted>',
-    );
-    result = result.replaceAllMapped(
       RegExp(
-        r'''((?:["']?authorization["']?\s*[:=]\s*))[^,\s}\]]+''',
+        r'''((?:["']?authorization["']?\s*[:=]\s*["']?))(?:basic|bearer)?(?:\s+)?([^"'\s,}\]]+)(["']?)''',
         caseSensitive: false,
       ),
+      (match) => '${match[1]}<redacted>${match[3]}',
+    );
+    result = result.replaceAllMapped(
+      RegExp(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', caseSensitive: false),
       (match) => '${match[1]}<redacted>',
     );
     result = result.replaceAllMapped(
