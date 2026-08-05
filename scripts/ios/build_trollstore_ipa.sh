@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SOURCE_ENTITLEMENTS="${ENTITLEMENTS_SOURCE:-$ROOT_DIR/scripts/ios/trollstore-entitlements.plist}"
+RUNNER_ENTITLEMENTS_SOURCE="${RUNNER_ENTITLEMENTS_SOURCE:-$ROOT_DIR/scripts/ios/runner-entitlements.plist}"
+TROLLSTORE_ENTITLEMENTS_SOURCE="${TROLLSTORE_ENTITLEMENTS_SOURCE:-$ROOT_DIR/scripts/ios/trollstore-entitlements.plist}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/build/ios/artifacts}"
 RUN_NUMBER="${RUN_NUMBER:-${GITHUB_RUN_NUMBER:-local}}"
 COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}}"
@@ -42,8 +43,12 @@ for command_name in ditto file ldid lipo plutil shasum unzip zip; do
     exit 1
   fi
 done
-if [[ ! -f "$SOURCE_ENTITLEMENTS" ]]; then
-  echo "Missing entitlement source: $SOURCE_ENTITLEMENTS" >&2
+if [[ ! -f "$RUNNER_ENTITLEMENTS_SOURCE" ]]; then
+  echo "Missing Xcode Runner entitlement source: $RUNNER_ENTITLEMENTS_SOURCE" >&2
+  exit 1
+fi
+if [[ ! -f "$TROLLSTORE_ENTITLEMENTS_SOURCE" ]]; then
+  echo "Missing TrollStore entitlement source: $TROLLSTORE_ENTITLEMENTS_SOURCE" >&2
   exit 1
 fi
 if [[ ! -d "$APP_PATH" || ! -d "$DSYM_PATH" ]]; then
@@ -61,12 +66,15 @@ ditto "$APP_PATH" "$staged_app"
 
 preflight_file="$ARTIFACT_DIR/entitlements-preflight.txt"
 {
-  ENTITLEMENTS_SOURCE="$SOURCE_ENTITLEMENTS" \
-    "$ROOT_DIR/scripts/ios/sync_entitlements.sh" \
+  RUNNER_ENTITLEMENTS_SOURCE="$RUNNER_ENTITLEMENTS_SOURCE" \
+    "$ROOT_DIR/scripts/ios/sync_entitlements.sh" --runner-files
+  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" --xcode \
+    "$RUNNER_ENTITLEMENTS_SOURCE"
+  TROLLSTORE_ENTITLEMENTS_SOURCE="$TROLLSTORE_ENTITLEMENTS_SOURCE" \
+    "$ROOT_DIR/scripts/ios/sync_entitlements.sh" --trollstore \
     "$work_dir/resolved-entitlements.plist"
-  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
-    "$SOURCE_ENTITLEMENTS" "$work_dir/resolved-entitlements.plist"
-  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" "$SOURCE_ENTITLEMENTS"
+  "$ROOT_DIR/scripts/ios/validate_entitlements.sh" --trollstore \
+    "$TROLLSTORE_ENTITLEMENTS_SOURCE" "$work_dir/resolved-entitlements.plist"
 } | tee "$preflight_file"
 
 if [[ ! -f "$staged_app/Runner" ]]; then
@@ -151,6 +159,7 @@ done <"$inventory_file"
 
 printf 'main\tRunner\n' >>"$signing_order_file"
 ldid -S"$work_dir/resolved-entitlements.plist" "$staged_app/Runner"
+"$ROOT_DIR/scripts/ios/validate_signing_order.sh" "$signing_order_file"
 
 dump_entitlements() {
   local app_dir="$1"
@@ -187,7 +196,7 @@ validate_dumps() {
   while IFS= read -r -d '' dump; do
     if [[ "$dump" == */main/* ]]; then
       "$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
-        "$SOURCE_ENTITLEMENTS" "$dump" >/dev/null
+        --trollstore-dump "$dump" >/dev/null
     else
       "$ROOT_DIR/scripts/ios/validate_embedded_entitlements.sh" "$dump" >/dev/null
     fi
@@ -200,6 +209,10 @@ mkdir -p "$fakesign_dump_dir"
 dump_entitlements "$staged_app" "$fakesign_dump_dir" \
   "$work_dir/fakesign-dumps" "$work_dir/fakesign-paths"
 validate_dumps "$work_dir/fakesign-dumps"
+"$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
+  --trollstore "$TROLLSTORE_ENTITLEMENTS_SOURCE" \
+  "$work_dir/resolved-entitlements.plist" \
+  "$fakesign_dump_dir/main/Runner.plist"
 
 architecture_file="$ARTIFACT_DIR/architecture-fakesign.txt"
 "$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" \
@@ -240,6 +253,10 @@ mkdir -p "$final_dump_dir"
 dump_entitlements "$final_app" "$final_dump_dir" \
   "$work_dir/final-dumps" "$work_dir/final-paths"
 validate_dumps "$work_dir/final-dumps"
+"$ROOT_DIR/scripts/ios/validate_entitlements.sh" \
+  --trollstore "$TROLLSTORE_ENTITLEMENTS_SOURCE" \
+  "$work_dir/resolved-entitlements.plist" \
+  "$final_dump_dir/main/Runner.plist"
 cp "$final_app/Info.plist" "$ARTIFACT_DIR/Info.plist"
 final_architecture_file="$ARTIFACT_DIR/architecture-final-ipa.txt"
 "$ROOT_DIR/scripts/ios/validate_macho_architectures.sh" \
@@ -252,10 +269,29 @@ ipa_sha256="$ARTIFACT_DIR/$ipa_basename.sha256"
   shasum -a 256 "$ipa_basename" >"$(basename "$ipa_sha256")"
 )
 "$ROOT_DIR/scripts/ios/verify_ipa_checksum.sh" "$ipa_path" "$ipa_sha256"
-shasum -a 256 "$SOURCE_ENTITLEMENTS" >"$ARTIFACT_DIR/trollstore-entitlements.plist.sha256"
+runner_entitlements_artifact="$ARTIFACT_DIR/runner-entitlements.plist"
+xcode_debug_entitlements_artifact="$ARTIFACT_DIR/xcode-debug-entitlements.plist"
+xcode_release_entitlements_artifact="$ARTIFACT_DIR/xcode-release-entitlements.plist"
+trollstore_entitlements_artifact="$ARTIFACT_DIR/trollstore-entitlements.plist"
+resolved_entitlements_artifact="$ARTIFACT_DIR/resolved-entitlements.plist"
+cp "$RUNNER_ENTITLEMENTS_SOURCE" "$runner_entitlements_artifact"
+cp "$ROOT_DIR/ios/Runner/DebugProfile.entitlements" \
+  "$xcode_debug_entitlements_artifact"
+cp "$ROOT_DIR/ios/Runner/Release.entitlements" \
+  "$xcode_release_entitlements_artifact"
+cp "$TROLLSTORE_ENTITLEMENTS_SOURCE" "$trollstore_entitlements_artifact"
+cp "$work_dir/resolved-entitlements.plist" "$resolved_entitlements_artifact"
+(
+  cd "$ARTIFACT_DIR"
+  shasum -a 256 runner-entitlements.plist >runner-entitlements.plist.sha256
+  shasum -a 256 xcode-debug-entitlements.plist >xcode-debug-entitlements.plist.sha256
+  shasum -a 256 xcode-release-entitlements.plist >xcode-release-entitlements.plist.sha256
+  shasum -a 256 trollstore-entitlements.plist >trollstore-entitlements.plist.sha256
+  shasum -a 256 resolved-entitlements.plist >resolved-entitlements.plist.sha256
+)
 {
-  shasum -a 256 "$ROOT_DIR/pubspec.lock"
-  shasum -a 256 "$ROOT_DIR/ios/Podfile.lock"
+  printf '%s  pubspec.lock\n' "$(shasum -a 256 "$ROOT_DIR/pubspec.lock" | awk '{print $1}')"
+  printf '%s  Podfile.lock\n' "$(shasum -a 256 "$ROOT_DIR/ios/Podfile.lock" | awk '{print $1}')"
 } >"$ARTIFACT_DIR/lockfiles-sha256.txt"
 printf '%s\n' "$COMMIT_SHA" >"$ARTIFACT_DIR/commit-sha.txt"
 
@@ -282,9 +318,16 @@ cp "$tool_versions_file" "$diagnostics_dir/"
 cp "$ROOT_DIR/pubspec.lock" "$diagnostics_dir/"
 cp "$ROOT_DIR/ios/Podfile.lock" "$diagnostics_dir/"
 cp "$ARTIFACT_DIR/Info.plist" "$diagnostics_dir/"
-cp "$SOURCE_ENTITLEMENTS" "$diagnostics_dir/trollstore-entitlements.plist"
+cp "$runner_entitlements_artifact" "$diagnostics_dir/"
+cp "$xcode_debug_entitlements_artifact" "$diagnostics_dir/"
+cp "$xcode_release_entitlements_artifact" "$diagnostics_dir/"
+cp "$trollstore_entitlements_artifact" "$diagnostics_dir/"
+cp "$resolved_entitlements_artifact" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/runner-entitlements.plist.sha256" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/xcode-debug-entitlements.plist.sha256" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/xcode-release-entitlements.plist.sha256" "$diagnostics_dir/"
 cp "$ARTIFACT_DIR/trollstore-entitlements.plist.sha256" "$diagnostics_dir/"
-cp "$work_dir/resolved-entitlements.plist" "$diagnostics_dir/"
+cp "$ARTIFACT_DIR/resolved-entitlements.plist.sha256" "$diagnostics_dir/"
 cp "$preflight_file" "$diagnostics_dir/"
 cp "$architecture_file" "$diagnostics_dir/"
 cp "$final_architecture_file" "$diagnostics_dir/"

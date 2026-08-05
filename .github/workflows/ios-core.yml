@@ -206,7 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/ios/validate_project_settings.sh
-          bash scripts/ios/validate_entitlements.sh
+          bash scripts/ios/validate_entitlements.sh --xcode
 
       - name: Build unsigned device Runner.app
         run: bundle exec flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
@@ -225,6 +225,10 @@ jobs:
       - name: Run packaging negative gates
         shell: bash
         run: bash scripts/ios/test_packaging_negative_gates.sh
+
+      - name: Run entitlement policy negative gates
+        shell: bash
+        run: bash scripts/ios/test_entitlement_policy_negative_gates.sh
 
       - name: Create and verify TrollStore IPA
         shell: bash

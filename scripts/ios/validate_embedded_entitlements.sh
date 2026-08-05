@@ -25,8 +25,9 @@ for candidate in "$@"; do
   fi
   plutil -lint "$candidate" >/dev/null
   keys="$(plist_keys "$candidate")"
-  if [[ -n "$keys" ]]; then
-    echo "Embedded Mach-O contains application entitlement(s): $candidate ($keys)" >&2
+  json="$(plutil -convert json -o - "$candidate" | tr -d '[:space:]')"
+  if [[ "$json" != '{}' || -n "$keys" ]]; then
+    echo "Embedded Mach-O contains application entitlement(s): $candidate (${keys:-non-empty entitlement dictionary})" >&2
     echo "Frameworks and dylibs must not carry Runner keychain-access-groups or private application entitlements" >&2
     exit 1
   fi

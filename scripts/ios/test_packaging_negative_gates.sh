@@ -69,6 +69,23 @@ assert_fails "$ROOT_DIR/scripts/ios/validate_embedded_entitlements.sh" \
 "$ROOT_DIR/scripts/ios/validate_embedded_entitlements.sh" \
   "$TEMP_DIR/empty-entitlements.plist" >/dev/null
 
+printf '%s\n' \
+  $'embedded\tFrameworks/App.framework/App' \
+  $'main\tRunner' >"$TEMP_DIR/signing-order-valid.txt"
+"$ROOT_DIR/scripts/ios/validate_signing_order.sh" \
+  "$TEMP_DIR/signing-order-valid.txt" >/dev/null
+printf '%s\n' \
+  $'main\tRunner' \
+  $'embedded\tFrameworks/App.framework/App' >"$TEMP_DIR/signing-order-swapped.txt"
+assert_fails "$ROOT_DIR/scripts/ios/validate_signing_order.sh" \
+  "$TEMP_DIR/signing-order-swapped.txt"
+printf '%s\n' \
+  $'embedded\tFrameworks/App.framework/App' \
+  $'main\tRunner' \
+  $'embedded\tFrameworks/Other.framework/Other' >"$TEMP_DIR/signing-order-not-last.txt"
+assert_fails "$ROOT_DIR/scripts/ios/validate_signing_order.sh" \
+  "$TEMP_DIR/signing-order-not-last.txt"
+
 mkdir -p "$TEMP_DIR/fake-bin" "$TEMP_DIR/non-arm64.app"
 touch "$TEMP_DIR/non-arm64.app/Runner"
 cat >"$TEMP_DIR/fake-bin/file" <<'SCRIPT'
