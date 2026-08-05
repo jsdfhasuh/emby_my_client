@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - agent/ios-core-adaptation
+      - agent/ios-core-real-device-remediation
   pull_request:
     paths:
       - '.metadata'
@@ -20,6 +21,7 @@ on:
       - '.github/workflows/ios-core.yml'
       - 'docs/plans/**'
       - 'docs/acceptance/**'
+      - 'docs/implementation/**'
 
 concurrency:
   group: ios-core-${{ github.workflow }}-${{ github.ref }}
