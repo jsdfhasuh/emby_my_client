@@ -11,6 +11,7 @@ final class RunnerTests: XCTestCase {
       buildNumber: "42",
       now: Date(timeIntervalSince1970: 1_786_019_445)
     )
+    print("SAFE_DIAGNOSTIC_FILENAME actual=\(result.filename)")
 
     XCTAssertEqual(result.data, data)
     XCTAssertEqual(
@@ -162,6 +163,7 @@ final class RunnerTests: XCTestCase {
       }
       report["records"] = [record]
       report["recordCount"] = 1
+      print("SAFE_DIAGNOSTIC_MAPPING stage=\(stage) reason=\(reason) code=\(code)")
       assertValid(report)
     }
   }
@@ -210,6 +212,7 @@ final class RunnerTests: XCTestCase {
       anchor: ["x": -20, "y": 20, "width": 100, "height": 80],
       in: bounds
     )
+    print("SAFE_DIAGNOSTIC_POPOVER intersection=\(intersection)")
     XCTAssertEqual(intersection, CGRect(x: 0, y: 20, width: 80, height: 80))
 
     let fallback = CGRect(x: 499.5, y: 299.5, width: 1, height: 1)
@@ -220,12 +223,18 @@ final class RunnerTests: XCTestCase {
       ),
       fallback
     )
+    print(
+      "SAFE_DIAGNOSTIC_POPOVER outside=\(SafeDiagnosticExportValidator.safePopoverRect(anchor: [\"x\": 2000, \"y\": 20, \"width\": 100, \"height\": 80], in: bounds)) fallback=\(fallback)"
+    )
     XCTAssertEqual(
       SafeDiagnosticExportValidator.safePopoverRect(
         anchor: ["x": 1, "y": 1, "width": 0, "height": 20],
         in: bounds
       ),
       fallback
+    )
+    print(
+      "SAFE_DIAGNOSTIC_POPOVER zero=\(SafeDiagnosticExportValidator.safePopoverRect(anchor: [\"x\": 1, \"y\": 1, \"width\": 0, \"height\": 20], in: bounds))"
     )
     XCTAssertEqual(
       SafeDiagnosticExportValidator.safePopoverRect(anchor: nil, in: bounds),
@@ -337,15 +346,16 @@ final class RunnerTests: XCTestCase {
   ) {
     do {
       let data = try JSONSerialization.data(withJSONObject: report)
-      XCTAssertNoThrow(
-        try SafeDiagnosticExportValidator.validate(
+      do {
+        _ = try SafeDiagnosticExportValidator.validate(
           content: data,
           appVersion: "1.0.0",
           buildNumber: "42"
-        ),
-        file: file,
-        line: line
-      )
+        )
+      } catch {
+        print("SAFE_DIAGNOSTIC_VALIDATION_FAILED error=\(error) report=\(report)")
+        XCTFail("validation failed: \(error)", file: file, line: line)
+      }
     } catch {
       XCTFail("fixture could not be encoded: \(error)", file: file, line: line)
     }
