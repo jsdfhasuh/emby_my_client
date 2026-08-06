@@ -142,32 +142,13 @@ enum SafeDiagnosticExportValidator {
 
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-    let components = calendar.dateComponents(
-      [.year, .month, .day, .hour, .minute, .second],
-      from: date
-    )
-    guard
-      let year = components.year,
-      let month = components.month,
-      let day = components.day,
-      let hour = components.hour,
-      let minute = components.minute,
-      let second = components.second
-    else {
-      throw SafeDiagnosticExportValidationError.unsafe
-    }
-
-    return String(
-      format: "emby-safe-diagnostics-v1-b%@-%04d%02d%02dT%02d%02d%02dZ.json",
-      locale: Locale(identifier: "en_US_POSIX"),
-      buildNumber,
-      year,
-      month,
-      day,
-      hour,
-      minute,
-      second
-    )
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+    let timestamp = formatter.string(from: date)
+    return "emby-safe-diagnostics-v1-b\(buildNumber)-\(timestamp).json"
   }
 
   static func safePopoverRect(
@@ -312,10 +293,33 @@ enum SafeDiagnosticExportValidator {
   }
 
   private static func finiteNumber(_ value: Any?) -> CGFloat? {
-    guard !(value is Bool), let number = value as? NSNumber else {
+    guard !(value is Bool) else {
       return nil
     }
-    let result = CGFloat(number.doubleValue)
+
+    let doubleValue: Double?
+    if let number = value as? NSNumber {
+      doubleValue = number.doubleValue
+    } else if let number = value as? CGFloat {
+      doubleValue = Double(number)
+    } else if let number = value as? Double {
+      doubleValue = number
+    } else if let number = value as? Float {
+      doubleValue = Double(number)
+    } else if let number = value as? Int {
+      doubleValue = Double(number)
+    } else if let number = value as? Int64 {
+      doubleValue = Double(number)
+    } else if let number = value as? UInt64 {
+      doubleValue = Double(number)
+    } else {
+      doubleValue = nil
+    }
+
+    guard let doubleValue else {
+      return nil
+    }
+    let result = CGFloat(doubleValue)
     return result.isFinite ? result : nil
   }
 
