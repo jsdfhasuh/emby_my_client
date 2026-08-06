@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
@@ -23,11 +26,20 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> {
+class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
+  static const _compactHeightThreshold = 600.0;
+
   final _formKey = GlobalKey<FormState>();
   final _serverController = TextEditingController();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _scrollController = ScrollController();
+  final _serverFocusNode = FocusNode();
+  final _usernameFocusNode = FocusNode();
+  final _passwordFocusNode = FocusNode();
+  final _serverAnchorKey = GlobalKey();
+  final _usernameAnchorKey = GlobalKey();
+  final _passwordAnchorKey = GlobalKey();
   late final EmbyServerDiscovery _discovery =
       widget.discovery ?? EmbyServerDiscovery();
   late final PlatformCapabilities _capabilities =
@@ -37,22 +49,120 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isSubmitting = false;
   bool _isDiscovering = false;
   int _discoveryGeneration = 0;
+  bool _ensureVisibleScheduled = false;
+  Duration _scheduledEnsureVisibleDuration = Duration.zero;
   String? _error;
   String? _diagnosticCode;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _serverFocusNode.addListener(_handleFieldFocusChanged);
+    _usernameFocusNode.addListener(_handleFieldFocusChanged);
+    _passwordFocusNode.addListener(_handleFieldFocusChanged);
     if (_capabilities.supportsLanUdpDiscovery) _startDiscovery();
   }
 
   @override
   void dispose() {
     _discoveryGeneration++;
+    WidgetsBinding.instance.removeObserver(this);
+    _serverFocusNode.removeListener(_handleFieldFocusChanged);
+    _usernameFocusNode.removeListener(_handleFieldFocusChanged);
+    _passwordFocusNode.removeListener(_handleFieldFocusChanged);
+    _serverFocusNode.dispose();
+    _usernameFocusNode.dispose();
+    _passwordFocusNode.dispose();
+    _scrollController.dispose();
     _serverController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    _scheduleEnsureVisible(duration: Duration.zero);
+  }
+
+  void _handleFieldFocusChanged() {
+    if (!_hasFocusedField) return;
+    _scheduleEnsureVisible(duration: const Duration(milliseconds: 220));
+  }
+
+  bool get _hasFocusedField =>
+      _serverFocusNode.hasFocus ||
+      _usernameFocusNode.hasFocus ||
+      _passwordFocusNode.hasFocus;
+
+  GlobalKey? get _focusedFieldAnchorKey {
+    if (_serverFocusNode.hasFocus) return _serverAnchorKey;
+    if (_usernameFocusNode.hasFocus) return _usernameAnchorKey;
+    if (_passwordFocusNode.hasFocus) return _passwordAnchorKey;
+    return null;
+  }
+
+  FocusNode? get _focusedFieldFocusNode {
+    if (_serverFocusNode.hasFocus) return _serverFocusNode;
+    if (_usernameFocusNode.hasFocus) return _usernameFocusNode;
+    if (_passwordFocusNode.hasFocus) return _passwordFocusNode;
+    return null;
+  }
+
+  void _scheduleEnsureVisible({required Duration duration}) {
+    if (!mounted || !_hasFocusedField) return;
+    if (_ensureVisibleScheduled) {
+      if (duration == Duration.zero) {
+        _scheduledEnsureVisibleDuration = Duration.zero;
+      }
+      return;
+    }
+    _ensureVisibleScheduled = true;
+    _scheduledEnsureVisibleDuration = duration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureVisibleScheduled = false;
+      final anchorContext = _focusedFieldAnchorKey?.currentContext;
+      final focusNode = _focusedFieldFocusNode;
+      if (!mounted ||
+          !_scrollController.hasClients ||
+          focusNode == null ||
+          !focusNode.hasFocus ||
+          anchorContext == null) {
+        return;
+      }
+      unawaited(
+        _ensureFocusedFieldVisible(
+          anchorContext,
+          focusNode: focusNode,
+          duration: _scheduledEnsureVisibleDuration,
+        ),
+      );
+    });
+  }
+
+  Future<void> _ensureFocusedFieldVisible(
+    BuildContext context, {
+    required FocusNode focusNode,
+    required Duration duration,
+  }) async {
+    if (!mounted || !_scrollController.hasClients || !focusNode.hasFocus) {
+      return;
+    }
+    try {
+      await Scrollable.ensureVisible(
+        context,
+        alignment: 0.14,
+        duration: duration,
+        curve: Curves.easeOut,
+      );
+    } catch (_) {
+      // The field may be removed while the keyboard or route is closing.
+    }
+  }
+
+  void _handleFieldTapOutside(PointerDownEvent event) {
+    FocusManager.instance.primaryFocus?.unfocus();
   }
 
   Future<void> _startDiscovery() async {
@@ -125,166 +235,239 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Container(
-                        width: 54,
-                        height: 54,
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.primary,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Icon(
-                          Icons.play_arrow_rounded,
-                          size: 38,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      'Emby 客户端',
-                      style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      '登录你的媒体服务器',
-                      style: TextStyle(color: Color(0xFFADB5B7), fontSize: 16),
-                    ),
-                    const SizedBox(height: 24),
-                    _buildDiscoverySection(),
-                    const SizedBox(height: 20),
-                    TextFormField(
-                      controller: _serverController,
-                      keyboardType: TextInputType.url,
-                      textInputAction: TextInputAction.next,
-                      autocorrect: false,
-                      decoration: const InputDecoration(
-                        labelText: '服务器地址',
-                        hintText: '192.168.1.10:8096',
-                        prefixIcon: Icon(Icons.dns_outlined),
-                      ),
-                      validator: (value) =>
-                          value == null || value.trim().isEmpty
-                          ? '请输入服务器地址'
-                          : null,
-                    ),
-                    const SizedBox(height: 14),
-                    TextFormField(
-                      controller: _usernameController,
-                      textInputAction: TextInputAction.next,
-                      autocorrect: false,
-                      decoration: const InputDecoration(
-                        labelText: '用户名',
-                        prefixIcon: Icon(Icons.person_outline),
-                      ),
-                      validator: (value) =>
-                          value == null || value.trim().isEmpty
-                          ? '请输入用户名'
-                          : null,
-                    ),
-                    const SizedBox(height: 14),
-                    TextFormField(
-                      controller: _passwordController,
-                      obscureText: _obscurePassword,
-                      textInputAction: TextInputAction.done,
-                      onFieldSubmitted: (_) => _submit(),
-                      decoration: InputDecoration(
-                        labelText: '密码',
-                        prefixIcon: const Icon(Icons.lock_outline),
-                        suffixIcon: IconButton(
-                          tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
-                          onPressed: () => setState(
-                            () => _obscurePassword = !_obscurePassword,
-                          ),
-                          icon: Icon(
-                            _obscurePassword
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (_error != null) ...[
-                      const SizedBox(height: 14),
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF3A2020),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: const Color(0xFF74403D)),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(
-                              Icons.error_outline,
-                              size: 20,
-                              color: Color(0xFFFFA49C),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+            final compact =
+                keyboardVisible ||
+                constraints.maxHeight < _compactHeightThreshold;
+            final verticalPadding = compact ? 16.0 : 24.0;
+            final minContentHeight = math.max(
+              0.0,
+              constraints.maxHeight - (2 * verticalPadding),
+            );
+
+            return SingleChildScrollView(
+              key: const ValueKey<String>('login-scroll-view'),
+              controller: _scrollController,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: verticalPadding,
+              ),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: minContentHeight),
+                child: Align(
+                  alignment: compact ? Alignment.topCenter : Alignment.center,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
+                    child: Form(
+                      key: _formKey,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _buildBrandHeader(compact),
+                          SizedBox(height: compact ? 14 : 24),
+                          _buildDiscoverySection(),
+                          SizedBox(height: compact ? 14 : 20),
+                          KeyedSubtree(
+                            key: _serverAnchorKey,
+                            child: TextFormField(
+                              key: const ValueKey<String>('login-server-field'),
+                              controller: _serverController,
+                              focusNode: _serverFocusNode,
+                              keyboardType: TextInputType.url,
+                              textInputAction: TextInputAction.next,
+                              autocorrect: false,
+                              onTapOutside: _handleFieldTapOutside,
+                              onFieldSubmitted: (_) =>
+                                  _usernameFocusNode.requestFocus(),
+                              decoration: const InputDecoration(
+                                labelText: '服务器地址',
+                                hintText: '192.168.1.10:8096',
+                                prefixIcon: Icon(Icons.dns_outlined),
+                              ),
+                              validator: (value) =>
+                                  value == null || value.trim().isEmpty
+                                  ? '请输入服务器地址'
+                                  : null,
                             ),
-                            const SizedBox(width: 9),
-                            Expanded(
-                              child: Column(
+                          ),
+                          const SizedBox(height: 14),
+                          KeyedSubtree(
+                            key: _usernameAnchorKey,
+                            child: TextFormField(
+                              key: const ValueKey<String>(
+                                'login-username-field',
+                              ),
+                              controller: _usernameController,
+                              focusNode: _usernameFocusNode,
+                              textInputAction: TextInputAction.next,
+                              autocorrect: false,
+                              onTapOutside: _handleFieldTapOutside,
+                              onFieldSubmitted: (_) =>
+                                  _passwordFocusNode.requestFocus(),
+                              decoration: const InputDecoration(
+                                labelText: '用户名',
+                                prefixIcon: Icon(Icons.person_outline),
+                              ),
+                              validator: (value) =>
+                                  value == null || value.trim().isEmpty
+                                  ? '请输入用户名'
+                                  : null,
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          KeyedSubtree(
+                            key: _passwordAnchorKey,
+                            child: TextFormField(
+                              key: const ValueKey<String>(
+                                'login-password-field',
+                              ),
+                              controller: _passwordController,
+                              focusNode: _passwordFocusNode,
+                              obscureText: _obscurePassword,
+                              textInputAction: TextInputAction.done,
+                              onTapOutside: _handleFieldTapOutside,
+                              onFieldSubmitted: (_) => _submit(),
+                              decoration: InputDecoration(
+                                labelText: '密码',
+                                prefixIcon: const Icon(Icons.lock_outline),
+                                suffixIcon: IconButton(
+                                  tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
+                                  onPressed: () => setState(
+                                    () => _obscurePassword = !_obscurePassword,
+                                  ),
+                                  icon: Icon(
+                                    _obscurePassword
+                                        ? Icons.visibility_outlined
+                                        : Icons.visibility_off_outlined,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_error != null) ...[
+                            const SizedBox(height: 14),
+                            Container(
+                              key: const ValueKey<String>('login-error'),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF3A2020),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                  color: const Color(0xFF74403D),
+                                ),
+                              ),
+                              child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    _error!,
-                                    style: const TextStyle(
-                                      color: Color(0xFFFFC2BC),
+                                  const Icon(
+                                    Icons.error_outline,
+                                    size: 20,
+                                    color: Color(0xFFFFA49C),
+                                  ),
+                                  const SizedBox(width: 9),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          _error!,
+                                          style: const TextStyle(
+                                            color: Color(0xFFFFC2BC),
+                                          ),
+                                        ),
+                                        if (_diagnosticCode != null) ...[
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            _diagnosticCode!,
+                                            style: const TextStyle(
+                                              color: Color(0xFFFFC2BC),
+                                              fontFamily: 'monospace',
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
                                     ),
                                   ),
-                                  if (_diagnosticCode != null) ...[
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      _diagnosticCode!,
-                                      style: const TextStyle(
-                                        color: Color(0xFFFFC2BC),
-                                        fontFamily: 'monospace',
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ],
                                 ],
                               ),
                             ),
                           ],
-                        ),
+                          const SizedBox(height: 22),
+                          FilledButton.icon(
+                            key: const ValueKey<String>('login-submit-button'),
+                            onPressed: _isSubmitting ? null : _submit,
+                            icon: _isSubmitting
+                                ? const SizedBox.square(
+                                    dimension: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.black,
+                                    ),
+                                  )
+                                : const Icon(Icons.login),
+                            label: Text(_isSubmitting ? '正在连接' : '登录'),
+                          ),
+                        ],
                       ),
-                    ],
-                    const SizedBox(height: 22),
-                    FilledButton.icon(
-                      onPressed: _isSubmitting ? null : _submit,
-                      icon: _isSubmitting
-                          ? const SizedBox.square(
-                              dimension: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.black,
-                              ),
-                            )
-                          : const Icon(Icons.login),
-                      label: Text(_isSubmitting ? '正在连接' : '登录'),
                     ),
-                  ],
+                  ),
                 ),
               ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBrandHeader(bool compact) {
+    final theme = Theme.of(context);
+    final logoSize = compact ? 38.0 : 54.0;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            width: logoSize,
+            height: logoSize,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primary,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Icon(
+              Icons.play_arrow_rounded,
+              size: compact ? 28 : 38,
+              color: Colors.black,
             ),
           ),
         ),
-      ),
+        SizedBox(height: compact ? 10 : 24),
+        Text(
+          'Emby 客户端',
+          style:
+              (compact
+                      ? theme.textTheme.titleLarge
+                      : theme.textTheme.displaySmall)
+                  ?.copyWith(fontWeight: FontWeight.w800),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        if (!compact) ...[
+          const SizedBox(height: 8),
+          const Text(
+            '登录你的媒体服务器',
+            style: TextStyle(color: Color(0xFFADB5B7), fontSize: 16),
+          ),
+        ],
+      ],
     );
   }
 
