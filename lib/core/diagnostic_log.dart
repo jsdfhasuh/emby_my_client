@@ -21,11 +21,13 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   static const _fileName = 'emby_client_diagnostics.log';
   static const _safeFileName = 'emby_safe_diagnostics_v1.jsonl';
   static const _maxFileBytes = 750 * 1024;
+  static const _maxSafeEventBytes = 256 * 1024;
+  static const _maxSafeEventRecords = 1000;
 
   File? _file;
   File? _safeFile;
   Future<void> _pendingWrite = Future.value();
-  Future<void> _pendingSafeWrite = Future.value();
+  Future<void> _pendingSafeOperation = Future.value();
   DiagnosticLogTestSink? _testSink;
   DiagnosticSafeEventTestSink? _safeEventTestSink;
 
@@ -138,34 +140,20 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
 
   @override
   Future<List<SafeDiagnosticRecord>> readSafeEvents() async {
-    await _pendingSafeWrite;
-    final file = _safeFile;
-    if (file == null || !await file.exists()) return const [];
-    final contents = await file.readAsString();
-    if (contents.contains('\r')) {
-      throw const SafeDiagnosticValidationException();
-    }
-    final records = <SafeDiagnosticRecord>[];
-    final lines = contents.split('\n');
-    if (lines.isNotEmpty && lines.last.isEmpty) lines.removeLast();
-    for (final line in lines) {
-      if (line.isEmpty) throw const SafeDiagnosticValidationException();
-      try {
-        records.add(SafeDiagnosticRecord.fromJson(jsonDecode(line)));
-      } on SafeDiagnosticValidationException {
-        rethrow;
-      } catch (_) {
-        throw const SafeDiagnosticValidationException();
-      }
-    }
-    return List<SafeDiagnosticRecord>.unmodifiable(records);
+    return _enqueueSafeOperation(() async {
+      final file = _safeFile;
+      if (file == null || !await file.exists()) return const [];
+      return _readSafeRecords(file);
+    });
   }
 
   @override
   Future<void> clearSafeEvents() async {
-    await _pendingSafeWrite;
-    final file = _safeFile;
-    if (file != null) await file.writeAsString('');
+    await _enqueueSafeOperation(() async {
+      final file = _safeFile;
+      if (file == null) return;
+      await _replaceSafeRecords(file, const []);
+    });
   }
 
   String? get path => _file?.path;
@@ -200,20 +188,110 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
       reason: reason,
       errorType: errorType,
     );
-    try {
-      _safeEventTestSink?.call(record);
-      final line = '${jsonEncode(record.toJson())}\n';
-      final file = _safeFile;
-      if (file == null) return;
-      _pendingSafeWrite = _pendingSafeWrite.then((_) async {
-        try {
-          await file.writeAsString(line, mode: FileMode.append, flush: true);
-        } catch (_) {
-          debugPrint('[diagnostic] Safe diagnostic event write failed');
+    _enqueueSafeOperation(() async {
+      try {
+        _safeEventTestSink?.call(record);
+        final file = _safeFile;
+        if (file == null) return;
+        final records = <SafeDiagnosticRecord>[];
+        if (await file.exists()) {
+          records.addAll(await _readSafeRecords(file));
         }
-      });
+        records.add(record);
+        while (records.length > _maxSafeEventRecords) {
+          records.removeAt(0);
+        }
+        while (records.isNotEmpty &&
+            _encodedSafeRecordsLength(records) > _maxSafeEventBytes) {
+          records.removeAt(0);
+        }
+        if (_encodedSafeRecordsLength(records) <= _maxSafeEventBytes) {
+          await _replaceSafeRecords(file, records);
+        }
+      } catch (_) {
+        debugPrint('[diagnostic] Safe diagnostic event write failed');
+      }
+    });
+  }
+
+  Future<T> _enqueueSafeOperation<T>(Future<T> Function() operation) {
+    final next = _pendingSafeOperation.then((_) => operation());
+    _pendingSafeOperation = next.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('[diagnostic] Safe diagnostic event operation failed');
+      },
+    );
+    return next;
+  }
+
+  Future<List<SafeDiagnosticRecord>> _readSafeRecords(File file) async {
+    final bytes = await file.readAsBytes();
+    if (bytes.length > _maxSafeEventBytes) {
+      throw const SafeDiagnosticValidationException();
+    }
+    if (bytes.isEmpty) return <SafeDiagnosticRecord>[];
+    late final String contents;
+    try {
+      contents = utf8.decode(bytes);
     } catch (_) {
-      debugPrint('[diagnostic] Safe diagnostic event write failed');
+      throw const SafeDiagnosticValidationException();
+    }
+    if (contents.contains('\r') || !contents.endsWith('\n')) {
+      throw const SafeDiagnosticValidationException();
+    }
+    final records = <SafeDiagnosticRecord>[];
+    final lines = contents.split('\n');
+    lines.removeLast();
+    for (final line in lines) {
+      if (line.isEmpty) throw const SafeDiagnosticValidationException();
+      try {
+        records.add(SafeDiagnosticRecord.fromJson(jsonDecode(line)));
+      } on SafeDiagnosticValidationException {
+        rethrow;
+      } catch (_) {
+        throw const SafeDiagnosticValidationException();
+      }
+    }
+    if (records.length > _maxSafeEventRecords) {
+      throw const SafeDiagnosticValidationException();
+    }
+    return records;
+  }
+
+  int _encodedSafeRecordsLength(List<SafeDiagnosticRecord> records) {
+    var length = 0;
+    for (final record in records) {
+      length += utf8.encode('${jsonEncode(record.toJson())}\n').length;
+    }
+    return length;
+  }
+
+  Future<void> _replaceSafeRecords(
+    File file,
+    List<SafeDiagnosticRecord> records,
+  ) async {
+    final content = records.isEmpty
+        ? ''
+        : '${records.map((record) => jsonEncode(record.toJson())).join('\n')}\n';
+    final bytes = utf8.encode(content);
+    if (bytes.length > _maxSafeEventBytes) {
+      throw const SafeDiagnosticValidationException();
+    }
+    await file.parent.create(recursive: true);
+    final temporary = File(
+      '${file.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    try {
+      await temporary.writeAsBytes(bytes, flush: true);
+      if (Platform.isWindows && await file.exists()) {
+        await file.delete();
+      }
+      await temporary.rename(file.path);
+    } finally {
+      if (await temporary.exists()) {
+        await temporary.delete();
+      }
     }
   }
 

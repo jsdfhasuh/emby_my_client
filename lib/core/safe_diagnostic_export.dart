@@ -17,6 +17,7 @@ class SafeDiagnosticExportException implements Exception {
   static const unsafe = 'DIAG-EXPORT-UNSAFE';
   static const write = 'DIAG-EXPORT-WRITE';
   static const share = 'DIAG-EXPORT-SHARE';
+  static const busy = 'DIAG-EXPORT-BUSY';
 
   final String code;
 
@@ -70,7 +71,33 @@ class MethodChannelSafeDiagnosticMetadataProvider
 }
 
 abstract interface class SafeDiagnosticShareGateway {
-  Future<void> share(SafeDiagnosticReport report);
+  Future<SafeDiagnosticShareOutcome> share(
+    SafeDiagnosticReport report, {
+    required SafeDiagnosticPopoverAnchor anchor,
+  });
+}
+
+enum SafeDiagnosticShareOutcome { completed, cancelled }
+
+class SafeDiagnosticPopoverAnchor {
+  const SafeDiagnosticPopoverAnchor({
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+  });
+
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+
+  Map<String, Object> toArguments() => <String, Object>{
+    'x': x,
+    'y': y,
+    'width': width,
+    'height': height,
+  };
 }
 
 class MethodChannelSafeDiagnosticShareGateway
@@ -78,19 +105,38 @@ class MethodChannelSafeDiagnosticShareGateway
   const MethodChannelSafeDiagnosticShareGateway();
 
   @override
-  Future<void> share(SafeDiagnosticReport report) async {
+  Future<SafeDiagnosticShareOutcome> share(
+    SafeDiagnosticReport report, {
+    required SafeDiagnosticPopoverAnchor anchor,
+  }) async {
     try {
-      await MethodChannelSafeDiagnosticMetadataProvider.channel
-          .invokeMethod<void>('share', <String, Object>{
-            'filename': report.filename,
+      final outcome = await MethodChannelSafeDiagnosticMetadataProvider.channel
+          .invokeMethod<String>('share', <String, Object>{
             'content': report.content,
+            ...anchor.toArguments(),
           });
+      return switch (outcome) {
+        'completed' => SafeDiagnosticShareOutcome.completed,
+        'cancelled' => SafeDiagnosticShareOutcome.cancelled,
+        _ => throw const SafeDiagnosticExportException(
+          SafeDiagnosticExportException.unsafe,
+        ),
+      };
+    } on PlatformException catch (error) {
+      throw SafeDiagnosticExportException(_nativeErrorCode(error.code));
     } catch (_) {
-      throw const SafeDiagnosticExportException(
-        SafeDiagnosticExportException.share,
-      );
+      rethrow;
     }
   }
+
+  static String _nativeErrorCode(String code) => switch (code) {
+    SafeDiagnosticExportException.unsafe =>
+      SafeDiagnosticExportException.unsafe,
+    SafeDiagnosticExportException.write => SafeDiagnosticExportException.write,
+    SafeDiagnosticExportException.busy => SafeDiagnosticExportException.busy,
+    SafeDiagnosticExportException.share => SafeDiagnosticExportException.share,
+    _ => SafeDiagnosticExportException.share,
+  };
 }
 
 class SafeDiagnosticReport {
@@ -191,7 +237,7 @@ class SafeDiagnosticExportService {
   @visibleForTesting
   static void validateSnapshot(String content) {
     if (utf8.encode(content).length > _maxSafeReportBytes ||
-        content.codeUnits.any((unit) => unit < 0x20)) {
+        content.codeUnits.any((unit) => unit < 0x20 || unit == 0x7f)) {
       throw const SafeDiagnosticExportException(
         SafeDiagnosticExportException.unsafe,
       );
@@ -343,11 +389,12 @@ class SafeDiagnosticExportService {
   static bool _containsSensitiveContent(String value) {
     final patterns = <RegExp>[
       RegExp(
-        r'''"(?:password|pw|accountName|username|accessToken|api_key|x-emby-token|authorization|cookie)"\s*:''',
+        r'''\b(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname)\b''',
         caseSensitive: false,
       ),
+      RegExp(r'\b(?:url|ip)\b', caseSensitive: false),
       RegExp(
-        r'\b(?:authorization|basic|bearer|cookie|token)\b',
+        r'''"(?:password|pw|account|accountName|username|accessToken|token|api_key|x-emby-token|authorization|cookie|deviceId|serverUrl|baseUrl)"\s*:''',
         caseSensitive: false,
       ),
       RegExp(
@@ -356,18 +403,23 @@ class SafeDiagnosticExportService {
       ),
       RegExp(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)'),
       RegExp(
-        r'''\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}\b''',
+        r'\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){2,7}\b|(?<![0-9a-f])::1\b',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'''\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}\b|\b(?:localhost|emby):\d{2,5}\b|\[[0-9a-f:]+\]:\d{2,5}''',
         caseSensitive: false,
       ),
       RegExp(r'\b(?:localhost|emby):\d{2,5}\b', caseSensitive: false),
       RegExp(
-        r'''(?:[a-z]:\\|/(?:home|users|private|var|tmp|data|documents|library)(?:/|\\))''',
+        r'''(?:[a-z]:\\|/(?:home|users|private|var|tmp|data|documents|library)(?:/|\\)|\\Users\\|\\private\\|\\var\\|\\tmp\\)''',
         caseSensitive: false,
       ),
-      RegExp(r'\[[0-9a-f:]{2,}\]', caseSensitive: false),
-      RegExp(r'\bsession\b', caseSensitive: false),
-      RegExp(r'\b(?:url|ip|host|address|hostname)\b', caseSensitive: false),
       RegExp(r'\bsession\s*(?:json|object|data)\b', caseSensitive: false),
+      RegExp(
+        r'''"session(?:json|object|data)?"\s*:|\b(?:request|response)\s+(?:body|headers?)\b|"(?:request|response)(?:body|headers?)"\s*:''',
+        caseSensitive: false,
+      ),
       RegExp(r'\\(?:r|n|u000[0-9a-f]{1,4})', caseSensitive: false),
     ];
     return patterns.any((pattern) => pattern.hasMatch(value));

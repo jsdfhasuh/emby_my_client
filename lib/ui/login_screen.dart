@@ -177,6 +177,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
         builder: (_) => SafeDiagnosticExportScreen(
           service: widget.safeDiagnosticService,
           shareGateway: widget.safeDiagnosticShareGateway,
+          capabilities: _capabilities,
         ),
       ),
     );

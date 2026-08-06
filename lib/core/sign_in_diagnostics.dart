@@ -451,7 +451,9 @@ String safeDiagnosticCodeFor(
 };
 
 bool _hasControlCharacter(Iterable<Object?> values) => values.any(
-  (value) => value is String && value.codeUnits.any((unit) => unit < 0x20),
+  (value) =>
+      value is String &&
+      value.codeUnits.any((unit) => unit < 0x20 || unit == 0x7f),
 );
 
 SafeDiagnosticLevel _safeDiagnosticLevelFromCode(String value) =>

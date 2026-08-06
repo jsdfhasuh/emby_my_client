@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
+import '../platform/platform_capabilities.dart';
 import 'safe_diagnostic_export_screen.dart';
 
 class DiagnosticLogScreen extends StatefulWidget {
-  const DiagnosticLogScreen({super.key});
+  const DiagnosticLogScreen({super.key, this.capabilities});
+
+  final PlatformCapabilities? capabilities;
 
   @override
   State<DiagnosticLogScreen> createState() => _DiagnosticLogScreenState();
 }
 
 class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
+  late final PlatformCapabilities _capabilities =
+      widget.capabilities ?? PlatformCapabilities.current();
   late Future<String> _future;
 
   @override
@@ -61,15 +66,17 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
             onPressed: _refresh,
             icon: const Icon(Icons.refresh),
           ),
-          IconButton(
-            tooltip: '安全登录诊断',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => const SafeDiagnosticExportScreen(),
+          if (_capabilities.platformName == 'ios')
+            IconButton(
+              tooltip: '安全登录诊断',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) =>
+                      SafeDiagnosticExportScreen(capabilities: _capabilities),
+                ),
               ),
+              icon: const Icon(Icons.security_outlined),
             ),
-            icon: const Icon(Icons.security_outlined),
-          ),
           IconButton(
             tooltip: '清空',
             onPressed: _clear,

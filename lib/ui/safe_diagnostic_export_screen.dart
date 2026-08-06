@@ -2,16 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/safe_diagnostic_export.dart';
+import '../platform/platform_capabilities.dart';
 
 class SafeDiagnosticExportScreen extends StatefulWidget {
   const SafeDiagnosticExportScreen({
     super.key,
     this.service,
     this.shareGateway,
+    this.capabilities,
   });
 
   final SafeDiagnosticExportService? service;
   final SafeDiagnosticShareGateway? shareGateway;
+  final PlatformCapabilities? capabilities;
 
   @override
   State<SafeDiagnosticExportScreen> createState() =>
@@ -24,10 +27,14 @@ class _SafeDiagnosticExportScreenState
       widget.service ?? SafeDiagnosticExportService();
   late final SafeDiagnosticShareGateway _shareGateway =
       widget.shareGateway ?? const MethodChannelSafeDiagnosticShareGateway();
+  late final PlatformCapabilities _capabilities =
+      widget.capabilities ?? PlatformCapabilities.current();
+  final _exportButtonKey = GlobalKey();
   SafeDiagnosticReport? _report;
   String? _errorCode;
   bool _loading = true;
   bool _sharing = false;
+  bool _nativeSharing = false;
 
   @override
   void initState() {
@@ -42,6 +49,15 @@ class _SafeDiagnosticExportScreenState
         _errorCode = null;
       });
     }
+    if (_capabilities.platformName != 'ios') {
+      if (!mounted) return;
+      setState(() {
+        _report = null;
+        _errorCode = SafeDiagnosticExportException.unsafe;
+        _loading = false;
+      });
+      return;
+    }
     try {
       final report = await _service.buildReport();
       if (!mounted) return;
@@ -53,7 +69,7 @@ class _SafeDiagnosticExportScreenState
       if (!mounted) return;
       setState(() {
         _report = null;
-        _errorCode = error.code;
+        _errorCode = _normalizeErrorCode(error.code);
         _loading = false;
       });
     } catch (_) {
@@ -116,30 +132,42 @@ class _SafeDiagnosticExportScreenState
 
   Future<void> _shareReport() async {
     final report = _report;
-    if (report == null || report.recordCount == 0 || _sharing) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('导出安全诊断？'),
-        content: const Text(
-          '即将导出只包含固定登录诊断字段的安全报告。发送前仍请预览并确认不含账户、密码、Token、设备 ID 或服务器地址。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('导出'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
+    if (report == null || report.recordCount == 0) return;
+    if (_sharing) {
+      _showMessage(_failureMessage(SafeDiagnosticExportException.busy));
+      return;
+    }
+    final anchor = _readExportButtonAnchor();
     setState(() => _sharing = true);
     try {
-      await _shareGateway.share(report);
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('导出安全诊断？'),
+          content: const Text(
+            '即将导出只包含固定登录诊断字段的安全报告。发送前仍请预览并确认不含账户、密码、Token、设备 ID 或服务器地址。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('导出'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      setState(() => _nativeSharing = true);
+      final outcome = await _shareGateway.share(report, anchor: anchor);
+      if (!mounted) return;
+      if (outcome == SafeDiagnosticShareOutcome.completed) {
+        _showMessage('安全诊断报告已准备分享');
+      } else {
+        _showMessage('已取消导出');
+      }
     } on SafeDiagnosticExportException catch (error) {
       if (mounted) {
         _showMessage(_failureMessage(error.code));
@@ -149,7 +177,15 @@ class _SafeDiagnosticExportScreenState
         _showMessage(_failureMessage(SafeDiagnosticExportException.share));
       }
     } finally {
-      if (mounted) setState(() => _sharing = false);
+      if (mounted) {
+        setState(() {
+          _sharing = false;
+          _nativeSharing = false;
+        });
+      } else {
+        _sharing = false;
+        _nativeSharing = false;
+      }
     }
   }
 
@@ -159,7 +195,44 @@ class _SafeDiagnosticExportScreenState
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  String _failureMessage(String code) => '安全诊断操作失败（$code）';
+  SafeDiagnosticPopoverAnchor _readExportButtonAnchor() {
+    final renderObject = _exportButtonKey.currentContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return const SafeDiagnosticPopoverAnchor(x: 0, y: 0, width: 0, height: 0);
+    }
+    final offset = renderObject.localToGlobal(Offset.zero);
+    final size = renderObject.size;
+    if (![
+          offset.dx,
+          offset.dy,
+          size.width,
+          size.height,
+        ].every((value) => value.isFinite) ||
+        size.width < 0 ||
+        size.height < 0 ||
+        size.width == 0 ||
+        size.height == 0) {
+      return const SafeDiagnosticPopoverAnchor(x: 0, y: 0, width: 0, height: 0);
+    }
+    return SafeDiagnosticPopoverAnchor(
+      x: offset.dx,
+      y: offset.dy,
+      width: size.width,
+      height: size.height,
+    );
+  }
+
+  String _normalizeErrorCode(String code) => switch (code) {
+    SafeDiagnosticExportException.read => code,
+    SafeDiagnosticExportException.unsafe => code,
+    SafeDiagnosticExportException.write => code,
+    SafeDiagnosticExportException.share => code,
+    SafeDiagnosticExportException.busy => code,
+    _ => SafeDiagnosticExportException.unsafe,
+  };
+
+  String _failureMessage(String code) =>
+      '安全诊断操作失败（${_normalizeErrorCode(code)}）';
 
   @override
   Widget build(BuildContext context) {
@@ -196,6 +269,12 @@ class _SafeDiagnosticExportScreenState
                 onPressed: _load,
                 icon: const Icon(Icons.refresh),
                 label: const Text('重试'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _clearReports,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('清空安全诊断'),
               ),
             ],
           ),
@@ -263,10 +342,11 @@ class _SafeDiagnosticExportScreenState
                 label: const Text('清空安全诊断'),
               ),
               FilledButton.icon(
+                key: _exportButtonKey,
                 onPressed: report.recordCount == 0 || _sharing
                     ? null
                     : _shareReport,
-                icon: _sharing
+                icon: _nativeSharing
                     ? const SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),

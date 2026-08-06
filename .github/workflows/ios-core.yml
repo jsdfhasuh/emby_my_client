@@ -192,6 +192,18 @@ jobs:
       - name: Check CocoaPods lock drift
         run: git diff --exit-code -- ios/Podfile.lock
 
+      - name: Run native safe diagnostic XCTest
+        working-directory: ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPad (10th generation),OS=18.5' \
+            CODE_SIGNING_ALLOWED=NO
+
       - name: Generate Runner entitlement mirrors
         shell: bash
         run: |
