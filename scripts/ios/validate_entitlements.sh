@@ -28,6 +28,40 @@ plist_keys() {
   ' | sort
 }
 
+plist_entry() {
+  local file="$1"
+  local key="$2"
+  local quoted_key="\"$key\""
+  plutil -p "$file" | awk -v quoted_key="$quoted_key" '
+    $1 == quoted_key && $2 == "=>" {
+      value = $0
+      sub(/^[^=]*=>[[:space:]]*/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) exit 1
+    }
+  '
+}
+
+plist_scalar() {
+  local file="$1"
+  local key="$2"
+  local value
+  value="$(plist_entry "$file" "$key")"
+  case "$value" in
+    \"*\")
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    *)
+      echo "$file: $key must be a string" >&2
+      return 1
+      ;;
+  esac
+}
+
 require_file() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
@@ -42,7 +76,15 @@ require_key_type() {
   local key="$2"
   local expected_type="$3"
   local actual_type
-  actual_type="$(plutil -type "$key" "$file")"
+  local value
+  value="$(plist_entry "$file" "$key")"
+  case "$value" in
+    \"*\") actual_type='string' ;;
+    \[*|\(* ) actual_type='array' ;;
+    \{*) actual_type='dictionary' ;;
+    true|false) actual_type='boolean' ;;
+    *) actual_type='unknown' ;;
+  esac
   if [[ "$actual_type" != "$expected_type" ]]; then
     echo "$file: $key must be $expected_type, got $actual_type" >&2
     exit 1
@@ -79,8 +121,8 @@ validate_trollstore_file() {
   require_key_type "$file" keychain-access-groups array
 
   local application_identifier team_identifier groups
-  application_identifier="$(plutil -extract application-identifier raw -o - "$file")"
-  team_identifier="$(plutil -extract com.apple.developer.team-identifier raw -o - "$file")"
+  application_identifier="$(plist_scalar "$file" application-identifier)"
+  team_identifier="$(plist_scalar "$file" com.apple.developer.team-identifier)"
   groups="$(plutil -extract keychain-access-groups json -o - "$file" | tr -d '[:space:]')"
   if [[ "$application_identifier" != "$EXPECTED_APPLICATION_IDENTIFIER" ]]; then
     echo "Unexpected application-identifier in $file" >&2
