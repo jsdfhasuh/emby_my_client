@@ -319,31 +319,35 @@ enum SafeDiagnosticExportValidator {
       return false
     }
 
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-    var components = DateComponents()
-    components.calendar = calendar
-    components.timeZone = calendar.timeZone
-    components.year = year
-    components.month = month
-    components.day = day
-    components.hour = hour
-    components.minute = minute
-    components.second = second
-
-    guard let date = calendar.date(from: components) else {
+    guard
+      month >= 1,
+      month <= 12,
+      hour >= 0,
+      hour <= 23,
+      minute >= 0,
+      minute <= 59,
+      second >= 0,
+      second <= 59
+    else {
       return false
     }
-    let normalized = calendar.dateComponents(
-      [.year, .month, .day, .hour, .minute, .second],
-      from: date
-    )
-    return normalized.year == year
-      && normalized.month == month
-      && normalized.day == day
-      && normalized.hour == hour
-      && normalized.minute == minute
-      && normalized.second == second
+
+    let isLeapYear = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    let daysInMonth: [Int] = [
+      31,
+      isLeapYear ? 29 : 28,
+      31,
+      30,
+      31,
+      30,
+      31,
+      31,
+      30,
+      31,
+      30,
+      31,
+    ]
+    return day >= 1 && day <= daysInMonth[month - 1]
   }
 
   private static func integerValue(_ value: Any?) -> Int? {

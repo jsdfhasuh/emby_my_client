@@ -134,6 +134,7 @@ final class RunnerTests: XCTestCase {
       "2026-08-06T12:30:45Z",
       "2026-08-06T12:30:45.000Z",
       "2026-08-06T12:30:45.000000Z",
+      "2024-02-29T23:59:59.000Z",
     ] {
       var report = validReport()
       report["generatedAtUtc"] = timestamp
