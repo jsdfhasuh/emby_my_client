@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,17 +8,26 @@ import 'package:path_provider/path_provider.dart';
 import 'sign_in_diagnostics.dart';
 
 typedef DiagnosticLogTestSink = void Function(String line);
+typedef DiagnosticSafeEventTestSink =
+    void Function(SafeDiagnosticRecord record);
 
-class DiagnosticLog {
+class DiagnosticLog implements SafeDiagnosticEventSource {
   DiagnosticLog._();
+
+  @visibleForTesting
+  DiagnosticLog.forTesting() : this._();
 
   static final DiagnosticLog instance = DiagnosticLog._();
   static const _fileName = 'emby_client_diagnostics.log';
+  static const _safeFileName = 'emby_safe_diagnostics_v1.jsonl';
   static const _maxFileBytes = 750 * 1024;
 
   File? _file;
+  File? _safeFile;
   Future<void> _pendingWrite = Future.value();
+  Future<void> _pendingSafeWrite = Future.value();
   DiagnosticLogTestSink? _testSink;
+  DiagnosticSafeEventTestSink? _safeEventTestSink;
 
   Future<void> initialize() async {
     try {
@@ -34,6 +44,9 @@ class DiagnosticLog {
         }
       }
       _file = file;
+      _safeFile = File(
+        '${directory.path}${Platform.pathSeparator}$_safeFileName',
+      );
       info('app', 'Diagnostic log initialized');
     } catch (error) {
       debugPrint('[diagnostic] Failed to initialize log: $error');
@@ -76,6 +89,14 @@ class DiagnosticLog {
       'event=${event.code} stage=${stage.code} '
           'reason=${reason.code} errorType=${errorType.code}',
     );
+    _writeSafeRecord(
+      level: SafeDiagnosticLevel.error,
+      component: component,
+      event: event,
+      stage: stage,
+      reason: reason,
+      errorType: errorType,
+    );
   }
 
   void safeStage({
@@ -90,6 +111,14 @@ class DiagnosticLog {
       component.code,
       'event=${event.code} stage=${stage.code} '
           'reason=${reason.code} errorType=${errorType.code}',
+    );
+    _writeSafeRecord(
+      level: SafeDiagnosticLevel.info,
+      component: component,
+      event: event,
+      stage: stage,
+      reason: reason,
+      errorType: errorType,
     );
   }
 
@@ -107,10 +136,86 @@ class DiagnosticLog {
     info('app', 'Diagnostic log cleared');
   }
 
+  @override
+  Future<List<SafeDiagnosticRecord>> readSafeEvents() async {
+    await _pendingSafeWrite;
+    final file = _safeFile;
+    if (file == null || !await file.exists()) return const [];
+    final contents = await file.readAsString();
+    if (contents.contains('\r')) {
+      throw const SafeDiagnosticValidationException();
+    }
+    final records = <SafeDiagnosticRecord>[];
+    final lines = contents.split('\n');
+    if (lines.isNotEmpty && lines.last.isEmpty) lines.removeLast();
+    for (final line in lines) {
+      if (line.isEmpty) throw const SafeDiagnosticValidationException();
+      try {
+        records.add(SafeDiagnosticRecord.fromJson(jsonDecode(line)));
+      } on SafeDiagnosticValidationException {
+        rethrow;
+      } catch (_) {
+        throw const SafeDiagnosticValidationException();
+      }
+    }
+    return List<SafeDiagnosticRecord>.unmodifiable(records);
+  }
+
+  @override
+  Future<void> clearSafeEvents() async {
+    await _pendingSafeWrite;
+    final file = _safeFile;
+    if (file != null) await file.writeAsString('');
+  }
+
   String? get path => _file?.path;
 
   @visibleForTesting
   void setTestSink(DiagnosticLogTestSink? sink) => _testSink = sink;
+
+  @visibleForTesting
+  void setSafeEventTestSink(DiagnosticSafeEventTestSink? sink) {
+    _safeEventTestSink = sink;
+  }
+
+  @visibleForTesting
+  void setTestSafeEventFile(File? file) {
+    _safeFile = file;
+  }
+
+  void _writeSafeRecord({
+    required SafeDiagnosticLevel level,
+    required SafeDiagnosticComponent component,
+    required SafeDiagnosticEvent event,
+    required SignInStage stage,
+    required SafeDiagnosticReason reason,
+    required SafeDiagnosticErrorType errorType,
+  }) {
+    final record = SafeDiagnosticRecord(
+      atUtc: DateTime.now().toUtc(),
+      level: level,
+      component: component,
+      event: event,
+      stage: stage,
+      reason: reason,
+      errorType: errorType,
+    );
+    try {
+      _safeEventTestSink?.call(record);
+      final line = '${jsonEncode(record.toJson())}\n';
+      final file = _safeFile;
+      if (file == null) return;
+      _pendingSafeWrite = _pendingSafeWrite.then((_) async {
+        try {
+          await file.writeAsString(line, mode: FileMode.append, flush: true);
+        } catch (_) {
+          debugPrint('[diagnostic] Safe diagnostic event write failed');
+        }
+      });
+    } catch (_) {
+      debugPrint('[diagnostic] Safe diagnostic event write failed');
+    }
+  }
 
   void _write(String level, String component, String message) {
     final clean = redact(message).replaceAll('\r', '');

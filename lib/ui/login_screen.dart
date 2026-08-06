@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
 import '../core/sign_in_diagnostics.dart';
+import '../core/safe_diagnostic_export.dart';
 import '../discovery/emby_server_discovery.dart';
 import '../models/discovered_server.dart';
 import '../platform/platform_capabilities.dart';
 import '../state/app_controller.dart';
+import 'safe_diagnostic_export_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({
@@ -16,11 +18,15 @@ class LoginScreen extends StatefulWidget {
     required this.controller,
     this.discovery,
     this.capabilities,
+    this.safeDiagnosticService,
+    this.safeDiagnosticShareGateway,
   });
 
   final AppController controller;
   final EmbyServerDiscovery? discovery;
   final PlatformCapabilities? capabilities;
+  final SafeDiagnosticExportService? safeDiagnosticService;
+  final SafeDiagnosticShareGateway? safeDiagnosticShareGateway;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -163,6 +169,17 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 
   void _handleFieldTapOutside(PointerDownEvent event) {
     FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  Future<void> _openSafeDiagnostics() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SafeDiagnosticExportScreen(
+          service: widget.safeDiagnosticService,
+          shareGateway: widget.safeDiagnosticShareGateway,
+        ),
+      ),
+    );
   }
 
   Future<void> _startDiscovery() async {
@@ -433,21 +450,32 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            width: logoSize,
-            height: logoSize,
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primary,
-              borderRadius: BorderRadius.circular(6),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: logoSize,
+              height: logoSize,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Icon(
+                Icons.play_arrow_rounded,
+                size: compact ? 28 : 38,
+                color: Colors.black,
+              ),
             ),
-            child: Icon(
-              Icons.play_arrow_rounded,
-              size: compact ? 28 : 38,
-              color: Colors.black,
-            ),
-          ),
+            if (_isIpadOS) ...[
+              const Spacer(),
+              TextButton.icon(
+                key: const ValueKey<String>('login-safe-diagnostics-button'),
+                onPressed: _openSafeDiagnostics,
+                icon: const Icon(Icons.security_outlined),
+                label: const Text('查看/导出安全诊断'),
+              ),
+            ],
+          ],
         ),
         SizedBox(height: compact ? 10 : 24),
         Text(

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../core/diagnostic_log.dart';
+import 'safe_diagnostic_export_screen.dart';
 
 class DiagnosticLogScreen extends StatefulWidget {
   const DiagnosticLogScreen({super.key});
@@ -25,17 +25,6 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
       _future = future;
     });
     await future;
-  }
-
-  Future<void> _copy() async {
-    final text = await DiagnosticLog.instance.read();
-    if (!mounted) return;
-    await Clipboard.setData(ClipboardData(text: text));
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('诊断日志已复制')));
-    }
   }
 
   Future<void> _clear() async {
@@ -73,9 +62,13 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
             icon: const Icon(Icons.refresh),
           ),
           IconButton(
-            tooltip: '复制',
-            onPressed: _copy,
-            icon: const Icon(Icons.copy_outlined),
+            tooltip: '安全登录诊断',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const SafeDiagnosticExportScreen(),
+              ),
+            ),
+            icon: const Icon(Icons.security_outlined),
           ),
           IconButton(
             tooltip: '清空',
@@ -96,14 +89,24 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
           }
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
-            child: SelectableText(
-              log,
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 12,
-                height: 1.45,
-                color: Color(0xFFD0D5D6),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '本机完整诊断（仅本机查看）',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                SelectableText(
+                  log,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    height: 1.45,
+                    color: Color(0xFFD0D5D6),
+                  ),
+                ),
+              ],
             ),
           );
         },
