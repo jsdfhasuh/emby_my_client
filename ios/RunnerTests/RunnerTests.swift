@@ -129,6 +129,34 @@ final class RunnerTests: XCTestCase {
     )
   }
 
+  func testCanonicalUtcTimestampFormsAreAccepted() throws {
+    for timestamp in [
+      "2026-08-06T12:30:45Z",
+      "2026-08-06T12:30:45.000Z",
+      "2026-08-06T12:30:45.000000Z",
+    ] {
+      var report = validReport()
+      report["generatedAtUtc"] = timestamp
+      assertValid(report)
+    }
+
+    var report = validReport()
+    report["records"] = [
+      [
+        "atUtc": "2026-08-06T12:30:45.000000Z",
+        "level": "ERROR",
+        "component": "auth",
+        "event": "sign_in_failure",
+        "stage": "SESSION_PREPARE",
+        "reason": "unknown",
+        "errorType": "SignInFailure",
+        "diagnosticCode": "LOGIN-SESSION-PREPARE",
+      ],
+    ]
+    report["recordCount"] = 1
+    assertValid(report)
+  }
+
   func testEmptyOversizedAndInvalidUtf8ContentIsRejected() {
     for data in [
       Data(),

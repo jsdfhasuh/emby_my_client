@@ -300,8 +300,9 @@ enum SafeDiagnosticExportValidator {
     let digitRanges = [0..<4, 5..<7, 8..<10, 11..<13, 14..<16, 17..<19]
       + (bytes.count > 20 ? [fractionRange] : [])
     guard digitRanges.allSatisfy({ range in
-      range.allSatisfy { byte in
-        byte >= 48 && byte <= 57
+      range.allSatisfy { index in
+        let byte = bytes[index]
+        return byte >= 48 && byte <= 57
       }
     }) else {
       return false
