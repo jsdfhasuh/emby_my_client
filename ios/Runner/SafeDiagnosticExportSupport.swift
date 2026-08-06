@@ -276,15 +276,14 @@ enum SafeDiagnosticExportValidator {
       return false
     }
 
-    let fixedSeparators: [Int: UInt8] = [
-      4: 45,
-      7: 45,
-      10: 84,
-      13: 58,
-      16: 58,
-      bytes.count - 1: 90,
-    ]
-    guard fixedSeparators.allSatisfy({ bytes[$0.key] == $0.value }) else {
+    guard
+      bytes[4] == 45,
+      bytes[7] == 45,
+      bytes[10] == 84,
+      bytes[13] == 58,
+      bytes[16] == 58,
+      bytes[bytes.count - 1] == 90
+    else {
       return false
     }
     if bytes.count > 20 {
@@ -293,29 +292,25 @@ enum SafeDiagnosticExportValidator {
       }
     }
 
-    func number(_ start: Int, _ end: Int) -> Int? {
-      Int(String(decoding: bytes[start..<end], as: UTF8.self))
-    }
-
-    let fractionRange = bytes.count > 20 ? 20..<(bytes.count - 1) : 0..<0
-    let digitRanges = [0..<4, 5..<7, 8..<10, 11..<13, 14..<16, 17..<19]
-      + (bytes.count > 20 ? [fractionRange] : [])
-    guard digitRanges.allSatisfy({ range in
-      range.allSatisfy { index in
+    func number(_ start: Int, _ count: Int) -> Int? {
+      var value = 0
+      for index in start..<(start + count) {
         let byte = bytes[index]
-        return byte >= 48 && byte <= 57
+        guard byte >= 48 && byte <= 57 else {
+          return nil
+        }
+        value = value * 10 + Int(byte - 48)
       }
-    }) else {
-      return false
+      return value
     }
 
     guard
       let year = number(0, 4),
-      let month = number(5, 7),
-      let day = number(8, 10),
-      let hour = number(11, 13),
-      let minute = number(14, 16),
-      let second = number(17, 19)
+      let month = number(5, 2),
+      let day = number(8, 2),
+      let hour = number(11, 2),
+      let minute = number(14, 2),
+      let second = number(17, 2)
     else {
       return false
     }
@@ -352,7 +347,17 @@ enum SafeDiagnosticExportValidator {
   }
 
   static func integerValue(_ value: Any?) -> Int? {
+    guard let value else {
+      return nil
+    }
+    if Swift.type(of: value) == Int.self {
+      return value as! Int
+    }
     guard !(value is Bool), let number = value as? NSNumber else {
+      return nil
+    }
+    let type = String(cString: number.objCType)
+    guard ["c", "C", "s", "S", "i", "I", "l", "L", "q", "Q"].contains(type) else {
       return nil
     }
     let integer = number.int64Value

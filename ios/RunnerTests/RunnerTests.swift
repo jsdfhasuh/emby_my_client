@@ -408,23 +408,6 @@ final class RunnerTests: XCTestCase {
   ) {
     do {
       let data = try JSONSerialization.data(withJSONObject: report)
-      let appVersion = report["appVersion"] as? String ?? ""
-      let buildNumber = report["buildNumber"] as? String ?? ""
-      let generatedAtUtc = report["generatedAtUtc"] as? String ?? ""
-      let recordCount = report["recordCount"]
-      let records = report["records"]
-      let truncated = report["truncated"]
-      let text = String(data: data, encoding: .utf8) ?? ""
-      print(
-        "SAFE_DIAGNOSTIC_VALIDATION "
-          + "appVersion=\(SafeDiagnosticExportValidator.isValidAppVersion(appVersion)) "
-          + "buildNumber=\(SafeDiagnosticExportValidator.isValidBuildNumber(buildNumber)) "
-          + "timestamp=\(SafeDiagnosticExportValidator.isValidUtcTimestamp(generatedAtUtc)) "
-          + "recordCountType=\(String(describing: type(of: recordCount))) "
-          + "recordsArray=\(records is [Any]) "
-          + "truncatedBool=\(truncated is Bool) "
-          + "sensitive=\(SafeDiagnosticExportValidator.containsSensitiveContent(text))"
-      )
       do {
         _ = try SafeDiagnosticExportValidator.validate(
           content: data,
