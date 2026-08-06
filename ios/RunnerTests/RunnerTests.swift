@@ -203,6 +203,9 @@ final class RunnerTests: XCTestCase {
     for count in [0, 1] {
       var report = validReport()
       report["recordCount"] = count
+      if count == 1 {
+        report["records"] = [validRecord()]
+      }
       let data = try JSONSerialization.data(withJSONObject: report)
       let decoded = try JSONSerialization.jsonObject(with: data)
       let dictionary = try XCTUnwrap(decoded as? [String: Any])
