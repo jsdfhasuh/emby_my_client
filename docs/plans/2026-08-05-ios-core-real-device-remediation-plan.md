@@ -487,6 +487,12 @@ Gate B `14.1.10` 的执行方式固定为：
 
 本授权不改变阶段顺序、STOP GATE A/B、Keychain 证据门槛或任何 entitlement；它也不授权 UDP 自动发现、阶段 8 文档回填或其他平台范围扩展。
 
+当前状态附注：
+
+- `STOP_GATE_B = BLOCKED_BY_IMPLEMENTATION`：安全导出第二道原生验证、临时文件生命周期、popover 锚点、Dart single-flight 和安全事件串行化整改完成并取得完整 Actions/Artifact 前，Gate B 不得执行。
+- Run 27 的 IPA 结构虽已核验，但其安全导出实现尚未满足本节的 fail-closed 要求；设备所有者不得发送 Run 27 导出的文件。
+- `IMPLEMENTATION_IN_PROGRESS`、`NOT_ACCEPTED` 和 `evidence_doc_head = NOT_CREATED` 必须保持不变；不得进入阶段 8。
+
 ## 9. 阶段 2：建立最小 TrollStore Keychain 身份
 
 ### 9.1 两种签名上下文必须分开
