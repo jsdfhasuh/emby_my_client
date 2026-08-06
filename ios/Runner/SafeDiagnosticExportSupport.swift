@@ -155,7 +155,12 @@ enum SafeDiagnosticExportValidator {
     anchor: [String: Any]?,
     in bounds: CGRect
   ) -> CGRect {
-    let fallback = CGRect(x: bounds.midX, y: bounds.midY, width: 1, height: 1)
+    let fallback = CGRect(
+      x: bounds.midX - 0.5,
+      y: bounds.midY - 0.5,
+      width: 1,
+      height: 1
+    )
     guard
       !bounds.isNull,
       !bounds.isEmpty,
@@ -334,7 +339,6 @@ enum SafeDiagnosticExportValidator {
       #"(?i)(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9])"#,
       #"(?i)(?:https?|wss?)://|(?:https?|wss?)%3a%2f%2f"#,
       #"(?:^|[^0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:$|[^0-9])"#,
-      #"(?i)(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}|::1"#,
       #"(?i)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}|(?:localhost|emby):\d{2,5}|\[[0-9a-f:]+\]:\d{2,5}"#,
       #"(?i)(?:[a-z]:[\\/]|/(?:home|users|private|var|tmp|data|documents|library)(?:[\\/]))"#,
       #"(?i)\\Users\\|\\private\\|\\var\\|\\tmp\\|/Users/|/private/|/var/|/tmp/"#,
@@ -342,9 +346,55 @@ enum SafeDiagnosticExportValidator {
       #"(?i)\"(?:request|response)(?:body|headers?)\"\s*:|\b(?:request|response)\s+(?:body|headers?)\b"#,
       #"\\(?:r|n|t|u000[0-9a-f]{1,4})"#,
     ]
+    guard !containsIPv6Address(value) else {
+      return true
+    }
     return patterns.contains {
       value.range(of: $0, options: .regularExpression) != nil
     }
+  }
+
+  private static func containsIPv6Address(_ value: String) -> Bool {
+    guard let regex = try? NSRegularExpression(pattern: #"[0-9a-fA-F:]{2,}"#) else {
+      return true
+    }
+    let range = NSRange(value.startIndex..<value.endIndex, in: value)
+    return regex.matches(in: value, range: range).contains { match in
+      guard let candidateRange = Range(match.range, in: value) else {
+        return true
+      }
+      return isIPv6Candidate(String(value[candidateRange]))
+    }
+  }
+
+  private static func isIPv6Candidate(_ candidate: String) -> Bool {
+    guard candidate.contains(":"), !candidate.contains(":::") else {
+      return false
+    }
+
+    let hasCompression = candidate.contains("::")
+    guard candidate.components(separatedBy: "::").count == (hasCompression ? 2 : 1) else {
+      return false
+    }
+
+    let normalized = hasCompression
+      ? candidate.replacingOccurrences(of: "::", with: ":")
+      : candidate
+    let groups = normalized.split(separator: ":", omittingEmptySubsequences: true)
+    guard groups.allSatisfy({ group in
+      group.count <= 4 && group.unicodeScalars.allSatisfy { scalar in
+        switch scalar.value {
+        case 48...57, 65...70, 97...102:
+          return true
+        default:
+          return false
+        }
+      }
+    }) else {
+      return false
+    }
+
+    return hasCompression ? groups.count <= 7 : groups.count == 8
   }
 }
 
