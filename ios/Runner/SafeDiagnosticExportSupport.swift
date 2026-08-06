@@ -356,10 +356,6 @@ enum SafeDiagnosticExportValidator {
     guard !(value is Bool), let number = value as? NSNumber else {
       return nil
     }
-    let type = String(cString: number.objCType)
-    guard ["c", "C", "s", "S", "i", "I", "l", "L", "q", "Q"].contains(type) else {
-      return nil
-    }
     let integer = number.int64Value
     guard integer >= Int64(Int.min), integer <= Int64(Int.max) else {
       return nil

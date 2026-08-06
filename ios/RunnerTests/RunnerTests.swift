@@ -196,6 +196,22 @@ final class RunnerTests: XCTestCase {
     )
   }
 
+  func testJsonIntegerRecordCountsAreAccepted() throws {
+    for count in [0, 1] {
+      var report = validReport()
+      report["recordCount"] = count
+      let data = try JSONSerialization.data(withJSONObject: report)
+      let decoded = try JSONSerialization.jsonObject(with: data)
+      let dictionary = try XCTUnwrap(decoded as? [String: Any])
+
+      XCTAssertEqual(
+        SafeDiagnosticExportValidator.integerValue(dictionary["recordCount"]),
+        count
+      )
+      assertValid(report)
+    }
+  }
+
   func testEmptyOversizedAndInvalidUtf8ContentIsRejected() {
     for data in [
       Data(),
