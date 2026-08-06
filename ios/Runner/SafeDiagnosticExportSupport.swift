@@ -128,11 +128,21 @@ enum SafeDiagnosticExportValidator {
   }
 
   static func isValidAppVersion(_ value: String) -> Bool {
-    value.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil
+    let components = value.split(separator: ".", omittingEmptySubsequences: false)
+    guard components.count == 3 else {
+      return false
+    }
+    return components.allSatisfy { component in
+      !component.isEmpty && component.utf8.allSatisfy { byte in
+        byte >= 48 && byte <= 57
+      }
+    }
   }
 
   static func isValidBuildNumber(_ value: String) -> Bool {
-    value.range(of: #"^\d+$"#, options: .regularExpression) != nil
+    !value.isEmpty && value.utf8.allSatisfy { byte in
+      byte >= 48 && byte <= 57
+    }
   }
 
   static func makeFilename(buildNumber: String, date: Date) throws -> String {
@@ -261,15 +271,6 @@ enum SafeDiagnosticExportValidator {
   }
 
   private static func isValidUtcTimestamp(_ value: String) -> Bool {
-    guard
-      value.range(
-        of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?Z$"#,
-        options: .regularExpression
-      ) != nil
-    else {
-      return false
-    }
-
     let bytes = Array(value.utf8)
     guard bytes.count == 20 || bytes.count == 24 || bytes.count == 27 else {
       return false

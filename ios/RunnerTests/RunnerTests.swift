@@ -92,6 +92,13 @@ final class RunnerTests: XCTestCase {
   }
 
   func testBundleMetadataTimestampAndControlCharactersAreRejected() throws {
+    XCTAssertTrue(SafeDiagnosticExportValidator.isValidAppVersion("1.0.0"))
+    XCTAssertTrue(SafeDiagnosticExportValidator.isValidBuildNumber("42"))
+    XCTAssertFalse(SafeDiagnosticExportValidator.isValidAppVersion("1.0"))
+    XCTAssertFalse(SafeDiagnosticExportValidator.isValidAppVersion("1.\u{FF10}.\u{FF10}"))
+    XCTAssertFalse(SafeDiagnosticExportValidator.isValidBuildNumber("42x"))
+    XCTAssertFalse(SafeDiagnosticExportValidator.isValidBuildNumber("\u{FF14}\u{FF12}"))
+
     let data = try JSONSerialization.data(withJSONObject: validReport())
     XCTAssertThrowsError(
       try SafeDiagnosticExportValidator.validate(
