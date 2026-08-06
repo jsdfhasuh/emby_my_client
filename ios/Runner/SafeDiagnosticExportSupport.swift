@@ -270,7 +270,7 @@ enum SafeDiagnosticExportValidator {
     }
   }
 
-  private static func isValidUtcTimestamp(_ value: String) -> Bool {
+  static func isValidUtcTimestamp(_ value: String) -> Bool {
     let bytes = Array(value.utf8)
     guard bytes.count == 20 || bytes.count == 24 || bytes.count == 27 else {
       return false
