@@ -187,7 +187,10 @@ final class RunnerTests: XCTestCase {
       return
     }
     XCTAssertNotNil(SafeDiagnosticExportValidator.arrayValue(report["records"]))
-    XCTAssertTrue(report["truncated"] is Bool)
+    XCTAssertEqual(
+      SafeDiagnosticExportValidator.booleanValue(report["truncated"]),
+      false
+    )
     XCTAssertEqual(SafeDiagnosticExportValidator.integerValue(report["recordCount"]), 0)
     XCTAssertFalse(
       SafeDiagnosticExportValidator.containsSensitiveContent(

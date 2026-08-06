@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreFoundation
 import Foundation
 import UIKit
 
@@ -106,7 +107,7 @@ enum SafeDiagnosticExportValidator {
       let generatedAtUtc = report["generatedAtUtc"] as? String,
       isValidUtcTimestamp(generatedAtUtc),
       let recordCount = integerValue(report["recordCount"]),
-      let truncated = report["truncated"] as? Bool,
+      let truncated = booleanValue(report["truncated"]),
       let records = arrayValue(report["records"]),
       recordCount == records.count,
       recordCount >= 0,
@@ -116,7 +117,23 @@ enum SafeDiagnosticExportValidator {
       throw SafeDiagnosticExportValidationError.unsafe
     }
 
-    guard !containsSensitiveContent(text) else {
+    // DEVICE_ID_* is an approved stage enum, not a device identifier. Remove
+    // only exact, already-validated enum tokens before scanning the raw JSON.
+    let fixedTokens = Set(
+      [schema, platform]
+        + Array(levels)
+        + Array(components)
+        + Array(events)
+        + Array(stages)
+        + Array(reasons)
+        + Array(errorTypes)
+    )
+    let scanText = fixedTokens
+      .sorted { $0.count > $1.count }
+      .reduce(text) { partial, token in
+        partial.replacingOccurrences(of: token, with: "")
+      }
+    guard !containsSensitiveContent(scanText) else {
       throw SafeDiagnosticExportValidationError.unsafe
     }
 
@@ -208,13 +225,23 @@ enum SafeDiagnosticExportValidator {
     if let dictionary = value as? [String: Any] {
       return dictionary
     }
+    if let dictionary = value as? [AnyHashable: Any] {
+      var result: [String: Any] = [:]
+      for (key, value) in dictionary {
+        guard let key = stringKey(key) else {
+          return nil
+        }
+        result[key] = value
+      }
+      return result
+    }
     guard let dictionary = value as? NSDictionary else {
       return nil
     }
 
     var result: [String: Any] = [:]
     for (key, value) in dictionary {
-      guard let key = key as? String else {
+      guard let key = stringKey(key) else {
         return nil
       }
       result[key] = value
@@ -222,12 +249,19 @@ enum SafeDiagnosticExportValidator {
     return result
   }
 
-  static func arrayValue(_ value: Any?) -> [Any]? {
-    if let array = value as? [Any] {
-      return array
+  private static func stringKey(_ value: Any) -> String? {
+    if let value = value as? String {
+      return value
     }
+    if let value = value as? NSString {
+      return value as String
+    }
+    return nil
+  }
+
+  static func arrayValue(_ value: Any?) -> [Any]? {
     guard let array = value as? NSArray else {
-      return nil
+      return value as? [Any]
     }
     return array.map { $0 }
   }
@@ -381,7 +415,10 @@ enum SafeDiagnosticExportValidator {
     if Swift.type(of: value) == Int.self {
       return value as! Int
     }
-    guard !(value is Bool), let number = value as? NSNumber else {
+    guard let number = value as? NSNumber else {
+      return nil
+    }
+    guard CFGetTypeID(number) != CFBooleanGetTypeID() else {
       return nil
     }
     let integer = number.int64Value
@@ -392,6 +429,16 @@ enum SafeDiagnosticExportValidator {
       return nil
     }
     return Int(integer)
+  }
+
+  static func booleanValue(_ value: Any?) -> Bool? {
+    if let number = value as? NSNumber {
+      guard CFGetTypeID(number) == CFBooleanGetTypeID() else {
+        return nil
+      }
+      return number.boolValue
+    }
+    return value as? Bool
   }
 
   private static func finiteNumber(_ value: Any?) -> CGFloat? {
