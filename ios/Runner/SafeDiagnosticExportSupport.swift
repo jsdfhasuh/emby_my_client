@@ -354,15 +354,11 @@ enum SafeDiagnosticExportValidator {
     guard !(value is Bool), let number = value as? NSNumber else {
       return nil
     }
-    let type = String(cString: number.objCType)
-    guard type != "c", type != "f", type != "d" else {
-      return nil
-    }
     let integer = number.int64Value
     guard integer >= Int64(Int.min), integer <= Int64(Int.max) else {
       return nil
     }
-    guard Double(integer) == number.doubleValue else {
+    guard number.doubleValue.isFinite, Double(integer) == number.doubleValue else {
       return nil
     }
     return Int(integer)

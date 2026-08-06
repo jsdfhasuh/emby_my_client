@@ -85,6 +85,10 @@ final class RunnerTests: XCTestCase {
     wrongTypes = validReport()
     wrongTypes["records"] = "[]"
     assertUnsafe(wrongTypes)
+
+    var fractionalRecordCount = validReport()
+    fractionalRecordCount["recordCount"] = 0.5
+    assertUnsafe(fractionalRecordCount)
   }
 
   func testBundleMetadataTimestampAndControlCharactersAreRejected() throws {
