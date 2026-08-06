@@ -204,7 +204,7 @@ enum SafeDiagnosticExportValidator {
     return dictionary
   }
 
-  private static func validateRecord(_ value: Any) -> Bool {
+  static func validateRecord(_ value: Any) -> Bool {
     guard let record = exactDictionary(value, keys: recordKeys) else {
       return false
     }
@@ -351,7 +351,7 @@ enum SafeDiagnosticExportValidator {
     return day >= 1 && day <= daysInMonth[month - 1]
   }
 
-  private static func integerValue(_ value: Any?) -> Int? {
+  static func integerValue(_ value: Any?) -> Int? {
     guard !(value is Bool), let number = value as? NSNumber else {
       return nil
     }

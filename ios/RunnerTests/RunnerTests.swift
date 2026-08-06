@@ -169,6 +169,33 @@ final class RunnerTests: XCTestCase {
     assertValid(report)
   }
 
+  func testValidFixturePredicatesPassBeforeFullValidation() throws {
+    XCTAssertTrue(SafeDiagnosticExportValidator.isValidAppVersion("1.0.0"))
+    XCTAssertTrue(SafeDiagnosticExportValidator.isValidBuildNumber("42"))
+    XCTAssertTrue(
+      SafeDiagnosticExportValidator.isValidUtcTimestamp(
+        "2026-08-06T12:30:45.000Z"
+      )
+    )
+    XCTAssertTrue(SafeDiagnosticExportValidator.validateRecord(validRecord()))
+    XCTAssertEqual(SafeDiagnosticExportValidator.integerValue(0), 0)
+
+    let data = try JSONSerialization.data(withJSONObject: validReport())
+    let object = try JSONSerialization.jsonObject(with: data)
+    guard let report = object as? [String: Any] else {
+      XCTFail("JSON root did not bridge to a string dictionary")
+      return
+    }
+    XCTAssertTrue(report["records"] is [Any])
+    XCTAssertTrue(report["truncated"] is Bool)
+    XCTAssertEqual(SafeDiagnosticExportValidator.integerValue(report["recordCount"]), 0)
+    XCTAssertFalse(
+      SafeDiagnosticExportValidator.containsSensitiveContent(
+        String(data: data, encoding: .utf8) ?? ""
+      )
+    )
+  }
+
   func testEmptyOversizedAndInvalidUtf8ContentIsRejected() {
     for data in [
       Data(),
