@@ -107,7 +107,7 @@ enum SafeDiagnosticExportValidator {
       isValidUtcTimestamp(generatedAtUtc),
       let recordCount = integerValue(report["recordCount"]),
       let truncated = report["truncated"] as? Bool,
-      let records = report["records"] as? [Any],
+      let records = arrayValue(report["records"]),
       recordCount == records.count,
       recordCount >= 0,
       recordCount <= maxRecords,
@@ -198,10 +198,38 @@ enum SafeDiagnosticExportValidator {
     _ value: Any?,
     keys: Set<String>
   ) -> [String: Any]? {
-    guard let dictionary = value as? [String: Any], Set(dictionary.keys) == keys else {
+    guard let dictionary = dictionaryValue(value), Set(dictionary.keys) == keys else {
       return nil
     }
     return dictionary
+  }
+
+  private static func dictionaryValue(_ value: Any?) -> [String: Any]? {
+    if let dictionary = value as? [String: Any] {
+      return dictionary
+    }
+    guard let dictionary = value as? NSDictionary else {
+      return nil
+    }
+
+    var result: [String: Any] = [:]
+    for (key, value) in dictionary {
+      guard let key = key as? String else {
+        return nil
+      }
+      result[key] = value
+    }
+    return result
+  }
+
+  static func arrayValue(_ value: Any?) -> [Any]? {
+    if let array = value as? [Any] {
+      return array
+    }
+    guard let array = value as? NSArray else {
+      return nil
+    }
+    return array.map { $0 }
   }
 
   static func validateRecord(_ value: Any) -> Bool {

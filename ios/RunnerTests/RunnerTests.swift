@@ -186,7 +186,7 @@ final class RunnerTests: XCTestCase {
       XCTFail("JSON root did not bridge to a string dictionary")
       return
     }
-    XCTAssertTrue(report["records"] is [Any])
+    XCTAssertNotNil(SafeDiagnosticExportValidator.arrayValue(report["records"]))
     XCTAssertTrue(report["truncated"] is Bool)
     XCTAssertEqual(SafeDiagnosticExportValidator.integerValue(report["recordCount"]), 0)
     XCTAssertFalse(
