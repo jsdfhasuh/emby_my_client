@@ -192,6 +192,35 @@ jobs:
       - name: Check CocoaPods lock drift
         run: git diff --exit-code -- ios/Podfile.lock
 
+      - name: Prepare iPad Simulator destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_id="$(
+            xcrun simctl list runtimes -j |
+              python3 -c 'import json, sys; data = json.load(sys.stdin); print(next((item["identifier"] for item in data["runtimes"] if item.get("isAvailable") and item.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")), ""))'
+          )"
+          if [[ -z "$runtime_id" ]]; then
+            xcodebuild -downloadPlatform iOS
+            runtime_id="$(
+              xcrun simctl list runtimes -j |
+                python3 -c 'import json, sys; data = json.load(sys.stdin); print(next((item["identifier"] for item in data["runtimes"] if item.get("isAvailable") and item.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")), ""))'
+            )"
+          fi
+          test -n "$runtime_id"
+
+          device_type_id="$(
+            xcrun simctl list devicetypes -j |
+              python3 -c 'import json, sys; data = json.load(sys.stdin); types = data["devicetypes"]; exact = next((item for item in types if item.get("name") == "iPad (10th generation)"), None); fallback = next((item for item in types if item.get("productFamily") == "iPad" or item.get("name", "").startswith("iPad")), None); print((exact or fallback or {}).get("identifier", ""))'
+          )"
+          test -n "$device_type_id"
+
+          simulator_udid="$(xcrun simctl create 'iPad Safe Diagnostics' "$device_type_id" "$runtime_id")"
+          test -n "$simulator_udid"
+          xcrun simctl boot "$simulator_udid"
+          xcrun simctl bootstatus "$simulator_udid" -b
+          echo "IOS_SIMULATOR_UDID=$simulator_udid" >> "$GITHUB_ENV"
+
       - name: Run native safe diagnostic XCTest
         working-directory: ios
         shell: bash
@@ -201,7 +230,7 @@ jobs:
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPad (10th generation),OS=18.5' \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Generate Runner entitlement mirrors
