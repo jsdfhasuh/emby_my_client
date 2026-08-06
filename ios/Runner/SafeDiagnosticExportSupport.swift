@@ -270,13 +270,79 @@ enum SafeDiagnosticExportValidator {
       return false
     }
 
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if formatter.date(from: value) != nil {
-      return true
+    let bytes = Array(value.utf8)
+    guard bytes.count == 20 || bytes.count == 24 || bytes.count == 27 else {
+      return false
     }
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.date(from: value) != nil
+
+    let fixedSeparators: [Int: UInt8] = [
+      4: 45,
+      7: 45,
+      10: 84,
+      13: 58,
+      16: 58,
+      bytes.count - 1: 90,
+    ]
+    guard fixedSeparators.allSatisfy({ bytes[$0.key] == $0.value }) else {
+      return false
+    }
+    if bytes.count > 20 {
+      guard bytes[19] == 46 else {
+        return false
+      }
+    }
+
+    func number(_ start: Int, _ end: Int) -> Int? {
+      Int(String(decoding: bytes[start..<end], as: UTF8.self))
+    }
+
+    let fractionRange = bytes.count > 20 ? 20..<(bytes.count - 1) : 0..<0
+    let digitRanges = [0..<4, 5..<7, 8..<10, 11..<13, 14..<16, 17..<19]
+      + (bytes.count > 20 ? [fractionRange] : [])
+    guard digitRanges.allSatisfy({ range in
+      range.allSatisfy { byte in
+        byte >= 48 && byte <= 57
+      }
+    }) else {
+      return false
+    }
+
+    guard
+      let year = number(0, 4),
+      let month = number(5, 7),
+      let day = number(8, 10),
+      let hour = number(11, 13),
+      let minute = number(14, 16),
+      let second = number(17, 19)
+    else {
+      return false
+    }
+
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    var components = DateComponents()
+    components.calendar = calendar
+    components.timeZone = calendar.timeZone
+    components.year = year
+    components.month = month
+    components.day = day
+    components.hour = hour
+    components.minute = minute
+    components.second = second
+
+    guard let date = calendar.date(from: components) else {
+      return false
+    }
+    let normalized = calendar.dateComponents(
+      [.year, .month, .day, .hour, .minute, .second],
+      from: date
+    )
+    return normalized.year == year
+      && normalized.month == month
+      && normalized.day == day
+      && normalized.hour == hour
+      && normalized.minute == minute
+      && normalized.second == second
   }
 
   private static func integerValue(_ value: Any?) -> Int? {

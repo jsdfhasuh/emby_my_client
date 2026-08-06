@@ -108,6 +108,10 @@ final class RunnerTests: XCTestCase {
     timestamp["generatedAtUtc"] = "2026-08-06T12:30:45+00:00"
     assertUnsafe(timestamp)
 
+    var impossibleDate = validReport()
+    impossibleDate["generatedAtUtc"] = "2026-02-30T12:30:45.000Z"
+    assertUnsafe(impossibleDate)
+
     var recordTimestamp = validReport()
     var record = validRecord()
     record["atUtc"] = "2026-08-06T12:30:45Z\n"
