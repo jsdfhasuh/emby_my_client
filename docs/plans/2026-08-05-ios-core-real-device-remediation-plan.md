@@ -493,6 +493,16 @@ Gate B `14.1.10` 的执行方式固定为：
 - Run 27 的 IPA 结构虽已核验，但其安全导出实现尚未满足本节的 fail-closed 要求；设备所有者不得发送 Run 27 导出的文件。
 - `IMPLEMENTATION_IN_PROGRESS`、`NOT_ACCEPTED` 和 `evidence_doc_head = NOT_CREATED` 必须保持不变；不得进入阶段 8。
 
+### 8.9 2026-08-07 播放退出方向真机事实
+
+设备所有者报告：视频播放期间为横屏；退出播放器或播放结束返回应用后，应用转为竖屏，随后旋转 iPad 无法重新进入横屏。现有代码在播放器销毁时只请求 `portraitUp`，而 iPad `Info.plist` 已允许四个方向，因此该现象记录为：
+
+```text
+POST_PLAYBACK_ORIENTATION_RESTORE = FAIL
+```
+
+本记录只保存脱敏事实，不包含真实日志、截图、媒体信息、服务器地址、账户信息或设备数据。修复前现象不得被自动测试或新 Artifact 覆盖为通过；修复完成后仍需设备所有者重新执行真机验收。
+
 ## 9. 阶段 2：建立最小 TrollStore Keychain 身份
 
 ### 9.1 两种签名上下文必须分开

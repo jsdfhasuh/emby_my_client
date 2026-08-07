@@ -1,13 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:volume_controller/volume_controller.dart';
 
 import '../core/diagnostic_log.dart';
+import '../core/player_diagnostics.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_models.dart';
 import '../downloads/download_service.dart';
@@ -25,6 +25,7 @@ import '../playback/playback_settings.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
+import 'player_system_ui.dart';
 
 abstract interface class PlayerSystemControls {
   Future<double> readBrightness();
@@ -156,6 +157,7 @@ class PlayerScreen extends StatefulWidget {
     this.downloads,
     this.capabilities,
     this.systemControls,
+    this.systemUiController,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -168,6 +170,7 @@ class PlayerScreen extends StatefulWidget {
   final DownloadService? downloads;
   final PlatformCapabilities? capabilities;
   final PlayerSystemControls? systemControls;
+  final PlayerSystemUiController? systemUiController;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -182,6 +185,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.capabilities ?? PlatformCapabilities.current();
   late final PlayerSystemControls _systemControls =
       widget.systemControls ?? const PluginPlayerSystemControls();
+  late final PlayerSystemUiController _systemUiController =
+      widget.systemUiController ??
+      DefaultPlayerSystemUiController(capabilities: _capabilities);
   late final SafePlayerSystemControls _safeSystemControls =
       SafePlayerSystemControls(
         _systemControls,
@@ -224,6 +230,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   String? _playbackStatus;
   bool _brightnessFailureReported = false;
   bool _volumeFailureReported = false;
+  late final PlayerCloseCoordinator _closeCoordinator;
+  bool _playbackResourcesReleased = false;
+  double? _lastMetricsWidth;
+  double? _lastMetricsHeight;
+  AppLifecycleState? _lastLifecycleState;
 
   @override
   void initState() {
@@ -244,7 +255,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       capabilities: _capabilities,
       onToggle: _togglePlay,
       onClose: () {
-        if (mounted) Navigator.of(context).maybePop();
+        unawaited(_closePlayer(PlayerExitReason.systemBack));
       },
       onModeChanged: (active) {
         if (mounted && active) {
@@ -252,13 +263,32 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       },
     );
+    _closeCoordinator = PlayerCloseCoordinator(
+      stopPlayback: _stopPlaybackForClose,
+      resetBrightness: _resetBrightnessSafely,
+      restoreSystemUi: _restoreAfterPlayback,
+      popRoute: () async {
+        if (mounted) Navigator.of(context).pop();
+      },
+      onExitRequested: (reason) {
+        _logPlayerEvent(
+          PlayerDiagnosticEvent.playerExitRequested,
+          exitReason: reason,
+        );
+      },
+      onFailure: logPlayerFailure,
+    );
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.playerRouteEnter,
+      orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
+    );
     unawaited(_pipController.initialize());
     try {
       VolumeController.instance.showSystemUI = false;
     } catch (error) {
       _handleSystemControlFailure(brightness: false, error: error);
     }
-    _enterFullscreen();
+    unawaited(_enterFullscreen());
     unawaited(_initializePlaybackSafely());
   }
 
@@ -369,16 +399,148 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_pipController.updatePlaying(playback.isPlaying));
     }
     if (startedPlaying) _restartControlsTimer();
+    if (startedPlaying) {
+      _logPlayerEvent(PlayerDiagnosticEvent.playerPlaybackStarted);
+    }
+    if (justCompleted) {
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.playerCompleted,
+        exitReason: PlayerExitReason.completed,
+      );
+    }
     _updateTimelineOverlays();
     if (justCompleted) unawaited(_handleCompleted());
   }
 
   Future<void> _enterFullscreen() async {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    await SystemChrome.setPreferredOrientations(const [
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.fullscreenOrientationRequested,
+      orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
+    );
+    try {
+      await _systemUiController.enterPlayback();
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.fullscreenOrientationApplied,
+        orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
+      );
+    } catch (error, stackTrace) {
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.fullscreenOrientationFailed,
+        orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
+        errorType: PlayerDiagnosticErrorType.orientation,
+      );
+      DiagnosticLog.instance.error(
+        'player',
+        'Playback fullscreen request failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _restoreAfterPlayback() async {
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.systemUiRestoreRequested,
+      orientationPolicy: _restoreOrientationPolicy,
+    );
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.orientationRestoreRequested,
+      orientationPolicy: _restoreOrientationPolicy,
+    );
+    try {
+      await _systemUiController.restoreAfterPlayback();
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.systemUiRestoreApplied,
+        orientationPolicy: _restoreOrientationPolicy,
+      );
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.orientationRestoreApplied,
+        orientationPolicy: _restoreOrientationPolicy,
+      );
+    } catch (error, stackTrace) {
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.systemUiRestoreFailed,
+        orientationPolicy: _restoreOrientationPolicy,
+        errorType: PlayerDiagnosticErrorType.systemUi,
+      );
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.orientationRestoreFailed,
+        orientationPolicy: _restoreOrientationPolicy,
+        errorType: PlayerDiagnosticErrorType.orientation,
+      );
+      DiagnosticLog.instance.error(
+        'player',
+        'Playback system UI restore failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  PlayerOrientationPolicy get _restoreOrientationPolicy =>
+      _capabilities.platformName == 'ios'
+      ? PlayerOrientationPolicy.systemDefault
+      : PlayerOrientationPolicy.androidPortraitDefault;
+
+  Future<void> _closePlayer(PlayerExitReason reason) =>
+      _closeCoordinator.close(reason);
+
+  Future<void> _stopPlaybackForClose() async {
+    if (_playbackResourcesReleased) return;
+    _playbackResourcesReleased = true;
+    _controlsTimer?.cancel();
+    _nextCountdownTimer?.cancel();
+    _pipController.dispose();
+    try {
+      await _realtimeSubscription?.cancel();
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'player',
+        'Realtime subscription cleanup failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+    if (widget.offlineItem == null) {
+      try {
+        await widget.api.realtime.setBackgroundConnectionRequired(false);
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'player',
+          'Realtime background cleanup failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    final controller = _playbackController;
+    if (controller != null) {
+      controller.removeListener(_syncPlaybackState);
+      try {
+        await controller.shutdown();
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'player',
+          'Playback controller shutdown failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      } finally {
+        controller.dispose();
+      }
+    } else {
+      try {
+        await _player.dispose();
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'player',
+          'Player cleanup failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
   }
 
   void _toggleControls() {
@@ -441,8 +603,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'play':
         await controller.play();
       case 'stop':
-        await controller.shutdown();
-        if (mounted) await Navigator.of(context).maybePop();
+        await _closePlayer(PlayerExitReason.remoteStop);
       case 'seek':
         final ticks = message.seekPositionTicks;
         if (ticks != null) {
@@ -559,7 +720,31 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   @override
+  void didChangeMetrics() {
+    if (!mounted) return;
+    final view = View.of(context);
+    final size = view.physicalSize / view.devicePixelRatio;
+    if (size.width == _lastMetricsWidth && size.height == _lastMetricsHeight) {
+      return;
+    }
+    _lastMetricsWidth = size.width;
+    _lastMetricsHeight = size.height;
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.orientationMetricsChanged,
+      logicalWidth: size.width,
+      logicalHeight: size.height,
+    );
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != _lastLifecycleState) {
+      _lastLifecycleState = state;
+      _logPlayerEvent(
+        PlayerDiagnosticEvent.appLifecycleChanged,
+        lifecycleState: state.name,
+      );
+    }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
       if (_pipController.isActive || _pipController.isEntering) return;
@@ -570,30 +755,40 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _pipController.dispose();
-    unawaited(_realtimeSubscription?.cancel());
-    if (widget.offlineItem == null) {
-      unawaited(widget.api.realtime.setBackgroundConnectionRequired(false));
-    }
-    _controlsTimer?.cancel();
-    _nextCountdownTimer?.cancel();
-    final controller = _playbackController;
-    if (controller != null) {
-      controller
-        ..removeListener(_syncPlaybackState)
-        ..dispose();
-    } else {
-      unawaited(_player.dispose());
-    }
-    unawaited(_resetBrightnessSafely());
-    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
-    unawaited(
-      SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.portraitUp,
-      ]),
+    _logPlayerEvent(
+      PlayerDiagnosticEvent.playerRouteDispose,
+      exitReason: PlayerExitReason.routeDisposed,
     );
+    WidgetsBinding.instance.removeObserver(this);
+    if (!_playbackResourcesReleased) {
+      unawaited(_stopPlaybackForClose());
+      unawaited(_restoreAfterPlayback().catchError((_) {}));
+    }
     super.dispose();
+  }
+
+  void _logPlayerEvent(
+    PlayerDiagnosticEvent event, {
+    PlayerExitReason? exitReason,
+    PlayerOrientationPolicy? orientationPolicy,
+    double? logicalWidth,
+    double? logicalHeight,
+    String? lifecycleState,
+    PlayerDiagnosticErrorType? errorType,
+  }) {
+    try {
+      DiagnosticLog.instance.playerEvent(
+        event: event,
+        exitReason: exitReason,
+        orientationPolicy: orientationPolicy,
+        logicalWidth: logicalWidth,
+        logicalHeight: logicalHeight,
+        lifecycleState: lifecycleState,
+        errorType: errorType,
+      );
+    } catch (_) {
+      // Diagnostics must not affect playback or route cleanup.
+    }
   }
 
   Future<void> _saveSettings(PlaybackSettings settings) async {
@@ -902,6 +1097,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     if (next == null) {
       _cancelAutoNext();
+      if (automatic) await _closePlayer(PlayerExitReason.completed);
       return;
     }
     if (automatic) _autoPlayedCount++;
@@ -1401,7 +1597,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final horizontalSeekEnabled =
         !_controlsLocked && _error == null && _duration > Duration.zero;
     return PopScope(
-      onPopInvokedWithResult: (_, _) {},
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_closePlayer(PlayerExitReason.systemBack));
+      },
       child: Scaffold(
         backgroundColor: Colors.black,
         body: GestureDetector(
@@ -1671,7 +1870,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
               const SizedBox(height: 18),
               FilledButton.icon(
-                onPressed: () => Navigator.of(context).pop(),
+                onPressed: () =>
+                    unawaited(_closePlayer(PlayerExitReason.playbackError)),
                 icon: const Icon(Icons.arrow_back),
                 label: const Text('返回'),
               ),
@@ -1745,7 +1945,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                 children: [
                   IconButton(
                     tooltip: '返回',
-                    onPressed: () => Navigator.of(context).pop(),
+                    onPressed: () =>
+                        unawaited(_closePlayer(PlayerExitReason.userBack)),
                     icon: const Icon(Icons.arrow_back),
                   ),
                   const SizedBox(width: 6),
