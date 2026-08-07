@@ -541,7 +541,7 @@ final class RunnerTests: XCTestCase {
     )
     let gate = SafeDiagnosticExportResultGate()
     XCTAssertTrue(gate.begin())
-    addTeardown {
+    addTeardownBlock {
       store.cleanupStale()
       try? FileManager.default.removeItem(at: base)
     }
