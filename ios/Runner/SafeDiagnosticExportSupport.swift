@@ -412,8 +412,8 @@ enum SafeDiagnosticExportValidator {
     guard let value else {
       return nil
     }
-    if Swift.type(of: value) == Int.self {
-      return value as! Int
+    if Swift.type(of: value) == Int.self, let integer = value as? Int {
+      return integer
     }
     guard let number = value as? NSNumber else {
       return nil
@@ -659,5 +659,143 @@ final class SafeDiagnosticExportCompletionGate {
     lock.unlock()
     action()
     return true
+  }
+}
+
+enum SafeDiagnosticExportPresentationOutcome: Equatable {
+  case completed
+  case cancelled
+  case writeFailure
+  case shareFailure
+}
+
+protocol SafeDiagnosticExportPresentationDriver: AnyObject {
+  var canPresent: Bool { get }
+  var isActivityMounted: Bool { get }
+
+  func setActivityCompletion(
+    _ handler: @escaping (_ completed: Bool, _ error: Error?) -> Void
+  )
+  func present(animated: Bool, completion: @escaping () -> Void)
+}
+
+final class SafeDiagnosticExportUIKitPresentationDriver:
+  SafeDiagnosticExportPresentationDriver
+{
+  private let presenter: UIViewController
+  private let activity: UIActivityViewController
+
+  init(presenter: UIViewController, activity: UIActivityViewController) {
+    self.presenter = presenter
+    self.activity = activity
+  }
+
+  var canPresent: Bool {
+    guard
+      presenter.isViewLoaded,
+      presenter.viewIfLoaded?.window != nil,
+      !presenter.view.bounds.isNull,
+      !presenter.view.bounds.isEmpty,
+      !presenter.isBeingDismissed,
+      !presenter.isBeingPresented,
+      presenter.transitionCoordinator == nil,
+      presenter.navigationController?.transitionCoordinator == nil,
+      presenter.tabBarController?.transitionCoordinator == nil
+    else {
+      return false
+    }
+    guard let presented = presenter.presentedViewController else {
+      return true
+    }
+    return !presented.isBeingDismissed && !presented.isBeingPresented
+  }
+
+  var isActivityMounted: Bool {
+    activity.presentingViewController != nil
+  }
+
+  func setActivityCompletion(
+    _ handler: @escaping (_ completed: Bool, _ error: Error?) -> Void
+  ) {
+    activity.completionWithItemsHandler = { _, completed, _, error in
+      handler(completed, error)
+    }
+  }
+
+  func present(animated: Bool, completion: @escaping () -> Void) {
+    presenter.present(activity, animated: animated, completion: completion)
+  }
+}
+
+final class SafeDiagnosticExportPresentationCoordinator {
+  typealias WatchdogScheduler = (@escaping () -> Void) -> Void
+
+  private let driver: SafeDiagnosticExportPresentationDriver
+  private let completionGate: SafeDiagnosticExportCompletionGate
+  private let scheduleWatchdog: WatchdogScheduler
+  private let onFinish: (SafeDiagnosticExportPresentationOutcome) -> Void
+  private var started = false
+
+  init(
+    driver: SafeDiagnosticExportPresentationDriver,
+    completionGate: SafeDiagnosticExportCompletionGate,
+    scheduleWatchdog: @escaping WatchdogScheduler = { callback in
+      DispatchQueue.main.asyncAfter(
+        deadline: .now() + .milliseconds(400),
+        execute: callback
+      )
+    },
+    onFinish: @escaping (SafeDiagnosticExportPresentationOutcome) -> Void
+  ) {
+    self.driver = driver
+    self.completionGate = completionGate
+    self.scheduleWatchdog = scheduleWatchdog
+    self.onFinish = onFinish
+  }
+
+  func start() {
+    guard !started else { return }
+    started = true
+    guard driver.canPresent else {
+      complete(.shareFailure)
+      return
+    }
+
+    driver.setActivityCompletion { [weak self] completed, error in
+      guard let self else { return }
+      if error != nil {
+        self.complete(.shareFailure)
+      } else if completed {
+        self.complete(.completed)
+      } else {
+        self.complete(.cancelled)
+      }
+    }
+    driver.present(animated: true) { [weak self] in
+      self?.presentationDidComplete()
+    }
+    scheduleWatchdog { [weak self] in
+      self?.watchdogDidFire()
+    }
+  }
+
+  private func presentationDidComplete() {
+    guard driver.isActivityMounted else {
+      complete(.shareFailure)
+      return
+    }
+  }
+
+  private func watchdogDidFire() {
+    guard driver.isActivityMounted else {
+      complete(.shareFailure)
+      return
+    }
+  }
+
+  private func complete(_ outcome: SafeDiagnosticExportPresentationOutcome) {
+    completionGate.complete { [onFinish] in
+      onFinish(outcome)
+    }
   }
 }

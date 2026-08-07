@@ -369,6 +369,212 @@ final class RunnerTests: XCTestCase {
     XCTAssertEqual(calls, 1)
   }
 
+  func testPresentationCoordinatorMountedCompletedCleansAndReleasesGate() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = SafeDiagnosticExportPresentationCoordinator(
+      driver: fixture.driver,
+      completionGate: SafeDiagnosticExportCompletionGate(),
+      scheduleWatchdog: { state.watchdog = $0 },
+      onFinish: { outcome in
+        state.outcomes.append(outcome)
+        fixture.store.remove(fixture.directory)
+        XCTAssertTrue(fixture.gate.finish())
+      }
+    )
+
+    fixture.driver.isActivityMounted = true
+    coordinator.start()
+    fixture.driver.completePresentation()
+    fixture.driver.completeActivity(completed: true)
+    state.watchdog?()
+
+    XCTAssertEqual(state.outcomes, [.completed])
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+  }
+
+  func testPresentationCoordinatorPresentationCompletionWithoutMountFailsOnce() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    coordinator.start()
+    fixture.driver.completePresentation()
+    state.watchdog?()
+    fixture.driver.completeActivity(completed: false)
+
+    assertPresentationFailure(
+      fixture: fixture,
+      outcomes: state.outcomes
+    )
+  }
+
+  func testPresentationCoordinatorWatchdogWithoutMountFailsAndCleans() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    coordinator.start()
+    state.watchdog?()
+
+    assertPresentationFailure(
+      fixture: fixture,
+      outcomes: state.outcomes
+    )
+  }
+
+  func testPresentationCoordinatorCancelledCleansAndCanStartAgain() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    fixture.driver.isActivityMounted = true
+    coordinator.start()
+    fixture.driver.completeActivity(completed: false)
+
+    XCTAssertEqual(state.outcomes, [.cancelled])
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+    XCTAssertTrue(fixture.gate.begin())
+    XCTAssertTrue(fixture.gate.finish())
+  }
+
+  func testPresentationCoordinatorActivityErrorUsesShareFailureAndCleans() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    fixture.driver.isActivityMounted = true
+    coordinator.start()
+    fixture.driver.completeActivity(
+      completed: false,
+      error: NSError(domain: "fixture", code: 1)
+    )
+    state.watchdog?()
+
+    XCTAssertEqual(state.outcomes, [.shareFailure])
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+  }
+
+  func testPresentationCoordinatorWatchdogAndCompletionRaceFinishesOnce() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    fixture.driver.isActivityMounted = true
+    coordinator.start()
+    fixture.driver.completeActivity(completed: true)
+    state.watchdog?()
+    fixture.driver.completePresentation()
+    fixture.driver.completeActivity(completed: false)
+
+    XCTAssertEqual(state.outcomes, [.completed])
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+  }
+
+  func testPresentationCoordinatorRejectsPresenterBeforePresenting() throws {
+    let fixture = try makePresentationFixture()
+    let state = PresentationOutcomeBox()
+    let coordinator = makePresentationCoordinator(
+      fixture: fixture,
+      state: state
+    )
+
+    fixture.driver.canPresent = false
+    coordinator.start()
+    state.watchdog?()
+
+    XCTAssertEqual(state.outcomes, [.shareFailure])
+    XCTAssertEqual(fixture.driver.presentCalls, 0)
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+  }
+
+  private typealias PresentationFixture = (
+    store: SafeDiagnosticExportTemporaryStore,
+    directory: URL,
+    gate: SafeDiagnosticExportResultGate,
+    driver: FakePresentationDriver
+  )
+
+  private func makePresentationFixture() throws -> PresentationFixture {
+    let base = FileManager.default.temporaryDirectory
+      .appendingPathComponent("safe-diagnostic-coordinator-\(UUID().uuidString)")
+    let root = base.appendingPathComponent(
+      SafeDiagnosticExportTemporaryStore.directoryName,
+      isDirectory: true
+    )
+    let store = SafeDiagnosticExportTemporaryStore(rootURL: root)
+    let directory = try store.makeSessionDirectory()
+    _ = try store.writeAndVerify(
+      data: Data("fixture".utf8),
+      filename: "emby-safe-diagnostics-v1-b42-20260806T123045Z.json",
+      in: directory
+    )
+    let gate = SafeDiagnosticExportResultGate()
+    XCTAssertTrue(gate.begin())
+    addTeardown {
+      store.cleanupStale()
+      try? FileManager.default.removeItem(at: base)
+    }
+    return (store, directory, gate, FakePresentationDriver())
+  }
+
+  private func makePresentationCoordinator(
+    fixture: PresentationFixture,
+    state: PresentationOutcomeBox
+  ) -> SafeDiagnosticExportPresentationCoordinator {
+    SafeDiagnosticExportPresentationCoordinator(
+      driver: fixture.driver,
+      completionGate: SafeDiagnosticExportCompletionGate(),
+      scheduleWatchdog: { state.watchdog = $0 },
+      onFinish: { outcome in
+        state.outcomes.append(outcome)
+        fixture.store.remove(fixture.directory)
+        XCTAssertTrue(fixture.gate.finish())
+      }
+    )
+  }
+
+  private func assertPresentationFailure(
+    fixture: PresentationFixture,
+    outcomes: [SafeDiagnosticExportPresentationOutcome]
+  ) {
+    XCTAssertEqual(outcomes, [.shareFailure])
+    XCTAssertFalse(fixture.gate.isInProgress)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.directory.path)
+    )
+  }
+
   private func validReport() -> [String: Any] {
     [
       "schema": "emby-safe-diagnostics/v1",
@@ -442,5 +648,41 @@ final class RunnerTests: XCTestCase {
     } catch {
       XCTFail("fixture could not be encoded: \(error)", file: file, line: line)
     }
+  }
+}
+
+private final class PresentationOutcomeBox {
+  var watchdog: (() -> Void)?
+  var outcomes: [SafeDiagnosticExportPresentationOutcome] = []
+}
+
+private final class FakePresentationDriver:
+  SafeDiagnosticExportPresentationDriver
+{
+  var canPresent = true
+  var isActivityMounted = false
+  var presentCalls = 0
+
+  private var activityCompletion:
+    ((_ completed: Bool, _ error: Error?) -> Void)?
+  private var presentationCompletion: (() -> Void)?
+
+  func setActivityCompletion(
+    _ handler: @escaping (_ completed: Bool, _ error: Error?) -> Void
+  ) {
+    activityCompletion = handler
+  }
+
+  func present(animated: Bool, completion: @escaping () -> Void) {
+    presentCalls += 1
+    presentationCompletion = completion
+  }
+
+  func completePresentation() {
+    presentationCompletion?()
+  }
+
+  func completeActivity(completed: Bool, error: Error? = nil) {
+    activityCompletion?(completed, error)
   }
 }
