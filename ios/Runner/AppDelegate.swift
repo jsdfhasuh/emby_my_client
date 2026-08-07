@@ -5,9 +5,17 @@ import UIKit
 @main
 @objc class AppDelegate: FlutterAppDelegate {
   private let safeDiagnosticChannelName = "emby_my_client/safe_diagnostic_export"
+  private let fullDiagnosticChannelName = "emby_my_client/full_diagnostic_export"
   private let safeDiagnosticExportGate = SafeDiagnosticExportResultGate()
+  private let fullDiagnosticExportGate = SafeDiagnosticExportResultGate()
   private let safeDiagnosticTemporaryStore = SafeDiagnosticExportTemporaryStore()
+  private let fullDiagnosticTemporaryStore = SafeDiagnosticExportTemporaryStore(
+    rootURL: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+      .appendingPathComponent("emby-full-diagnostics-export", isDirectory: true)
+  )
   private var safeDiagnosticPresentationCoordinator:
+    SafeDiagnosticExportPresentationCoordinator?
+  private var fullDiagnosticPresentationCoordinator:
     SafeDiagnosticExportPresentationCoordinator?
 
   override func application(
@@ -15,6 +23,7 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     safeDiagnosticTemporaryStore.cleanupStale()
+    fullDiagnosticTemporaryStore.cleanupStale()
     GeneratedPluginRegistrant.register(with: self)
     let didFinishLaunching = super.application(
       application,
@@ -31,6 +40,17 @@ import UIKit
           return
         }
         self.handleSafeDiagnosticCall(call, result: result)
+      }
+      let fullChannel = FlutterMethodChannel(
+        name: fullDiagnosticChannelName,
+        binaryMessenger: controller.binaryMessenger
+      )
+      fullChannel.setMethodCallHandler { [weak self] call, result in
+        guard let self else {
+          result(Self.fullDiagnosticError(code: "FULL-DIAG-SHARE"))
+          return
+        }
+        self.handleFullDiagnosticCall(call, result: result)
       }
     }
     return didFinishLaunching
@@ -59,6 +79,128 @@ import UIKit
     default:
       result(Self.safeDiagnosticError(code: "DIAG-EXPORT-UNSAFE"))
     }
+  }
+
+  private func handleFullDiagnosticCall(
+    _ call: FlutterMethodCall,
+    result: @escaping FlutterResult
+  ) {
+    guard call.method == "fullShare" else {
+      result(Self.fullDiagnosticError(code: "FULL-DIAG-UNSAFE"))
+      return
+    }
+    handleFullDiagnosticShare(call.arguments, result: result)
+  }
+
+  private func handleFullDiagnosticShare(
+    _ argumentsValue: Any?,
+    result: @escaping FlutterResult
+  ) {
+    guard fullDiagnosticExportGate.begin() else {
+      result(Self.fullDiagnosticError(code: "FULL-DIAG-BUSY"))
+      return
+    }
+
+    let completionGate = SafeDiagnosticExportCompletionGate()
+    var sessionDirectory: URL?
+    func finish(_ value: Any?) {
+      completionGate.complete { [weak self] in
+        self?.finishFullDiagnosticShare(
+          value,
+          sessionDirectory: sessionDirectory,
+          result: result
+        )
+      }
+    }
+
+    fullDiagnosticTemporaryStore.cleanupStale()
+    guard
+      let arguments = argumentsValue as? [String: Any],
+      Set(arguments.keys) == Set(["content", "x", "y", "width", "height"]),
+      let content = arguments["content"] as? String,
+      let data = content.data(using: .utf8),
+      let appVersion = Bundle.main.object(
+        forInfoDictionaryKey: "CFBundleShortVersionString"
+      ) as? String,
+      let buildNumber = Bundle.main.object(
+        forInfoDictionaryKey: "CFBundleVersion"
+      ) as? String
+    else {
+      finish(Self.fullDiagnosticError(code: "FULL-DIAG-UNSAFE"))
+      return
+    }
+
+    let anchor: [String: Any] = [
+      "x": arguments["x"] as Any,
+      "y": arguments["y"] as Any,
+      "width": arguments["width"] as Any,
+      "height": arguments["height"] as Any,
+    ]
+    let exportDate = Date()
+    let validated: FullDiagnosticExportValidatedReport
+    do {
+      validated = try FullDiagnosticExportValidator.validate(
+        content: data,
+        appVersion: appVersion,
+        buildNumber: buildNumber,
+        now: exportDate
+      )
+    } catch {
+      finish(Self.fullDiagnosticError(code: "FULL-DIAG-UNSAFE"))
+      return
+    }
+
+    do {
+      let directory = try fullDiagnosticTemporaryStore.makeSessionDirectory()
+      sessionDirectory = directory
+      let fileURL = try fullDiagnosticTemporaryStore.writeAndVerify(
+        data: validated.data,
+        filename: validated.filename,
+        in: directory
+      )
+      let reread = try Data(contentsOf: fileURL)
+      guard reread == validated.data else {
+        finish(Self.fullDiagnosticError(code: "FULL-DIAG-UNSAFE"))
+        return
+      }
+      _ = try FullDiagnosticExportValidator.validate(
+        content: reread,
+        appVersion: appVersion,
+        buildNumber: buildNumber,
+        now: exportDate
+      )
+    } catch FullDiagnosticExportValidationError.unsafe {
+      finish(Self.fullDiagnosticError(code: "FULL-DIAG-UNSAFE"))
+      return
+    } catch {
+      finish(Self.fullDiagnosticError(code: "FULL-DIAG-WRITE"))
+      return
+    }
+
+    presentFullDiagnosticShare(
+      anchor: anchor,
+      directory: sessionDirectory!,
+      filename: validated.filename,
+      completionGate: completionGate,
+      finish: { [weak self] outcome in
+        let value: Any?
+        switch outcome {
+        case .completed:
+          value = "completed"
+        case .cancelled:
+          value = "cancelled"
+        case .writeFailure:
+          value = Self.fullDiagnosticError(code: "FULL-DIAG-WRITE")
+        case .shareFailure:
+          value = Self.fullDiagnosticError(code: "FULL-DIAG-SHARE")
+        }
+        self?.finishFullDiagnosticShare(
+          value,
+          sessionDirectory: sessionDirectory,
+          result: result
+        )
+      }
+    )
   }
 
   private func handleSafeDiagnosticShare(
@@ -168,6 +310,53 @@ import UIKit
     )
   }
 
+  private func presentFullDiagnosticShare(
+    anchor: [String: Any],
+    directory: URL,
+    filename: String,
+    completionGate: SafeDiagnosticExportCompletionGate,
+    finish: @escaping (SafeDiagnosticExportPresentationOutcome) -> Void
+  ) {
+    guard let rootViewController = window?.rootViewController else {
+      completionGate.complete {
+        finish(.shareFailure)
+      }
+      return
+    }
+    let presenter = topViewController(rootViewController)
+    let fileURL = directory.appendingPathComponent(filename, isDirectory: false)
+    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+      completionGate.complete {
+        finish(.writeFailure)
+      }
+      return
+    }
+
+    let activity = UIActivityViewController(
+      activityItems: [fileURL],
+      applicationActivities: nil
+    )
+    if let popover = activity.popoverPresentationController {
+      popover.sourceView = presenter.view
+      popover.sourceRect = SafeDiagnosticExportValidator.safePopoverRect(
+        anchor: anchor,
+        in: presenter.view.bounds
+      )
+      popover.permittedArrowDirections = []
+    }
+    let driver = SafeDiagnosticExportUIKitPresentationDriver(
+      presenter: presenter,
+      activity: activity
+    )
+    let coordinator = SafeDiagnosticExportPresentationCoordinator(
+      driver: driver,
+      completionGate: completionGate,
+      onFinish: finish
+    )
+    fullDiagnosticPresentationCoordinator = coordinator
+    coordinator.start()
+  }
+
   private func presentSafeDiagnosticShare(
     anchor: [String: Any],
     directory: URL,
@@ -229,6 +418,19 @@ import UIKit
     result(value)
   }
 
+  private func finishFullDiagnosticShare(
+    _ value: Any?,
+    sessionDirectory: URL?,
+    result: @escaping FlutterResult
+  ) {
+    if let sessionDirectory {
+      fullDiagnosticTemporaryStore.remove(sessionDirectory)
+    }
+    fullDiagnosticPresentationCoordinator = nil
+    fullDiagnosticExportGate.finish()
+    result(value)
+  }
+
   private func topViewController(_ viewController: UIViewController) -> UIViewController {
     if let presented = viewController.presentedViewController {
       return topViewController(presented)
@@ -247,6 +449,10 @@ import UIKit
   }
 
   private static func safeDiagnosticError(code: String) -> FlutterError {
+    FlutterError(code: code, message: nil, details: nil)
+  }
+
+  private static func fullDiagnosticError(code: String) -> FlutterError {
     FlutterError(code: code, message: nil, details: nil)
   }
 }

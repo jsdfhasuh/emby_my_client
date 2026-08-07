@@ -1,10 +1,20 @@
 import CoreGraphics
 import CoreFoundation
+import CryptoKit
 import Foundation
 import UIKit
 
 enum SafeDiagnosticExportValidationError: Error, Equatable {
   case unsafe
+}
+
+enum FullDiagnosticExportValidationError: Error, Equatable {
+  case unsafe
+}
+
+struct FullDiagnosticExportValidatedReport {
+  let data: Data
+  let filename: String
 }
 
 struct SafeDiagnosticExportValidatedReport {
@@ -486,7 +496,7 @@ enum SafeDiagnosticExportValidator {
       #"(?i)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}|(?:localhost|emby):\d{2,5}|\[[0-9a-f:]+\]:\d{2,5}"#,
       #"(?i)(?:[a-z]:[\\/]|/(?:home|users|private|var|tmp|data|documents|library)(?:[\\/]))"#,
       #"(?i)\\Users\\|\\private\\|\\var\\|\\tmp\\|/Users/|/private/|/var/|/tmp/"#,
-      #"(?i)\"session(?:json|object|data)?\"\s*:|\bsession\s+(?:json|object|data)\b"#,
+      #"(?i)\"session(?:json|object|data)?\"\s*:|\bsession\s+(?:json|object|data)\b|\bsession\s*[:=]\s*[\{\[]"#,
       #"(?i)\"(?:request|response)(?:body|headers?)\"\s*:|\b(?:request|response)\s+(?:body|headers?)\b"#,
       #"\\(?:r|n|t|u000[0-9a-f]{1,4})"#,
     ]
@@ -539,6 +549,114 @@ enum SafeDiagnosticExportValidator {
     }
 
     return hasCompression ? groups.count <= 7 : groups.count == 8
+  }
+}
+
+enum FullDiagnosticExportValidator {
+  static let maxBytes = 750 * 1024
+
+  private static let headerKeys = [
+    "schema",
+    "generatedAtUtc",
+    "appVersion",
+    "buildNumber",
+    "platform",
+    "redaction",
+    "truncated",
+    "sha256",
+  ]
+
+  static func validate(
+    content: Data,
+    appVersion: String,
+    buildNumber: String,
+    now: Date = Date()
+  ) throws -> FullDiagnosticExportValidatedReport {
+    guard
+      !content.isEmpty,
+      content.count <= maxBytes,
+      let text = String(data: content, encoding: .utf8),
+      !text.isEmpty,
+      !text.contains("\r"),
+      text.unicodeScalars.allSatisfy({ scalar in
+        scalar.value == 0x0A || scalar.value == 0x09 ||
+          (scalar.value >= 0x20 && scalar.value != 0x7F)
+      }),
+      SafeDiagnosticExportValidator.isValidAppVersion(appVersion),
+      SafeDiagnosticExportValidator.isValidBuildNumber(buildNumber)
+    else {
+      throw FullDiagnosticExportValidationError.unsafe
+    }
+
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+      .map(String.init)
+    guard lines.count >= headerKeys.count else {
+      throw FullDiagnosticExportValidationError.unsafe
+    }
+
+    var header: [String: String] = [:]
+    for (index, key) in headerKeys.enumerated() {
+      let line = lines[index]
+      guard let separator = line.firstIndex(of: "=") else {
+        throw FullDiagnosticExportValidationError.unsafe
+      }
+      let actualKey = String(line[..<separator])
+      guard actualKey == key else {
+        throw FullDiagnosticExportValidationError.unsafe
+      }
+      header[key] = String(line[line.index(after: separator)...])
+    }
+
+    let body = lines.dropFirst(headerKeys.count).joined(separator: "\n")
+    guard
+      header["schema"] == "emby-full-diagnostics/v1",
+      header["platform"] == "iPadOS",
+      header["redaction"] == "best-effort",
+      header["appVersion"] == appVersion,
+      header["buildNumber"] == buildNumber,
+      let generatedAtUtc = header["generatedAtUtc"],
+      isValidUtcTimestamp(generatedAtUtc),
+      let truncated = header["truncated"],
+      truncated == "true" || truncated == "false",
+      let digest = header["sha256"],
+      isValidDigest(digest),
+      digest == sha256Hex(Data(body.utf8)),
+      !SafeDiagnosticExportValidator.containsSensitiveContent(body)
+    else {
+      throw FullDiagnosticExportValidationError.unsafe
+    }
+
+    return FullDiagnosticExportValidatedReport(
+      data: content,
+      filename: try makeFilename(buildNumber: buildNumber, date: now)
+    )
+  }
+
+  static func makeFilename(buildNumber: String, date: Date) throws -> String {
+    guard SafeDiagnosticExportValidator.isValidBuildNumber(buildNumber) else {
+      throw FullDiagnosticExportValidationError.unsafe
+    }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+    return "emby-full-diagnostics-b\(buildNumber)-\(formatter.string(from: date)).txt"
+  }
+
+  private static func isValidDigest(_ value: String) -> Bool {
+    value.count == 64 &&
+      value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+  }
+
+  private static func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+
+  private static func isValidUtcTimestamp(_ value: String) -> Bool {
+    SafeDiagnosticExportValidator.isValidUtcTimestamp(value)
   }
 }
 

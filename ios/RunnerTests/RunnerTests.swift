@@ -1,4 +1,5 @@
 import Flutter
+import CryptoKit
 import UIKit
 import XCTest
 
@@ -518,6 +519,90 @@ final class RunnerTests: XCTestCase {
     )
   }
 
+  func testFullReportPassesAndFilenameUsesNativeBuildAndTime() throws {
+    let data = validFullReport()
+    let result = try FullDiagnosticExportValidator.validate(
+      content: data,
+      appVersion: "1.0.0",
+      buildNumber: "42",
+      now: Date(timeIntervalSince1970: 1_786_019_445)
+    )
+
+    XCTAssertEqual(result.data, data)
+    XCTAssertEqual(
+      result.filename,
+      "emby-full-diagnostics-b42-20260806T123045Z.txt"
+    )
+    XCTAssertFalse(result.filename.contains("fixture"))
+    XCTAssertFalse(result.filename.contains("/"))
+    XCTAssertFalse(result.filename.contains("\\"))
+  }
+
+  func testFullReportHeaderOrderAndExactFieldsAreRequired() {
+    let valid = String(data: validFullReport(), encoding: .utf8)!
+    var lines = valid.split(separator: "\n", omittingEmptySubsequences: false)
+      .map(String.init)
+
+    lines.swapAt(0, 1)
+    assertFullUnsafe(Data(lines.joined(separator: "\n").utf8))
+
+    lines = valid.split(separator: "\n", omittingEmptySubsequences: false)
+      .map(String.init)
+    lines[0] = "extra=value"
+    assertFullUnsafe(Data(lines.joined(separator: "\n").utf8))
+
+    lines = Array(
+      valid.split(separator: "\n", omittingEmptySubsequences: false)
+        .dropFirst()
+        .map(String.init)
+    )
+    assertFullUnsafe(Data(lines.joined(separator: "\n").utf8))
+  }
+
+  func testFullReportMustMatchBundleMetadataAndBodyDigest() {
+    let data = validFullReport()
+    assertFullUnsafe(data, appVersion: "1.0.1")
+    assertFullUnsafe(data, buildNumber: "43")
+
+    var lines = String(data: data, encoding: .utf8)!
+      .split(separator: "\n", omittingEmptySubsequences: false)
+      .map(String.init)
+    lines[7] = "sha256=" + String(repeating: "0", count: 64)
+    assertFullUnsafe(Data(lines.joined(separator: "\n").utf8))
+  }
+
+  func testFullReportRejectsSensitiveContentAndControlCharacters() {
+    for value in [
+      "password=secret",
+      "Authorization: Basic credential",
+      "Authorization: Bearer token",
+      "Cookie: session=value",
+      "X-Emby-Token: secret",
+      "https://example.test:8096/path",
+      "https%3A%2F%2Fexample.test%3A8096",
+      "192.0.2.1",
+      "2001:db8::1",
+      "example.test:8096",
+      "/var/mobile/Containers/Data/file.json",
+      "Session JSON",
+      "request headers",
+      "response body",
+    ] {
+      assertFullUnsafe(Data(validFullBody(value).utf8))
+    }
+
+    assertFullUnsafe(Data(validFullBody("line\u{007F}injected").utf8))
+    assertFullUnsafe(Data(validFullBody("line\rinjected").utf8))
+  }
+
+  func testFullReportRejectsContentOverNativeSizeLimit() {
+    let body = String(
+      repeating: "x",
+      count: FullDiagnosticExportValidator.maxBytes
+    )
+    assertFullUnsafe(Data(validFullBody(body).utf8))
+  }
+
   private typealias PresentationFixture = (
     store: SafeDiagnosticExportTemporaryStore,
     directory: URL,
@@ -599,6 +684,52 @@ final class RunnerTests: XCTestCase {
       "errorType": "SignInFailure",
       "diagnosticCode": "LOGIN-SESSION-PREPARE",
     ]
+  }
+
+  private func validFullBody(_ body: String = "event=player_route_enter\n") -> String {
+    let digest = SHA256.hash(data: Data(body.utf8))
+      .map { String(format: "%02x", $0) }
+      .joined()
+    return [
+      "schema=emby-full-diagnostics/v1",
+      "generatedAtUtc=2026-08-06T12:30:45.000Z",
+      "appVersion=1.0.0",
+      "buildNumber=42",
+      "platform=iPadOS",
+      "redaction=best-effort",
+      "truncated=false",
+      "sha256=\(digest)",
+      body,
+    ].joined(separator: "\n")
+  }
+
+  private func validFullReport() -> Data {
+    Data(validFullBody().utf8)
+  }
+
+  private func assertFullUnsafe(
+    _ data: Data,
+    appVersion: String = "1.0.0",
+    buildNumber: String = "42",
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    XCTAssertThrowsError(
+      try FullDiagnosticExportValidator.validate(
+        content: data,
+        appVersion: appVersion,
+        buildNumber: buildNumber
+      ),
+      file: file,
+      line: line
+    ) { error in
+      XCTAssertEqual(
+        error as? FullDiagnosticExportValidationError,
+        .unsafe,
+        file: file,
+        line: line
+      )
+    }
   }
 
   private func assertUnsafe(

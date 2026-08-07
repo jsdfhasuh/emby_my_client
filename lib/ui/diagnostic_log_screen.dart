@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
 import '../platform/platform_capabilities.dart';
+import 'full_diagnostic_export_screen.dart';
 import 'safe_diagnostic_export_screen.dart';
 
 class DiagnosticLogScreen extends StatefulWidget {
@@ -76,6 +77,17 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
                 ),
               ),
               icon: const Icon(Icons.security_outlined),
+            ),
+          if (_capabilities.platformName == 'ios')
+            IconButton(
+              tooltip: '导出完整调试日志',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) =>
+                      FullDiagnosticExportScreen(capabilities: _capabilities),
+                ),
+              ),
+              icon: const Icon(Icons.bug_report_outlined),
             ),
           IconButton(
             tooltip: '清空',

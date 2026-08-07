@@ -313,7 +313,6 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
     });
   }
 
-  @visibleForTesting
   static String redact(String value) {
     var result = value;
     result = result.replaceAll(
