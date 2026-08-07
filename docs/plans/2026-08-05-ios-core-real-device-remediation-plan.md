@@ -503,6 +503,37 @@ POST_PLAYBACK_ORIENTATION_RESTORE = FAIL
 
 本记录只保存脱敏事实，不包含真实日志、截图、媒体信息、服务器地址、账户信息或设备数据。修复前现象不得被自动测试或新 Artifact 覆盖为通过；修复完成后仍需设备所有者重新执行真机验收。
 
+### 8.10 2026-08-08 媒体库 Gate B 真机事实
+
+设备所有者在分支 Gate B 复测中报告以下脱敏失败，均保留为待整改事实：
+
+```text
+IPAD_DETAIL_HERO_ARTWORK_VISIBILITY = FAIL
+```
+
+横屏详情页的大背景图被严重裁切，无法看到完整 Backdrop；没有 Backdrop 时竖版 Primary 图被填入超宽区域，也可能严重裁切。
+
+```text
+FILTERED_LIBRARY_REMAINING_COUNT = FAIL
+```
+
+媒体库未筛选时位置浮层可以显示当前范围、总数和百分比；应用筛选或进入目录状态后，不再明确显示筛选结果总数以及还剩多少项。
+
+```text
+LIBRARY_FILTER_STATE_CLARITY = FAIL
+```
+
+页面同时存在两排外观相似的选择控件，存在重复入口和同时选中的歧义，设备所有者无法判断当前生效的浏览状态。
+
+本节只记录脱敏文字，不提交原始截图、媒体标题、图片、服务器、账号或其他私人媒体库信息。现有 `POST_PLAYBACK_ORIENTATION_RESTORE = FAIL` 同样保留，所有这些项目在设备所有者重新复测前不得改写为 `PASS`。当前状态为：
+
+```text
+STOP_GATE_B = BLOCKED_BY_IMPLEMENTATION
+IMPLEMENTATION_IN_PROGRESS
+NOT_ACCEPTED
+evidence_doc_head = NOT_CREATED
+```
+
 ## 9. 阶段 2：建立最小 TrollStore Keychain 身份
 
 ### 9.1 两种签名上下文必须分开
