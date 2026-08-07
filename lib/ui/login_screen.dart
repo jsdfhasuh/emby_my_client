@@ -365,6 +365,10 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                                   ),
                                 ),
                               ),
+                              validator: (value) =>
+                                  value == null || value.isEmpty
+                                  ? '请输入密码'
+                                  : null,
                             ),
                           ),
                           if (_error != null) ...[

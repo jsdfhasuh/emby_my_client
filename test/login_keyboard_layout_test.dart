@@ -88,6 +88,52 @@ void main() {
     }
   });
 
+  testWidgets(
+    'landscape iPad keyboard keeps the login button reachable after a user drag',
+    (tester) async {
+      final controller = _FakeLoginController(
+        capabilities: PlatformCapabilities.ipad,
+      );
+      final viewport = ValueNotifier<_ViewportConfig>(
+        const _ViewportConfig(size: Size(1194, 834), bottomInset: 360),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(viewport.dispose);
+      await _pumpLogin(tester, controller, viewport);
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('login-server-field')),
+        '192.0.2.10:8096',
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('login-username-field')),
+        'fixture-user',
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('login-password-field')),
+        'fixture-password',
+      );
+      await tester.showKeyboard(
+        find.byKey(const ValueKey<String>('login-password-field')),
+      );
+      await _pumpScrollAnimation(tester);
+      await tester.drag(
+        find.byKey(const ValueKey<String>('login-scroll-view')),
+        const Offset(0, -600),
+      );
+      await tester.pump();
+
+      final button = find.byKey(const ValueKey<String>('login-submit-button'));
+      final buttonRect = tester.getRect(button);
+      expect(buttonRect.top, greaterThanOrEqualTo(8));
+      expect(buttonRect.bottom, lessThanOrEqualTo(834 - 360 - 8));
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(controller.signInCalls, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('rotating a focused password preserves text and focus', (
     tester,
   ) async {
@@ -170,6 +216,43 @@ void main() {
   );
 
   testWidgets(
+    'rotating a focused password from portrait to landscape preserves the field',
+    (tester) async {
+      final controller = _FakeLoginController(
+        capabilities: PlatformCapabilities.ipad,
+      );
+      final viewport = ValueNotifier<_ViewportConfig>(
+        const _ViewportConfig(size: Size(834, 1194), bottomInset: 320),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(viewport.dispose);
+      await _pumpLogin(tester, controller, viewport);
+
+      final passwordKey = find.byKey(
+        const ValueKey<String>('login-password-field'),
+      );
+      await tester.enterText(passwordKey, 'fixture-password');
+      await tester.showKeyboard(passwordKey);
+      await _pumpScrollAnimation(tester);
+
+      await tester.binding.setSurfaceSize(const Size(1194, 834));
+      viewport.value = viewport.value.copyWith(
+        size: const Size(1194, 834),
+        bottomInset: 360,
+      );
+      await _pumpScrollAnimation(tester);
+
+      final password = _editableText(tester, passwordKey);
+      final rect = tester.getRect(passwordKey);
+      expect(password.focusNode.hasFocus, isTrue);
+      expect(password.controller.text, 'fixture-password');
+      expect(rect.top, greaterThanOrEqualTo(8));
+      expect(rect.bottom, lessThanOrEqualTo(834 - 360 - 8));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'Android discovery remains available in a compact keyboard view',
     (tester) async {
       final controller = _FakeLoginController(
@@ -197,6 +280,106 @@ void main() {
       final rect = tester.getRect(usernameKey);
       expect(rect.top, greaterThanOrEqualTo(8));
       expect(rect.bottom, lessThanOrEqualTo(640 - 260 - 8));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Android 360 by 800 keeps discovery visible without a keyboard', (
+    tester,
+  ) async {
+    final controller = _FakeLoginController(
+      capabilities: PlatformCapabilities.android,
+    );
+    final viewport = ValueNotifier<_ViewportConfig>(
+      const _ViewportConfig(size: Size(360, 800)),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(viewport.dispose);
+    await _pumpLogin(tester, controller, viewport, discovery: _FakeDiscovery());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Emby 客户端'), findsOneWidget);
+    expect(find.text('Living Room Emby'), findsOneWidget);
+    await tester.tap(find.text('Living Room Emby'));
+    await tester.pump();
+    expect(
+      _editableText(
+        tester,
+        find.byKey(const ValueKey<String>('login-server-field')),
+      ).controller.text,
+      'http://192.0.2.10:8096',
+    );
+    expect(controller.signInCalls, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('focused Android field can select discovery without submitting', (
+    tester,
+  ) async {
+    final controller = _FakeLoginController(
+      capabilities: PlatformCapabilities.android,
+    );
+    final viewport = ValueNotifier<_ViewportConfig>(
+      const _ViewportConfig(size: Size(360, 800), bottomInset: 260),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(viewport.dispose);
+    await _pumpLogin(tester, controller, viewport, discovery: _FakeDiscovery());
+    await tester.pumpAndSettle();
+
+    final usernameKey = find.byKey(
+      const ValueKey<String>('login-username-field'),
+    );
+    await tester.showKeyboard(usernameKey);
+    await _pumpScrollAnimation(tester);
+    await tester.tap(find.text('Living Room Emby'));
+    await tester.pump();
+
+    expect(
+      _editableText(
+        tester,
+        find.byKey(const ValueKey<String>('login-server-field')),
+      ).controller.text,
+      'http://192.0.2.10:8096',
+    );
+    expect(controller.signInCalls, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'empty compact iPad form exposes all validators and keeps login inactive',
+    (tester) async {
+      final controller = _FakeLoginController(
+        capabilities: PlatformCapabilities.ipad,
+      );
+      final viewport = ValueNotifier<_ViewportConfig>(
+        const _ViewportConfig(size: Size(600, 500), bottomInset: 220),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(viewport.dispose);
+      await _pumpLogin(tester, controller, viewport);
+
+      final scrollKey = find.byKey(const ValueKey<String>('login-scroll-view'));
+      await tester.drag(scrollKey, const Offset(0, -1000));
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const ValueKey<String>('login-submit-button')),
+      );
+      await tester.pumpAndSettle();
+      for (var index = 0; index < 3; index++) {
+        await tester.drag(scrollKey, const Offset(0, -300));
+        await tester.pump();
+      }
+
+      for (final text in const ['请输入服务器地址', '请输入用户名', '请输入密码']) {
+        expect(find.text(text), findsOneWidget);
+      }
+      final buttonRect = tester.getRect(
+        find.byKey(const ValueKey<String>('login-submit-button')),
+      );
+      expect(buttonRect.top, greaterThanOrEqualTo(8));
+      expect(buttonRect.bottom, lessThanOrEqualTo(500 - 220 - 8));
+      expect(controller.signInCalls, 0);
       expect(tester.takeException(), isNull);
     },
   );
@@ -352,6 +535,9 @@ void main() {
       await tester.tap(find.byTooltip('显示密码'));
       await tester.pump();
       expect(_editableText(tester, passwordKey).focusNode.hasFocus, isTrue);
+      final passwordRect = tester.getRect(passwordKey);
+      expect(passwordRect.top, greaterThanOrEqualTo(8));
+      expect(passwordRect.bottom, lessThanOrEqualTo(500 - 220 - 8));
 
       await tester.tapAt(const Offset(590, 20));
       await tester.pump();

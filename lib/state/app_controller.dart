@@ -35,6 +35,9 @@ typedef SignInAuthenticator =
 typedef SignInApiFactory =
     EmbyApi Function(EmbySession session, ServerScope scope);
 
+typedef DownloadServiceFactory =
+    DownloadService Function(EmbyApi api, ServerScope scope);
+
 Future<EmbySession> _defaultAuthenticate({
   required String serverUrl,
   required String username,
@@ -59,6 +62,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     PlatformCapabilities? capabilities,
     SignInAuthenticator? authenticator,
     SignInApiFactory? apiFactory,
+    DownloadServiceFactory? downloadServiceFactory,
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
@@ -66,6 +70,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
        _capabilities = capabilities ?? PlatformCapabilities.current(),
        _authenticate = authenticator ?? _defaultAuthenticate,
        _apiFactory = apiFactory,
+       _downloadServiceFactory = downloadServiceFactory,
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -77,6 +82,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final PlatformCapabilities _capabilities;
   final SignInAuthenticator _authenticate;
   final SignInApiFactory? _apiFactory;
+  final DownloadServiceFactory? _downloadServiceFactory;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -549,14 +555,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _activateSession(EmbySession session) async {
     final scope = ServerScope.fromSession(session);
-    final api = _createApi(session, scope);
+    final api = _apiFactory?.call(session, scope) ?? _createApi(session, scope);
     _session = session;
     _scope = scope;
     _serverCapabilities = await _restoreCapabilities(session);
     _libraryCategorySettings = await _restoreLibraryCategorySettings(scope);
     _clients.register(scope, api);
-    await _activateDownloads(api, scope);
-    unawaited(api.realtime.start());
+    await _activateDownloads(api, scope, safeLogging: true);
+    unawaited(_startRealtimeSafely(api));
   }
 
   Future<void> updateLibraryCategorySettings(
@@ -713,27 +719,31 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     bool safeLogging = false,
   }) async {
     if (!_localDatabaseAvailable) return;
-    final service = DownloadService(
-      api: api,
-      scope: scope,
-      repository: _downloadRepository,
-      assetService: EmbyDownloadAssetService(api),
-      preflight: PlatformDownloadPreflight(),
-      settingsStore: SharedPreferencesDownloadSettingsStore(),
-      executor: _capabilities.supportsAndroidForegroundDownloadExecutor
-          ? ForegroundDownloadExecutor(capabilities: _capabilities)
-          : null,
-    );
+    DownloadService? service;
     try {
-      await service.initialize();
+      final created =
+          _downloadServiceFactory?.call(api, scope) ??
+          DownloadService(
+            api: api,
+            scope: scope,
+            repository: _downloadRepository,
+            assetService: EmbyDownloadAssetService(api),
+            preflight: PlatformDownloadPreflight(),
+            settingsStore: SharedPreferencesDownloadSettingsStore(),
+            executor: _capabilities.supportsAndroidForegroundDownloadExecutor
+                ? ForegroundDownloadExecutor(capabilities: _capabilities)
+                : null,
+          );
+      service = created;
+      await created.initialize();
       if (_disposed ||
           _scope != scope ||
           !identical(_clients.clientFor(scope), api)) {
-        await service.shutdown();
-        service.dispose();
+        await created.shutdown();
+        created.dispose();
         return;
       }
-      _downloads = service;
+      _downloads = created;
       _offlineProgressSync = OfflineProgressSync(
         api: api,
         scope: scope,
@@ -741,7 +751,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       );
       unawaited(_syncOfflineProgress());
     } catch (error, stackTrace) {
-      service.dispose();
+      service?.dispose();
       if (safeLogging) {
         _recordSafeFailure(
           component: SafeDiagnosticComponent.auth,

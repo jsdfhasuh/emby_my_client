@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/core/safe_diagnostic_export.dart';
 import 'package:emby_my_client/core/sign_in_diagnostics.dart';
+import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
 import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
@@ -18,6 +20,78 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'real AppController sign-in failure becomes a verified safe export record',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'emby-safe-diagnostic-integration-',
+      );
+      final file = File('${directory.path}/events.jsonl');
+      final diagnostic = DiagnosticLog.instance;
+      diagnostic.setTestSafeEventFile(file);
+      addTearDown(() async {
+        diagnostic.setTestSafeEventFile(null);
+        await directory.delete(recursive: true);
+      });
+      final storage = _ExportSessionStorage()
+        ..values['emby_device_id_v1'] = 'fixture-device';
+      final controller = AppController(
+        store: SessionStore(sessionStorage: storage),
+        capabilities: PlatformCapabilities.ipad,
+        authenticator:
+            ({
+              required serverUrl,
+              required username,
+              required password,
+              required deviceId,
+              required deviceName,
+            }) async => throw const EmbyApiException(
+              'fixture authentication detail must not be exported',
+              statusCode: 401,
+            ),
+      );
+      addTearDown(controller.dispose);
+
+      await expectLater(
+        controller.signIn(
+          serverUrl: 'http://fixture.invalid:8096',
+          username: 'fixture-user',
+          password: 'fixture-password',
+        ),
+        throwsA(isA<EmbyApiException>()),
+      );
+
+      final records = await diagnostic.readSafeEvents();
+      final report = await SafeDiagnosticExportService(
+        source: diagnostic,
+        appVersion: '1.0.0',
+        buildNumber: '42',
+      ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
+      final decoded = jsonDecode(report.content) as Map<String, dynamic>;
+      final exportedRecords = (decoded['records'] as List)
+          .cast<Map<String, dynamic>>();
+      final failure = exportedRecords.singleWhere(
+        (record) =>
+            record['event'] == 'sign_in_failure' &&
+            record['stage'] == 'AUTHENTICATE',
+      );
+
+      expect(
+        records.any(
+          (record) =>
+              record.event == SafeDiagnosticEvent.signInFailure &&
+              record.stage == SignInStage.authenticate,
+        ),
+        isTrue,
+      );
+      expect(failure['reason'], 'emby_api_failure');
+      expect(failure['errorType'], 'EmbyApiException');
+      expect(failure['diagnosticCode'], 'LOGIN-AUTH');
+      expect(report.content, isNot(contains('fixture authentication detail')));
+      SafeDiagnosticExportService.validateSnapshot(report.content);
+    },
+  );
+
   test(
     'typed safe events are written to an independent JSONL stream',
     () async {
@@ -578,6 +652,60 @@ void main() {
     expect(gateway.report, isNull);
   });
 
+  testWidgets(
+    'native share error hides PlatformException details and allows retry',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      var calls = 0;
+      messenger.setMockMethodCallHandler(
+        MethodChannelSafeDiagnosticMetadataProvider.channel,
+        (call) async {
+          if (call.method != 'share') return null;
+          calls++;
+          if (calls == 1) {
+            throw PlatformException(
+              code: SafeDiagnosticExportException.share,
+              message: 'password=fixture-secret',
+              details: '/private/fixture/export.json',
+            );
+          }
+          return 'completed';
+        },
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(
+          MethodChannelSafeDiagnosticMetadataProvider.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SafeDiagnosticExportScreen(
+            service: _service(_FakeSafeEventSource(records: [_record(0)])),
+            capabilities: PlatformCapabilities.ipad,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> tapExport() async {
+        await tester.tap(find.text('导出安全诊断'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('导出'));
+        await tester.pumpAndSettle();
+      }
+
+      await tapExport();
+      expect(find.text('安全诊断操作失败（DIAG-EXPORT-SHARE）'), findsOneWidget);
+      expect(find.textContaining('fixture-secret'), findsNothing);
+      expect(find.textContaining('/private/fixture/export.json'), findsNothing);
+      await tapExport();
+      expect(calls, 2);
+      expect(find.text('安全诊断报告已准备分享'), findsOneWidget);
+    },
+  );
+
   testWidgets('rapid taps keep one confirmation and one native call', (
     tester,
   ) async {
@@ -703,7 +831,7 @@ void main() {
         home: DiagnosticLogScreen(capabilities: PlatformCapabilities.android),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
     expect(find.byTooltip('安全登录诊断'), findsNothing);
   });
 }
@@ -746,6 +874,19 @@ class _FakeSafeEventSource implements SafeDiagnosticEventSource {
   Future<void> clearSafeEvents() async {
     if (clearError != null) throw clearError!;
   }
+}
+
+class _ExportSessionStorage implements SessionStorage {
+  final Map<String, String> values = <String, String>{};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+
+  @override
+  Future<void> delete(String key) async => values.remove(key);
 }
 
 class _CapturingShareGateway implements SafeDiagnosticShareGateway {
