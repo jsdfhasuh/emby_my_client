@@ -59,6 +59,63 @@ class EmbyImage extends StatelessWidget {
   }
 }
 
+class DetailHeroArtwork extends StatelessWidget {
+  const DetailHeroArtwork({
+    super.key,
+    required this.backdrop,
+    required this.primary,
+  });
+
+  final EmbyImageRequest? backdrop;
+  final EmbyImageRequest? primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = backdrop ?? primary;
+    return Stack(
+      key: const ValueKey('item-detail-hero'),
+      fit: StackFit.expand,
+      children: [
+        if (foreground != null)
+          ColorFiltered(
+            key: const ValueKey('item-detail-backdrop-underlay'),
+            colorFilter: const ColorFilter.mode(
+              Color(0x99000000),
+              BlendMode.darken,
+            ),
+            child: EmbyImage(request: foreground),
+          )
+        else
+          const ColoredBox(
+            key: ValueKey('item-detail-backdrop-underlay'),
+            color: Color(0xFF202629),
+          ),
+        if (backdrop != null)
+          EmbyImage(
+            key: const ValueKey('item-detail-backdrop-foreground'),
+            request: backdrop,
+            fit: BoxFit.contain,
+          )
+        else if (primary != null)
+          EmbyImage(
+            key: const ValueKey('item-detail-primary-fallback'),
+            request: primary,
+            fit: BoxFit.contain,
+          )
+        else
+          const Center(
+            key: ValueKey('item-detail-primary-fallback'),
+            child: Icon(
+              Icons.movie_outlined,
+              color: Color(0xFF70797D),
+              size: 42,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class MediaPosterCard extends StatelessWidget {
   const MediaPosterCard({
     super.key,

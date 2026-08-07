@@ -96,6 +96,7 @@ void main() {
       300,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('cast-link-person-1')));
     await tester.pumpAndSettle();
 

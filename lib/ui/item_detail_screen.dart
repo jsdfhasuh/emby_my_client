@@ -13,6 +13,13 @@ import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
 import 'widgets/person_widgets.dart';
 
+double detailHeroHeightForViewport(Size size) {
+  final preferred = size.width > size.height
+      ? size.height * 0.48
+      : size.width * 0.72;
+  return preferred.clamp(300.0, 480.0).toDouble();
+}
+
 class ItemDetailScreen extends StatefulWidget {
   const ItemDetailScreen({
     super.key,
@@ -311,22 +318,25 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     }
 
     final item = _item!;
-    final backdrop =
-        widget.api.imageRequest(item, type: 'Backdrop', maxWidth: 1400) ??
-        widget.api.imageRequest(item, maxWidth: 900);
+    final backdrop = widget.api.imageRequest(
+      item,
+      type: 'Backdrop',
+      maxWidth: 1800,
+    );
     final poster = widget.api.imageRequest(item, maxWidth: 500);
+    final heroHeight = _heroHeight(context);
 
     return Scaffold(
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
             pinned: true,
-            expandedHeight: 260,
+            expandedHeight: heroHeight,
             flexibleSpace: FlexibleSpaceBar(
               background: Stack(
                 fit: StackFit.expand,
                 children: [
-                  EmbyImage(request: backdrop),
+                  DetailHeroArtwork(backdrop: backdrop, primary: poster),
                   const DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -459,6 +469,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         ],
       ),
     );
+  }
+
+  double _heroHeight(BuildContext context) {
+    return detailHeroHeightForViewport(MediaQuery.sizeOf(context));
   }
 
   Widget _buildEpisodes(EmbyItem series) {
