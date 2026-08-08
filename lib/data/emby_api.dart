@@ -491,8 +491,7 @@ class EmbyApi {
     }
     final filters = <String>[
       if (favoritesFilter) 'IsFavorite',
-      if (options.playedFilter.apiValue != null)
-        options.playedFilter.apiValue!,
+      if (options.playedFilter.apiValue != null) options.playedFilter.apiValue!,
     ];
     final response = await _request(
       () => _dio.get<dynamic>(
