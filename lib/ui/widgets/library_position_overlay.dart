@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
 
+import '../../library/library_browse_state.dart';
+import '../../library/library_result_statistics.dart';
 import '../../library/library_scroll_position_controller.dart';
 
 class LibraryPositionOverlay extends StatefulWidget {
   const LibraryPositionOverlay({
     super.key,
     required this.controller,
+    this.statistics,
     this.showRemaining = false,
     this.fadeDuration = const Duration(milliseconds: 180),
   });
 
   final LibraryScrollPositionController controller;
+  final LibraryResultStatistics? statistics;
   final bool showRemaining;
   final Duration fadeDuration;
 
@@ -78,8 +82,20 @@ class _LibraryPositionOverlayState extends State<LibraryPositionOverlay> {
               onEnd: _handleFadeEnd,
               child: _renderPanel && widget.controller.snapshot != null
                   ? _LibraryPositionPanel(
-                      snapshot: widget.controller.snapshot!,
-                      showRemaining: widget.showRemaining,
+                      presentation:
+                          (widget.statistics ??
+                                  LibraryResultStatistics(
+                                    state: LibraryBrowseState(
+                                      mediaType: widget.showRemaining
+                                          ? LibraryMediaType.movie
+                                          : LibraryMediaType.all,
+                                    ),
+                                    loadedCount:
+                                        widget.controller.snapshot!.loadedCount,
+                                    totalCount:
+                                        widget.controller.snapshot!.totalCount,
+                                  ))
+                              .present(widget.controller.snapshot!),
                     )
                   : const SizedBox.shrink(),
             ),
@@ -91,18 +107,13 @@ class _LibraryPositionOverlayState extends State<LibraryPositionOverlay> {
 }
 
 class _LibraryPositionPanel extends StatelessWidget {
-  const _LibraryPositionPanel({
-    required this.snapshot,
-    required this.showRemaining,
-  });
+  const _LibraryPositionPanel({required this.presentation});
 
-  final LibraryPositionSnapshot snapshot;
-  final bool showRemaining;
+  final LibraryPositionPresentation presentation;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final percentage = snapshot.percentage;
     return Container(
       key: const ValueKey('library-position-panel'),
       constraints: const BoxConstraints(minWidth: 96),
@@ -124,26 +135,26 @@ class _LibraryPositionPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${snapshot.firstVisible}\u2013${snapshot.lastVisible}',
+            presentation.rangeLabel,
             key: const ValueKey('library-position-range'),
             style: Theme.of(
               context,
             ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
           ),
-          if (snapshot.totalCount case final total?) ...[
+          if (presentation.totalLabel case final total?) ...[
             const SizedBox(height: 2),
             Text(
-              '共 ${_formatCount(total)} 项',
+              total,
               key: const ValueKey('library-position-total'),
               style: Theme.of(
                 context,
               ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
             ),
           ],
-          if (percentage != null) ...[
+          if (presentation.percentageLabel case final percentage?) ...[
             const SizedBox(height: 2),
             Text(
-              '$percentage%',
+              percentage,
               key: const ValueKey('library-position-percentage'),
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
                 color: colors.primary,
@@ -151,29 +162,28 @@ class _LibraryPositionPanel extends StatelessWidget {
               ),
             ),
           ],
-          if (showRemaining)
-            if (snapshot.remainingCount case final remaining?) ...[
-              const SizedBox(height: 2),
-              Text(
-                '剩余 ${_formatCount(remaining)} 项',
-                key: const ValueKey('library-position-remaining'),
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
-              ),
-            ],
+          if (presentation.remainingLabel case final remaining?) ...[
+            const SizedBox(height: 2),
+            Text(
+              remaining,
+              key: const ValueKey('library-position-remaining'),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+            ),
+          ],
+          if (presentation.statusLabel case final status?) ...[
+            const SizedBox(height: 2),
+            Text(
+              status,
+              key: const ValueKey('library-position-status'),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+            ),
+          ],
         ],
       ),
     );
   }
-}
-
-String _formatCount(int value) {
-  final digits = value.toString();
-  final output = StringBuffer();
-  for (var index = 0; index < digits.length; index++) {
-    if (index > 0 && (digits.length - index) % 3 == 0) output.write(',');
-    output.write(digits[index]);
-  }
-  return output.toString();
 }

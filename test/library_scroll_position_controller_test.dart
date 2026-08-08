@@ -187,6 +187,46 @@ void main() {
       expect(controller.snapshot?.remainingCount, isNull);
     });
 
+    test('normalizes a stale server total to the loaded count', () {
+      final controller = LibraryScrollPositionController();
+      addTearDown(controller.dispose);
+
+      controller.updateLayout(
+        constraints: _constraints(
+          crossAxisExtent: 340,
+          remainingPaintExtent: 400,
+        ),
+        loadedCount: 60,
+        totalCount: 20,
+      );
+
+      expect(controller.snapshot?.totalCount, 60);
+      expect(controller.snapshot?.remainingCount, greaterThanOrEqualTo(0));
+      expect(controller.snapshot?.percentage, lessThanOrEqualTo(100));
+    });
+
+    test('accepts directory and facet grid geometry', () {
+      final controller = LibraryScrollPositionController();
+      addTearDown(controller.dispose);
+      final constraints = _constraints(crossAxisExtent: 700);
+
+      controller.updateLayout(
+        constraints: constraints,
+        loadedCount: 60,
+        totalCount: 60,
+        geometry: libraryDirectoryGridGeometry,
+      );
+      expect(controller.snapshot, isNotNull);
+
+      controller.updateLayout(
+        constraints: constraints,
+        loadedCount: 60,
+        totalCount: 60,
+        geometry: libraryFacetGridGeometry,
+      );
+      expect(controller.snapshot, isNotNull);
+    });
+
     test('does not show when the full result fits in one viewport', () {
       final controller = LibraryScrollPositionController();
       addTearDown(controller.dispose);

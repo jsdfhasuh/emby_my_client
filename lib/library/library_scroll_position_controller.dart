@@ -70,7 +70,7 @@ class LibraryScrollPositionController extends ChangeNotifier {
     required SliverConstraints constraints,
     required int loadedCount,
     required int? totalCount,
-    LibraryMediaGridGeometry geometry = libraryMediaGridGeometry,
+    LibraryGridGeometry geometry = libraryMediaGridGeometry,
   }) {
     if (_disposed) return;
     if (loadedCount <= 0 ||
@@ -99,7 +99,7 @@ class LibraryScrollPositionController extends ChangeNotifier {
     lastIndex = lastIndex.clamp(firstIndex, loadedCount - 1);
 
     final normalizedTotal = totalCount != null && totalCount >= 0
-        ? totalCount
+        ? math.max(totalCount, loadedCount)
         : null;
     final viewportItemCount = math.max(
       loadedCount,

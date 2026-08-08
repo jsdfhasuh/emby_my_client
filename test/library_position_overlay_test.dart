@@ -1,3 +1,5 @@
+import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_result_statistics.dart';
 import 'package:emby_my_client/library/library_scroll_position_controller.dart';
 import 'package:emby_my_client/ui/widgets/library_position_overlay.dart';
 import 'package:flutter/material.dart';
@@ -139,7 +141,11 @@ void main() {
             children: [
               LibraryPositionOverlay(
                 controller: controller,
-                showRemaining: true,
+                statistics: const LibraryResultStatistics(
+                  state: LibraryBrowseState(mediaType: LibraryMediaType.movie),
+                  loadedCount: 60,
+                  totalCount: 137,
+                ),
               ),
             ],
           ),
@@ -147,7 +153,7 @@ void main() {
       ),
     );
 
-    expect(find.text('剩余 131 项'), findsOneWidget);
+    expect(find.text('筛选结果还剩 131 项'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
