@@ -8,6 +8,7 @@ import '../core/diagnostic_log.dart';
 import '../core/server_scope.dart';
 import '../images/emby_image_request.dart';
 import '../library/library_alphabet_filter.dart';
+import '../library/library_browse_state.dart' as browse;
 import '../models/emby_models.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
@@ -530,7 +531,86 @@ class EmbyApi {
     final total = rawTotal is num
         ? rawTotal.toInt()
         : int.tryParse(rawTotal?.toString() ?? '');
-    return EmbyItemPage(items: items, totalRecordCount: total);
+    return EmbyItemPage(
+      items: items,
+      totalRecordCount: total,
+      rawItemCount: rawItems.length,
+    );
+  }
+
+  Future<EmbyItemPage> getLibraryMediaItems({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    browse.LibraryMediaType mediaType = browse.LibraryMediaType.all,
+    browse.LibraryPlayedFilter playedFilter = browse.LibraryPlayedFilter.all,
+    bool favorites = false,
+    browse.LibrarySortBy sortBy = browse.LibrarySortBy.name,
+    browse.LibrarySortOrder sortOrder = browse.LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async {
+    if (genreId != null && tagId != null) {
+      throw ArgumentError('genreId and tagId cannot both be set.');
+    }
+    final filters = <String>[
+      if (favorites) 'IsFavorite',
+      if (playedFilter.apiValue != null) playedFilter.apiValue!,
+    ];
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': true,
+          'IncludeItemTypes': mediaType.apiValue,
+          'SortBy': sortBy.apiValue,
+          'SortOrder': sortOrder.apiValue,
+          if (filters.isNotEmpty) 'Filters': filters.join(','),
+          'GenreIds': ?genreId,
+          'TagIds': ?tagId,
+          'NameStartsWith': ?alphabetFilter.nameStartsWith,
+          'NameLessThan': ?alphabetFilter.nameLessThan,
+          'Fields': '$_listItemFields,MediaSources',
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    return _parseLibraryPage(response.data);
+  }
+
+  Future<EmbyItemPage> getDirectoryChildren({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    browse.LibrarySortBy sortBy = browse.LibrarySortBy.name,
+    browse.LibrarySortOrder sortOrder = browse.LibrarySortOrder.ascending,
+  }) async {
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': false,
+          'IncludeItemTypes':
+              'Folder,CollectionFolder,Movie,Series,Episode,Video',
+          'SortBy': sortBy.apiValue,
+          'SortOrder': sortOrder.apiValue,
+          'Fields': _listItemFields,
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    return _parseLibraryPage(response.data);
   }
 
   Future<EmbyItemPage> getLibraryFolders({
@@ -615,7 +695,32 @@ class EmbyApi {
     final total = rawTotal is num
         ? rawTotal.toInt()
         : int.tryParse(rawTotal?.toString() ?? '');
-    return EmbyItemPage(items: items, totalRecordCount: total);
+    return EmbyItemPage(
+      items: items,
+      totalRecordCount: total,
+      rawItemCount: rawItems.length,
+    );
+  }
+
+  EmbyItemPage _parseLibraryPage(dynamic responseData) {
+    final data = _map(responseData);
+    final rawItems = responseData is List
+        ? responseData
+        : data['Items'] as List<dynamic>? ?? const [];
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList(growable: false);
+    final rawTotal = data['TotalRecordCount'];
+    final total = rawTotal is num
+        ? rawTotal.toInt()
+        : int.tryParse(rawTotal?.toString() ?? '');
+    return EmbyItemPage(
+      items: items,
+      totalRecordCount: total,
+      rawItemCount: rawItems.length,
+    );
   }
 
   Future<EmbyItemPage> search(
