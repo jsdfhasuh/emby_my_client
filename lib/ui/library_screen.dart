@@ -552,7 +552,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _loading = false;
   Future<void>? _activeLoad;
   int? _activeLoadGeneration;
-  bool _reloading = false;
+  Future<void>? _activeReload;
+  int? _reloadGeneration;
   bool _hasMore = true;
   bool _loadFailed = false;
   bool _pendingRealtimeLibraryRefresh = false;
@@ -566,6 +567,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
   bool get _isMediaScope => _state.scope.supportsMediaFilters;
+
+  bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
 
   bool get _positionEnabled => _items.isNotEmpty;
 
@@ -631,6 +634,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   @override
   void dispose() {
+    _generation++;
+    _reloadGeneration = null;
+    _activeReload = null;
     _controller
       ..removeListener(_onScroll)
       ..dispose();
@@ -640,7 +646,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _onScroll() {
-    if (!_reloading && !_loadFailed && _controller.position.extentAfter < 700) {
+    if (!_isReloadingCurrentGeneration &&
+        !_loadFailed &&
+        _controller.position.extentAfter < 700) {
       unawaited(_loadMore());
     }
   }
@@ -852,13 +860,38 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   Future<void> _restartQuery({
     required int targetStartIndex,
     required bool restoreScrollPosition,
-  }) async {
-    if (_reloading) return;
-    _reloading = true;
+  }) {
+    if (!mounted) return Future.value();
+    if (_isReloadingCurrentGeneration) {
+      return _activeReload ?? Future.value();
+    }
     final previousOffset = restoreScrollPosition && _controller.hasClients
         ? _controller.offset
         : null;
     final generation = ++_generation;
+    _reloadGeneration = generation;
+    late final Future<void> trackedReload;
+    trackedReload =
+        _runRestartQuery(
+          generation: generation,
+          targetStartIndex: targetStartIndex,
+          restoreScrollPosition: restoreScrollPosition,
+          previousOffset: previousOffset,
+        ).whenComplete(() {
+          if (_reloadGeneration == generation) _reloadGeneration = null;
+          if (identical(_activeReload, trackedReload)) _activeReload = null;
+        });
+    _activeReload = trackedReload;
+    return trackedReload;
+  }
+
+  Future<void> _runRestartQuery({
+    required int generation,
+    required int targetStartIndex,
+    required bool restoreScrollPosition,
+    required double? previousOffset,
+  }) async {
+    if (!mounted || generation != _generation) return;
     setState(() {
       _items.clear();
       _seenItemIds.clear();
@@ -869,26 +902,22 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _loadFailed = false;
     });
     _clearPosition(scrollToTop: !restoreScrollPosition);
-    try {
-      while (mounted &&
-          generation == _generation &&
-          _nextStartIndex < targetStartIndex &&
-          _hasMore &&
-          !_loadFailed) {
-        final previousCursor = _nextStartIndex;
-        await _loadMore(expectedGeneration: generation);
-        if (_nextStartIndex <= previousCursor) break;
-      }
-      if (mounted &&
-          generation == _generation &&
-          _state.localFilter != LibraryLocalMediaFilter.all &&
-          _items.isEmpty &&
-          _hasMore &&
-          !_loadFailed) {
-        await _loadUntilDisplayCapacity(expectedGeneration: generation);
-      }
-    } finally {
-      if (generation == _generation) _reloading = false;
+    while (mounted &&
+        generation == _generation &&
+        _nextStartIndex < targetStartIndex &&
+        _hasMore &&
+        !_loadFailed) {
+      final previousCursor = _nextStartIndex;
+      await _loadMore(expectedGeneration: generation);
+      if (_nextStartIndex <= previousCursor) break;
+    }
+    if (mounted &&
+        generation == _generation &&
+        _state.localFilter != LibraryLocalMediaFilter.all &&
+        _items.isEmpty &&
+        _hasMore &&
+        !_loadFailed) {
+      await _loadUntilDisplayCapacity(expectedGeneration: generation);
     }
     if (previousOffset != null && mounted && generation == _generation) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -913,6 +942,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final next = reduceLibraryBrowseState(_state, event);
     if (identical(next, _state) || next == _state) return;
     _generation++;
+    _reloadGeneration = null;
+    _activeReload = null;
     setState(() {
       _state = next;
       _items.clear();
