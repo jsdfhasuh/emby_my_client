@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../library/library_browse_state.dart';
 import '../../library/library_result_statistics.dart';
 import '../../library/library_scroll_position_controller.dart';
 
@@ -8,14 +7,12 @@ class LibraryPositionOverlay extends StatefulWidget {
   const LibraryPositionOverlay({
     super.key,
     required this.controller,
-    this.statistics,
-    this.showRemaining = false,
+    required this.statistics,
     this.fadeDuration = const Duration(milliseconds: 180),
   });
 
   final LibraryScrollPositionController controller;
-  final LibraryResultStatistics? statistics;
-  final bool showRemaining;
+  final LibraryResultStatistics statistics;
   final Duration fadeDuration;
 
   @override
@@ -82,20 +79,9 @@ class _LibraryPositionOverlayState extends State<LibraryPositionOverlay> {
               onEnd: _handleFadeEnd,
               child: _renderPanel && widget.controller.snapshot != null
                   ? _LibraryPositionPanel(
-                      presentation:
-                          (widget.statistics ??
-                                  LibraryResultStatistics(
-                                    state: LibraryBrowseState(
-                                      mediaType: widget.showRemaining
-                                          ? LibraryMediaType.movie
-                                          : LibraryMediaType.all,
-                                    ),
-                                    loadedCount:
-                                        widget.controller.snapshot!.loadedCount,
-                                    totalCount:
-                                        widget.controller.snapshot!.totalCount,
-                                  ))
-                              .present(widget.controller.snapshot!),
+                      presentation: widget.statistics.present(
+                        widget.controller.snapshot!,
+                      ),
                     )
                   : const SizedBox.shrink(),
             ),

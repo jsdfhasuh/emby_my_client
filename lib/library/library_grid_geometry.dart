@@ -21,7 +21,7 @@ class LibraryMediaGridGeometry extends LibraryGridGeometry {
   const LibraryMediaGridGeometry({
     super.padding = const EdgeInsets.all(16),
     super.maxCrossAxisExtent = 180,
-    super.childAspectRatio = 0.52,
+    super.childAspectRatio = 0.46,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 18,
   });

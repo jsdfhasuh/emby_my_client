@@ -20,7 +20,7 @@ void main() {
     final api = _api(requests);
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -56,7 +56,11 @@ void main() {
 
     expect(find.byKey(const ValueKey('library-item-strm-1')), findsOneWidget);
     expect(find.byKey(const ValueKey('library-item-regular-0')), findsNothing);
-    expect(requests, hasLength(2));
+    expect(requests, hasLength(3));
+    expect(
+      requests.skip(1).map((request) => request.queryParameters['StartIndex']),
+      [0, 60],
+    );
     expect(requests.last.queryParameters['StartIndex'], 60);
 
     await tester.tap(find.byKey(const ValueKey('library-filter-button')));
@@ -69,15 +73,19 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('library-item-strm-1')), findsNothing);
+    expect(requests, hasLength(4));
+    expect(requests.last.queryParameters['StartIndex'], 0);
 
     await tester.tap(find.byKey(const ValueKey('library-sort-button')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-sort-dateAdded')));
+    await tester.pumpAndSettle();
     await tester.tap(
-      find.byKey(const ValueKey('library-sort-dateAddedDescending')),
+      find.byKey(const ValueKey('library-sort-direction-button')),
     );
     await tester.pumpAndSettle();
 
-    expect(requests, hasLength(3));
+    expect(requests, hasLength(6));
     expect(requests.last.queryParameters['StartIndex'], 0);
     expect(requests.last.queryParameters['SortBy'], 'DateCreated');
     expect(requests.last.queryParameters['SortOrder'], 'Descending');
@@ -91,7 +99,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('library-more-reset')));
     await tester.pumpAndSettle();
 
-    expect(requests, hasLength(4));
+    expect(requests, hasLength(7));
     expect(requests.last.queryParameters['StartIndex'], 0);
     expect(requests.last.queryParameters['SortBy'], 'SortName');
     expect(requests.last.queryParameters['SortOrder'], 'Ascending');
@@ -114,7 +122,7 @@ void main() {
     final api = _sectionApi(requests);
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -142,7 +150,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], isFalse);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      LibraryItemType.folder.apiValue,
+      'Folder,CollectionFolder,Movie,Series,Episode,Video',
     );
     expect(requests.last.queryParameters, isNot(contains('Filters')));
 
@@ -214,7 +222,7 @@ void main() {
       );
       await tester.pumpWidget(
         MaterialApp(
-          home: LibraryBrowseScreen(api: api, view: _folder),
+          home: LibraryBrowseScreen.directory(api: api, view: _folder),
         ),
       );
       await tester.pumpAndSettle();
@@ -225,7 +233,7 @@ void main() {
       );
       expect(verticalScrollable, findsOneWidget);
       await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('library-item-item-70')),
+        find.byKey(const ValueKey('library-group-item-70')),
         700,
         scrollable: verticalScrollable,
       );
@@ -235,7 +243,7 @@ void main() {
           .position
           .pixels;
 
-      await tester.tap(find.byKey(const ValueKey('library-item-item-70')));
+      await tester.tap(find.byKey(const ValueKey('library-group-item-70')));
       await tester.pumpAndSettle();
       expect(find.byType(ItemDetailScreen), findsOneWidget);
 
@@ -250,7 +258,7 @@ void main() {
       expect(browseStarts, [0, 60]);
       expect(detailRequests, ['item-70']);
       expect(
-        find.byKey(const ValueKey('library-item-item-70')),
+        find.byKey(const ValueKey('library-group-item-70')),
         findsOneWidget,
       );
 
@@ -316,7 +324,7 @@ EmbyApi _sectionApi(List<RequestOptions> requests) {
             ],
             _
                 when query['IncludeItemTypes'] ==
-                    LibraryItemType.folder.apiValue =>
+                    'Folder,CollectionFolder,Movie,Series,Episode,Video' =>
               [
                 {'Id': 'folder-1', 'Name': '电影目录', 'Type': 'Folder'},
                 {'Id': 'directory-media', 'Name': '目录内媒体', 'Type': 'Movie'},

@@ -24,18 +24,13 @@ void main() {
         );
       });
 
-      await api.getLibraryItems(parentId: 'library-1');
+      await api.getLibraryMediaItems(parentId: 'library-1');
       await api.getItem('item-1');
 
       final listFields = requests.first.queryParameters['Fields'].toString();
       final detailFields = requests.last.queryParameters['Fields'].toString();
-      for (final field in [
-        'People',
-        'MediaSources',
-        'MediaStreams',
-        'Chapters',
-        'Trickplay',
-      ]) {
+      expect(listFields, contains('MediaSources'));
+      for (final field in ['People', 'MediaStreams', 'Chapters', 'Trickplay']) {
         expect(listFields, isNot(contains(field)));
         expect(detailFields, contains(field));
       }

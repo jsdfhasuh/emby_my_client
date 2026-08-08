@@ -118,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
       MaterialPageRoute(
         builder: (_) => library.isPhotoLibrary
             ? PhotoLibraryScreen(api: widget.api, directory: library)
-            : LibraryBrowseScreen(
+            : LibraryBrowseScreen.root(
                 api: widget.api,
                 view: library,
                 downloads: widget.downloads,

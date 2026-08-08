@@ -70,19 +70,6 @@ class EmbyApiException implements Exception {
   String toString() => message;
 }
 
-enum LibrarySort {
-  nameAscending('SortName', 'Ascending'),
-  nameDescending('SortName', 'Descending'),
-  dateAddedDescending('DateCreated', 'Descending'),
-  productionYearDescending('ProductionYear', 'Descending'),
-  communityRatingDescending('CommunityRating', 'Descending');
-
-  const LibrarySort(this.sortBy, this.sortOrder);
-
-  final String sortBy;
-  final String sortOrder;
-}
-
 class EmbyApi {
   EmbyApi(
     this.session, {
@@ -458,85 +445,6 @@ class EmbyApi {
           'GroupItems': true,
         },
       );
-
-  Future<EmbyItemPage> getLibraryItems({
-    required String parentId,
-    int startIndex = 0,
-    int limit = 60,
-    LibraryBrowseOptions options = const LibraryBrowseOptions(),
-    String? genreId,
-    String? tagId,
-    bool favoritesFilter = false,
-    bool includeMediaSources = false,
-    String? nameStartsWith,
-    String? nameLessThan,
-  }) async {
-    final hasExplicitAlphabetFilter =
-        nameStartsWith != null || nameLessThan != null;
-    final effectiveNameStartsWith = hasExplicitAlphabetFilter
-        ? nameStartsWith
-        : options.alphabetFilter.nameStartsWith;
-    final effectiveNameLessThan = hasExplicitAlphabetFilter
-        ? nameLessThan
-        : options.alphabetFilter.nameLessThan;
-    final normalizedNameStartsWith = effectiveNameStartsWith == null
-        ? null
-        : normalizeLibraryAlphabetLetter(effectiveNameStartsWith);
-    final normalizedNameLessThan = effectiveNameLessThan == null
-        ? null
-        : normalizeLibraryAlphabetLetter(effectiveNameLessThan);
-    if (normalizedNameStartsWith != null && normalizedNameLessThan != null) {
-      throw ArgumentError(
-        'NameStartsWith and NameLessThan cannot be used together.',
-      );
-    }
-    final filters = <String>[
-      if (favoritesFilter) 'IsFavorite',
-      if (options.playedFilter.apiValue != null) options.playedFilter.apiValue!,
-    ];
-    final response = await _request(
-      () => _dio.get<dynamic>(
-        '/Users/${session.userId}/Items',
-        queryParameters: {
-          'ParentId': parentId,
-          'StartIndex': startIndex,
-          'Limit': limit,
-          'Recursive': options.itemType.recursive,
-          'IncludeItemTypes': options.itemType.apiValue,
-          'SortBy': options.sortBy.apiValue,
-          'SortOrder': options.sortOrder.apiValue,
-          if (filters.isNotEmpty) 'Filters': filters.join(','),
-          if (options.favoriteOnly) 'IsFavorite': true,
-          'GenreIds': ?genreId,
-          'TagIds': ?tagId,
-          'NameStartsWith': ?normalizedNameStartsWith,
-          'NameLessThan': ?normalizedNameLessThan,
-          'Fields': includeMediaSources
-              ? '$_listItemFields,MediaSources'
-              : _listItemFields,
-          'EnableUserData': true,
-          'EnableImages': true,
-          'EnableTotalRecordCount': true,
-        },
-      ),
-    );
-    final data = _map(response.data);
-    final rawItems = data['Items'] as List<dynamic>? ?? const [];
-    final items = rawItems
-        .whereType<Map>()
-        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
-        .where((item) => item.id.isNotEmpty)
-        .toList(growable: false);
-    final rawTotal = data['TotalRecordCount'];
-    final total = rawTotal is num
-        ? rawTotal.toInt()
-        : int.tryParse(rawTotal?.toString() ?? '');
-    return EmbyItemPage(
-      items: items,
-      totalRecordCount: total,
-      rawItemCount: rawItems.length,
-    );
-  }
 
   Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
+import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
@@ -332,11 +333,16 @@ void main() {
         letterRequests.map((request) => request.queryParameters['StartIndex']),
         [0, 60],
       );
-      expect(find.byType(ErrorState), findsOneWidget);
+      expect(find.byKey(const ValueKey('library-load-error')), findsOneWidget);
+      expect(find.text('加载失败，请重试'), findsOneWidget);
       expect(find.text('首字母：M'), findsOneWidget);
+      final firstLetterRequest = requests.indexWhere(
+        (request) => request.queryParameters['NameStartsWith'] == 'M',
+      );
+      expect(firstLetterRequest, greaterThanOrEqualTo(0));
       expect(
         requests
-            .skip(1)
+            .skip(firstLetterRequest)
             .every(
               (request) => request.queryParameters['NameStartsWith'] == 'M',
             ),
@@ -445,9 +451,7 @@ void main() {
 
       await tester.tap(find.byKey(const ValueKey('library-sort-button')));
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('library-sort-dateAddedDescending')),
-      );
+      await tester.tap(find.byKey(const ValueKey('library-sort-dateAdded')));
       await tester.pumpAndSettle();
 
       expect(
@@ -464,9 +468,7 @@ void main() {
 
       await tester.tap(find.byKey(const ValueKey('library-sort-button')));
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('library-sort-nameAscending')),
-      );
+      await tester.tap(find.byKey(const ValueKey('library-sort-name')));
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('library-alphabet-button')),
@@ -568,7 +570,8 @@ void main() {
 
     expect(requests, hasLength(2));
     expect(requests.last.queryParameters['NameStartsWith'], 'M');
-    expect(find.byType(ErrorState), findsOneWidget);
+    expect(find.byKey(const ValueKey('library-load-error')), findsOneWidget);
+    expect(find.text('加载失败，请重试'), findsOneWidget);
     expect(find.text('首字母：M'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('library-alphabet-button')),
@@ -624,7 +627,7 @@ void _setPhoneView(WidgetTester tester) {
 
 Widget _app(EmbyApi api) => MaterialApp(
   theme: ThemeData.dark(useMaterial3: true),
-  home: LibraryBrowseScreen(api: api, view: _library),
+  home: LibraryBrowseScreen.root(api: api, view: _library),
 );
 
 Future<void> _selectAlphabet(WidgetTester tester, String key) async {
@@ -751,19 +754,20 @@ class _DeferredAlphabetApi extends EmbyApi {
   final List<LibraryAlphabetFilter> filters = [];
 
   @override
-  Future<EmbyItemPage> getLibraryItems({
+  Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,
     int startIndex = 0,
     int limit = 60,
-    LibraryBrowseOptions options = const LibraryBrowseOptions(),
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
     String? genreId,
     String? tagId,
-    bool favoritesFilter = false,
-    bool includeMediaSources = false,
-    String? nameStartsWith,
-    String? nameLessThan,
   }) {
-    final filter = options.alphabetFilter;
+    final filter = alphabetFilter;
     filters.add(filter);
     return switch (filter) {
       LetterItems(letter: 'M') => mRequest.future,

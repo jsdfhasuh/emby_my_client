@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
+import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -8,35 +9,34 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('normalizes library browse modes without overlapping state', () {
-    final legacyFolder = LibraryBrowseOptions(
-      itemType: LibraryItemType.folder,
+  test('normalizes library browse scopes without overlapping state', () {
+    final overlapping = LibraryBrowseState(
+      scope: LibraryBrowseScope.directory,
+      mediaType: LibraryMediaType.movie,
       playedFilter: LibraryPlayedFilter.unplayed,
-      favoriteOnly: true,
+      localFilter: LibraryLocalMediaFilter.strm,
       alphabetFilter: LetterItems('m'),
     );
-    final directory = normalizeLibraryBrowseOptions(
-      legacyFolder,
-      mode: LibraryBrowseMode.directory,
-    );
-    expect(directory.itemType, LibraryItemType.folder);
+    final directory = normalizeLibraryBrowseState(overlapping);
+    expect(directory.scope, LibraryBrowseScope.directory);
+    expect(directory.mediaType, LibraryMediaType.all);
     expect(directory.playedFilter, LibraryPlayedFilter.all);
-    expect(directory.favoriteOnly, isFalse);
+    expect(directory.localFilter, LibraryLocalMediaFilter.all);
     expect(directory.alphabetFilter.isAll, isTrue);
 
-    final media = normalizeLibraryBrowseOptions(
-      legacyFolder,
-      mode: LibraryBrowseMode.media,
+    final media = reduceLibraryBrowseState(
+      directory,
+      const LibraryScopeSelected(LibraryBrowseScope.media),
     );
-    expect(media.itemType, LibraryItemType.all);
-    expect(media.favoriteOnly, isFalse);
+    expect(media, const LibraryBrowseState());
 
-    final favorites = normalizeLibraryBrowseOptions(
-      const LibraryBrowseOptions(itemType: LibraryItemType.movie),
-      mode: LibraryBrowseMode.favorites,
+    const filteredMedia = LibraryBrowseState(mediaType: LibraryMediaType.movie);
+    final favorites = reduceLibraryBrowseState(
+      filteredMedia,
+      const LibraryScopeSelected(LibraryBrowseScope.favorites),
     );
-    expect(favorites.itemType, LibraryItemType.movie);
-    expect(favorites.favoriteOnly, isFalse);
+    expect(favorites.scope, LibraryBrowseScope.favorites);
+    expect(favorites.mediaType, LibraryMediaType.movie);
   });
 
   test(
@@ -48,12 +48,10 @@ void main() {
         handler.resolve(_libraryResponse(options));
       });
 
-      await api.getLibraryItems(
+      await api.getLibraryMediaItems(
         parentId: 'library-1',
-        favoritesFilter: true,
-        options: const LibraryBrowseOptions(
-          playedFilter: LibraryPlayedFilter.unplayed,
-        ),
+        favorites: true,
+        playedFilter: LibraryPlayedFilter.unplayed,
       );
 
       expect(captured?.queryParameters['Filters'], 'IsFavorite,IsUnplayed');
@@ -62,13 +60,16 @@ void main() {
   );
 
   test('filter badge excludes the visible media type choice', () {
-    const all = LibraryBrowseOptions();
+    const all = LibraryBrowseState();
     expect(all.activeFilterCount, 0);
-    expect(all.copyWith(itemType: LibraryItemType.movie).activeFilterCount, 0);
+    expect(
+      all.copyWith(mediaType: LibraryMediaType.movie).activeFilterCount,
+      0,
+    );
     expect(
       all
           .copyWith(
-            itemType: LibraryItemType.movie,
+            mediaType: LibraryMediaType.movie,
             playedFilter: LibraryPlayedFilter.unplayed,
           )
           .activeFilterCount,
@@ -83,17 +84,15 @@ void main() {
       handler.resolve(_libraryResponse(options));
     });
 
-    final page = await api.getLibraryItems(
+    final page = await api.getLibraryMediaItems(
       parentId: 'library-1',
       startIndex: 60,
       limit: 30,
-      options: const LibraryBrowseOptions(
-        sortBy: LibrarySortBy.dateAdded,
-        sortOrder: LibrarySortOrder.descending,
-        playedFilter: LibraryPlayedFilter.unplayed,
-        itemType: LibraryItemType.movie,
-        favoriteOnly: true,
-      ),
+      sortBy: LibrarySortBy.dateAdded,
+      sortOrder: LibrarySortOrder.descending,
+      playedFilter: LibraryPlayedFilter.unplayed,
+      mediaType: LibraryMediaType.movie,
+      favorites: true,
     );
 
     expect(page.totalRecordCount, 116);
@@ -104,12 +103,15 @@ void main() {
     expect(captured?.queryParameters, containsPair('Limit', 30));
     expect(captured?.queryParameters, containsPair('SortBy', 'DateCreated'));
     expect(captured?.queryParameters, containsPair('SortOrder', 'Descending'));
-    expect(captured?.queryParameters, containsPair('Filters', 'IsUnplayed'));
+    expect(
+      captured?.queryParameters,
+      containsPair('Filters', 'IsFavorite,IsUnplayed'),
+    );
     expect(
       captured?.queryParameters,
       containsPair('IncludeItemTypes', 'Movie'),
     );
-    expect(captured?.queryParameters, containsPair('IsFavorite', true));
+    expect(captured?.queryParameters, isNot(contains('IsFavorite')));
     expect(
       captured?.queryParameters,
       containsPair('EnableTotalRecordCount', true),
@@ -127,21 +129,17 @@ void main() {
         handler.resolve(_libraryResponse(options));
       });
 
-      await api.getLibraryItems(parentId: 'library-1', nameStartsWith: ' m ');
-      await api.getLibraryItems(parentId: 'library-1', nameLessThan: 'a');
-      await api.getLibraryItems(
+      await api.getLibraryMediaItems(
         parentId: 'library-1',
-        options: LibraryBrowseOptions(alphabetFilter: LetterItems('q')),
+        alphabetFilter: LetterItems('m'),
       );
-      await api.getLibraryItems(
+      await api.getLibraryMediaItems(
         parentId: 'library-1',
-        options: LibraryBrowseOptions(alphabetFilter: LetterItems('q')),
-        nameLessThan: 'a',
+        alphabetFilter: const SymbolsItems(),
       );
-      await api.getLibraryItems(
+      await api.getLibraryMediaItems(
         parentId: 'library-1',
-        options: const LibraryBrowseOptions(alphabetFilter: SymbolsItems()),
-        nameStartsWith: 'm',
+        alphabetFilter: LetterItems('q'),
       );
 
       expect(requests.first.queryParameters['NameStartsWith'], 'M');
@@ -149,24 +147,7 @@ void main() {
       expect(requests[1].queryParameters['NameLessThan'], 'A');
       expect(requests[1].queryParameters, isNot(contains('NameStartsWith')));
       expect(requests[2].queryParameters['NameStartsWith'], 'Q');
-      expect(requests[3].queryParameters['NameLessThan'], 'A');
-      expect(requests[3].queryParameters, isNot(contains('NameStartsWith')));
-      expect(requests[4].queryParameters['NameStartsWith'], 'M');
-      expect(requests[4].queryParameters, isNot(contains('NameLessThan')));
-
-      await expectLater(
-        api.getLibraryItems(
-          parentId: 'library-1',
-          nameStartsWith: 'M',
-          nameLessThan: 'A',
-        ),
-        throwsArgumentError,
-      );
-      await expectLater(
-        api.getLibraryItems(parentId: 'library-1', nameStartsWith: '#'),
-        throwsArgumentError,
-      );
-      expect(requests, hasLength(5));
+      expect(requests, hasLength(3));
     },
   );
 
@@ -177,15 +158,12 @@ void main() {
       handler.resolve(_libraryResponse(options));
     });
 
-    await api.getLibraryItems(
-      parentId: 'library-1',
-      options: const LibraryBrowseOptions(itemType: LibraryItemType.folder),
-    );
+    await api.getDirectoryChildren(parentId: 'library-1');
 
     expect(captured?.queryParameters['Recursive'], false);
     expect(
       captured?.queryParameters['IncludeItemTypes'],
-      'Folder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,Movie,Series,Episode,Video',
     );
   });
 
@@ -201,7 +179,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(useMaterial3: true),
-        home: LibraryBrowseScreen(
+        home: LibraryBrowseScreen.root(
           api: api,
           view: _library,
           categorySettings: _allCategorySettings,
@@ -232,7 +210,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      LibraryItemType.movie.apiValue,
+      LibraryMediaType.movie.apiValue,
     );
 
     await tester.tap(find.byTooltip('筛选'));
@@ -260,7 +238,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(useMaterial3: true),
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -291,7 +269,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(useMaterial3: true),
-        home: LibraryBrowseScreen(
+        home: LibraryBrowseScreen.root(
           api: api,
           view: _library,
           categorySettings: _allCategorySettings,
@@ -345,7 +323,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(useMaterial3: true),
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -360,7 +338,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], false);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      LibraryItemType.folder.apiValue,
+      'Folder,CollectionFolder,Movie,Series,Episode,Video',
     );
 
     await tester.tap(find.text('目录 A'));
@@ -371,7 +349,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], false);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      LibraryItemType.folder.apiValue,
+      'Folder,CollectionFolder,Movie,Series,Episode,Video',
     );
   });
 
@@ -436,7 +414,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(useMaterial3: true),
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -506,7 +484,8 @@ Response<dynamic> _libraryResponse(RequestOptions options) => Response<dynamic>(
 Response<dynamic> _folderResponse(RequestOptions options) {
   final query = options.queryParameters;
   final isFolderView =
-      query['IncludeItemTypes'] == LibraryItemType.folder.apiValue;
+      query['IncludeItemTypes'] ==
+      'Folder,CollectionFolder,Movie,Series,Episode,Video';
   final isLibraryRoot = query['ParentId'] == _library.id;
   final items = isFolderView && isLibraryRoot
       ? [

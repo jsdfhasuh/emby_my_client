@@ -4,6 +4,8 @@ import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/library/library_alphabet_filter.dart';
+import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -23,7 +25,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -75,7 +77,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -114,7 +116,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: LibraryBrowseScreen(api: api, view: _library),
+          home: LibraryBrowseScreen.root(api: api, view: _library),
         ),
       );
       await tester.pumpAndSettle();
@@ -171,11 +173,11 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final api = _pagedApi(starts: <int>[], totalCount: 120, includeStrm: true);
+    final api = _pagedApi(starts: <int>[], totalCount: 180, includeStrm: true);
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -189,11 +191,14 @@ void main() {
       find.byKey(const ValueKey('library-position-range')),
       findsOneWidget,
     );
-    expect(find.byKey(const ValueKey('library-position-total')), findsNothing);
+    expect(find.text('共 60 项'), findsNothing);
     expect(
       find.byKey(const ValueKey('library-position-percentage')),
       findsNothing,
     );
+    expect(find.text('已匹配 60 项'), findsOneWidget);
+    expect(find.text('已扫描 120/180 项'), findsOneWidget);
+    expect(find.text('继续统计中'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await api.dispose();
@@ -215,7 +220,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -248,7 +253,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -276,7 +281,7 @@ void main() {
     await api.dispose();
   });
 
-  testWidgets('does not attach position state to grouping grids', (
+  testWidgets('shows typed position state across media and grouping grids', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(393, 852);
@@ -287,7 +292,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -302,10 +307,36 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('library-section-directories')));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('library-position-panel')), findsNothing);
     expect(
       find.byKey(const ValueKey('library-group-folder-0')),
       findsOneWidget,
+    );
+    await _showOverlay(tester);
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-position-total')))
+          .data,
+      '目录共 60 项',
+    );
+    expect(
+      find.byKey(const ValueKey('library-position-percentage')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('library-position-remaining')),
+      findsNothing,
+    );
+
+    tester.state<ScrollableState>(_verticalScrollable()).position.jumpTo(0);
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('library-section-genres')));
+    await tester.pumpAndSettle();
+    await _showOverlay(tester);
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-position-total')))
+          .data,
+      '分类共 60 项',
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -324,7 +355,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -332,8 +363,10 @@ void main() {
     await _showOverlay(tester);
     await tester.tap(find.byKey(const ValueKey('library-sort-button')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-sort-dateAdded')));
+    await tester.pumpAndSettle();
     await tester.tap(
-      find.byKey(const ValueKey('library-sort-dateAddedDescending')),
+      find.byKey(const ValueKey('library-sort-direction-button')),
     );
     await tester.pumpAndSettle();
 
@@ -374,7 +407,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen(api: api, view: _library),
+        home: LibraryBrowseScreen.root(api: api, view: _library),
       ),
     );
     await tester.pumpAndSettle();
@@ -471,7 +504,7 @@ EmbyApi _sectionApi() {
         onRequest: (options, handler) {
           final folders =
               options.queryParameters['IncludeItemTypes'] ==
-              LibraryItemType.folder.apiValue;
+              'Folder,CollectionFolder,Movie,Series,Episode,Video';
           final items = [
             for (var index = 0; index < 60; index++)
               folders
@@ -557,17 +590,18 @@ class _CountingLibraryApi extends EmbyApi {
   final _ReadCounter counter;
 
   @override
-  Future<EmbyItemPage> getLibraryItems({
+  Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,
     int startIndex = 0,
     int limit = 60,
-    LibraryBrowseOptions options = const LibraryBrowseOptions(),
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
     String? genreId,
     String? tagId,
-    bool favoritesFilter = false,
-    bool includeMediaSources = false,
-    String? nameStartsWith,
-    String? nameLessThan,
   }) async => EmbyItemPage(
     items: [
       for (var index = 0; index < itemCount; index++)

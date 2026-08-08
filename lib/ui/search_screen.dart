@@ -233,14 +233,11 @@ class _SearchScreenState extends State<SearchScreen> {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => item.isFolder
-            ? LibraryBrowseScreen(
+            ? LibraryBrowseScreen.directory(
                 api: widget.api,
                 view: item,
                 downloads: widget.downloads,
                 categorySettings: widget.categorySettings,
-                initialOptions: const LibraryBrowseOptions(
-                  itemType: LibraryItemType.folder,
-                ),
               )
             : ItemDetailScreen(
                 api: widget.api,

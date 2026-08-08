@@ -30,6 +30,11 @@ void main() {
               ),
               LibraryPositionOverlay(
                 controller: controller,
+                statistics: const LibraryResultStatistics(
+                  state: LibraryBrowseState(),
+                  loadedCount: 60,
+                  totalCount: 1286,
+                ),
                 fadeDuration: const Duration(milliseconds: 100),
               ),
             ],
@@ -72,7 +77,16 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: Stack(
-            children: [LibraryPositionOverlay(controller: controller)],
+            children: [
+              LibraryPositionOverlay(
+                controller: controller,
+                statistics: const LibraryResultStatistics(
+                  state: LibraryBrowseState(),
+                  loadedCount: 60,
+                  totalCount: 120,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -106,7 +120,15 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: Stack(
-            children: [LibraryPositionOverlay(controller: controller)],
+            children: [
+              LibraryPositionOverlay(
+                controller: controller,
+                statistics: const LibraryResultStatistics(
+                  state: LibraryBrowseState(),
+                  loadedCount: 60,
+                ),
+              ),
+            ],
           ),
         ),
       ),

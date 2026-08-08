@@ -1,5 +1,3 @@
-import '../library/library_alphabet_filter.dart';
-
 class EmbySession {
   const EmbySession({
     required this.serverUrl,
@@ -366,53 +364,6 @@ bool _isStrmReference(String? value) {
 
 bool _isStrmContainer(String? value) => value?.trim().toLowerCase() == 'strm';
 
-enum LibrarySortBy {
-  name('SortName'),
-  dateAdded('DateCreated'),
-  premiereDate('PremiereDate'),
-  productionYear('ProductionYear'),
-  communityRating('CommunityRating'),
-  runtime('Runtime');
-
-  const LibrarySortBy(this.apiValue);
-
-  final String apiValue;
-}
-
-enum LibrarySortOrder {
-  ascending('Ascending'),
-  descending('Descending');
-
-  const LibrarySortOrder(this.apiValue);
-
-  final String apiValue;
-}
-
-enum LibraryPlayedFilter {
-  all(null),
-  played('IsPlayed'),
-  unplayed('IsUnplayed');
-
-  const LibraryPlayedFilter(this.apiValue);
-
-  final String? apiValue;
-}
-
-enum LibraryItemType {
-  all('Movie,Series,Video'),
-  movie('Movie'),
-  series('Series'),
-  video('Video'),
-  folder('Folder,Movie,Series,Episode,Video', recursive: false);
-
-  const LibraryItemType(this.apiValue, {this.recursive = true});
-
-  final String apiValue;
-  final bool recursive;
-}
-
-enum LibraryBrowseMode { media, directory, genre, tag, favorites }
-
 enum SearchItemType {
   all('Movie,Series,Episode,Video,Folder,CollectionFolder'),
   movie('Movie'),
@@ -434,95 +385,6 @@ enum PersonMediaFilter {
   const PersonMediaFilter(this.apiValue);
 
   final String apiValue;
-}
-
-class LibraryBrowseOptions {
-  const LibraryBrowseOptions({
-    this.sortBy = LibrarySortBy.name,
-    this.sortOrder = LibrarySortOrder.ascending,
-    this.playedFilter = LibraryPlayedFilter.all,
-    this.itemType = LibraryItemType.all,
-    this.favoriteOnly = false,
-    this.alphabetFilter = const AllItems(),
-  });
-
-  final LibrarySortBy sortBy;
-  final LibrarySortOrder sortOrder;
-  final LibraryPlayedFilter playedFilter;
-  final LibraryItemType itemType;
-  final bool favoriteOnly;
-  final LibraryAlphabetFilter alphabetFilter;
-
-  int get activeFilterCount =>
-      (playedFilter == LibraryPlayedFilter.all ? 0 : 1) +
-      (alphabetFilter.isAll ? 0 : 1);
-
-  LibraryBrowseOptions copyWith({
-    LibrarySortBy? sortBy,
-    LibrarySortOrder? sortOrder,
-    LibraryPlayedFilter? playedFilter,
-    LibraryItemType? itemType,
-    bool? favoriteOnly,
-    LibraryAlphabetFilter? alphabetFilter,
-  }) => LibraryBrowseOptions(
-    sortBy: sortBy ?? this.sortBy,
-    sortOrder: sortOrder ?? this.sortOrder,
-    playedFilter: playedFilter ?? this.playedFilter,
-    itemType: itemType ?? this.itemType,
-    favoriteOnly: favoriteOnly ?? this.favoriteOnly,
-    alphabetFilter: alphabetFilter ?? this.alphabetFilter,
-  );
-
-  @override
-  bool operator ==(Object other) =>
-      other is LibraryBrowseOptions &&
-      other.sortBy == sortBy &&
-      other.sortOrder == sortOrder &&
-      other.playedFilter == playedFilter &&
-      other.itemType == itemType &&
-      other.favoriteOnly == favoriteOnly &&
-      other.alphabetFilter == alphabetFilter;
-
-  @override
-  int get hashCode => Object.hash(
-    sortBy,
-    sortOrder,
-    playedFilter,
-    itemType,
-    favoriteOnly,
-    alphabetFilter,
-  );
-}
-
-LibraryBrowseOptions normalizeLibraryBrowseOptions(
-  LibraryBrowseOptions options, {
-  required LibraryBrowseMode mode,
-}) {
-  switch (mode) {
-    case LibraryBrowseMode.directory:
-      return options.copyWith(
-        playedFilter: LibraryPlayedFilter.all,
-        itemType: LibraryItemType.folder,
-        favoriteOnly: false,
-        alphabetFilter: const AllItems(),
-      );
-    case LibraryBrowseMode.media:
-    case LibraryBrowseMode.favorites:
-      return options.copyWith(
-        itemType: options.itemType == LibraryItemType.folder
-            ? LibraryItemType.all
-            : options.itemType,
-        favoriteOnly: false,
-      );
-    case LibraryBrowseMode.genre:
-    case LibraryBrowseMode.tag:
-      return options.copyWith(
-        playedFilter: LibraryPlayedFilter.all,
-        itemType: LibraryItemType.all,
-        favoriteOnly: false,
-        alphabetFilter: const AllItems(),
-      );
-  }
 }
 
 class EmbyItemPage {
