@@ -143,7 +143,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             _categorySwitch(
               icon: Icons.folder_outlined,
-              label: '文件夹',
+              label: '目录',
               value: _settings.showFolders,
               onChanged: (value) =>
                   _update(_settings.copyWith(showFolders: value)),

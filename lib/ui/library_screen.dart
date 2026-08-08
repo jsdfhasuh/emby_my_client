@@ -314,21 +314,25 @@ extension on LibraryLocalMediaFilter {
 enum _LibraryMoreAction { refresh, reset }
 
 class _LibraryScopeBar extends StatelessWidget {
-  const _LibraryScopeBar({required this.selected, required this.onSelected});
+  const _LibraryScopeBar({
+    required this.selected,
+    required this.categorySettings,
+    required this.onSelected,
+  });
 
   final LibraryBrowseScope selected;
+  final LibraryCategorySettings categorySettings;
   final ValueChanged<LibraryBrowseScope> onSelected;
-
-  static const _rootScopes = [
-    LibraryBrowseScope.media,
-    LibraryBrowseScope.directory,
-    LibraryBrowseScope.genres,
-    LibraryBrowseScope.tags,
-    LibraryBrowseScope.favorites,
-  ];
 
   @override
   Widget build(BuildContext context) {
+    final scopes = [
+      LibraryBrowseScope.media,
+      if (categorySettings.showFolders) LibraryBrowseScope.directory,
+      LibraryBrowseScope.genres,
+      LibraryBrowseScope.tags,
+      if (categorySettings.showFavorites) LibraryBrowseScope.favorites,
+    ];
     return Padding(
       key: const ValueKey('library-section-bar'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -341,7 +345,7 @@ class _LibraryScopeBar extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                for (final scope in _rootScopes) ...[
+                for (final scope in scopes) ...[
                   FilterChip(
                     key: ValueKey(
                       'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
@@ -353,7 +357,7 @@ class _LibraryScopeBar extends StatelessWidget {
                       if (isSelected) onSelected(scope);
                     },
                   ),
-                  if (scope != _rootScopes.last) const SizedBox(width: 8),
+                  if (scope != scopes.last) const SizedBox(width: 8),
                 ],
               ],
             ),
@@ -649,6 +653,27 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       },
     );
     unawaited(_loadUntilDisplayCapacity());
+  }
+
+  @override
+  void didUpdateWidget(covariant LibraryBrowseScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_isRoot || oldWidget.categorySettings == widget.categorySettings) {
+      return;
+    }
+    final settings = widget.categorySettings;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_isRoot || widget.categorySettings != settings) return;
+      _dispatch(
+        LibraryCategoryVisibilityChanged(
+          showMovies: settings.showMovies,
+          showSeries: settings.showSeries,
+          showVideos: settings.showVideos,
+          showFavorites: settings.showFavorites,
+          showDirectory: settings.showFolders,
+        ),
+      );
+    });
   }
 
   @override
@@ -1267,6 +1292,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                     SliverToBoxAdapter(
                       child: _LibraryScopeBar(
                         selected: _state.scope,
+                        categorySettings: widget.categorySettings,
                         onSelected: (scope) =>
                             _dispatch(LibraryScopeSelected(scope)),
                       ),

@@ -273,4 +273,49 @@ void main() {
       same(directory),
     );
   });
+
+  test('category visibility normalizes hidden root selections', () {
+    const visibility = LibraryCategoryVisibilityChanged(
+      showMovies: false,
+      showSeries: true,
+      showVideos: true,
+      showFavorites: false,
+      showDirectory: false,
+    );
+    const favoriteMovie = LibraryBrowseState(
+      scope: LibraryBrowseScope.favorites,
+      mediaType: LibraryMediaType.movie,
+      playedFilter: LibraryPlayedFilter.unplayed,
+      localFilter: LibraryLocalMediaFilter.strm,
+    );
+
+    final media = reduceLibraryBrowseState(favoriteMovie, visibility);
+    expect(media.scope, LibraryBrowseScope.media);
+    expect(media.mediaType, LibraryMediaType.all);
+    expect(media.playedFilter, LibraryPlayedFilter.unplayed);
+    expect(media.localFilter, LibraryLocalMediaFilter.strm);
+    expect(
+      reduceLibraryBrowseState(
+        const LibraryBrowseState.directory(
+          sortBy: LibrarySortBy.runtime,
+          sortOrder: LibrarySortOrder.descending,
+        ),
+        visibility,
+      ),
+      const LibraryBrowseState(),
+    );
+  });
+
+  test('category visibility is an identity no-op for visible selections', () {
+    const state = LibraryBrowseState(mediaType: LibraryMediaType.series);
+    const visibility = LibraryCategoryVisibilityChanged(
+      showMovies: false,
+      showSeries: true,
+      showVideos: false,
+      showFavorites: false,
+      showDirectory: false,
+    );
+
+    expect(reduceLibraryBrowseState(state, visibility), same(state));
+  });
 }

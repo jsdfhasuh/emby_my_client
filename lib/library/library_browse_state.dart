@@ -291,6 +291,29 @@ final class LibraryBrowseReset extends LibraryBrowseEvent {
   const LibraryBrowseReset();
 }
 
+final class LibraryCategoryVisibilityChanged extends LibraryBrowseEvent {
+  const LibraryCategoryVisibilityChanged({
+    required this.showMovies,
+    required this.showSeries,
+    required this.showVideos,
+    required this.showFavorites,
+    required this.showDirectory,
+  });
+
+  final bool showMovies;
+  final bool showSeries;
+  final bool showVideos;
+  final bool showFavorites;
+  final bool showDirectory;
+
+  bool showsMediaType(LibraryMediaType mediaType) => switch (mediaType) {
+    LibraryMediaType.all => true,
+    LibraryMediaType.movie => showMovies,
+    LibraryMediaType.series => showSeries,
+    LibraryMediaType.video => showVideos,
+  };
+}
+
 LibraryBrowseState reduceLibraryBrowseState(
   LibraryBrowseState state,
   LibraryBrowseEvent event,
@@ -319,10 +342,32 @@ LibraryBrowseState reduceLibraryBrowseState(
           ? current.copyWith(alphabetFilter: alphabetFilter)
           : current,
     LibraryBrowseReset() => const LibraryBrowseState(),
+    LibraryCategoryVisibilityChanged() => _applyCategoryVisibility(
+      current,
+      event,
+    ),
   };
   if (identical(next, current)) return current;
   final normalized = normalizeLibraryBrowseState(next);
   return normalized == current ? current : normalized;
+}
+
+LibraryBrowseState _applyCategoryVisibility(
+  LibraryBrowseState current,
+  LibraryCategoryVisibilityChanged visibility,
+) {
+  var next = current;
+  if ((current.scope == LibraryBrowseScope.directory &&
+          !visibility.showDirectory) ||
+      (current.scope == LibraryBrowseScope.favorites &&
+          !visibility.showFavorites)) {
+    next = _selectScope(current, LibraryBrowseScope.media);
+  }
+  if (next.scope.supportsMediaFilters &&
+      !visibility.showsMediaType(next.mediaType)) {
+    next = next.copyWith(mediaType: LibraryMediaType.all);
+  }
+  return next;
 }
 
 LibraryBrowseState _selectScope(

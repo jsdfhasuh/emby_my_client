@@ -55,6 +55,8 @@ void main() {
           .value,
       isTrue,
     );
+    expect(find.widgetWithText(SwitchListTile, '目录'), findsOneWidget);
+    expect(find.widgetWithText(SwitchListTile, '文件夹'), findsNothing);
   });
 
   testWidgets('account data deletion requires explicit confirmation', (
