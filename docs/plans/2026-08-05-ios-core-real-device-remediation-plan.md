@@ -105,7 +105,7 @@ ACCEPTED
 - 替换播放器、升级 Flutter、升级 Dart、升级 CocoaPods、升级 ldid 或无关依赖；
 - Split View/Stage Manager 专项功能承诺；小窗口只作为响应式回归场景；
 - 与登录、Keychain、键盘无关的 UI 重构；
-- 修改媒体库、播放、下载业务契约；媒体库 Gate B UI/统计整改仅按第 8.11 节授权的窄幅例外执行；
+- 修改播放、下载业务契约；媒体库 Gate B 整改仅按 `docs/plans/2026-08-08-library-browse-final-remediation-plan.md` 冻结的完整状态重构例外执行；
 - 修改 Android 设备 ID、已保存会话或现有用户数据迁移规则；
 - 直接修改或推送 `main`；
 - 自动合并 PR；
@@ -536,6 +536,8 @@ evidence_doc_head = NOT_CREATED
 ```
 
 ### 8.11 2026-08-08 媒体库 Gate B 窄幅整改授权
+
+> **取代声明（2026-08-08）**：本节原有的窄幅补丁方案已由 `docs/plans/2026-08-08-library-browse-final-remediation-plan.md` 取代。该新计划是媒体库状态、查询、分页、导航、位置统计、混合目录卡片和详情 Hero 回归的唯一权威实施依据。本节保留为历史授权和失败事实，不得再据此继续叠加局部 `if/else`。新计划完成并通过同一 HEAD 的 Run A/Run B 前，`STOP_GATE_B` 保持 `BLOCKED_BY_IMPLEMENTATION`。
 
 在仍停留于 Gate B、且不进入阶段 8 的前提下，本计划授权仅修复 8.10 列出的三个媒体库验收问题：
 
