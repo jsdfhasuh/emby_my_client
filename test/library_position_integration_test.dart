@@ -199,6 +199,83 @@ void main() {
     await api.dispose();
   });
 
+  testWidgets('uses filtered server totals and shows remaining items', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _pagedApi(
+      starts: <int>[],
+      totalCount: 1286,
+      totalCountForRequest: (options) =>
+          options.queryParameters['Filters'] == 'IsUnplayed' ? 137 : 1286,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen(api: api, view: _library),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('筛选'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('未播放'));
+    await tester.tap(find.text('查看结果'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('未播放共 137 项'), findsOneWidget);
+    await _showOverlay(tester);
+    expect(find.text('共 137 项'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('library-position-remaining')),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
+  testWidgets('local media filtering shows its matched total after scanning', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _pagedApi(starts: <int>[], totalCount: 120, includeStrm: true);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen(api: api, view: _library),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('library-item-item-118')),
+      900,
+      scrollable: _verticalScrollable(),
+    );
+    await tester.pumpAndSettle();
+
+    tester.state<ScrollableState>(_verticalScrollable()).position.jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(find.text('已匹配 60 项'), findsOneWidget);
+    await _showOverlay(tester);
+    expect(
+      find.byKey(const ValueKey('library-position-total')),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await api.dispose();
+  });
+
   testWidgets('does not attach position state to grouping grids', (
     tester,
   ) async {
@@ -222,7 +299,7 @@ void main() {
 
     tester.state<ScrollableState>(_verticalScrollable()).position.jumpTo(0);
     await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('library-section-folders')));
+    await tester.tap(find.byKey(const ValueKey('library-section-directories')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('library-position-panel')), findsNothing);
@@ -343,6 +420,7 @@ void main() {
 EmbyApi _pagedApi({
   required List<int> starts,
   required int totalCount,
+  int Function(RequestOptions options)? totalCountForRequest,
   bool includeStrm = false,
   List<RequestOptions>? requests,
   EmbySocketConnector? realtimeConnector,
@@ -360,17 +438,19 @@ EmbyApi _pagedApi({
           requests?.add(options);
           final start = options.queryParameters['StartIndex'] as int? ?? 0;
           final limit = options.queryParameters['Limit'] as int? ?? 60;
+          final responseTotal =
+              totalCountForRequest?.call(options) ?? totalCount;
           starts.add(start);
           handler.resolve(
             Response<dynamic>(
               requestOptions: options,
               statusCode: 200,
               data: {
-                'TotalRecordCount': totalCount,
+                'TotalRecordCount': responseTotal,
                 'Items': [
                   for (
                     var index = start;
-                    index < math.min(start + limit, totalCount);
+                    index < math.min(start + limit, responseTotal);
                     index++
                   )
                     _item(index, isStrm: includeStrm && index.isEven),
@@ -390,7 +470,8 @@ EmbyApi _sectionApi() {
       InterceptorsWrapper(
         onRequest: (options, handler) {
           final folders =
-              options.queryParameters['IncludeItemTypes'] == 'Folder';
+              options.queryParameters['IncludeItemTypes'] ==
+              LibraryItemType.folder.apiValue;
           final items = [
             for (var index = 0; index < 60; index++)
               folders

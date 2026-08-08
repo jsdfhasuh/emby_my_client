@@ -194,28 +194,28 @@ class LibraryBrowseScreen extends StatefulWidget {
   State<LibraryBrowseScreen> createState() => _LibraryBrowseScreenState();
 }
 
-enum _LibrarySection { videos, folders, genres, tags, favorites }
+enum _LibrarySection { media, directories, genres, tags, favorites }
 
 extension on _LibrarySection {
   String get label => switch (this) {
-    _LibrarySection.videos => '影片',
-    _LibrarySection.folders => '文件夹',
+    _LibrarySection.media => '媒体',
+    _LibrarySection.directories => '目录',
     _LibrarySection.genres => '分类',
     _LibrarySection.tags => '标签',
     _LibrarySection.favorites => '收藏',
   };
 
   IconData get icon => switch (this) {
-    _LibrarySection.videos => Icons.movie_outlined,
-    _LibrarySection.folders => Icons.folder_outlined,
+    _LibrarySection.media => Icons.movie_outlined,
+    _LibrarySection.directories => Icons.folder_outlined,
     _LibrarySection.genres => Icons.category_outlined,
     _LibrarySection.tags => Icons.label_outline,
     _LibrarySection.favorites => Icons.favorite_border,
   };
 
   String get emptyTitle => switch (this) {
-    _LibrarySection.videos => '这个媒体库是空的',
-    _LibrarySection.folders => '没有文件夹',
+    _LibrarySection.media => '这个媒体库是空的',
+    _LibrarySection.directories => '没有目录',
     _LibrarySection.genres => '没有分类',
     _LibrarySection.tags => '没有标签',
     _LibrarySection.favorites => '还没有收藏的媒体',
@@ -244,27 +244,33 @@ class _LibrarySectionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    return Padding(
       key: const ValueKey('library-section-bar'),
-      height: 58,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            for (final section in _LibrarySection.values) ...[
-              FilterChip(
-                key: ValueKey('library-section-${section.name}'),
-                label: Text(section.label),
-                selected: selected == section,
-                showCheckmark: false,
-                onSelected: (_) => onSelected(section),
-              ),
-              if (section != _LibrarySection.values.last)
-                const SizedBox(width: 8),
-            ],
-          ],
-        ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('浏览方式', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 6),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final section in _LibrarySection.values) ...[
+                  FilterChip(
+                    key: ValueKey('library-section-${section.name}'),
+                    label: Text(section.label),
+                    selected: selected == section,
+                    showCheckmark: false,
+                    onSelected: (_) => onSelected(section),
+                  ),
+                  if (section != _LibrarySection.values.last)
+                    const SizedBox(width: 8),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -536,7 +542,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   int _positionGeneration = 0;
   bool _suppressPositionNotifications = false;
   Object? _error;
-  _LibrarySection _section = _LibrarySection.videos;
+  _LibrarySection _section = _LibrarySection.media;
   _LibraryMediaFilter _filter = _LibraryMediaFilter.all;
   LibrarySort _sort = LibrarySort.nameAscending;
 
@@ -545,12 +551,39 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool get _positionEnabled =>
       _isMediaView && _options.itemType != LibraryItemType.folder;
 
+  bool get _showPositionRemaining =>
+      _localFilterActive ||
+      _options.itemType != LibraryItemType.all ||
+      _options.playedFilter != LibraryPlayedFilter.all ||
+      _section == _LibrarySection.favorites ||
+      widget._facet != null;
+
   bool get _alphabetEnabled => _alphabetAvailableFor(_options);
 
   bool _isMediaViewFor(_LibrarySection section) =>
       widget._facet != null ||
-      section == _LibrarySection.videos ||
+      section == _LibrarySection.media ||
       section == _LibrarySection.favorites;
+
+  LibraryBrowseMode _browseModeFor(_LibrarySection section) =>
+      switch (section) {
+        _LibrarySection.media => LibraryBrowseMode.media,
+        _LibrarySection.directories => LibraryBrowseMode.directory,
+        _LibrarySection.genres => LibraryBrowseMode.genre,
+        _LibrarySection.tags => LibraryBrowseMode.tag,
+        _LibrarySection.favorites => LibraryBrowseMode.favorites,
+      };
+
+  LibraryBrowseOptions _normalizeOptions(
+    LibraryBrowseOptions options, {
+    _LibrarySection? section,
+  }) => _normalizeAlphabetOptions(
+    normalizeLibraryBrowseOptions(
+      options,
+      mode: _browseModeFor(section ?? _section),
+    ),
+    section: section,
+  );
 
   bool _alphabetAvailableFor(
     LibraryBrowseOptions options, {
@@ -592,7 +625,14 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   @override
   void initState() {
     super.initState();
-    _options = _normalizeAlphabetOptions(widget.initialOptions);
+    _section = widget._facet != null
+        ? _LibrarySection.media
+        : widget.initialOptions.itemType == LibraryItemType.folder
+        ? _LibrarySection.directories
+        : widget.initialOptions.favoriteOnly
+        ? _LibrarySection.favorites
+        : _LibrarySection.media;
+    _options = _normalizeOptions(widget.initialOptions);
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     _realtimeRefresh = RealtimeRefreshBinding(
@@ -732,17 +772,18 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       );
     }
     return switch (_section) {
-      _LibrarySection.videos => widget.api.getLibraryItems(
+      _LibrarySection.media => widget.api.getLibraryItems(
         parentId: widget.view.id,
         startIndex: startIndex,
         limit: _pageSize,
         options: _options,
         includeMediaSources: true,
       ),
-      _LibrarySection.folders => widget.api.getLibraryFolders(
+      _LibrarySection.directories => widget.api.getLibraryItems(
         parentId: widget.view.id,
         startIndex: startIndex,
         limit: _pageSize,
+        options: _options,
       ),
       _LibrarySection.genres => widget.api.getLibraryGenres(
         parentId: widget.view.id,
@@ -878,7 +919,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _applyOptions(LibraryBrowseOptions options) {
-    options = _normalizeAlphabetOptions(options);
+    options = _normalizeOptions(options);
     if (options == _options) return;
     _generation++;
     setState(() {
@@ -893,27 +934,17 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _loadForCurrentFilter();
   }
 
-  void _selectQuickCategory({
-    required LibraryItemType itemType,
-    bool favoriteOnly = false,
-  }) {
-    final folderView = itemType == LibraryItemType.folder;
+  void _selectMediaType(LibraryItemType itemType) {
+    if (itemType == LibraryItemType.folder) return;
     final changedSectionOrLocalFilter =
-        _section != _LibrarySection.videos ||
-        _filter != _LibraryMediaFilter.all;
+        _section != _LibrarySection.media || _filter != _LibraryMediaFilter.all;
     if (changedSectionOrLocalFilter) {
       setState(() {
-        _section = _LibrarySection.videos;
+        _section = _LibrarySection.media;
         _filter = _LibraryMediaFilter.all;
       });
     }
-    final options = _options.copyWith(
-      itemType: itemType,
-      favoriteOnly: favoriteOnly,
-      playedFilter: folderView
-          ? LibraryPlayedFilter.all
-          : _options.playedFilter,
-    );
+    final options = _options.copyWith(itemType: itemType, favoriteOnly: false);
     if (options == _options) {
       if (changedSectionOrLocalFilter) unawaited(_refresh());
       return;
@@ -972,59 +1003,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                           update(draft.copyWith(playedFilter: selection.first)),
                     ),
                   ),
-                  const SizedBox(height: 22),
-                  Text('项目类型', style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 10),
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SegmentedButton<LibraryItemType>(
-                      showSelectedIcon: false,
-                      segments: const [
-                        ButtonSegment(
-                          value: LibraryItemType.all,
-                          label: Text('节目'),
-                        ),
-                        ButtonSegment(
-                          value: LibraryItemType.movie,
-                          label: Text('电影'),
-                        ),
-                        ButtonSegment(
-                          value: LibraryItemType.series,
-                          label: Text('剧集'),
-                        ),
-                        ButtonSegment(
-                          value: LibraryItemType.video,
-                          label: Text('视频'),
-                        ),
-                        ButtonSegment(
-                          value: LibraryItemType.folder,
-                          label: Text('文件夹'),
-                        ),
-                      ],
-                      selected: {draft.itemType},
-                      onSelectionChanged: (selection) =>
-                          update(draft.copyWith(itemType: selection.first)),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    secondary: const Icon(Icons.favorite_outline),
-                    title: const Text('只看收藏'),
-                    value: draft.favoriteOnly,
-                    onChanged: (value) =>
-                        update(draft.copyWith(favoriteOnly: value)),
-                  ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
                       OutlinedButton.icon(
                         onPressed: () => update(
-                          draft.copyWith(
-                            playedFilter: LibraryPlayedFilter.all,
-                            itemType: LibraryItemType.all,
-                            favoriteOnly: false,
-                          ),
+                          draft.copyWith(playedFilter: LibraryPlayedFilter.all),
                         ),
                         icon: const Icon(Icons.restart_alt),
                         label: const Text('重置'),
@@ -1090,7 +1074,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   void _selectSection(_LibrarySection section) {
     if (section == _section) return;
-    final options = _normalizeAlphabetOptions(_options, section: section);
+    final options = _normalizeOptions(_options, section: section);
     setState(() {
       _section = section;
       _filter = _LibraryMediaFilter.all;
@@ -1155,16 +1139,19 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         return;
       case _LibraryMoreAction.reset:
         setState(() {
+          _section = _LibrarySection.media;
           _filter = _LibraryMediaFilter.all;
           _sort = LibrarySort.nameAscending;
         });
-        final reset = _options.copyWith(
-          sortBy: LibrarySortBy.name,
-          sortOrder: LibrarySortOrder.ascending,
-          playedFilter: LibraryPlayedFilter.all,
-          itemType: LibraryItemType.all,
-          favoriteOnly: false,
-          alphabetFilter: const AllItems(),
+        final reset = _normalizeOptions(
+          _options.copyWith(
+            sortBy: LibrarySortBy.name,
+            sortOrder: LibrarySortOrder.ascending,
+            playedFilter: LibraryPlayedFilter.all,
+            itemType: LibraryItemType.all,
+            favoriteOnly: false,
+            alphabetFilter: const AllItems(),
+          ),
         );
         if (reset == _options) {
           unawaited(_refresh());
@@ -1216,7 +1203,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Future<void> _openGroup(EmbyItem item) async {
     switch (_section) {
-      case _LibrarySection.folders:
+      case _LibrarySection.directories:
         await Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => LibraryBrowseScreen(
@@ -1224,6 +1211,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               view: item,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              initialOptions: const LibraryBrowseOptions(
+                itemType: LibraryItemType.folder,
+              ),
             ),
           ),
         );
@@ -1250,7 +1240,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         );
         if (mounted) await _refreshRealtime();
         return;
-      case _LibrarySection.videos:
+      case _LibrarySection.media:
       case _LibrarySection.favorites:
         return;
     }
@@ -1340,8 +1330,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                         onSelected: _selectSection,
                       ),
                     ),
-                  if (facet == null && _section == _LibrarySection.videos)
+                  if (facet == null && _isMediaView)
                     SliverToBoxAdapter(child: _buildBrowseControls(context)),
+                  if (facet == null && !_isMediaView)
+                    SliverToBoxAdapter(child: _buildSectionSummary(context)),
                   if (_isMediaView &&
                       _options.itemType != LibraryItemType.folder)
                     SliverToBoxAdapter(
@@ -1424,7 +1416,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               ),
             ),
           ),
-          LibraryPositionOverlay(controller: _positionController),
+          LibraryPositionOverlay(
+            controller: _positionController,
+            showRemaining: _showPositionRemaining,
+          ),
           if (_alphabetEnabled)
             LibraryAlphabetNavigation(
               selected: _options.alphabetFilter,
@@ -1437,8 +1432,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Widget _buildBrowseControls(BuildContext context) {
     final surface = Theme.of(context).colorScheme.surfaceContainerHighest;
-    final countLabel = _totalCount == null
+    final countLabel = _localFilterActive
+        ? _items.isEmpty
+              ? '正在统计'
+              : _hasMore || _loading
+              ? '已匹配 ${_displayedItems.length} 项，继续统计中'
+              : '已匹配 ${_displayedItems.length} 项'
+        : _totalCount == null
         ? (_items.isEmpty ? '正在统计' : '已加载 ${_items.length} 项')
+        : _section == _LibrarySection.favorites
+        ? '收藏共 $_totalCount 项'
+        : _options.playedFilter == LibraryPlayedFilter.unplayed
+        ? '未播放共 $_totalCount 项'
+        : _options.playedFilter == LibraryPlayedFilter.played
+        ? '已播放共 $_totalCount 项'
         : '共 $_totalCount 项';
     return ColoredBox(
       color: Theme.of(context).scaffoldBackgroundColor,
@@ -1447,64 +1454,39 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text('媒体类型', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 6),
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
                   _quickChip(
-                    label: '节目',
-                    selected:
-                        !_options.favoriteOnly &&
-                        _options.itemType == LibraryItemType.all,
-                    onSelected: () =>
-                        _selectQuickCategory(itemType: LibraryItemType.all),
+                    key: const ValueKey('library-media-type-all'),
+                    label: '全部',
+                    selected: _options.itemType == LibraryItemType.all,
+                    onSelected: () => _selectMediaType(LibraryItemType.all),
                   ),
                   if (widget.categorySettings.showMovies)
                     _quickChip(
+                      key: const ValueKey('library-media-type-movie'),
                       label: '电影',
-                      selected:
-                          !_options.favoriteOnly &&
-                          _options.itemType == LibraryItemType.movie,
-                      onSelected: () =>
-                          _selectQuickCategory(itemType: LibraryItemType.movie),
+                      selected: _options.itemType == LibraryItemType.movie,
+                      onSelected: () => _selectMediaType(LibraryItemType.movie),
                     ),
                   if (widget.categorySettings.showSeries)
                     _quickChip(
+                      key: const ValueKey('library-media-type-series'),
                       label: '剧集',
-                      selected:
-                          !_options.favoriteOnly &&
-                          _options.itemType == LibraryItemType.series,
-                      onSelected: () => _selectQuickCategory(
-                        itemType: LibraryItemType.series,
-                      ),
+                      selected: _options.itemType == LibraryItemType.series,
+                      onSelected: () =>
+                          _selectMediaType(LibraryItemType.series),
                     ),
                   if (widget.categorySettings.showVideos)
                     _quickChip(
+                      key: const ValueKey('library-media-type-video'),
                       label: '视频',
-                      selected:
-                          !_options.favoriteOnly &&
-                          _options.itemType == LibraryItemType.video,
-                      onSelected: () =>
-                          _selectQuickCategory(itemType: LibraryItemType.video),
-                    ),
-                  if (widget.categorySettings.showFavorites)
-                    _quickChip(
-                      label: '收藏',
-                      selected: _options.favoriteOnly,
-                      onSelected: () => _selectQuickCategory(
-                        itemType: LibraryItemType.all,
-                        favoriteOnly: true,
-                      ),
-                    ),
-                  if (widget.categorySettings.showFolders)
-                    _quickChip(
-                      label: '文件夹',
-                      selected:
-                          !_options.favoriteOnly &&
-                          _options.itemType == LibraryItemType.folder,
-                      onSelected: () => _selectQuickCategory(
-                        itemType: LibraryItemType.folder,
-                      ),
+                      selected: _options.itemType == LibraryItemType.video,
+                      onSelected: () => _selectMediaType(LibraryItemType.video),
                     ),
                 ],
               ),
@@ -1512,10 +1494,14 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             const SizedBox(height: 10),
             Row(
               children: [
-                Text(
-                  countLabel,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                Expanded(
+                  child: Text(
+                    countLabel,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 const Spacer(),
@@ -1583,11 +1569,31 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     );
   }
 
+  Widget _buildSectionSummary(BuildContext context) {
+    final label = _totalCount == null
+        ? _items.isEmpty
+              ? '正在统计'
+              : '已加载 ${_items.length} 项'
+        : '${_section.label}共 $_totalCount 项';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      child: Text(
+        label,
+        key: const ValueKey('library-section-total'),
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
   Widget _quickChip({
+    Key? key,
     required String label,
     required bool selected,
     required VoidCallback onSelected,
   }) => Padding(
+    key: key,
     padding: const EdgeInsets.only(right: 6),
     child: ChoiceChip(
       label: Text(label),
@@ -1628,6 +1634,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       ],
     );
   }
+
+  bool get _localFilterActive => _filter != _LibraryMediaFilter.all;
 
   String _sortLabel(LibrarySortBy sortBy) => switch (sortBy) {
     LibrarySortBy.name => '名称',

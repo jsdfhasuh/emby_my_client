@@ -23,6 +23,12 @@ class LibraryPositionSnapshot {
   final int loadedCount;
   final int? totalCount;
 
+  int? get remainingCount {
+    final total = totalCount;
+    if (total == null) return null;
+    return math.max(0, total - lastVisible);
+  }
+
   int? get percentage {
     final total = totalCount;
     if (total == null || total <= 0) return null;

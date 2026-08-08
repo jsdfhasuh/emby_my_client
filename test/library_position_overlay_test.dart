@@ -123,6 +123,35 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
   });
+
+  testWidgets('shows remaining count for filtered totals', (tester) async {
+    final controller = LibraryScrollPositionController();
+    controller.updateLayout(
+      constraints: _constraints(),
+      loadedCount: 60,
+      totalCount: 137,
+    );
+    controller.onScrollStart();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: [
+              LibraryPositionOverlay(
+                controller: controller,
+                showRemaining: true,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('剩余 131 项'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  });
 }
 
 double _opacity(WidgetTester tester) => tester

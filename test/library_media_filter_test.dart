@@ -120,8 +120,8 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final section in [
-      'videos',
-      'folders',
+      'media',
+      'directories',
       'genres',
       'tags',
       'favorites',
@@ -129,14 +129,22 @@ void main() {
       expect(find.byKey(ValueKey('library-section-$section')), findsOneWidget);
     }
 
-    await tester.tap(find.byKey(const ValueKey('library-section-folders')));
+    await tester.tap(find.byKey(const ValueKey('library-section-directories')));
     await tester.pumpAndSettle();
     expect(
       find.byKey(const ValueKey('library-group-folder-1')),
       findsOneWidget,
     );
+    expect(
+      find.byKey(const ValueKey('library-group-directory-media')),
+      findsOneWidget,
+    );
     expect(requests.last.queryParameters['Recursive'], isFalse);
-    expect(requests.last.queryParameters['IncludeItemTypes'], 'Folder');
+    expect(
+      requests.last.queryParameters['IncludeItemTypes'],
+      LibraryItemType.folder.apiValue,
+    );
+    expect(requests.last.queryParameters, isNot(contains('Filters')));
 
     await tester.tap(find.byKey(const ValueKey('library-section-genres')));
     await tester.pumpAndSettle();
@@ -172,11 +180,13 @@ void main() {
       of: find.byKey(const ValueKey('library-section-bar')),
       matching: find.byType(SingleChildScrollView),
     );
+    expect(sectionScroller, findsOneWidget);
     await tester.drag(sectionScroller, const Offset(-180, 0));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
     await tester.pumpAndSettle();
     expect(requests.last.queryParameters['Filters'], 'IsFavorite');
+    expect(requests.last.queryParameters, isNot(contains('IsFavorite')));
     expect(
       find.byKey(const ValueKey('library-item-favorite-media')),
       findsOneWidget,
@@ -304,9 +314,13 @@ EmbyApi _sectionApi(List<RequestOptions> requests) {
             '/Tags' => [
               {'Id': 'tag-1', 'Name': '高码率', 'Type': 'Tag'},
             ],
-            _ when query['IncludeItemTypes'] == 'Folder' => [
-              {'Id': 'folder-1', 'Name': '电影目录', 'Type': 'Folder'},
-            ],
+            _
+                when query['IncludeItemTypes'] ==
+                    LibraryItemType.folder.apiValue =>
+              [
+                {'Id': 'folder-1', 'Name': '电影目录', 'Type': 'Folder'},
+                {'Id': 'directory-media', 'Name': '目录内媒体', 'Type': 'Movie'},
+              ],
             _ when query['GenreIds'] == 'genre-1' => [
               {'Id': 'genre-media', 'Name': '动作电影', 'Type': 'Movie'},
             ],

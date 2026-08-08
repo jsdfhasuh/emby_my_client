@@ -128,6 +128,7 @@ void main() {
       expect(firstPage?.lastVisible, 60);
       expect(firstPage?.percentage, lessThan(10));
       expect(firstPage?.percentage, isNot(100));
+      expect(firstPage?.remainingCount, 1226);
 
       controller.updateLayout(
         constraints: constraints,
@@ -183,6 +184,7 @@ void main() {
 
       expect(controller.snapshot?.totalCount, isNull);
       expect(controller.snapshot?.percentage, isNull);
+      expect(controller.snapshot?.remainingCount, isNull);
     });
 
     test('does not show when the full result fits in one viewport', () {

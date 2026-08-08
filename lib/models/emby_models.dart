@@ -411,6 +411,8 @@ enum LibraryItemType {
   final bool recursive;
 }
 
+enum LibraryBrowseMode { media, directory, genre, tag, favorites }
+
 enum SearchItemType {
   all('Movie,Series,Episode,Video,Folder,CollectionFolder'),
   movie('Movie'),
@@ -452,9 +454,7 @@ class LibraryBrowseOptions {
   final LibraryAlphabetFilter alphabetFilter;
 
   int get activeFilterCount =>
-      (favoriteOnly ? 1 : 0) +
       (playedFilter == LibraryPlayedFilter.all ? 0 : 1) +
-      (itemType == LibraryItemType.all ? 0 : 1) +
       (alphabetFilter.isAll ? 0 : 1);
 
   LibraryBrowseOptions copyWith({
@@ -492,6 +492,37 @@ class LibraryBrowseOptions {
     favoriteOnly,
     alphabetFilter,
   );
+}
+
+LibraryBrowseOptions normalizeLibraryBrowseOptions(
+  LibraryBrowseOptions options, {
+  required LibraryBrowseMode mode,
+}) {
+  switch (mode) {
+    case LibraryBrowseMode.directory:
+      return options.copyWith(
+        playedFilter: LibraryPlayedFilter.all,
+        itemType: LibraryItemType.folder,
+        favoriteOnly: false,
+        alphabetFilter: const AllItems(),
+      );
+    case LibraryBrowseMode.media:
+    case LibraryBrowseMode.favorites:
+      return options.copyWith(
+        itemType: options.itemType == LibraryItemType.folder
+            ? LibraryItemType.all
+            : options.itemType,
+        favoriteOnly: false,
+      );
+    case LibraryBrowseMode.genre:
+    case LibraryBrowseMode.tag:
+      return options.copyWith(
+        playedFilter: LibraryPlayedFilter.all,
+        itemType: LibraryItemType.all,
+        favoriteOnly: false,
+        alphabetFilter: const AllItems(),
+      );
+  }
 }
 
 class EmbyItemPage {

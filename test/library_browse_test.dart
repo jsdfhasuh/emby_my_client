@@ -8,6 +8,74 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('normalizes library browse modes without overlapping state', () {
+    final legacyFolder = LibraryBrowseOptions(
+      itemType: LibraryItemType.folder,
+      playedFilter: LibraryPlayedFilter.unplayed,
+      favoriteOnly: true,
+      alphabetFilter: LetterItems('m'),
+    );
+    final directory = normalizeLibraryBrowseOptions(
+      legacyFolder,
+      mode: LibraryBrowseMode.directory,
+    );
+    expect(directory.itemType, LibraryItemType.folder);
+    expect(directory.playedFilter, LibraryPlayedFilter.all);
+    expect(directory.favoriteOnly, isFalse);
+    expect(directory.alphabetFilter.isAll, isTrue);
+
+    final media = normalizeLibraryBrowseOptions(
+      legacyFolder,
+      mode: LibraryBrowseMode.media,
+    );
+    expect(media.itemType, LibraryItemType.all);
+    expect(media.favoriteOnly, isFalse);
+
+    final favorites = normalizeLibraryBrowseOptions(
+      const LibraryBrowseOptions(itemType: LibraryItemType.movie),
+      mode: LibraryBrowseMode.favorites,
+    );
+    expect(favorites.itemType, LibraryItemType.movie);
+    expect(favorites.favoriteOnly, isFalse);
+  });
+
+  test(
+    'combines favorite and played filters in one server filter value',
+    () async {
+      RequestOptions? captured;
+      final api = _api((options, handler) {
+        captured = options;
+        handler.resolve(_libraryResponse(options));
+      });
+
+      await api.getLibraryItems(
+        parentId: 'library-1',
+        favoritesFilter: true,
+        options: const LibraryBrowseOptions(
+          playedFilter: LibraryPlayedFilter.unplayed,
+        ),
+      );
+
+      expect(captured?.queryParameters['Filters'], 'IsFavorite,IsUnplayed');
+      expect(captured?.queryParameters, isNot(contains('IsFavorite')));
+    },
+  );
+
+  test('filter badge excludes the visible media type choice', () {
+    const all = LibraryBrowseOptions();
+    expect(all.activeFilterCount, 0);
+    expect(all.copyWith(itemType: LibraryItemType.movie).activeFilterCount, 0);
+    expect(
+      all
+          .copyWith(
+            itemType: LibraryItemType.movie,
+            playedFilter: LibraryPlayedFilter.unplayed,
+          )
+          .activeFilterCount,
+      1,
+    );
+  });
+
   test('library browse sends server-side sort and filter parameters', () async {
     RequestOptions? captured;
     final api = _api((options, handler) {
@@ -143,7 +211,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('共 116 项'), findsOneWidget);
-    expect(find.text('节目'), findsOneWidget);
+    expect(find.text('媒体类型'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('library-media-type-all')),
+      findsOneWidget,
+    );
     final movieQuickFilter = find.descendant(
       of: find.byType(ChoiceChip),
       matching: find.text('电影'),
@@ -152,7 +224,7 @@ void main() {
     expect(find.byTooltip('排序方式'), findsOneWidget);
     expect(find.byTooltip('筛选'), findsOneWidget);
     expect(
-      find.descendant(of: find.byType(ChoiceChip), matching: find.text('文件夹')),
+      find.byKey(const ValueKey('library-section-directories')),
       findsOneWidget,
     );
 
@@ -166,16 +238,16 @@ void main() {
     await tester.tap(find.byTooltip('筛选'));
     await tester.pumpAndSettle();
     expect(find.text('播放状态'), findsOneWidget);
-    expect(find.text('项目类型'), findsOneWidget);
+    expect(find.text('项目类型'), findsNothing);
+    expect(find.text('只看收藏'), findsNothing);
 
     await tester.tap(find.text('未播放'));
-    await tester.tap(find.text('只看收藏'));
     await tester.tap(find.text('查看结果'));
     await tester.pumpAndSettle();
 
     expect(requests.last.queryParameters['Filters'], 'IsUnplayed');
     expect(requests.last.queryParameters['IncludeItemTypes'], 'Movie');
-    expect(requests.last.queryParameters['IsFavorite'], true);
+    expect(requests.last.queryParameters, isNot(contains('IsFavorite')));
   });
 
   testWidgets('library defaults hide optional media type categories', (
@@ -193,12 +265,74 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(_quickCategory('节目'), findsOneWidget);
+    expect(_quickCategory('全部'), findsOneWidget);
     expect(_quickCategory('电影'), findsNothing);
     expect(_quickCategory('剧集'), findsNothing);
     expect(_quickCategory('视频'), findsNothing);
-    expect(_quickCategory('收藏'), findsOneWidget);
-    expect(_quickCategory('文件夹'), findsOneWidget);
+    expect(_quickCategory('收藏'), findsNothing);
+    expect(_quickCategory('文件夹'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('library-section-favorites')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('library-section-directories')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('reset returns from favorites to the media default', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(_libraryResponse(options));
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen(
+          api: api,
+          view: _library,
+          categorySettings: _allCategorySettings,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-more-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('library-more-reset')));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const ValueKey('library-section-media')),
+          )
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.descendant(
+              of: find.byKey(const ValueKey('library-media-type-all')),
+              matching: find.byType(ChoiceChip),
+            ),
+          )
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const ValueKey('library-section-favorites')),
+          )
+          .selected,
+      isFalse,
+    );
   });
 
   testWidgets('folder category opens nested folder browsing', (tester) async {
@@ -216,15 +350,18 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final folderCategory = find.descendant(
-      of: find.byType(ChoiceChip),
-      matching: find.text('文件夹'),
+    final folderCategory = find.byKey(
+      const ValueKey('library-section-directories'),
     );
     await tester.tap(folderCategory);
     await tester.pumpAndSettle();
 
     expect(find.text('目录 A'), findsOneWidget);
     expect(requests.last.queryParameters['Recursive'], false);
+    expect(
+      requests.last.queryParameters['IncludeItemTypes'],
+      LibraryItemType.folder.apiValue,
+    );
 
     await tester.tap(find.text('目录 A'));
     await tester.pumpAndSettle();
@@ -232,6 +369,10 @@ void main() {
     expect(find.widgetWithText(AppBar, '目录 A'), findsOneWidget);
     expect(requests.last.queryParameters['ParentId'], 'folder-1');
     expect(requests.last.queryParameters['Recursive'], false);
+    expect(
+      requests.last.queryParameters['IncludeItemTypes'],
+      LibraryItemType.folder.apiValue,
+    );
   });
 
   testWidgets('returning from details restores a deeply scrolled position', (
@@ -300,7 +441,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final scrollable = find.byType(Scrollable).first;
+    final scrollable = _verticalScrollable();
     await tester.scrollUntilVisible(
       find.text('项目 70'),
       700,
@@ -316,10 +457,7 @@ void main() {
     await tester.pageBack();
     await tester.pumpAndSettle();
 
-    final after = tester
-        .state<ScrollableState>(find.byType(Scrollable).first)
-        .position
-        .pixels;
+    final after = tester.state<ScrollableState>(scrollable).position.pixels;
     expect(after, closeTo(before, 1));
     expect(browseStarts, [0, 60]);
     expect(refreshedItemId, 'item-70');
@@ -328,6 +466,13 @@ void main() {
 
 Finder _quickCategory(String label) =>
     find.descendant(of: find.byType(ChoiceChip), matching: find.text(label));
+
+Finder _verticalScrollable() => find.byWidgetPredicate(
+  (widget) =>
+      widget is Scrollable &&
+      (widget.axisDirection == AxisDirection.down ||
+          widget.axisDirection == AxisDirection.up),
+);
 
 EmbyApi _api(
   void Function(RequestOptions options, RequestInterceptorHandler handler)

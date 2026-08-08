@@ -489,6 +489,11 @@ class EmbyApi {
         'NameStartsWith and NameLessThan cannot be used together.',
       );
     }
+    final filters = <String>[
+      if (favoritesFilter) 'IsFavorite',
+      if (options.playedFilter.apiValue != null)
+        options.playedFilter.apiValue!,
+    ];
     final response = await _request(
       () => _dio.get<dynamic>(
         '/Users/${session.userId}/Items',
@@ -500,8 +505,7 @@ class EmbyApi {
           'IncludeItemTypes': options.itemType.apiValue,
           'SortBy': options.sortBy.apiValue,
           'SortOrder': options.sortOrder.apiValue,
-          if (favoritesFilter) 'Filters': 'IsFavorite',
-          if (!favoritesFilter) 'Filters': ?options.playedFilter.apiValue,
+          if (filters.isNotEmpty) 'Filters': filters.join(','),
           if (options.favoriteOnly) 'IsFavorite': true,
           'GenreIds': ?genreId,
           'TagIds': ?tagId,
@@ -581,22 +585,38 @@ class EmbyApi {
     required int startIndex,
     required int limit,
   }) async {
-    final items = await _getItemPage(
-      path,
-      query: {
-        'UserId': session.userId,
-        'ParentId': parentId,
-        'StartIndex': startIndex,
-        'Limit': limit,
-        'Recursive': true,
-        'IncludeItemTypes': 'Movie,Series,Video',
-        'SortBy': 'SortName',
-        'SortOrder': 'Ascending',
-        'Fields': _listItemFields,
-        'EnableImages': true,
-      },
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        path,
+        queryParameters: {
+          'UserId': session.userId,
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': true,
+          'IncludeItemTypes': 'Movie,Series,Video',
+          'SortBy': 'SortName',
+          'SortOrder': 'Ascending',
+          'Fields': _listItemFields,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
     );
-    return EmbyItemPage(items: items);
+    final data = _map(response.data);
+    final rawItems = response.data is List
+        ? response.data as List<dynamic>
+        : data['Items'] as List<dynamic>? ?? const [];
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => EmbyItem.fromJson(Map<String, dynamic>.from(item)))
+        .where((item) => item.id.isNotEmpty)
+        .toList(growable: false);
+    final rawTotal = data['TotalRecordCount'];
+    final total = rawTotal is num
+        ? rawTotal.toInt()
+        : int.tryParse(rawTotal?.toString() ?? '');
+    return EmbyItemPage(items: items, totalRecordCount: total);
   }
 
   Future<EmbyItemPage> search(

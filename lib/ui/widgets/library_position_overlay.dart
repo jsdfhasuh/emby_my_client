@@ -6,10 +6,12 @@ class LibraryPositionOverlay extends StatefulWidget {
   const LibraryPositionOverlay({
     super.key,
     required this.controller,
+    this.showRemaining = false,
     this.fadeDuration = const Duration(milliseconds: 180),
   });
 
   final LibraryScrollPositionController controller;
+  final bool showRemaining;
   final Duration fadeDuration;
 
   @override
@@ -75,7 +77,10 @@ class _LibraryPositionOverlayState extends State<LibraryPositionOverlay> {
               curve: Curves.easeOut,
               onEnd: _handleFadeEnd,
               child: _renderPanel && widget.controller.snapshot != null
-                  ? _LibraryPositionPanel(snapshot: widget.controller.snapshot!)
+                  ? _LibraryPositionPanel(
+                      snapshot: widget.controller.snapshot!,
+                      showRemaining: widget.showRemaining,
+                    )
                   : const SizedBox.shrink(),
             ),
           ),
@@ -86,9 +91,13 @@ class _LibraryPositionOverlayState extends State<LibraryPositionOverlay> {
 }
 
 class _LibraryPositionPanel extends StatelessWidget {
-  const _LibraryPositionPanel({required this.snapshot});
+  const _LibraryPositionPanel({
+    required this.snapshot,
+    required this.showRemaining,
+  });
 
   final LibraryPositionSnapshot snapshot;
+  final bool showRemaining;
 
   @override
   Widget build(BuildContext context) {
@@ -142,6 +151,17 @@ class _LibraryPositionPanel extends StatelessWidget {
               ),
             ),
           ],
+          if (showRemaining)
+            if (snapshot.remainingCount case final remaining?) ...[
+              const SizedBox(height: 2),
+              Text(
+                '剩余 ${_formatCount(remaining)} 项',
+                key: const ValueKey('library-position-remaining'),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+              ),
+            ],
         ],
       ),
     );

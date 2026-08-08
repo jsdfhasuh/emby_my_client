@@ -473,7 +473,9 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.byKey(const ValueKey('library-section-folders')));
+      await tester.tap(
+        find.byKey(const ValueKey('library-section-directories')),
+      );
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('library-alphabet-button')),
