@@ -5,6 +5,7 @@
 - 文档状态：`FROZEN_FOR_IMPLEMENTATION`
 - 当前实现状态：`IMPLEMENTATION_IN_PROGRESS`
 - 当前真机验收状态：`NOT_ACCEPTED`
+- 当前 `STOP_GATE_B`：`BLOCKED_BY_IMPLEMENTATION`
 - 计划日期：2026-08-05
 - 仓库：`jsdfhasuh/emby_my_client`
 - 实施基线：`main@9b74b6216e25375ee2e44e8019bfbff9546a5f51`
@@ -104,7 +105,7 @@ ACCEPTED
 - 替换播放器、升级 Flutter、升级 Dart、升级 CocoaPods、升级 ldid 或无关依赖；
 - Split View/Stage Manager 专项功能承诺；小窗口只作为响应式回归场景；
 - 与登录、Keychain、键盘无关的 UI 重构；
-- 修改媒体库、播放、下载业务契约；
+- 修改媒体库、播放、下载业务契约；媒体库 Gate B UI/统计整改仅按第 8.11 节授权的窄幅例外执行；
 - 修改 Android 设备 ID、已保存会话或现有用户数据迁移规则；
 - 直接修改或推送 `main`；
 - 自动合并 PR；
@@ -529,6 +530,25 @@ LIBRARY_FILTER_STATE_CLARITY = FAIL
 
 ```text
 STOP_GATE_B = BLOCKED_BY_IMPLEMENTATION
+IMPLEMENTATION_IN_PROGRESS
+NOT_ACCEPTED
+evidence_doc_head = NOT_CREATED
+```
+
+### 8.11 2026-08-08 媒体库 Gate B 窄幅整改授权
+
+在仍停留于 Gate B、且不进入阶段 8 的前提下，本计划授权仅修复 8.10 列出的三个媒体库验收问题：
+
+- 详情页 Backdrop/Primary hero 的完整可见性和响应式布局；
+- 媒体、目录、分类、标签、收藏之间互斥且可理解的浏览状态；
+- 服务端筛选结果总数、位置浮层剩余数量，以及本地筛选在完整扫描前后的明确统计文案。
+
+本授权允许修改对应的 Flutter 媒体库 UI、状态模型、Emby 列表请求参数、位置统计组件和自动测试，但不允许修改媒体库服务契约、播放/下载行为、依赖、锁文件、原生配置、entitlement 或任何本计划明确禁止的功能。目录仍使用当前层级 `Recursive=false`，并可返回当前层级的子目录和媒体；收藏只保留浏览方式入口，不再保留第二层收藏状态。
+
+本授权不改变既有的 `POST_PLAYBACK_ORIENTATION_RESTORE = FAIL`，也不允许实现者代填任何媒体库或播放真机 `PASS`。完成代码和 Actions 后，三个 FAIL 仍须由设备所有者重新执行；在此之前状态保持：
+
+```text
+STOP_GATE_B = WAITING_FOR_DEVICE_OWNER
 IMPLEMENTATION_IN_PROGRESS
 NOT_ACCEPTED
 evidence_doc_head = NOT_CREATED
