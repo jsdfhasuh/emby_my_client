@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_models.dart';
 import '../downloads/download_service.dart';
@@ -44,7 +45,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   final Set<String> _startingDownloads = {};
   late final RealtimeRefreshBinding _realtimeRefresh;
   String? _seasonId;
-  Object? _error;
+  bool _loadFailed = false;
   bool _loading = true;
   bool _loadingEpisodes = false;
 
@@ -69,7 +70,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   Future<void> _load() async {
     setState(() {
       _loading = true;
-      _error = null;
+      _loadFailed = false;
     });
     try {
       final item = await widget.api.getItem(widget.initialItem.id);
@@ -88,8 +89,9 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         _episodes = episodes;
         _seasonId = seasonId;
       });
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
+    } catch (error, stackTrace) {
+      _logFailure('Item detail initial load failed', error, stackTrace);
+      if (mounted) setState(() => _loadFailed = true);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -108,12 +110,13 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         seasonId: seasonId,
       );
       if (mounted) setState(() => _episodes = episodes);
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(error.toString())));
-      }
+    } catch (error, stackTrace) {
+      _showOperationFailure(
+        event: 'Item detail season load failed',
+        message: '剧集加载失败，请重试',
+        error: error,
+        stackTrace: stackTrace,
+      );
     } finally {
       if (mounted) setState(() => _loadingEpisodes = false);
     }
@@ -165,8 +168,13 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
             break;
         }
       }
-    } catch (error) {
-      if (mounted) _showError(error);
+    } catch (error, stackTrace) {
+      _showOperationFailure(
+        event: 'Item detail download action failed',
+        message: '下载操作失败，请重试',
+        error: error,
+        stackTrace: stackTrace,
+      );
     } finally {
       if (mounted) setState(() => _startingDownloads.remove(item.id));
     }
@@ -184,7 +192,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         'missingFile' => '本地文件丢失，请重新下载',
         _ => '离线文件记录不存在',
       };
-      _showError(StateError(message));
+      _showMessage(message);
       return;
     }
     await Navigator.of(context).push(
@@ -213,8 +221,13 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         _item = refreshedItem;
         _episodes = refreshedEpisodes;
       });
-    } catch (error) {
-      if (mounted) _showError(error);
+    } catch (error, stackTrace) {
+      _showOperationFailure(
+        event: 'Item detail refresh failed',
+        message: '详情刷新失败，请重试',
+        error: error,
+        stackTrace: stackTrace,
+      );
     }
   }
 
@@ -277,17 +290,41 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
-    } catch (error) {
-      if (mounted) _showError(error);
+    } catch (error, stackTrace) {
+      _showOperationFailure(
+        event: 'Item detail user data update failed',
+        message: '状态更新失败，请重试',
+        error: error,
+        stackTrace: stackTrace,
+      );
     } finally {
       if (mounted) setState(() => _updatingUserData.remove(item.id));
     }
   }
 
-  void _showError(Object error) {
+  void _showOperationFailure({
+    required String event,
+    required String message,
+    required Object error,
+    required StackTrace stackTrace,
+  }) {
+    _logFailure(event, error, stackTrace);
+    if (mounted) _showMessage(message);
+  }
+
+  void _logFailure(String event, Object error, StackTrace stackTrace) {
+    DiagnosticLog.instance.error(
+      'library',
+      event,
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
+
+  void _showMessage(String message) {
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(error.toString())));
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _openPerson(EmbyPerson person) async {
@@ -310,10 +347,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    if (_error != null || _item == null) {
+    if (_loadFailed || _item == null) {
       return Scaffold(
         appBar: AppBar(),
-        body: ErrorState(error: _error!, onRetry: _load),
+        body: _ItemDetailLoadError(onRetry: _load),
       );
     }
 
@@ -806,3 +843,40 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
 }
 
 enum _UserDataAction { favorite, played }
+
+class _ItemDetailLoadError extends StatelessWidget {
+  const _ItemDetailLoadError({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_outlined,
+              size: 42,
+              color: Color(0xFFE2A93B),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              '详情加载失败，请重试',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFFC8CECF)),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh),
+              label: const Text('重试'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
