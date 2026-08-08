@@ -11,6 +11,7 @@ import '../library/library_alphabet_filter.dart';
 import '../library/library_browse_state.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_grid_geometry.dart';
+import '../library/library_item_membership.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
@@ -182,6 +183,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
 }
 
 enum _LibraryBrowsePageKind { root, directory, facet }
+
+class _LibraryQuerySnapshot {
+  const _LibraryQuerySnapshot({
+    required this.items,
+    required this.seenItemIds,
+    required this.nextStartIndex,
+    required this.totalCount,
+    required this.hasMore,
+    required this.loadFailed,
+  });
+
+  final List<EmbyItem> items;
+  final Set<String> seenItemIds;
+  final int nextStartIndex;
+  final int? totalCount;
+  final bool hasMore;
+  final bool loadFailed;
+}
 
 class LibraryBrowseScreen extends StatefulWidget {
   const LibraryBrowseScreen.root({
@@ -833,26 +852,38 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<void> _refreshUserData(Iterable<String> itemIds) async {
-    final loadedIds = _items.map((item) => item.id).toSet();
-    final requestedIds = itemIds.where(loadedIds.contains).toSet();
-    if (requestedIds.isEmpty) return;
     final generation = _generation;
-    final userData = await widget.api.getUserDataForItems(requestedIds);
+    final state = _state;
+    final requestedIds = itemIds.where((id) => id.isNotEmpty).toSet();
+    if (requestedIds.isEmpty) return;
+    final loadedItems = {for (final item in _items) item.id: item};
+    final hasUnknownId = requestedIds.any((id) => !loadedItems.containsKey(id));
+    if (hasUnknownId && libraryBrowseHasServerMembershipCondition(state)) {
+      await _refreshPreservingPosition();
+      return;
+    }
+    final loadedRequestedIds = requestedIds
+        .where(loadedItems.containsKey)
+        .toSet();
+    if (loadedRequestedIds.isEmpty) return;
+    final userData = await widget.api.getUserDataForItems(loadedRequestedIds);
     if (!mounted || generation != _generation || userData.isEmpty) return;
+    final membershipChanged = userData.entries.any((entry) {
+      final item = loadedItems[entry.key];
+      return item != null &&
+          libraryItemMatchesServerMembership(state, item.userData) !=
+              libraryItemMatchesServerMembership(state, entry.value);
+    });
+    if (membershipChanged) {
+      await _refreshPreservingPosition();
+      return;
+    }
     setState(() {
-      for (var index = _items.length - 1; index >= 0; index--) {
+      for (var index = 0; index < _items.length; index++) {
         final item = _items[index];
         final updated = userData[item.id];
         if (updated == null) continue;
-        if (_state.scope == LibraryBrowseScope.favorites &&
-            !updated.isFavorite) {
-          _items.removeAt(index);
-          if (_totalCount != null && _totalCount! > 0) {
-            _totalCount = _totalCount! - 1;
-          }
-        } else {
-          _items[index] = item.copyWith(userData: updated);
-        }
+        _items[index] = item.copyWith(userData: updated);
       }
     });
   }
@@ -865,6 +896,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     if (_isReloadingCurrentGeneration) {
       return _activeReload ?? Future.value();
     }
+    final failureSnapshot = restoreScrollPosition
+        ? _LibraryQuerySnapshot(
+            items: List<EmbyItem>.of(_items),
+            seenItemIds: Set<String>.of(_seenItemIds),
+            nextStartIndex: _nextStartIndex,
+            totalCount: _totalCount,
+            hasMore: _hasMore,
+            loadFailed: _loadFailed,
+          )
+        : null;
     final previousOffset = restoreScrollPosition && _controller.hasClients
         ? _controller.offset
         : null;
@@ -877,6 +918,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           targetStartIndex: targetStartIndex,
           restoreScrollPosition: restoreScrollPosition,
           previousOffset: previousOffset,
+          failureSnapshot: failureSnapshot,
         ).whenComplete(() {
           if (_reloadGeneration == generation) _reloadGeneration = null;
           if (identical(_activeReload, trackedReload)) _activeReload = null;
@@ -890,6 +932,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     required int targetStartIndex,
     required bool restoreScrollPosition,
     required double? previousOffset,
+    required _LibraryQuerySnapshot? failureSnapshot,
   }) async {
     if (!mounted || generation != _generation) return;
     setState(() {
@@ -919,6 +962,26 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         !_loadFailed) {
       await _loadUntilDisplayCapacity(expectedGeneration: generation);
     }
+    var restoredAfterFailure = false;
+    if (failureSnapshot != null &&
+        mounted &&
+        generation == _generation &&
+        _loadFailed) {
+      setState(() {
+        _items
+          ..clear()
+          ..addAll(failureSnapshot.items);
+        _seenItemIds
+          ..clear()
+          ..addAll(failureSnapshot.seenItemIds);
+        _nextStartIndex = failureSnapshot.nextStartIndex;
+        _totalCount = failureSnapshot.totalCount;
+        _hasMore = failureSnapshot.hasMore;
+        _loading = false;
+        _loadFailed = failureSnapshot.loadFailed;
+      });
+      restoredAfterFailure = true;
+    }
     if (previousOffset != null && mounted && generation == _generation) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || generation != _generation || !_controller.hasClients) {
@@ -935,6 +998,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           _clearPosition();
         }
       });
+    }
+    if (restoredAfterFailure && mounted && generation == _generation) {
+      _showUserDataRefreshFailure();
     }
   }
 
@@ -1128,6 +1194,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       error: error,
       stackTrace: stackTrace,
     );
+    _showUserDataRefreshFailure();
+  }
+
+  void _showUserDataRefreshFailure() {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
