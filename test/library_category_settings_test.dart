@@ -9,6 +9,7 @@ void main() {
     final store = MemoryLibraryCategorySettingsStore();
 
     expect(await store.load(_firstScope), const LibraryCategorySettings());
+    expect((await store.load(_firstScope)).showPhotos, isTrue);
     await store.save(
       _firstScope,
       const LibraryCategorySettings(showMovies: true, showFolders: false),
@@ -56,6 +57,7 @@ void main() {
       isTrue,
     );
     expect(find.widgetWithText(SwitchListTile, '目录'), findsOneWidget);
+    expect(find.widgetWithText(SwitchListTile, '图片'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '文件夹'), findsNothing);
   });
 

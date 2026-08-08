@@ -119,6 +119,7 @@ String _rangePrefix(LibraryBrowseState state) {
       LibraryMediaType.movie => '收藏电影',
       LibraryMediaType.series => '收藏剧集',
       LibraryMediaType.video => '收藏视频',
+      LibraryMediaType.photo => '收藏图片',
     };
   }
   if (state.playedFilter == LibraryPlayedFilter.unplayed) return '未播放';
@@ -130,6 +131,7 @@ String _rangePrefix(LibraryBrowseState state) {
     LibraryMediaType.movie => '电影',
     LibraryMediaType.series => '剧集',
     LibraryMediaType.video => '视频',
+    LibraryMediaType.photo => '图片',
   };
 }
 

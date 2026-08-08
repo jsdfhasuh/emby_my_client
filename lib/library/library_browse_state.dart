@@ -27,7 +27,8 @@ enum LibraryMediaType {
   all('Movie,Series,Video'),
   movie('Movie'),
   series('Series'),
-  video('Video');
+  video('Video'),
+  photo('Photo');
 
   const LibraryMediaType(this.apiValue);
 
@@ -154,6 +155,7 @@ class LibraryBrowseState {
 
   int get activeFilterCount =>
       (playedFilter == LibraryPlayedFilter.all ? 0 : 1) +
+      (localFilter == LibraryLocalMediaFilter.all ? 0 : 1) +
       (alphabetFilter.isAll ? 0 : 1);
 
   LibraryBrowseState copyWith({
@@ -209,9 +211,11 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
     case LibraryBrowseScope.favorites:
       return _preserveIdentity(
         state,
-        state.copyWith(
-          alphabetFilter: _normalizedAlphabet(state),
-          clearFacet: true,
+        _normalizeMediaFilters(
+          state.copyWith(
+            alphabetFilter: _normalizedAlphabet(state),
+            clearFacet: true,
+          ),
         ),
       );
     case LibraryBrowseScope.facet:
@@ -219,7 +223,9 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
       if (facet == null || !facet.isValid) return const LibraryBrowseState();
       return _preserveIdentity(
         state,
-        state.copyWith(alphabetFilter: _normalizedAlphabet(state)),
+        _normalizeMediaFilters(
+          state.copyWith(alphabetFilter: _normalizedAlphabet(state)),
+        ),
       );
     case LibraryBrowseScope.directory:
       return _preserveIdentity(
@@ -234,6 +240,14 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
       return _preserveIdentity(state, LibraryBrowseState(scope: state.scope));
   }
 }
+
+LibraryBrowseState _normalizeMediaFilters(LibraryBrowseState state) =>
+    state.mediaType == LibraryMediaType.photo
+    ? state.copyWith(
+        playedFilter: LibraryPlayedFilter.all,
+        localFilter: LibraryLocalMediaFilter.all,
+      )
+    : state;
 
 LibraryBrowseState _preserveIdentity(
   LibraryBrowseState original,
@@ -274,6 +288,60 @@ final class LibraryLocalFilterSelected extends LibraryBrowseEvent {
   final LibraryLocalMediaFilter localFilter;
 }
 
+@immutable
+class LibraryFilterDraft {
+  const LibraryFilterDraft({
+    this.mediaType = LibraryMediaType.all,
+    this.localFilter = LibraryLocalMediaFilter.all,
+    this.playedFilter = LibraryPlayedFilter.all,
+  });
+
+  factory LibraryFilterDraft.fromState(LibraryBrowseState state) =>
+      LibraryFilterDraft(
+        mediaType: state.mediaType,
+        localFilter: state.localFilter,
+        playedFilter: state.playedFilter,
+      );
+
+  final LibraryMediaType mediaType;
+  final LibraryLocalMediaFilter localFilter;
+  final LibraryPlayedFilter playedFilter;
+
+  LibraryFilterDraft copyWith({
+    LibraryMediaType? mediaType,
+    LibraryLocalMediaFilter? localFilter,
+    LibraryPlayedFilter? playedFilter,
+  }) {
+    final next = LibraryFilterDraft(
+      mediaType: mediaType ?? this.mediaType,
+      localFilter: localFilter ?? this.localFilter,
+      playedFilter: playedFilter ?? this.playedFilter,
+    );
+    return next.mediaType == LibraryMediaType.photo
+        ? const LibraryFilterDraft(mediaType: LibraryMediaType.photo)
+        : next;
+  }
+
+  LibraryFilterDraft reset() => const LibraryFilterDraft();
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LibraryFilterDraft &&
+          mediaType == other.mediaType &&
+          localFilter == other.localFilter &&
+          playedFilter == other.playedFilter;
+
+  @override
+  int get hashCode => Object.hash(mediaType, localFilter, playedFilter);
+}
+
+final class LibraryFiltersApplied extends LibraryBrowseEvent {
+  const LibraryFiltersApplied(this.draft);
+
+  final LibraryFilterDraft draft;
+}
+
 final class LibrarySortChanged extends LibraryBrowseEvent {
   const LibrarySortChanged({required this.sortBy, required this.sortOrder});
 
@@ -296,6 +364,7 @@ final class LibraryCategoryVisibilityChanged extends LibraryBrowseEvent {
     required this.showMovies,
     required this.showSeries,
     required this.showVideos,
+    this.showPhotos = true,
     required this.showFavorites,
     required this.showDirectory,
   });
@@ -303,6 +372,7 @@ final class LibraryCategoryVisibilityChanged extends LibraryBrowseEvent {
   final bool showMovies;
   final bool showSeries;
   final bool showVideos;
+  final bool showPhotos;
   final bool showFavorites;
   final bool showDirectory;
 
@@ -311,6 +381,7 @@ final class LibraryCategoryVisibilityChanged extends LibraryBrowseEvent {
     LibraryMediaType.movie => showMovies,
     LibraryMediaType.series => showSeries,
     LibraryMediaType.video => showVideos,
+    LibraryMediaType.photo => showPhotos,
   };
 }
 
@@ -332,6 +403,14 @@ LibraryBrowseState reduceLibraryBrowseState(
     LibraryLocalFilterSelected(:final localFilter) =>
       current.scope.supportsMediaFilters
           ? current.copyWith(localFilter: localFilter)
+          : current,
+    LibraryFiltersApplied(:final draft) =>
+      current.scope.supportsMediaFilters
+          ? current.copyWith(
+              mediaType: draft.mediaType,
+              localFilter: draft.localFilter,
+              playedFilter: draft.playedFilter,
+            )
           : current,
     LibrarySortChanged(:final sortBy, :final sortOrder) =>
       current.scope.supportsSorting

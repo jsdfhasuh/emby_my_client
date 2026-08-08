@@ -95,6 +95,13 @@ void main() {
                     if (!normalized.alphabetEnabled) {
                       expect(normalized.alphabetFilter.isAll, isTrue);
                     }
+                    if (normalized.mediaType == LibraryMediaType.photo) {
+                      expect(normalized.playedFilter, LibraryPlayedFilter.all);
+                      expect(
+                        normalized.localFilter,
+                        LibraryLocalMediaFilter.all,
+                      );
+                    }
                   }
                 }
               }
@@ -271,6 +278,46 @@ void main() {
         const LibraryLocalFilterSelected(LibraryLocalMediaFilter.regular),
       ),
       same(directory),
+    );
+  });
+
+  test(
+    'filter draft applies atomically and photo clears incompatible filters',
+    () {
+      const state = LibraryBrowseState(
+        mediaType: LibraryMediaType.movie,
+        localFilter: LibraryLocalMediaFilter.strm,
+        playedFilter: LibraryPlayedFilter.unplayed,
+      );
+      final draft = LibraryFilterDraft.fromState(
+        state,
+      ).copyWith(mediaType: LibraryMediaType.photo);
+
+      expect(draft.mediaType, LibraryMediaType.photo);
+      expect(draft.localFilter, LibraryLocalMediaFilter.all);
+      expect(draft.playedFilter, LibraryPlayedFilter.all);
+      expect(
+        reduceLibraryBrowseState(state, LibraryFiltersApplied(draft)),
+        const LibraryBrowseState(mediaType: LibraryMediaType.photo),
+      );
+      expect(draft.reset(), const LibraryFilterDraft());
+    },
+  );
+
+  test('favorites and photo remain compatible after normalization', () {
+    const state = LibraryBrowseState(
+      scope: LibraryBrowseScope.favorites,
+      mediaType: LibraryMediaType.photo,
+      localFilter: LibraryLocalMediaFilter.regular,
+      playedFilter: LibraryPlayedFilter.played,
+    );
+
+    expect(
+      normalizeLibraryBrowseState(state),
+      const LibraryBrowseState(
+        scope: LibraryBrowseScope.favorites,
+        mediaType: LibraryMediaType.photo,
+      ),
     );
   });
 

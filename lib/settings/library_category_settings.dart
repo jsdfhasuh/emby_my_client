@@ -7,6 +7,7 @@ class LibraryCategorySettings {
     this.showMovies = false,
     this.showSeries = false,
     this.showVideos = false,
+    this.showPhotos = true,
     this.showFavorites = true,
     this.showFolders = true,
   });
@@ -14,6 +15,7 @@ class LibraryCategorySettings {
   final bool showMovies;
   final bool showSeries;
   final bool showVideos;
+  final bool showPhotos;
   final bool showFavorites;
   final bool showFolders;
 
@@ -21,12 +23,14 @@ class LibraryCategorySettings {
     bool? showMovies,
     bool? showSeries,
     bool? showVideos,
+    bool? showPhotos,
     bool? showFavorites,
     bool? showFolders,
   }) => LibraryCategorySettings(
     showMovies: showMovies ?? this.showMovies,
     showSeries: showSeries ?? this.showSeries,
     showVideos: showVideos ?? this.showVideos,
+    showPhotos: showPhotos ?? this.showPhotos,
     showFavorites: showFavorites ?? this.showFavorites,
     showFolders: showFolders ?? this.showFolders,
   );
@@ -37,6 +41,7 @@ class LibraryCategorySettings {
       other.showMovies == showMovies &&
       other.showSeries == showSeries &&
       other.showVideos == showVideos &&
+      other.showPhotos == showPhotos &&
       other.showFavorites == showFavorites &&
       other.showFolders == showFolders;
 
@@ -45,6 +50,7 @@ class LibraryCategorySettings {
     showMovies,
     showSeries,
     showVideos,
+    showPhotos,
     showFavorites,
     showFolders,
   );
@@ -79,6 +85,9 @@ class SharedPreferencesLibraryCategorySettingsStore
       showVideos:
           await _preferences.getBool(_key(scope, 'videos')) ??
           defaults.showVideos,
+      showPhotos:
+          await _preferences.getBool(_key(scope, 'photos')) ??
+          defaults.showPhotos,
       showFavorites:
           await _preferences.getBool(_key(scope, 'favorites')) ??
           defaults.showFavorites,
@@ -94,6 +103,7 @@ class SharedPreferencesLibraryCategorySettingsStore
       _preferences.setBool(_key(scope, 'movies'), settings.showMovies),
       _preferences.setBool(_key(scope, 'series'), settings.showSeries),
       _preferences.setBool(_key(scope, 'videos'), settings.showVideos),
+      _preferences.setBool(_key(scope, 'photos'), settings.showPhotos),
       _preferences.setBool(_key(scope, 'favorites'), settings.showFavorites),
       _preferences.setBool(_key(scope, 'folders'), settings.showFolders),
     ]);
@@ -105,6 +115,7 @@ class SharedPreferencesLibraryCategorySettingsStore
       _preferences.remove(_key(scope, 'movies')),
       _preferences.remove(_key(scope, 'series')),
       _preferences.remove(_key(scope, 'videos')),
+      _preferences.remove(_key(scope, 'photos')),
       _preferences.remove(_key(scope, 'favorites')),
       _preferences.remove(_key(scope, 'folders')),
     ]);

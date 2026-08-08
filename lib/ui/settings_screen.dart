@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/diagnostic_log.dart';
 import '../settings/library_category_settings.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -41,12 +42,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     try {
       await widget.onLibraryCategorySettingsChanged(settings);
-    } catch (error) {
+    } catch (error, stackTrace) {
       if (!mounted) return;
       setState(() => _settings = previous);
+      DiagnosticLog.instance.error(
+        'settings',
+        'Library category settings update failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      ).showSnackBar(const SnackBar(content: Text('设置保存失败，请重试')));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -133,6 +140,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: _settings.showVideos,
               onChanged: (value) =>
                   _update(_settings.copyWith(showVideos: value)),
+            ),
+            _categorySwitch(
+              icon: Icons.photo_outlined,
+              label: '图片',
+              value: _settings.showPhotos,
+              onChanged: (value) =>
+                  _update(_settings.copyWith(showPhotos: value)),
             ),
             _categorySwitch(
               icon: Icons.favorite_outline,

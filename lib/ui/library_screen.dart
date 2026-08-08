@@ -282,6 +282,7 @@ extension on LibraryMediaType {
     LibraryMediaType.movie => '电影',
     LibraryMediaType.series => '剧集',
     LibraryMediaType.video => '视频',
+    LibraryMediaType.photo => '图片',
   };
 }
 
@@ -669,6 +670,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           showMovies: settings.showMovies,
           showSeries: settings.showSeries,
           showVideos: settings.showVideos,
+          showPhotos: settings.showPhotos,
           showFavorites: settings.showFavorites,
           showDirectory: settings.showFolders,
         ),
