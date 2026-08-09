@@ -2,15 +2,20 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/diagnostic_log.dart';
 import '../core/server_scope.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../library/library_browse_state.dart';
+import '../library/library_content_profile.dart';
+import '../library/library_entry_action.dart';
 import '../models/emby_models.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
 import 'library_screen.dart';
+import 'photos/photo_viewer_screen.dart';
 import 'widgets/media_widgets.dart';
 
 class SearchScreen extends StatefulWidget {
@@ -181,16 +186,22 @@ class _SearchScreenState extends State<SearchScreen> {
       setState(() {
         final knownIds = _results.map((item) => item.id).toSet();
         _results.addAll(page.items.where((item) => knownIds.add(item.id)));
-        _nextStartIndex += page.items.length;
+        _nextStartIndex += page.rawItemCount;
         _totalCount = page.totalRecordCount;
         _hasMore =
-            page.items.isNotEmpty &&
+            page.rawItemCount > 0 &&
             (page.totalRecordCount == null
-                ? page.items.length == _pageSize
+                ? page.rawItemCount == _pageSize
                 : _nextStartIndex < page.totalRecordCount!);
       });
-    } catch (error) {
+    } catch (error, stackTrace) {
       if (mounted && generation == _generation) {
+        DiagnosticLog.instance.error(
+          'search',
+          'Search page load failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
         setState(() => _error = error);
       }
     } finally {
@@ -230,23 +241,82 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _open(EmbyItem item) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => item.isFolder
-            ? LibraryBrowseScreen.directory(
-                api: widget.api,
-                view: item,
-                downloads: widget.downloads,
-                categorySettings: widget.categorySettings,
-              )
-            : ItemDetailScreen(
-                api: widget.api,
-                initialItem: item,
-                downloads: widget.downloads,
-              ),
-      ),
-    );
-    if (mounted && _activeQuery.isNotEmpty) await _refresh();
+    const profile = LibraryContentProfile.unknown;
+    switch (resolveLibraryEntryAction(
+      profile,
+      LibraryBrowseScope.media,
+      item,
+    )) {
+      case LibraryEntryAction.openDirectory:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LibraryBrowseScreen.directory(
+              api: widget.api,
+              view: item,
+              downloads: widget.downloads,
+              categorySettings: widget.categorySettings,
+              profile: profile,
+            ),
+          ),
+        );
+      case LibraryEntryAction.openPhoto:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => PhotoViewerScreen(
+              api: widget.api,
+              parentId: '',
+              initialDirectoryItems: _results,
+              initialItemId: item.id,
+              initialHasMore: false,
+            ),
+          ),
+        );
+      case LibraryEntryAction.openDetail:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ItemDetailScreen(
+              api: widget.api,
+              initialItem: item,
+              downloads: widget.downloads,
+            ),
+          ),
+        );
+        await _refreshItemUserData(item.id);
+      case LibraryEntryAction.openFacet:
+      case LibraryEntryAction.unsupported:
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('暂不支持打开这个项目')));
+        }
+    }
+  }
+
+  Future<void> _refreshItemUserData(String itemId) async {
+    if (!mounted || itemId.isEmpty) return;
+    try {
+      final values = await widget.api.getUserDataForItems([itemId]);
+      final userData = values[itemId];
+      if (!mounted || userData == null) return;
+      setState(() {
+        final index = _results.indexWhere((item) => item.id == itemId);
+        if (index >= 0) {
+          _results[index] = _results[index].copyWith(userData: userData);
+        }
+      });
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'search',
+        'Search result user data refresh failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('状态刷新失败，可稍后重试')));
+      }
+    }
   }
 
   @override
@@ -302,7 +372,9 @@ class _SearchScreenState extends State<SearchScreen> {
           final itemType = SearchItemType.values[index];
           return ChoiceChip(
             selected: _itemType == itemType,
-            onSelected: (_) => _selectItemType(itemType),
+            onSelected: (selected) {
+              if (selected) _selectItemType(itemType);
+            },
             avatar: Icon(itemType.icon, size: 17),
             label: Text(itemType.label),
           );
@@ -447,6 +519,7 @@ extension on SearchItemType {
     SearchItemType.series => '剧集',
     SearchItemType.episode => '单集',
     SearchItemType.video => '视频',
+    SearchItemType.photo => '图片',
     SearchItemType.folder => '文件夹',
   };
 
@@ -456,6 +529,7 @@ extension on SearchItemType {
     SearchItemType.series => Icons.tv_outlined,
     SearchItemType.episode => Icons.play_circle_outline,
     SearchItemType.video => Icons.video_library_outlined,
+    SearchItemType.photo => Icons.photo_outlined,
     SearchItemType.folder => Icons.folder_outlined,
   };
 }

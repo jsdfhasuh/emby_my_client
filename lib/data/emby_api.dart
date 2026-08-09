@@ -9,6 +9,7 @@ import '../core/server_scope.dart';
 import '../images/emby_image_request.dart';
 import '../library/library_alphabet_filter.dart';
 import '../library/library_browse_state.dart' as browse;
+import '../library/library_content_profile.dart';
 import '../models/emby_models.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
@@ -406,10 +407,12 @@ class EmbyApi {
       final items = await getLatestItems(parentId: library.id, limit: 18);
       if (items.isEmpty) return null;
       return HomeLatestSection(library: library, items: items);
-    } catch (error) {
-      DiagnosticLog.instance.warning(
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
         'home',
-        'Skipped latest shelf library=${library.id}: $error',
+        'Skipped latest shelf profile=${LibraryContentProfile.fromCollectionType(library.collectionType).kind.name}',
+        error: error,
+        stackTrace: stackTrace,
       );
       return null;
     }
@@ -438,7 +441,7 @@ class EmbyApi {
         query: {
           'ParentId': ?parentId,
           'Limit': limit,
-          'IncludeItemTypes': 'Movie,Series,Episode,Video',
+          'IncludeItemTypes': 'Movie,Series,Episode,Video,Photo',
           'Fields': _listItemFields,
           'EnableUserData': true,
           'EnableImages': true,
@@ -448,6 +451,7 @@ class EmbyApi {
 
   Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
     browse.LibraryMediaType mediaType = browse.LibraryMediaType.all,
@@ -474,7 +478,7 @@ class EmbyApi {
           'StartIndex': startIndex,
           'Limit': limit,
           'Recursive': true,
-          'IncludeItemTypes': mediaType.apiValue,
+          'IncludeItemTypes': profile.includeItemTypesFor(mediaType),
           'SortBy': sortBy.apiValue,
           'SortOrder': sortOrder.apiValue,
           if (filters.isNotEmpty) 'Filters': filters.join(','),
@@ -508,7 +512,7 @@ class EmbyApi {
           'Limit': limit,
           'Recursive': false,
           'IncludeItemTypes':
-              'Folder,CollectionFolder,Movie,Series,Episode,Video',
+              'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
           'SortBy': sortBy.apiValue,
           'SortOrder': sortOrder.apiValue,
           'Fields': _listItemFields,
@@ -546,6 +550,7 @@ class EmbyApi {
 
   Future<EmbyItemPage> getLibraryGenres({
     required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
   }) => _getLibraryTerms(
@@ -553,10 +558,12 @@ class EmbyApi {
     parentId: parentId,
     startIndex: startIndex,
     limit: limit,
+    profile: profile,
   );
 
   Future<EmbyItemPage> getLibraryTags({
     required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
   }) => _getLibraryTerms(
@@ -564,6 +571,7 @@ class EmbyApi {
     parentId: parentId,
     startIndex: startIndex,
     limit: limit,
+    profile: profile,
   );
 
   Future<EmbyItemPage> _getLibraryTerms({
@@ -571,6 +579,7 @@ class EmbyApi {
     required String parentId,
     required int startIndex,
     required int limit,
+    required LibraryContentProfile profile,
   }) async {
     final response = await _request(
       () => _dio.get<dynamic>(
@@ -581,7 +590,9 @@ class EmbyApi {
           'StartIndex': startIndex,
           'Limit': limit,
           'Recursive': true,
-          'IncludeItemTypes': 'Movie,Series,Video',
+          'IncludeItemTypes': profile.includeItemTypesFor(
+            browse.LibraryMediaType.all,
+          ),
           'SortBy': 'SortName',
           'SortOrder': 'Ascending',
           'Fields': _listItemFields,
@@ -668,7 +679,49 @@ class EmbyApi {
     final total = rawTotal is num
         ? rawTotal.toInt()
         : int.tryParse(rawTotal?.toString() ?? '');
-    return EmbyItemPage(items: items, totalRecordCount: total);
+    return EmbyItemPage(
+      items: items,
+      totalRecordCount: total,
+      rawItemCount: rawItems.length,
+    );
+  }
+
+  Future<EmbyItemPage> getPhotoItems({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    bool recursive = false,
+    bool favorites = false,
+    browse.LibrarySortBy sortBy = browse.LibrarySortBy.name,
+    browse.LibrarySortOrder sortOrder = browse.LibrarySortOrder.ascending,
+    String? genreId,
+    String? tagId,
+  }) async {
+    if (genreId != null && tagId != null) {
+      throw ArgumentError('genreId and tagId cannot both be set.');
+    }
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': recursive,
+          'IncludeItemTypes': 'Photo',
+          'SortBy': sortBy.apiValue,
+          'SortOrder': sortOrder.apiValue,
+          if (favorites) 'Filters': 'IsFavorite',
+          'GenreIds': ?genreId,
+          'TagIds': ?tagId,
+          'Fields': _listItemFields,
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    return _parseLibraryPage(response.data);
   }
 
   Future<List<EmbyItem>> getPhotoChildren({

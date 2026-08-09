@@ -9,6 +9,7 @@ import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
 import '../library/library_alphabet_filter.dart';
 import '../library/library_browse_state.dart';
+import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_grid_geometry.dart';
 import '../library/library_item_membership.dart';
@@ -20,7 +21,7 @@ import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
-import 'photos/photo_library_screen.dart';
+import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
 import 'widgets/library_alphabet_navigation.dart';
 import 'widgets/library_directory_entry_card.dart';
@@ -88,14 +89,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _openView(EmbyItem view) {
     return Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => view.isPhotoLibrary
-            ? PhotoLibraryScreen(api: widget.api, directory: view)
-            : LibraryBrowseScreen.root(
-                api: widget.api,
-                view: view,
-                downloads: widget.downloads,
-                categorySettings: widget.categorySettings,
-              ),
+        builder: (_) => LibraryBrowseScreen.root(
+          api: widget.api,
+          view: view,
+          downloads: widget.downloads,
+          categorySettings: widget.categorySettings,
+        ),
       ),
     );
   }
@@ -203,14 +202,18 @@ class _LibraryQuerySnapshot {
 }
 
 class LibraryBrowseScreen extends StatefulWidget {
-  const LibraryBrowseScreen.root({
+  LibraryBrowseScreen.root({
     super.key,
     required this.api,
     required this.view,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
     this.initialState = const LibraryBrowseState(),
-  }) : _pageKind = _LibraryBrowsePageKind.root;
+    LibraryContentProfile? profile,
+  }) : profile =
+           profile ??
+           LibraryContentProfile.fromCollectionType(view.collectionType),
+       _pageKind = _LibraryBrowsePageKind.root;
 
   LibraryBrowseScreen.directory({
     super.key,
@@ -219,7 +222,11 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
     this.initialState = const LibraryBrowseState.directory(),
+    LibraryContentProfile? profile,
   }) : assert(initialState.scope == LibraryBrowseScope.directory),
+       profile =
+           profile ??
+           LibraryContentProfile.fromCollectionType(view.collectionType),
        _pageKind = _LibraryBrowsePageKind.directory;
 
   LibraryBrowseScreen.facet({
@@ -230,7 +237,11 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
     LibraryBrowseState? initialState,
+    LibraryContentProfile? profile,
   }) : initialState = initialState ?? LibraryBrowseState.facet(facet),
+       profile =
+           profile ??
+           LibraryContentProfile.fromCollectionType(view.collectionType),
        assert(
          initialState == null || initialState.scope == LibraryBrowseScope.facet,
        ),
@@ -240,6 +251,7 @@ class LibraryBrowseScreen extends StatefulWidget {
   final EmbyItem view;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibraryContentProfile profile;
   final LibraryBrowseState initialState;
   final _LibraryBrowsePageKind _pageKind;
 
@@ -317,23 +329,20 @@ enum _LibraryMoreAction { refresh, reset }
 class _LibraryScopeBar extends StatelessWidget {
   const _LibraryScopeBar({
     required this.selected,
-    required this.categorySettings,
+    required this.scopes,
     required this.onSelected,
   });
 
   final LibraryBrowseScope selected;
-  final LibraryCategorySettings categorySettings;
+  final Set<LibraryBrowseScope> scopes;
   final ValueChanged<LibraryBrowseScope> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    final scopes = [
-      LibraryBrowseScope.media,
-      if (categorySettings.showFolders) LibraryBrowseScope.directory,
-      LibraryBrowseScope.genres,
-      LibraryBrowseScope.tags,
-      if (categorySettings.showFavorites) LibraryBrowseScope.favorites,
-    ];
+    final visibleScopes = LibraryBrowseScope.values
+        .where(scopes.contains)
+        .where((scope) => scope != LibraryBrowseScope.facet)
+        .toList(growable: false);
     return Padding(
       key: const ValueKey('library-section-bar'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -346,7 +355,7 @@ class _LibraryScopeBar extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                for (final scope in scopes) ...[
+                for (final scope in visibleScopes) ...[
                   FilterChip(
                     key: ValueKey(
                       'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
@@ -358,7 +367,7 @@ class _LibraryScopeBar extends StatelessWidget {
                       if (isSelected) onSelected(scope);
                     },
                   ),
-                  if (scope != scopes.last) const SizedBox(width: 8),
+                  if (scope != visibleScopes.last) const SizedBox(width: 8),
                 ],
               ],
             ),
@@ -590,6 +599,17 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
+  Set<LibraryBrowseScope> get _visibleScopes =>
+      widget.profile.visibleScopes(widget.categorySettings);
+
+  Set<LibraryBrowseScope> get _allowedScopesForPage =>
+      widget._pageKind == _LibraryBrowsePageKind.directory
+      ? const {LibraryBrowseScope.directory}
+      : _visibleScopes;
+
+  Set<LibraryMediaType> get _visibleMediaTypes =>
+      widget.profile.visibleMediaTypes(widget.categorySettings);
+
   bool get _isMediaScope => _state.scope.supportsMediaFilters;
 
   bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
@@ -630,7 +650,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   @override
   void initState() {
     super.initState();
-    _state = normalizeLibraryBrowseState(widget.initialState);
+    _state = reduceLibraryBrowseState(
+      widget.initialState,
+      _capabilitiesEvent(),
+    );
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     _realtimeRefresh = RealtimeRefreshBinding(
@@ -665,18 +688,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final settings = widget.categorySettings;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_isRoot || widget.categorySettings != settings) return;
-      _dispatch(
-        LibraryCategoryVisibilityChanged(
-          showMovies: settings.showMovies,
-          showSeries: settings.showSeries,
-          showVideos: settings.showVideos,
-          showPhotos: settings.showPhotos,
-          showFavorites: settings.showFavorites,
-          showDirectory: settings.showFolders,
-        ),
-      );
+      _dispatch(_capabilitiesEvent());
     });
   }
+
+  LibraryCapabilitiesChanged _capabilitiesEvent() => LibraryCapabilitiesChanged(
+    allowedScopes: _allowedScopesForPage,
+    allowedMediaTypes: _visibleMediaTypes,
+    supportsPlayedFilter: widget.profile.supportsPlayedFilter,
+    supportsLocalSourceFilter: widget.profile.supportsLocalSourceFilter,
+  );
 
   @override
   void dispose() {
@@ -815,6 +836,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     LibraryBrowseScope.favorites ||
     LibraryBrowseScope.facet => widget.api.getLibraryMediaItems(
       parentId: widget.view.id,
+      profile: widget.profile,
       startIndex: startIndex,
       limit: _pageSize,
       mediaType: _state.mediaType,
@@ -839,11 +861,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     ),
     LibraryBrowseScope.genres => widget.api.getLibraryGenres(
       parentId: widget.view.id,
+      profile: widget.profile,
       startIndex: startIndex,
       limit: _pageSize,
     ),
     LibraryBrowseScope.tags => widget.api.getLibraryTags(
       parentId: widget.view.id,
+      profile: widget.profile,
       startIndex: startIndex,
       limit: _pageSize,
     ),
@@ -1162,7 +1186,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<void> _open(EmbyItem item) async {
-    switch (resolveLibraryEntryAction(_state.scope, item)) {
+    switch (resolveLibraryEntryAction(widget.profile, _state.scope, item)) {
       case LibraryEntryAction.openDirectory:
         await Navigator.of(context).push(
           MaterialPageRoute(
@@ -1171,6 +1195,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               view: item,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              profile: widget.profile,
               initialState: _state.scope == LibraryBrowseScope.directory
                   ? LibraryBrowseState.directory(
                       sortBy: _state.sortBy,
@@ -1191,6 +1216,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               view: widget.view,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              profile: widget.profile,
               facet: LibraryFacet(id: item.id, name: item.name, kind: kind),
             ),
           ),
@@ -1210,6 +1236,28 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           await _refreshUserData([item.id]);
         } catch (error, stackTrace) {
           _reportUserDataRefreshFailure(error, stackTrace);
+        }
+      case LibraryEntryAction.openPhoto:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => PhotoViewerScreen(
+              api: widget.api,
+              parentId: widget.view.id,
+              initialDirectoryItems: _items,
+              initialItemId: item.id,
+              initialHasMore: _hasMore,
+            ),
+          ),
+        );
+      case LibraryEntryAction.unsupported:
+        DiagnosticLog.instance.warning(
+          'library',
+          'Unsupported library entry type=${item.type}',
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('暂不支持打开这个项目')));
         }
     }
   }
@@ -1294,7 +1342,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                     SliverToBoxAdapter(
                       child: _LibraryScopeBar(
                         selected: _state.scope,
-                        categorySettings: widget.categorySettings,
+                        scopes: _visibleScopes,
                         onSelected: (scope) =>
                             _dispatch(LibraryScopeSelected(scope)),
                       ),
@@ -1389,13 +1437,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                 scrollDirection: Axis.horizontal,
                 child: Row(
                   children: [
-                    _mediaTypeChip(LibraryMediaType.all),
-                    if (widget.categorySettings.showMovies)
-                      _mediaTypeChip(LibraryMediaType.movie),
-                    if (widget.categorySettings.showSeries)
-                      _mediaTypeChip(LibraryMediaType.series),
-                    if (widget.categorySettings.showVideos)
-                      _mediaTypeChip(LibraryMediaType.video),
+                    for (final mediaType in LibraryMediaType.values)
+                      if (_visibleMediaTypes.contains(mediaType))
+                        _mediaTypeChip(mediaType),
                   ],
                 ),
               ),

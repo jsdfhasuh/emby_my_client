@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
@@ -756,6 +757,7 @@ class _DeferredAlphabetApi extends EmbyApi {
   @override
   Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
     LibraryMediaType mediaType = LibraryMediaType.all,

@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/models/emby_models.dart' show EmbySession;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,7 +15,10 @@ void main() {
     });
     addTearDown(api.dispose);
 
-    final page = await api.getLibraryMediaItems(parentId: 'library-1');
+    final page = await api.getLibraryMediaItems(
+      parentId: 'library-1',
+      profile: LibraryContentProfile.movies,
+    );
     final query = captured!.queryParameters;
 
     expect(captured!.path, '/Users/user-1/Items');
@@ -35,7 +39,7 @@ void main() {
     expect(query['StartIndex'], 0);
     expect(query['Limit'], 60);
     expect(query['Recursive'], isTrue);
-    expect(query['IncludeItemTypes'], 'Movie,Series,Video');
+    expect(query['IncludeItemTypes'], 'Movie');
     expect(query['SortBy'], 'SortName');
     expect(query['SortOrder'], 'Ascending');
     expect(query['Fields'], allOf(contains('Path'), contains('MediaSources')));
@@ -54,6 +58,7 @@ void main() {
 
       await api.getLibraryMediaItems(
         parentId: 'library-1',
+        profile: LibraryContentProfile.mixed,
         startIndex: 60,
         limit: 30,
         mediaType: LibraryMediaType.movie,
@@ -66,6 +71,7 @@ void main() {
       );
       await api.getLibraryMediaItems(
         parentId: 'library-1',
+        profile: LibraryContentProfile.mixed,
         tagId: 'tag-1',
         alphabetFilter: const SymbolsItems(),
       );
@@ -92,6 +98,7 @@ void main() {
       await expectLater(
         api.getLibraryMediaItems(
           parentId: 'library-1',
+          profile: LibraryContentProfile.mixed,
           genreId: 'genre-1',
           tagId: 'tag-1',
         ),
@@ -137,7 +144,7 @@ void main() {
     expect(query['Recursive'], isFalse);
     expect(
       query['IncludeItemTypes'],
-      'Folder,CollectionFolder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
     for (final forbidden in [
       'Filters',
@@ -161,8 +168,18 @@ void main() {
     });
     addTearDown(api.dispose);
 
-    await api.getLibraryGenres(parentId: 'library-1', startIndex: 4, limit: 10);
-    await api.getLibraryTags(parentId: 'library-1', startIndex: 14, limit: 20);
+    await api.getLibraryGenres(
+      parentId: 'library-1',
+      profile: LibraryContentProfile.homeVideosAndPhotos,
+      startIndex: 4,
+      limit: 10,
+    );
+    await api.getLibraryTags(
+      parentId: 'library-1',
+      profile: LibraryContentProfile.homeVideosAndPhotos,
+      startIndex: 14,
+      limit: 20,
+    );
 
     expect(requests.map((request) => request.path), ['/Genres', '/Tags']);
     for (final request in requests) {
@@ -181,7 +198,7 @@ void main() {
         'EnableTotalRecordCount',
       });
       expect(query['Recursive'], isTrue);
-      expect(query['IncludeItemTypes'], 'Movie,Series,Video');
+      expect(query['IncludeItemTypes'], 'Movie,Video,Photo');
       expect(query['SortBy'], 'SortName');
       expect(query['SortOrder'], 'Ascending');
       expect(query, isNot(contains('Filters')));
@@ -204,10 +221,19 @@ void main() {
     addTearDown(api.dispose);
 
     final pages = [
-      await api.getLibraryMediaItems(parentId: 'library-1'),
+      await api.getLibraryMediaItems(
+        parentId: 'library-1',
+        profile: LibraryContentProfile.mixed,
+      ),
       await api.getDirectoryChildren(parentId: 'library-1'),
-      await api.getLibraryGenres(parentId: 'library-1'),
-      await api.getLibraryTags(parentId: 'library-1'),
+      await api.getLibraryGenres(
+        parentId: 'library-1',
+        profile: LibraryContentProfile.mixed,
+      ),
+      await api.getLibraryTags(
+        parentId: 'library-1',
+        profile: LibraryContentProfile.mixed,
+      ),
     ];
 
     for (final page in pages) {
@@ -215,6 +241,61 @@ void main() {
       expect(page.items.map((item) => item.id), ['same', 'same']);
       expect(page.totalRecordCount, 4);
     }
+  });
+
+  test('home video and photo media queries use exact profile types', () async {
+    final requests = <RequestOptions>[];
+    final api = _api((options, handler) {
+      requests.add(options);
+      handler.resolve(_response(options));
+    });
+    addTearDown(api.dispose);
+
+    for (final mediaType in <LibraryMediaType>[
+      LibraryMediaType.all,
+      LibraryMediaType.video,
+      LibraryMediaType.photo,
+    ]) {
+      await api.getLibraryMediaItems(
+        parentId: 'library-1',
+        profile: LibraryContentProfile.homeVideosAndPhotos,
+        mediaType: mediaType,
+      );
+    }
+
+    expect(
+      requests.map((request) => request.queryParameters['IncludeItemTypes']),
+      ['Movie,Video,Photo', 'Video', 'Photo'],
+    );
+    await expectLater(
+      api.getLibraryMediaItems(
+        parentId: 'library-1',
+        profile: LibraryContentProfile.homeVideosAndPhotos,
+        mediaType: LibraryMediaType.series,
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test('photo query is explicit and retains raw response count', () async {
+    RequestOptions? captured;
+    final api = _api((options, handler) {
+      captured = options;
+      handler.resolve(_response(options));
+    });
+    addTearDown(api.dispose);
+
+    final page = await api.getPhotoItems(
+      parentId: 'album-1',
+      startIndex: 60,
+      limit: 30,
+      recursive: false,
+    );
+
+    expect(captured!.queryParameters['IncludeItemTypes'], 'Photo');
+    expect(captured!.queryParameters['Recursive'], isFalse);
+    expect(captured!.queryParameters['StartIndex'], 60);
+    expect(page.rawItemCount, 1);
   });
 }
 

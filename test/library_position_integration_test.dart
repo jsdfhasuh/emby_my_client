@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -504,7 +505,7 @@ EmbyApi _sectionApi() {
         onRequest: (options, handler) {
           final folders =
               options.queryParameters['IncludeItemTypes'] ==
-              'Folder,CollectionFolder,Movie,Series,Episode,Video';
+              'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo';
           final items = [
             for (var index = 0; index < 60; index++)
               folders
@@ -592,6 +593,7 @@ class _CountingLibraryApi extends EmbyApi {
   @override
   Future<EmbyItemPage> getLibraryMediaItems({
     required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
     LibraryMediaType mediaType = LibraryMediaType.all,

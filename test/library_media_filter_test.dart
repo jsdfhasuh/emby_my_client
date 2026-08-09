@@ -150,7 +150,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], isFalse);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      'Folder,CollectionFolder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
     expect(requests.last.queryParameters, isNot(contains('Filters')));
 
@@ -324,7 +324,7 @@ EmbyApi _sectionApi(List<RequestOptions> requests) {
             ],
             _
                 when query['IncludeItemTypes'] ==
-                    'Folder,CollectionFolder,Movie,Series,Episode,Video' =>
+                    'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo' =>
               [
                 {'Id': 'folder-1', 'Name': '电影目录', 'Type': 'Folder'},
                 {'Id': 'directory-media', 'Name': '目录内媒体', 'Type': 'Movie'},

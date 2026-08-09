@@ -5,6 +5,7 @@ import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
+import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -163,7 +164,7 @@ void main() {
     expect(captured?.queryParameters['Recursive'], false);
     expect(
       captured?.queryParameters['IncludeItemTypes'],
-      'Folder,CollectionFolder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
   });
 
@@ -208,10 +209,7 @@ void main() {
 
     await tester.tap(movieQuickFilter);
     await tester.pumpAndSettle();
-    expect(
-      requests.last.queryParameters['IncludeItemTypes'],
-      LibraryMediaType.movie.apiValue,
-    );
+    expect(requests.last.queryParameters['IncludeItemTypes'], 'Movie');
 
     await tester.tap(find.byTooltip('筛选'));
     await tester.pumpAndSettle();
@@ -338,7 +336,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], false);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      'Folder,CollectionFolder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
 
     await tester.tap(find.text('目录 A'));
@@ -349,7 +347,7 @@ void main() {
     expect(requests.last.queryParameters['Recursive'], false);
     expect(
       requests.last.queryParameters['IncludeItemTypes'],
-      'Folder,CollectionFolder,Movie,Series,Episode,Video',
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
   });
 
@@ -440,6 +438,53 @@ void main() {
     expect(browseStarts, [0, 60]);
     expect(refreshedItemId, 'item-70');
   });
+
+  testWidgets('mixed library photo opens the viewer with a photo-aware query', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1024, 768);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final requests = <RequestOptions>[];
+    final api = _api((options, handler) {
+      requests.add(options);
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [
+              {
+                'Id': 'photo-1',
+                'Name': '媒体库图片',
+                'Type': 'Photo',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      requests.first.queryParameters['IncludeItemTypes'],
+      'Movie,Video,Photo',
+    );
+    await tester.tap(find.text('媒体库图片'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PhotoViewerScreen), findsOneWidget);
+  });
 }
 
 Finder _quickCategory(String label) =>
@@ -485,7 +530,7 @@ Response<dynamic> _folderResponse(RequestOptions options) {
   final query = options.queryParameters;
   final isFolderView =
       query['IncludeItemTypes'] ==
-      'Folder,CollectionFolder,Movie,Series,Episode,Video';
+      'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo';
   final isLibraryRoot = query['ParentId'] == _library.id;
   final items = isFolderView && isLibraryRoot
       ? [
@@ -533,6 +578,17 @@ const _library = EmbyItem(
   name: '电影',
   type: 'CollectionFolder',
   collectionType: 'movies',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _homeVideoLibrary = EmbyItem(
+  id: 'home-video-library',
+  name: '家庭视频和照片',
+  type: 'CollectionFolder',
+  collectionType: 'homevideos',
   imageTags: {},
   backdropImageTags: [],
   genres: [],

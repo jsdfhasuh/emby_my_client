@@ -190,11 +190,14 @@ class EmbyItem {
 
   bool get isSeries => type == 'Series';
 
-  bool get isFolder => type == 'Folder' || type == 'CollectionFolder';
+  bool get isFolder => isLibraryContainer;
+
+  bool get isLibraryContainer =>
+      type == 'Folder' || type == 'CollectionFolder' || type == 'PhotoAlbum';
 
   bool get isPhoto => type == 'Photo';
 
-  bool get isPhotoContainer => type == 'PhotoAlbum' || type == 'Folder';
+  bool get isPhotoContainer => isLibraryContainer;
 
   bool get isPhotoLibrary => collectionType?.toLowerCase() == 'photos';
 
@@ -212,7 +215,9 @@ class EmbyItem {
       Duration(microseconds: userData.playbackPositionTicks ~/ 10);
 
   String get subtitle {
-    if (isFolder) return '文件夹';
+    if (type == 'PhotoAlbum') return '相册';
+    if (isFolder) return '目录';
+    if (isPhoto) return '图片';
     if (type == 'Episode') {
       final season = parentIndexNumber?.toString().padLeft(2, '0');
       final episode = indexNumber?.toString().padLeft(2, '0');
@@ -365,12 +370,13 @@ bool _isStrmReference(String? value) {
 bool _isStrmContainer(String? value) => value?.trim().toLowerCase() == 'strm';
 
 enum SearchItemType {
-  all('Movie,Series,Episode,Video,Folder,CollectionFolder'),
+  all('Movie,Series,Episode,Video,Photo,Folder,CollectionFolder,PhotoAlbum'),
   movie('Movie'),
   series('Series'),
   episode('Episode'),
   video('Video'),
-  folder('Folder,CollectionFolder');
+  photo('Photo'),
+  folder('Folder,CollectionFolder,PhotoAlbum');
 
   const SearchItemType(this.apiValue);
 

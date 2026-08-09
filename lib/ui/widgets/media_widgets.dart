@@ -549,10 +549,10 @@ class ErrorState extends StatelessWidget {
               color: Color(0xFFE2A93B),
             ),
             const SizedBox(height: 14),
-            Text(
-              error.toString(),
+            const Text(
+              '加载失败，请重试',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Color(0xFFC8CECF)),
+              style: TextStyle(color: Color(0xFFC8CECF)),
             ),
             const SizedBox(height: 18),
             OutlinedButton.icon(

@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/home_screen.dart';
+import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,6 +74,10 @@ void main() {
       );
       expect(latestRequests.first.queryParameters['Limit'], 18);
       expect(latestRequests.first.queryParameters['EnableImages'], true);
+      expect(
+        latestRequests.first.queryParameters['IncludeItemTypes'],
+        'Movie,Series,Episode,Video,Photo',
+      );
     },
   );
 
@@ -193,6 +198,65 @@ void main() {
 
     expect(find.text('最新华语剧'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home latest photo opens the photo viewer', (tester) async {
+    final api = _api((options, handler) {
+      if (options.path.endsWith('/Views')) {
+        handler.resolve(
+          _response(
+            options,
+            data: [
+              {
+                'Id': 'mixed-1',
+                'Name': '家庭内容',
+                'Type': 'CollectionFolder',
+                'CollectionType': 'homevideos',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          ),
+        );
+        return;
+      }
+      if (options.path.endsWith('/Items/Resume')) {
+        handler.resolve(_response(options, data: {'Items': const []}));
+        return;
+      }
+      if (options.path.endsWith('/Items/Latest')) {
+        handler.resolve(
+          _response(
+            options,
+            data: {
+              'Items': [
+                {
+                  'Id': 'photo-1',
+                  'Name': '最新图片',
+                  'Type': 'Photo',
+                  'ImageTags': const <String, String>{},
+                  'UserData': const <String, dynamic>{},
+                },
+              ],
+            },
+          ),
+        );
+        return;
+      }
+      handler.resolve(_response(options, data: {'Items': const []}));
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(body: HomeScreen(api: api)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('最新图片'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PhotoViewerScreen), findsOneWidget);
   });
 }
 

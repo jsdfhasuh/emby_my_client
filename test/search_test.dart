@@ -4,6 +4,7 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/search/search_history_store.dart';
 import 'package:emby_my_client/ui/search_screen.dart';
+import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -32,7 +33,7 @@ void main() {
       expect(captured?.queryParameters['Limit'], 30);
       expect(
         captured?.queryParameters['IncludeItemTypes'],
-        'Folder,CollectionFolder',
+        'Folder,CollectionFolder,PhotoAlbum',
       );
       expect(captured?.queryParameters['EnableTotalRecordCount'], true);
       expect(captured?.queryParameters, isNot(contains('SortBy')));
@@ -51,6 +52,18 @@ void main() {
     expect(requestCount, 0);
     expect(page.items, isEmpty);
     expect(page.totalRecordCount, 0);
+  });
+
+  test('photo search sends the exact Photo item type', () async {
+    RequestOptions? captured;
+    final api = _api((options, handler) {
+      captured = options;
+      handler.resolve(_searchResponse(options));
+    });
+
+    await api.search('图片', itemType: SearchItemType.photo);
+
+    expect(captured!.queryParameters['IncludeItemTypes'], 'Photo');
   });
 
   test('recent searches are case-insensitive, newest-first, and bounded', () {
@@ -166,6 +179,50 @@ void main() {
     expect(requests, hasLength(2));
     expect(requests.last.queryParameters['StartIndex'], 60);
     expect(find.text('项目 60'), findsOneWidget);
+  });
+
+  testWidgets('photo search opens the viewer instead of item details', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [
+              {
+                'Id': 'photo-1',
+                'Name': '测试图片',
+                'Type': 'Photo',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(
+          body: SearchScreen(
+            api: api,
+            historyStore: MemorySearchHistoryStore(),
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '图片');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('测试图片'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PhotoViewerScreen), findsOneWidget);
   });
 }
 

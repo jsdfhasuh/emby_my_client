@@ -23,17 +23,7 @@ extension LibraryBrowseScopeCapabilities on LibraryBrowseScope {
   };
 }
 
-enum LibraryMediaType {
-  all('Movie,Series,Video'),
-  movie('Movie'),
-  series('Series'),
-  video('Video'),
-  photo('Photo');
-
-  const LibraryMediaType(this.apiValue);
-
-  final String apiValue;
-}
+enum LibraryMediaType { all, movie, series, video, photo }
 
 enum LibraryLocalMediaFilter { all, strm, regular }
 
@@ -385,6 +375,20 @@ final class LibraryCategoryVisibilityChanged extends LibraryBrowseEvent {
   };
 }
 
+final class LibraryCapabilitiesChanged extends LibraryBrowseEvent {
+  const LibraryCapabilitiesChanged({
+    required this.allowedScopes,
+    required this.allowedMediaTypes,
+    required this.supportsPlayedFilter,
+    required this.supportsLocalSourceFilter,
+  });
+
+  final Set<LibraryBrowseScope> allowedScopes;
+  final Set<LibraryMediaType> allowedMediaTypes;
+  final bool supportsPlayedFilter;
+  final bool supportsLocalSourceFilter;
+}
+
 LibraryBrowseState reduceLibraryBrowseState(
   LibraryBrowseState state,
   LibraryBrowseEvent event,
@@ -425,10 +429,37 @@ LibraryBrowseState reduceLibraryBrowseState(
       current,
       event,
     ),
+    LibraryCapabilitiesChanged() => _applyCapabilities(current, event),
   };
   if (identical(next, current)) return current;
   final normalized = normalizeLibraryBrowseState(next);
   return normalized == current ? current : normalized;
+}
+
+LibraryBrowseState _applyCapabilities(
+  LibraryBrowseState current,
+  LibraryCapabilitiesChanged capabilities,
+) {
+  var next = current;
+  if (current.scope != LibraryBrowseScope.facet &&
+      !capabilities.allowedScopes.contains(current.scope)) {
+    next = _selectScope(current, LibraryBrowseScope.media);
+  }
+  if (next.scope.supportsMediaFilters &&
+      !capabilities.allowedMediaTypes.contains(next.mediaType)) {
+    next = next.copyWith(
+      mediaType: capabilities.allowedMediaTypes.contains(LibraryMediaType.all)
+          ? LibraryMediaType.all
+          : capabilities.allowedMediaTypes.firstOrNull ?? LibraryMediaType.all,
+    );
+  }
+  if (!capabilities.supportsPlayedFilter) {
+    next = next.copyWith(playedFilter: LibraryPlayedFilter.all);
+  }
+  if (!capabilities.supportsLocalSourceFilter) {
+    next = next.copyWith(localFilter: LibraryLocalMediaFilter.all);
+  }
+  return next;
 }
 
 LibraryBrowseState _applyCategoryVisibility(

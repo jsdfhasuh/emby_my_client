@@ -4,13 +4,16 @@ import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../library/library_browse_state.dart';
+import '../library/library_content_profile.dart';
+import '../library/library_entry_action.dart';
 import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
 import 'library_screen.dart';
-import 'photos/photo_library_screen.dart';
+import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
 
@@ -113,17 +116,58 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) await _refresh();
   }
 
+  Future<void> _openLatest(HomeLatestSection section, EmbyItem item) async {
+    final profile = LibraryContentProfile.fromCollectionType(
+      section.library.collectionType,
+    );
+    switch (resolveLibraryEntryAction(
+      profile,
+      LibraryBrowseScope.media,
+      item,
+    )) {
+      case LibraryEntryAction.openDirectory:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LibraryBrowseScreen.directory(
+              api: widget.api,
+              view: item,
+              downloads: widget.downloads,
+              categorySettings: widget.categorySettings,
+              profile: profile,
+            ),
+          ),
+        );
+      case LibraryEntryAction.openPhoto:
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => PhotoViewerScreen(
+              api: widget.api,
+              parentId: section.library.id,
+              initialDirectoryItems: section.items,
+              initialItemId: item.id,
+              initialHasMore: false,
+            ),
+          ),
+        );
+      case LibraryEntryAction.openDetail:
+        await _openDetail(item);
+        return;
+      case LibraryEntryAction.openFacet:
+      case LibraryEntryAction.unsupported:
+        return;
+    }
+    if (mounted) await _refresh();
+  }
+
   Future<void> _openLibrary(EmbyItem library) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => library.isPhotoLibrary
-            ? PhotoLibraryScreen(api: widget.api, directory: library)
-            : LibraryBrowseScreen.root(
-                api: widget.api,
-                view: library,
-                downloads: widget.downloads,
-                categorySettings: widget.categorySettings,
-              ),
+        builder: (_) => LibraryBrowseScreen.root(
+          api: widget.api,
+          view: library,
+          downloads: widget.downloads,
+          categorySettings: widget.categorySettings,
+        ),
       ),
     );
     if (mounted) await _refresh();
@@ -198,7 +242,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: '最新${section.library.name}',
                     items: section.items,
                     api: widget.api,
-                    onTap: _openDetail,
+                    onTap: (item) => _openLatest(section, item),
                     onTitleTap: () => _openLibrary(section.library),
                   )
                 else
@@ -206,7 +250,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: '最新${section.library.name}',
                     items: section.items,
                     api: widget.api,
-                    onTap: _openDetail,
+                    onTap: (item) => _openLatest(section, item),
                     onTitleTap: () => _openLibrary(section.library),
                   ),
             ],
