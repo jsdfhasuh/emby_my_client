@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/core/server_scope.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/item_detail_screen.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -18,9 +20,14 @@ void main() {
     });
     final requests = <RequestOptions>[];
     final api = _api(requests);
+    final scanService = _scanService(api);
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen.root(api: api, view: _library),
+        home: LibraryBrowseScreen.root(
+          api: api,
+          view: _library,
+          libraryScanService: scanService,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -73,8 +80,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('library-item-strm-1')), findsNothing);
-    expect(requests, hasLength(4));
-    expect(requests.last.queryParameters['StartIndex'], 0);
+    expect(requests, hasLength(3));
 
     await tester.tap(find.byKey(const ValueKey('library-sort-button')));
     await tester.pumpAndSettle();
@@ -85,8 +91,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(requests, hasLength(6));
-    expect(requests.last.queryParameters['StartIndex'], 0);
+    expect(requests, hasLength(7));
+    expect(requests.last.queryParameters['StartIndex'], 60);
     expect(requests.last.queryParameters['SortBy'], 'DateCreated');
     expect(requests.last.queryParameters['SortOrder'], 'Descending');
     expect(
@@ -99,13 +105,15 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('library-more-reset')));
     await tester.pumpAndSettle();
 
-    expect(requests, hasLength(7));
+    expect(requests, hasLength(8));
     expect(requests.last.queryParameters['StartIndex'], 0);
     expect(requests.last.queryParameters['SortBy'], 'SortName');
     expect(requests.last.queryParameters['SortOrder'], 'Ascending');
     expect(find.byKey(const ValueKey('library-item-strm-1')), findsNothing);
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await scanService.cancelAll();
+    scanService.dispose();
     await api.dispose();
   });
 
@@ -267,6 +275,13 @@ void main() {
     },
   );
 }
+
+LibraryLocalMediaScanService _scanService(EmbyApi api) =>
+    LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
 
 EmbyApi _api(List<RequestOptions> requests) {
   final dio = Dio()

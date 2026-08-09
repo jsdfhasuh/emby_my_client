@@ -13,6 +13,8 @@ import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_grid_geometry.dart';
 import '../library/library_item_membership.dart';
+import '../library/library_local_media_scan_cache.dart';
+import '../library/library_local_media_scan_service.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
@@ -35,11 +37,13 @@ class LibraryScreen extends StatefulWidget {
     required this.api,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.libraryScanService,
   });
 
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibraryLocalMediaScanService? libraryScanService;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -95,6 +99,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           view: view,
           downloads: widget.downloads,
           categorySettings: widget.categorySettings,
+          libraryScanService: widget.libraryScanService,
         ),
       ),
     );
@@ -209,6 +214,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     required this.view,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.libraryScanService,
     this.initialState = const LibraryBrowseState(),
     LibraryContentProfile? profile,
   }) : profile =
@@ -222,6 +228,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     required this.view,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.libraryScanService,
     this.initialState = const LibraryBrowseState.directory(),
     LibraryContentProfile? profile,
   }) : assert(initialState.scope == LibraryBrowseScope.directory),
@@ -237,6 +244,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     required LibraryFacet facet,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.libraryScanService,
     LibraryBrowseState? initialState,
     LibraryContentProfile? profile,
   }) : initialState = initialState ?? LibraryBrowseState.facet(facet),
@@ -253,6 +261,7 @@ class LibraryBrowseScreen extends StatefulWidget {
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
   final LibraryContentProfile profile;
+  final LibraryLocalMediaScanService? libraryScanService;
   final LibraryBrowseState initialState;
   final _LibraryBrowsePageKind _pageKind;
 
@@ -304,12 +313,6 @@ extension on LibraryLocalMediaFilter {
     LibraryLocalMediaFilter.all => '全部',
     LibraryLocalMediaFilter.strm => 'STRM',
     LibraryLocalMediaFilter.regular => '普通媒体',
-  };
-
-  bool includes(EmbyItem item) => switch (this) {
-    LibraryLocalMediaFilter.all => true,
-    LibraryLocalMediaFilter.strm => item.isStrm,
-    LibraryLocalMediaFilter.regular => !item.isStrm,
   };
 
   String get emptyTitle => switch (this) {
@@ -597,6 +600,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   int _generation = 0;
   int _positionGeneration = 0;
   bool _suppressPositionNotifications = false;
+  LibraryScanKey? _activeScanKey;
+  LibraryLocalScanSnapshot? _scanSnapshot;
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
@@ -613,6 +618,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   bool get _isMediaScope => _state.scope.supportsMediaFilters;
 
+  bool get _usesLocalScan => _state.localFilter != LibraryLocalMediaFilter.all;
+
   bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
 
   bool get _positionEnabled => _items.isNotEmpty;
@@ -623,20 +630,33 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _items.where((item) => item.isPlayable).toList(growable: false);
 
   LibraryLocalScanStatus get _scanStatus {
-    if (_state.localFilter == LibraryLocalMediaFilter.all) {
+    if (!_usesLocalScan) {
       return LibraryLocalScanStatus.inactive;
     }
-    if (_loadFailed) return LibraryLocalScanStatus.interrupted;
-    if (_hasMore || _loading) return LibraryLocalScanStatus.scanning;
-    return LibraryLocalScanStatus.complete;
+    final snapshot = _scanSnapshot;
+    if (snapshot == null || snapshot.safeError != null) {
+      return LibraryLocalScanStatus.interrupted;
+    }
+    return switch (snapshot.status) {
+      LibraryScanStatus.complete => LibraryLocalScanStatus.complete,
+      LibraryScanStatus.queued ||
+      LibraryScanStatus.scanning ||
+      LibraryScanStatus.paused => LibraryLocalScanStatus.scanning,
+      LibraryScanStatus.cancelled => LibraryLocalScanStatus.interrupted,
+    };
   }
 
   LibraryResultStatistics get _statistics => LibraryResultStatistics(
     state: _state,
     loadedCount: _items.length,
-    totalCount: _totalCount,
-    scannedCount: _nextStartIndex,
+    totalCount: _usesLocalScan && _scanStatus == LibraryLocalScanStatus.complete
+        ? _items.length
+        : _totalCount,
+    scannedCount: _scanSnapshot?.scannedRawCount ?? _nextStartIndex,
+    sourceTotalCount: _scanSnapshot?.sourceTotalCount,
     scanStatus: _scanStatus,
+    dirty: _scanSnapshot?.dirty ?? false,
+    unknownClassificationCount: _scanSnapshot?.unknownCount ?? 0,
   );
 
   LibraryGridGeometry get _gridGeometry => switch (_state.scope) {
@@ -657,6 +677,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     );
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
+    widget.libraryScanService?.addListener(_onLibraryScanChanged);
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refreshRealtime,
@@ -677,12 +698,24 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         return false;
       },
     );
-    unawaited(_loadUntilDisplayCapacity());
+    _startCurrentResultLoad();
   }
 
   @override
   void didUpdateWidget(covariant LibraryBrowseScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.libraryScanService, widget.libraryScanService)) {
+      oldWidget.libraryScanService?.removeListener(_onLibraryScanChanged);
+      widget.libraryScanService?.addListener(_onLibraryScanChanged);
+      final previousState = _state;
+      _dispatch(_capabilitiesEvent());
+      if (_state == previousState) {
+        _activeScanKey = null;
+        _scanSnapshot = null;
+        _startCurrentResultLoad();
+      }
+      return;
+    }
     if (!_isRoot || oldWidget.categorySettings == widget.categorySettings) {
       return;
     }
@@ -697,7 +730,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     allowedScopes: _allowedScopesForPage,
     allowedMediaTypes: _visibleMediaTypes,
     supportsPlayedFilter: widget.profile.supportsPlayedFilter,
-    supportsLocalSourceFilter: widget.profile.supportsLocalSourceFilter,
+    supportsLocalSourceFilter:
+        widget.profile.supportsLocalSourceFilter &&
+        widget.libraryScanService != null,
   );
 
   @override
@@ -708,13 +743,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _controller
       ..removeListener(_onScroll)
       ..dispose();
+    widget.libraryScanService?.removeListener(_onLibraryScanChanged);
     _positionController.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
 
   void _onScroll() {
-    if (!_isReloadingCurrentGeneration &&
+    if (!_usesLocalScan &&
+        !_isReloadingCurrentGeneration &&
         !_loadFailed &&
         _controller.position.extentAfter < 700) {
       unawaited(_loadMore());
@@ -780,6 +817,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<void> _performLoadMore(int generation) async {
+    if (_usesLocalScan) return;
     final startIndex = _nextStartIndex;
     setState(() {
       _loading = true;
@@ -795,7 +833,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         }
         for (final item in page.items) {
           if (!_seenItemIds.add(item.id)) continue;
-          if (_state.localFilter.includes(item)) _items.add(item);
+          _items.add(item);
         }
         _hasMore = page.rawItemCount == 0
             ? false
@@ -826,33 +864,34 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       await _loadMore(expectedGeneration: generation);
       if (!mounted || generation != _generation || _loadFailed) return;
       if (_nextStartIndex <= previousCursor) return;
-    } while (_hasMore &&
-        (_items.isEmpty ||
-            (_state.localFilter != LibraryLocalMediaFilter.all &&
-                _items.length < _pageSize)));
+    } while (_hasMore && _items.isEmpty);
   }
+
+  Future<EmbyItemPage> _requestMediaPage(
+    LibraryBrowseState state,
+    int startIndex, [
+    int limit = _pageSize,
+  ]) => widget.api.getLibraryMediaItems(
+    parentId: widget.view.id,
+    profile: widget.profile,
+    startIndex: startIndex,
+    limit: limit,
+    mediaType: state.mediaType,
+    playedFilter: state.playedFilter,
+    favorites: state.scope == LibraryBrowseScope.favorites,
+    sortBy: state.sortBy,
+    sortOrder: state.sortOrder,
+    alphabetFilter: state.alphabetFilter,
+    genreId: state.facet?.kind == LibraryFacetKind.genre
+        ? state.facet!.id
+        : null,
+    tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
+  );
 
   Future<EmbyItemPage> _requestPage(int startIndex) => switch (_state.scope) {
     LibraryBrowseScope.media ||
     LibraryBrowseScope.favorites ||
-    LibraryBrowseScope.facet => widget.api.getLibraryMediaItems(
-      parentId: widget.view.id,
-      profile: widget.profile,
-      startIndex: startIndex,
-      limit: _pageSize,
-      mediaType: _state.mediaType,
-      playedFilter: _state.playedFilter,
-      favorites: _state.scope == LibraryBrowseScope.favorites,
-      sortBy: _state.sortBy,
-      sortOrder: _state.sortOrder,
-      alphabetFilter: _state.alphabetFilter,
-      genreId: _state.facet?.kind == LibraryFacetKind.genre
-          ? _state.facet!.id
-          : null,
-      tagId: _state.facet?.kind == LibraryFacetKind.tag
-          ? _state.facet!.id
-          : null,
-    ),
+    LibraryBrowseScope.facet => _requestMediaPage(_state, startIndex),
     LibraryBrowseScope.directory => widget.api.getDirectoryChildren(
       parentId: widget.view.id,
       startIndex: startIndex,
@@ -874,13 +913,131 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     ),
   };
 
-  Future<void> _refresh() =>
-      _restartQuery(targetStartIndex: _pageSize, restoreScrollPosition: false);
+  Future<void> _refresh() {
+    if (_usesLocalScan) return _restartLocalScan();
+    return _restartQuery(
+      targetStartIndex: _pageSize,
+      restoreScrollPosition: false,
+    );
+  }
 
-  Future<void> _refreshPreservingPosition() => _restartQuery(
-    targetStartIndex: _nextStartIndex > _pageSize ? _nextStartIndex : _pageSize,
-    restoreScrollPosition: true,
-  );
+  Future<void> _refreshPreservingPosition() {
+    if (_usesLocalScan) return _restartLocalScan();
+    return _restartQuery(
+      targetStartIndex: _nextStartIndex > _pageSize
+          ? _nextStartIndex
+          : _pageSize,
+      restoreScrollPosition: true,
+    );
+  }
+
+  LibraryScanKey _scanKeyForState(LibraryBrowseState state) =>
+      LibraryScanKey.fromBrowseState(
+        scopeNamespace: widget.libraryScanService!.scope.cacheNamespace,
+        libraryId: widget.view.id,
+        state: state,
+      );
+
+  LibraryLocalMediaScanRequest _scanRequestForState(LibraryBrowseState state) {
+    final key = _scanKeyForState(state);
+    return LibraryLocalMediaScanRequest(
+      key: key,
+      loadPage: ({required startIndex, required limit}) =>
+          _requestMediaPage(state, startIndex, limit),
+    );
+  }
+
+  void _startCurrentResultLoad() {
+    if (_usesLocalScan) {
+      _subscribeToLocalScan();
+    } else {
+      _activeScanKey = null;
+      _scanSnapshot = null;
+      unawaited(_loadUntilDisplayCapacity());
+    }
+  }
+
+  void _subscribeToLocalScan({bool restart = false}) {
+    final service = widget.libraryScanService;
+    if (service == null) {
+      setState(() {
+        _loading = false;
+        _loadFailed = true;
+      });
+      return;
+    }
+    final request = _scanRequestForState(_state);
+    _activeScanKey = request.key;
+    try {
+      final snapshot = restart
+          ? service.restartScan(request)
+          : service.ensureScan(request);
+      _applyLocalScanSnapshot(snapshot);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library-scan',
+        'Local media scan subscription failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadFailed = true;
+      });
+    }
+  }
+
+  Future<void> _restartLocalScan() async {
+    if (!mounted) return;
+    _clearPosition(scrollToTop: true);
+    setState(() {
+      _items.clear();
+      _seenItemIds.clear();
+      _nextStartIndex = 0;
+      _totalCount = null;
+      _hasMore = false;
+      _loadFailed = false;
+      _loading = true;
+      _scanSnapshot = null;
+    });
+    _subscribeToLocalScan(restart: true);
+  }
+
+  void _onLibraryScanChanged() {
+    if (!mounted || !_usesLocalScan) return;
+    final key = _activeScanKey;
+    if (key == null) return;
+    final snapshot = widget.libraryScanService?.snapshotFor(key);
+    if (snapshot != null) _applyLocalScanSnapshot(snapshot);
+  }
+
+  void _applyLocalScanSnapshot(LibraryLocalScanSnapshot snapshot) {
+    if (!mounted || !_usesLocalScan) return;
+    final service = widget.libraryScanService;
+    final key = _activeScanKey;
+    if (service == null || key == null) return;
+    final items = service.itemsFor(key, _state.localFilter);
+    setState(() {
+      _scanSnapshot = snapshot;
+      _items
+        ..clear()
+        ..addAll(items);
+      _seenItemIds
+        ..clear()
+        ..addAll(items.map((item) => item.id));
+      _nextStartIndex = snapshot.rawCursor;
+      _totalCount = null;
+      _hasMore = false;
+      _loading = switch (snapshot.status) {
+        LibraryScanStatus.queued || LibraryScanStatus.scanning => true,
+        LibraryScanStatus.paused ||
+        LibraryScanStatus.complete ||
+        LibraryScanStatus.cancelled => false,
+      };
+      _loadFailed = snapshot.safeError != null;
+    });
+  }
 
   Future<void> _refreshRealtime() async {
     final reloadLibrary = _pendingRealtimeLibraryRefresh;
@@ -928,6 +1085,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     });
     if (membershipChanged) {
       await _refreshPreservingPosition();
+      return;
+    }
+    final scanKey = _activeScanKey;
+    if (_usesLocalScan && scanKey != null) {
+      widget.libraryScanService?.updateUserData(scanKey, userData);
       return;
     }
     setState(() {
@@ -1071,9 +1233,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _hasMore = true;
       _loading = false;
       _loadFailed = false;
+      _activeScanKey = null;
+      _scanSnapshot = null;
     });
     _clearPosition(scrollToTop: true);
-    unawaited(_loadUntilDisplayCapacity());
+    _startCurrentResultLoad();
   }
 
   Future<void> _showPlayedFilters() async {
@@ -1152,6 +1316,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _retryLoad() {
+    if (_usesLocalScan) {
+      final key = _activeScanKey;
+      if (key != null) unawaited(widget.libraryScanService?.retry(key));
+      return;
+    }
     if (_loadFailed) setState(() => _loadFailed = false);
     unawaited(_loadUntilDisplayCapacity());
   }
@@ -1261,6 +1430,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               view: item,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              libraryScanService: widget.libraryScanService,
               profile: widget.profile,
               initialState: _state.scope == LibraryBrowseScope.directory
                   ? LibraryBrowseState.directory(
@@ -1282,6 +1452,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               view: widget.view,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              libraryScanService: widget.libraryScanService,
               profile: widget.profile,
               facet: LibraryFacet(id: item.id, name: item.name, kind: kind),
             ),
@@ -1625,38 +1796,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     ),
   );
 
-  String get _countLabel {
-    if (_state.localFilter != LibraryLocalMediaFilter.all) {
-      final source = _totalCount == null
-          ? '已扫描 $_nextStartIndex 项'
-          : '已扫描 $_nextStartIndex/$_totalCount 项';
-      return switch (_scanStatus) {
-        LibraryLocalScanStatus.scanning =>
-          '已匹配 ${_items.length} 项，$source，继续统计中',
-        LibraryLocalScanStatus.interrupted =>
-          '已匹配 ${_items.length} 项，$source，统计中断',
-        LibraryLocalScanStatus.complete => '已匹配 ${_items.length} 项',
-        LibraryLocalScanStatus.inactive => '已匹配 ${_items.length} 项',
-      };
-    }
-    final total = _totalCount;
-    if (total == null) {
-      return _items.isEmpty ? '正在统计' : '已加载 ${_items.length} 项';
-    }
-    return switch (_state.scope) {
-      LibraryBrowseScope.directory => '目录共 $total 项',
-      LibraryBrowseScope.genres => '分类共 $total 项',
-      LibraryBrowseScope.tags => '标签共 $total 项',
-      LibraryBrowseScope.favorites => '收藏共 $total 项',
-      LibraryBrowseScope.media || LibraryBrowseScope.facet
-          when _state.playedFilter == LibraryPlayedFilter.unplayed =>
-        '未播放共 $total 项',
-      LibraryBrowseScope.media || LibraryBrowseScope.facet
-          when _state.playedFilter == LibraryPlayedFilter.played =>
-        '已播放共 $total 项',
-      LibraryBrowseScope.media || LibraryBrowseScope.facet => '共 $total 项',
-    };
-  }
+  String get _countLabel => _statistics.summaryLabel;
 
   IconData get _emptyIcon => _state.localFilter != LibraryLocalMediaFilter.all
       ? _state.localFilter.emptyIcon

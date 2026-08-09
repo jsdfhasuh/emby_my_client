@@ -14,40 +14,49 @@ class LibraryResultStatistics {
     required this.loadedCount,
     this.totalCount,
     this.scannedCount = 0,
+    this.sourceTotalCount,
     this.scanStatus = LibraryLocalScanStatus.inactive,
+    this.dirty = false,
+    this.unknownClassificationCount = 0,
   }) : assert(loadedCount >= 0),
        assert(totalCount == null || totalCount >= 0),
-       assert(scannedCount >= 0);
+       assert(scannedCount >= 0),
+       assert(sourceTotalCount == null || sourceTotalCount >= 0),
+       assert(unknownClassificationCount >= 0);
 
   final LibraryBrowseState state;
   final int loadedCount;
   final int? totalCount;
   final int scannedCount;
+  final int? sourceTotalCount;
   final LibraryLocalScanStatus scanStatus;
+  final bool dirty;
+  final int unknownClassificationCount;
 
   bool get isLocalScan => state.localFilter != LibraryLocalMediaFilter.all;
 
   bool get isLocalScanComplete =>
       isLocalScan && scanStatus == LibraryLocalScanStatus.complete;
 
+  bool get hasExactLocalTotal =>
+      isLocalScanComplete && !dirty && unknownClassificationCount == 0;
+
   int? get effectiveTotal {
-    if (isLocalScan && !isLocalScanComplete) return null;
-    if (isLocalScanComplete) return loadedCount;
+    if (isLocalScan && !hasExactLocalTotal) return null;
+    if (hasExactLocalTotal) return loadedCount;
     final total = totalCount;
     return total == null ? null : math.max(total, loadedCount);
   }
 
   LibraryPositionPresentation present(LibraryPositionSnapshot snapshot) {
-    if (isLocalScan && !isLocalScanComplete) {
-      final sourceTotal = totalCount;
+    if (isLocalScan && !hasExactLocalTotal) {
+      final sourceTotal = sourceTotalCount ?? totalCount;
       return LibraryPositionPresentation(
         rangeLabel: '已匹配 $loadedCount 项',
         totalLabel: sourceTotal == null
             ? '已扫描 $scannedCount 项'
             : '已扫描 $scannedCount/$sourceTotal 项',
-        statusLabel: scanStatus == LibraryLocalScanStatus.interrupted
-            ? '统计中断，可重试'
-            : '继续统计中',
+        statusLabel: _localStatusLabel,
       );
     }
 
@@ -80,6 +89,47 @@ class LibraryResultStatistics {
     );
   }
 
+  String get summaryLabel {
+    if (isLocalScan) {
+      if (!hasExactLocalTotal) {
+        final sourceTotal = sourceTotalCount ?? totalCount;
+        final source = sourceTotal == null
+            ? '已扫描 $scannedCount 项'
+            : '已扫描 $scannedCount/$sourceTotal 项';
+        return '已匹配 $loadedCount 项，$source，$_localStatusLabel';
+      }
+      return '已匹配 $loadedCount 项';
+    }
+    final total = effectiveTotal;
+    if (total == null) {
+      return loadedCount == 0 ? '正在统计' : '已加载 $loadedCount 项';
+    }
+    return switch (state.scope) {
+      LibraryBrowseScope.directory => '目录共 $total 项',
+      LibraryBrowseScope.genres => '分类共 $total 项',
+      LibraryBrowseScope.tags => '标签共 $total 项',
+      LibraryBrowseScope.favorites => '收藏共 $total 项',
+      LibraryBrowseScope.media || LibraryBrowseScope.facet
+          when state.playedFilter == LibraryPlayedFilter.unplayed =>
+        '未播放共 $total 项',
+      LibraryBrowseScope.media || LibraryBrowseScope.facet
+          when state.playedFilter == LibraryPlayedFilter.played =>
+        '已播放共 $total 项',
+      LibraryBrowseScope.media || LibraryBrowseScope.facet => '共 $total 项',
+    };
+  }
+
+  String get _localStatusLabel {
+    if (scanStatus == LibraryLocalScanStatus.interrupted) {
+      return '统计中断，可重试';
+    }
+    if (dirty) return '结果已变化，请刷新统计';
+    if (unknownClassificationCount > 0) {
+      return '有 ${_formatCount(unknownClassificationCount)} 项无法判断';
+    }
+    return isLocalScanComplete ? '统计完成' : '继续统计中';
+  }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -88,11 +138,22 @@ class LibraryResultStatistics {
           loadedCount == other.loadedCount &&
           totalCount == other.totalCount &&
           scannedCount == other.scannedCount &&
-          scanStatus == other.scanStatus;
+          sourceTotalCount == other.sourceTotalCount &&
+          scanStatus == other.scanStatus &&
+          dirty == other.dirty &&
+          unknownClassificationCount == other.unknownClassificationCount;
 
   @override
-  int get hashCode =>
-      Object.hash(state, loadedCount, totalCount, scannedCount, scanStatus);
+  int get hashCode => Object.hash(
+    state,
+    loadedCount,
+    totalCount,
+    scannedCount,
+    sourceTotalCount,
+    scanStatus,
+    dirty,
+    unknownClassificationCount,
+  );
 }
 
 @immutable

@@ -137,4 +137,52 @@ void main() {
     expect(complete.remainingLabel, '筛选结果还剩 6 项');
     expect(complete.percentageLabel, '29%');
   });
+
+  test('unknown and dirty scans never claim an exact local total', () {
+    for (final statistics in [
+      const LibraryResultStatistics(
+        state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.regular),
+        loadedCount: 8,
+        scannedCount: 60,
+        sourceTotalCount: 60,
+        scanStatus: LibraryLocalScanStatus.complete,
+        unknownClassificationCount: 2,
+      ),
+      const LibraryResultStatistics(
+        state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.strm),
+        loadedCount: 8,
+        scannedCount: 60,
+        sourceTotalCount: 60,
+        scanStatus: LibraryLocalScanStatus.complete,
+        dirty: true,
+      ),
+    ]) {
+      final result = statistics.present(snapshot);
+      expect(statistics.effectiveTotal, isNull);
+      expect(result.rangeLabel, '已匹配 8 项');
+      expect(result.remainingLabel, isNull);
+      expect(result.percentageLabel, isNull);
+    }
+
+    expect(
+      const LibraryResultStatistics(
+        state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.regular),
+        loadedCount: 8,
+        scannedCount: 60,
+        scanStatus: LibraryLocalScanStatus.complete,
+        unknownClassificationCount: 2,
+      ).present(snapshot).statusLabel,
+      '有 2 项无法判断',
+    );
+    expect(
+      const LibraryResultStatistics(
+        state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.strm),
+        loadedCount: 8,
+        scannedCount: 60,
+        scanStatus: LibraryLocalScanStatus.complete,
+        dirty: true,
+      ).present(snapshot).statusLabel,
+      '结果已变化，请刷新统计',
+    );
+  });
 }

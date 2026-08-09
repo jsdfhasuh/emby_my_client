@@ -9,6 +9,7 @@ import '../downloads/download_service.dart';
 import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
+import '../library/library_local_media_scan_service.dart';
 import '../models/emby_models.dart';
 import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
@@ -25,12 +26,14 @@ class SearchScreen extends StatefulWidget {
     required this.api,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.libraryScanService,
     this.historyStore,
   });
 
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibraryLocalMediaScanService? libraryScanService;
   final SearchHistoryStore? historyStore;
 
   @override
@@ -256,6 +259,7 @@ class _SearchScreenState extends State<SearchScreen> {
               view: item,
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
+              libraryScanService: widget.libraryScanService,
               profile: profile,
             ),
           ),

@@ -75,16 +75,19 @@ class _HomeShellState extends State<HomeShell> {
         api: api,
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
+        libraryScanService: widget.controller.libraryScanService,
       ),
       LibraryScreen(
         api: api,
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
+        libraryScanService: widget.controller.libraryScanService,
       ),
       SearchScreen(
         api: api,
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
+        libraryScanService: widget.controller.libraryScanService,
       ),
     ];
     const titles = ['首页', '媒体库', '搜索'];

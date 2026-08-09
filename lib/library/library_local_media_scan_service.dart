@@ -80,6 +80,28 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
     return entry.snapshot;
   }
 
+  LibraryLocalScanSnapshot restartScan(LibraryLocalMediaScanRequest request) {
+    if (!_acceptingScans || _disposed) {
+      throw StateError('Library scan service is shutting down');
+    }
+    _removeScan(request.key);
+    return ensureScan(request);
+  }
+
+  void clearScan(LibraryScanKey key) {
+    if (!_acceptingScans || _disposed) return;
+    _removeScan(key);
+    _notify();
+  }
+
+  void updateUserData(
+    LibraryScanKey key,
+    Map<String, EmbyUserData> userDataById,
+  ) {
+    if (_disposed || userDataById.isEmpty) return;
+    if (_cache[key]?.updateUserData(userDataById) ?? false) _notify();
+  }
+
   Future<void> retry(LibraryScanKey key) async {
     final entry = _cache[key];
     if (!_acceptingScans ||
@@ -124,6 +146,15 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       _pending.remove(key);
     }
     if (keys.isNotEmpty) _notify();
+  }
+
+  void _removeScan(LibraryScanKey key) {
+    final entry = _cache[key];
+    if (entry != null) entry.generation++;
+    _cache.remove(key);
+    _loaders.remove(key);
+    _pendingSet.remove(key);
+    _pending.remove(key);
   }
 
   Future<void> cancelAll() async {

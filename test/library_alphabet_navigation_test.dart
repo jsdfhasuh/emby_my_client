@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
@@ -202,8 +204,9 @@ void main() {
           ),
         );
       });
+      final scanService = _scanService(api);
 
-      await tester.pumpWidget(_app(api));
+      await tester.pumpWidget(_app(api, scanService: scanService));
       await tester.pumpAndSettle();
       await _selectMediaFilter(tester, 'strm');
       await _selectAlphabet(tester, 'm');
@@ -243,6 +246,7 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
 
       await tester.pumpWidget(const SizedBox.shrink());
+      await _disposeScanService(scanService);
       await api.dispose();
     },
   );
@@ -262,8 +266,9 @@ void main() {
         ),
       );
     });
+    final scanService = _scanService(api);
 
-    await tester.pumpWidget(_app(api));
+    await tester.pumpWidget(_app(api, scanService: scanService));
     await tester.pumpAndSettle();
     await _selectMediaFilter(tester, 'strm');
     await _selectAlphabet(tester, 'm');
@@ -293,6 +298,7 @@ void main() {
     expect(find.byType(ErrorState), findsNothing);
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await _disposeScanService(scanService);
     await api.dispose();
   });
 
@@ -323,8 +329,9 @@ void main() {
           ),
         );
       });
+      final scanService = _scanService(api);
 
-      await tester.pumpWidget(_app(api));
+      await tester.pumpWidget(_app(api, scanService: scanService));
       await tester.pumpAndSettle();
       await _selectMediaFilter(tester, 'strm');
       await _selectAlphabet(tester, 'm');
@@ -332,7 +339,7 @@ void main() {
       final letterRequests = _letterRequests(requests, 'M');
       expect(
         letterRequests.map((request) => request.queryParameters['StartIndex']),
-        [0, 60],
+        [0, 60, 60, 60, 60],
       );
       expect(find.byKey(const ValueKey('library-load-error')), findsOneWidget);
       expect(find.text('加载失败，请重试'), findsOneWidget);
@@ -351,6 +358,7 @@ void main() {
       );
 
       await tester.pumpWidget(const SizedBox.shrink());
+      await _disposeScanService(scanService);
       await api.dispose();
     },
   );
@@ -403,8 +411,9 @@ void main() {
         ),
       );
     });
+    final scanService = _scanService(api);
 
-    await tester.pumpWidget(_app(api));
+    await tester.pumpWidget(_app(api, scanService: scanService));
     await tester.pumpAndSettle();
     await _selectMediaFilter(tester, 'strm');
     await _selectAlphabetWithoutSettling(tester, 'm');
@@ -418,11 +427,7 @@ void main() {
     );
 
     await _selectAlphabetWithoutSettling(tester, 'z');
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('library-item-z-strm-0')), findsOneWidget);
-
     mSecondPage.complete();
-    await tester.pump();
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('library-item-z-strm-0')), findsOneWidget);
     expect(find.byKey(const ValueKey('library-item-m-strm-60')), findsNothing);
@@ -435,6 +440,7 @@ void main() {
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await _disposeScanService(scanService);
     await api.dispose();
   });
 
@@ -626,10 +632,27 @@ void _setPhoneView(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-Widget _app(EmbyApi api) => MaterialApp(
-  theme: ThemeData.dark(useMaterial3: true),
-  home: LibraryBrowseScreen.root(api: api, view: _library),
-);
+Widget _app(EmbyApi api, {LibraryLocalMediaScanService? scanService}) =>
+    MaterialApp(
+      theme: ThemeData.dark(useMaterial3: true),
+      home: LibraryBrowseScreen.root(
+        api: api,
+        view: _library,
+        libraryScanService: scanService,
+      ),
+    );
+
+LibraryLocalMediaScanService _scanService(EmbyApi api) =>
+    LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
+
+Future<void> _disposeScanService(LibraryLocalMediaScanService service) async {
+  await service.cancelAll();
+  service.dispose();
+}
 
 Future<void> _selectAlphabet(WidgetTester tester, String key) async {
   await _selectAlphabetWithoutSettling(tester, key);

@@ -436,6 +436,61 @@ void main() {
     harness.service.dispose();
     await harness.api.dispose();
   });
+
+  test(
+    'restart ignores the old response and starts a fresh raw cursor',
+    () async {
+      final oldResponse = Completer<EmbyItemPage>();
+      final starts = <int>[];
+      final harness = _harness();
+      final key = _key(harness.scope, 'restart-library');
+      harness.service.ensureScan(
+        LibraryLocalMediaScanRequest(
+          key: key,
+          loadPage: ({required startIndex, required limit}) {
+            starts.add(startIndex);
+            return oldResponse.future;
+          },
+        ),
+      );
+      await _waitFor(
+        harness.service,
+        key,
+        (value) => value.status == LibraryScanStatus.scanning,
+      );
+
+      harness.service.restartScan(
+        LibraryLocalMediaScanRequest(
+          key: key,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            return EmbyItemPage(
+              items: [_item('fresh', 'Video', path: 'fresh.mp4')],
+              rawItemCount: 1,
+              totalRecordCount: 1,
+            );
+          },
+        ),
+      );
+      oldResponse.complete(
+        EmbyItemPage(
+          items: [_item('stale', 'Video', path: 'stale.mp4')],
+          rawItemCount: 1,
+          totalRecordCount: 1,
+        ),
+      );
+
+      await _waitFor(harness.service, key, (value) => value.complete);
+      expect(starts, [0, 0]);
+      expect(
+        harness.service
+            .itemsFor(key, LibraryLocalMediaFilter.regular)
+            .map((item) => item.id),
+        ['fresh'],
+      );
+      await harness.dispose();
+    },
+  );
 }
 
 class _ScanHarness {

@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/item_detail_screen.dart';
@@ -95,8 +97,13 @@ void main() {
     'favorites survive media, played and local filters while selected controls are no-ops',
     (tester) async {
       final api = _StateRecordingApi();
+      final scanService = _scanService(api);
       await tester.pumpWidget(
-        _rootApp(api, categorySettings: _allCategorySettings),
+        _rootApp(
+          api,
+          categorySettings: _allCategorySettings,
+          scanService: scanService,
+        ),
       );
       await tester.pumpAndSettle();
       expect(api.requests, hasLength(1));
@@ -149,6 +156,8 @@ void main() {
       expect(api.requests.last.startIndex, 0);
 
       await tester.pumpWidget(const SizedBox.shrink());
+      await scanService.cancelAll();
+      scanService.dispose();
       await api.dispose();
     },
   );
@@ -159,7 +168,8 @@ void main() {
     _setCompactView(tester);
     final starts = <int>[];
     final api = _retryingLocalScanApi(starts);
-    await tester.pumpWidget(_rootApp(api));
+    final scanService = _scanService(api);
+    await tester.pumpWidget(_rootApp(api, scanService: scanService));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('library-filter-button')));
@@ -176,7 +186,7 @@ void main() {
         .position;
     position.jumpTo(position.maxScrollExtent);
     await tester.pumpAndSettle();
-    expect(starts, [0, 0, 60]);
+    expect(starts, [0, 0, 60, 60, 60, 60]);
 
     position.jumpTo(position.minScrollExtent);
     await tester.pumpAndSettle();
@@ -185,7 +195,7 @@ void main() {
 
     await tester.tap(retry);
     await tester.pumpAndSettle();
-    expect(starts, [0, 0, 60, 60]);
+    expect(starts, [0, 0, 60, 60, 60, 60, 60]);
     expect(
       find.byKey(const ValueKey('library-item-strm-first')),
       findsOneWidget,
@@ -196,6 +206,8 @@ void main() {
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await scanService.cancelAll();
+    scanService.dispose();
     await api.dispose();
   });
 
@@ -316,12 +328,14 @@ void main() {
 Widget _rootApp(
   EmbyApi api, {
   LibraryCategorySettings categorySettings = const LibraryCategorySettings(),
+  LibraryLocalMediaScanService? scanService,
 }) => MaterialApp(
   theme: ThemeData.dark(useMaterial3: true),
   home: LibraryBrowseScreen.root(
     api: api,
     view: _library,
     categorySettings: categorySettings,
+    libraryScanService: scanService,
   ),
 );
 
@@ -474,7 +488,7 @@ EmbyApi _retryingLocalScanApi(List<int> starts) {
           call++;
           final start = options.queryParameters['StartIndex'] as int;
           starts.add(start);
-          if (call == 3) {
+          if (call >= 3 && call <= 6) {
             handler.reject(
               DioException.badResponse(
                 statusCode: 500,
@@ -510,6 +524,13 @@ EmbyApi _retryingLocalScanApi(List<int> starts) {
     );
   return EmbyApi(_session, dio: dio);
 }
+
+LibraryLocalMediaScanService _scanService(EmbyApi api) =>
+    LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
 
 EmbyApi _mixedDirectoryApi() {
   final items = [

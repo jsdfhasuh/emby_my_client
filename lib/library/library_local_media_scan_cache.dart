@@ -184,6 +184,17 @@ class LibraryLocalMediaScanCacheEntry {
           .whereType<EmbyItem>(),
     );
   }
+
+  bool updateUserData(Map<String, EmbyUserData> userDataById) {
+    var changed = false;
+    for (final entry in userDataById.entries) {
+      final item = itemsById[entry.key];
+      if (item == null || item.userData == entry.value) continue;
+      itemsById[entry.key] = item.copyWith(userData: entry.value);
+      changed = true;
+    }
+    return changed;
+  }
 }
 
 class LibraryLocalMediaScanCache {

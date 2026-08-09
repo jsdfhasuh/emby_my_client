@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -75,10 +77,15 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final counter = _ReadCounter();
     final api = _CountingLibraryApi(itemCount: 2000, counter: counter);
+    final scanService = _scanService(api);
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen.root(api: api, view: _library),
+        home: LibraryBrowseScreen.root(
+          api: api,
+          view: _library,
+          libraryScanService: scanService,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -102,6 +109,7 @@ void main() {
     expect(counter.reads, readsAfterFilterBuild);
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await _disposeScanService(scanService);
     await api.dispose();
   });
 
@@ -174,18 +182,31 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final api = _pagedApi(starts: <int>[], totalCount: 180, includeStrm: true);
+    final finalPage = Completer<void>();
+    final starts = <int>[];
+    final api = _pagedApi(
+      starts: starts,
+      totalCount: 180,
+      includeStrm: true,
+      blockedStartIndex: 120,
+      blockedPageRelease: finalPage,
+    );
+    final scanService = _scanService(api);
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen.root(api: api, view: _library),
+        home: LibraryBrowseScreen.root(
+          api: api,
+          view: _library,
+          libraryScanService: scanService,
+        ),
       ),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('library-filter-button')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-    await tester.pumpAndSettle();
+    await _pumpUntil(tester, () => starts.contains(120));
     await _showOverlay(tester);
 
     expect(
@@ -202,6 +223,8 @@ void main() {
     expect(find.text('继续统计中'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
+    finalPage.complete();
+    await _disposeScanService(scanService);
     await api.dispose();
   });
 
@@ -251,10 +274,15 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final api = _pagedApi(starts: <int>[], totalCount: 120, includeStrm: true);
+    final scanService = _scanService(api);
 
     await tester.pumpWidget(
       MaterialApp(
-        home: LibraryBrowseScreen.root(api: api, view: _library),
+        home: LibraryBrowseScreen.root(
+          api: api,
+          view: _library,
+          libraryScanService: scanService,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -279,6 +307,7 @@ void main() {
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
+    await _disposeScanService(scanService);
     await api.dispose();
   });
 
@@ -458,6 +487,8 @@ EmbyApi _pagedApi({
   bool includeStrm = false,
   List<RequestOptions>? requests,
   EmbySocketConnector? realtimeConnector,
+  int? blockedStartIndex,
+  Completer<void>? blockedPageRelease,
 }) {
   final dio = Dio()
     ..interceptors.add(
@@ -475,27 +506,46 @@ EmbyApi _pagedApi({
           final responseTotal =
               totalCountForRequest?.call(options) ?? totalCount;
           starts.add(start);
-          handler.resolve(
-            Response<dynamic>(
-              requestOptions: options,
-              statusCode: 200,
-              data: {
-                'TotalRecordCount': responseTotal,
-                'Items': [
-                  for (
-                    var index = start;
-                    index < math.min(start + limit, responseTotal);
-                    index++
-                  )
-                    _item(index, isStrm: includeStrm && index.isEven),
-                ],
-              },
-            ),
+          final response = Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: {
+              'TotalRecordCount': responseTotal,
+              'Items': [
+                for (
+                  var index = start;
+                  index < math.min(start + limit, responseTotal);
+                  index++
+                )
+                  _item(index, isStrm: includeStrm && index.isEven),
+              ],
+            },
           );
+          if (start == blockedStartIndex &&
+              blockedPageRelease != null &&
+              !blockedPageRelease.isCompleted) {
+            unawaited(
+              blockedPageRelease.future.then((_) => handler.resolve(response)),
+            );
+            return;
+          }
+          handler.resolve(response);
         },
       ),
     );
   return EmbyApi(_session, dio: dio, realtimeConnector: realtimeConnector);
+}
+
+LibraryLocalMediaScanService _scanService(EmbyApi api) =>
+    LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
+
+Future<void> _disposeScanService(LibraryLocalMediaScanService service) async {
+  await service.cancelAll();
+  service.dispose();
 }
 
 EmbyApi _sectionApi() {
@@ -556,6 +606,14 @@ Future<void> _showOverlay(WidgetTester tester) async {
   await gesture.up();
   await tester.pump(const Duration(milliseconds: 50));
   expect(_opacity(tester), 1);
+}
+
+Future<void> _pumpUntil(WidgetTester tester, bool Function() predicate) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await tester.pump(const Duration(milliseconds: 5));
+  }
+  fail('Timed out waiting for library scan state');
 }
 
 double _opacity(WidgetTester tester) => tester
