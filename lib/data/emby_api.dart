@@ -496,6 +496,63 @@ class EmbyApi {
     return _parseLibraryPage(response.data);
   }
 
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    browse.LibraryMediaType mediaType = browse.LibraryMediaType.all,
+    browse.LibraryPlayedFilter playedFilter = browse.LibraryPlayedFilter.all,
+    bool favorites = false,
+    browse.LibrarySortBy sortBy = browse.LibrarySortBy.name,
+    browse.LibrarySortOrder sortOrder = browse.LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async {
+    if (genreId != null && tagId != null) {
+      throw ArgumentError('genreId and tagId cannot both be set.');
+    }
+    final includeItemTypes = switch (mediaType) {
+      browse.LibraryMediaType.all => 'Movie,Episode,Video',
+      browse.LibraryMediaType.movie => 'Movie',
+      browse.LibraryMediaType.video => 'Video',
+      browse.LibraryMediaType.series ||
+      browse.LibraryMediaType.photo => throw ArgumentError.value(
+        mediaType,
+        'mediaType',
+        'Media type does not expose source-bearing scan candidates',
+      ),
+    };
+    final filters = <String>[
+      if (favorites) 'IsFavorite',
+      if (playedFilter.apiValue != null) playedFilter.apiValue!,
+    ];
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': true,
+          'IncludeItemTypes': includeItemTypes,
+          'SortBy': sortBy.apiValue,
+          'SortOrder': sortOrder.apiValue,
+          if (filters.isNotEmpty) 'Filters': filters.join(','),
+          'GenreIds': ?genreId,
+          'TagIds': ?tagId,
+          'NameStartsWith': ?alphabetFilter.nameStartsWith,
+          'NameLessThan': ?alphabetFilter.nameLessThan,
+          'Fields': '$_listItemFields,MediaSources',
+          'EnableUserData': true,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    return _parseLibraryPage(response.data);
+  }
+
   Future<EmbyItemPage> getDirectoryChildren({
     required String parentId,
     int startIndex = 0,

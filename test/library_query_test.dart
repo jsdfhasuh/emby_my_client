@@ -160,6 +160,94 @@ void main() {
     }
   });
 
+  test('local source scan query uses only source-bearing candidates', () async {
+    final requests = <RequestOptions>[];
+    final api = _api((options, handler) {
+      requests.add(options);
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 37,
+            'Items': [_item('candidate-1')],
+          },
+        ),
+      );
+    });
+    addTearDown(api.dispose);
+
+    for (final parentId in ['homevideos-1', 'mixed-1']) {
+      final page = await api.getLocalMediaScanCandidates(
+        parentId: parentId,
+        startIndex: 60,
+        limit: 30,
+        favorites: true,
+        playedFilter: LibraryPlayedFilter.unplayed,
+        sortBy: LibrarySortBy.dateAdded,
+        sortOrder: LibrarySortOrder.descending,
+        alphabetFilter: LetterItems('m'),
+        genreId: 'genre-1',
+      );
+      expect(page.totalRecordCount, 37);
+      expect(page.rawItemCount, 1);
+    }
+
+    for (final request in requests) {
+      final query = request.queryParameters;
+      expect(request.path, '/Users/user-1/Items');
+      expect(query['Recursive'], isTrue);
+      expect(query['IncludeItemTypes'], 'Movie,Episode,Video');
+      expect(query['IncludeItemTypes'], isNot(contains('Photo')));
+      expect(query['IncludeItemTypes'], isNot(contains('Series')));
+      expect(query['Filters'], 'IsFavorite,IsUnplayed');
+      expect(query['SortBy'], 'DateCreated');
+      expect(query['SortOrder'], 'Descending');
+      expect(query['NameStartsWith'], 'M');
+      expect(query['GenreIds'], 'genre-1');
+      expect(query['Fields'], contains('Path'));
+      expect(query['Fields'], contains('Container'));
+      expect(query['Fields'], contains('MediaSources'));
+      expect(query['EnableTotalRecordCount'], isTrue);
+    }
+  });
+
+  test('local source scan media types use a strict intersection', () async {
+    final requests = <RequestOptions>[];
+    final api = _api((options, handler) {
+      requests.add(options);
+      handler.resolve(_response(options));
+    });
+    addTearDown(api.dispose);
+
+    await api.getLocalMediaScanCandidates(
+      parentId: 'library-1',
+      mediaType: LibraryMediaType.movie,
+    );
+    await api.getLocalMediaScanCandidates(
+      parentId: 'library-1',
+      mediaType: LibraryMediaType.video,
+    );
+    expect(
+      requests.map((request) => request.queryParameters['IncludeItemTypes']),
+      ['Movie', 'Video'],
+    );
+
+    for (final unsupported in [
+      LibraryMediaType.series,
+      LibraryMediaType.photo,
+    ]) {
+      await expectLater(
+        api.getLocalMediaScanCandidates(
+          parentId: 'library-1',
+          mediaType: unsupported,
+        ),
+        throwsArgumentError,
+      );
+    }
+    expect(requests, hasLength(2));
+  });
+
   test('genre and tag index queries keep their exact term shape', () async {
     final requests = <RequestOptions>[];
     final api = _api((options, handler) {
@@ -234,6 +322,7 @@ void main() {
         parentId: 'library-1',
         profile: LibraryContentProfile.mixed,
       ),
+      await api.getLocalMediaScanCandidates(parentId: 'library-1'),
     ];
 
     for (final page in pages) {
@@ -274,6 +363,15 @@ void main() {
         mediaType: LibraryMediaType.series,
       ),
       throwsArgumentError,
+    );
+
+    await api.getLibraryMediaItems(
+      parentId: 'mixed-1',
+      profile: LibraryContentProfile.mixed,
+    );
+    expect(
+      requests.last.queryParameters['IncludeItemTypes'],
+      'Movie,Series,Video,Photo',
     );
   });
 

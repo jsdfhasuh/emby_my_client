@@ -706,11 +706,29 @@ class _CountingLibraryApi extends EmbyApi {
     LibraryAlphabetFilter alphabetFilter = const AllItems(),
     String? genreId,
     String? tagId,
-  }) async => EmbyItemPage(
+  }) async => _page();
+
+  @override
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async => _page();
+
+  EmbyItemPage _page() => EmbyItemPage(
     items: [
       for (var index = 0; index < itemCount; index++)
         _CountingItem(index: index, counter: counter),
     ],
+    rawItemCount: itemCount,
     totalRecordCount: itemCount,
   );
 }

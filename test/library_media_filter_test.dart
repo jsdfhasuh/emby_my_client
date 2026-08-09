@@ -69,6 +69,17 @@ void main() {
       requests.skip(1).map((request) => request.queryParameters['StartIndex']),
       [0, 60],
     );
+    for (final request in requests.skip(1)) {
+      expect(
+        request.queryParameters['IncludeItemTypes'],
+        'Movie,Episode,Video',
+      );
+      expect(
+        request.queryParameters['IncludeItemTypes'],
+        isNot(anyOf(contains('Photo'), contains('Series'))),
+      );
+      expect(request.queryParameters['EnableTotalRecordCount'], isTrue);
+    }
     expect(requests.last.queryParameters['StartIndex'], 60);
 
     await openLibraryFilter(tester);

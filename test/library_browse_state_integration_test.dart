@@ -461,6 +461,42 @@ class _StateRecordingApi extends EmbyApi {
     String? genreId,
     String? tagId,
   }) async {
+    return _recordRequest(
+      startIndex: startIndex,
+      mediaType: mediaType,
+      playedFilter: playedFilter,
+      favorites: favorites,
+    );
+  }
+
+  @override
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async {
+    return _recordRequest(
+      startIndex: startIndex,
+      mediaType: mediaType,
+      playedFilter: playedFilter,
+      favorites: favorites,
+    );
+  }
+
+  EmbyItemPage _recordRequest({
+    required int startIndex,
+    required LibraryMediaType mediaType,
+    required LibraryPlayedFilter playedFilter,
+    required bool favorites,
+  }) {
     requests.add(
       _RecordedLibraryRequest(
         startIndex: startIndex,

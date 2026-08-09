@@ -97,6 +97,8 @@ void main() {
                     }
                     if (normalized.mediaType == LibraryMediaType.photo) {
                       expect(normalized.playedFilter, LibraryPlayedFilter.all);
+                    }
+                    if (!normalized.mediaType.supportsLocalSourceFilter) {
                       expect(
                         normalized.localFilter,
                         LibraryLocalMediaFilter.all,
@@ -114,7 +116,7 @@ void main() {
 
   test('media and favorites preserve compatible filters both ways', () {
     final media = LibraryBrowseState(
-      mediaType: LibraryMediaType.series,
+      mediaType: LibraryMediaType.movie,
       playedFilter: LibraryPlayedFilter.unplayed,
       localFilter: LibraryLocalMediaFilter.strm,
       alphabetFilter: LetterItems('q'),
@@ -303,6 +305,33 @@ void main() {
       expect(draft.reset(), const LibraryFilterDraft());
     },
   );
+
+  test('series clears local source filters without clearing played state', () {
+    const candidate = LibraryBrowseState(
+      mediaType: LibraryMediaType.series,
+      localFilter: LibraryLocalMediaFilter.strm,
+      playedFilter: LibraryPlayedFilter.unplayed,
+    );
+
+    expect(
+      normalizeLibraryBrowseState(candidate),
+      const LibraryBrowseState(
+        mediaType: LibraryMediaType.series,
+        playedFilter: LibraryPlayedFilter.unplayed,
+      ),
+    );
+    expect(
+      const LibraryFilterDraft(
+        mediaType: LibraryMediaType.movie,
+        localFilter: LibraryLocalMediaFilter.regular,
+        playedFilter: LibraryPlayedFilter.played,
+      ).copyWith(mediaType: LibraryMediaType.series),
+      const LibraryFilterDraft(
+        mediaType: LibraryMediaType.series,
+        playedFilter: LibraryPlayedFilter.played,
+      ),
+    );
+  });
 
   test('favorites and photo remain compatible after normalization', () {
     const state = LibraryBrowseState(

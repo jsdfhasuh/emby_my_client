@@ -5,7 +5,6 @@ import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
-import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/library/library_local_media_scan_cache.dart';
 import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
@@ -72,9 +71,8 @@ class _PageLifetimeApi extends EmbyApi {
   bool secondPageRequested = false;
 
   @override
-  Future<EmbyItemPage> getLibraryMediaItems({
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
     required String parentId,
-    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
     LibraryMediaType mediaType = LibraryMediaType.all,

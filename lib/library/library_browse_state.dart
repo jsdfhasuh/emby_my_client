@@ -25,6 +25,15 @@ extension LibraryBrowseScopeCapabilities on LibraryBrowseScope {
 
 enum LibraryMediaType { all, movie, series, video, photo }
 
+extension LibraryMediaTypeCapabilities on LibraryMediaType {
+  bool get supportsLocalSourceFilter => switch (this) {
+    LibraryMediaType.all ||
+    LibraryMediaType.movie ||
+    LibraryMediaType.video => true,
+    LibraryMediaType.series || LibraryMediaType.photo => false,
+  };
+}
+
 enum LibraryLocalMediaFilter { all, strm, regular }
 
 enum LibraryPlayedFilter {
@@ -231,13 +240,18 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
   }
 }
 
-LibraryBrowseState _normalizeMediaFilters(LibraryBrowseState state) =>
-    state.mediaType == LibraryMediaType.photo
-    ? state.copyWith(
-        playedFilter: LibraryPlayedFilter.all,
-        localFilter: LibraryLocalMediaFilter.all,
-      )
-    : state;
+LibraryBrowseState _normalizeMediaFilters(LibraryBrowseState state) {
+  if (state.mediaType == LibraryMediaType.photo) {
+    return state.copyWith(
+      playedFilter: LibraryPlayedFilter.all,
+      localFilter: LibraryLocalMediaFilter.all,
+    );
+  }
+  if (!state.mediaType.supportsLocalSourceFilter) {
+    return state.copyWith(localFilter: LibraryLocalMediaFilter.all);
+  }
+  return state;
+}
 
 LibraryBrowseState _preserveIdentity(
   LibraryBrowseState original,
@@ -307,9 +321,16 @@ class LibraryFilterDraft {
       localFilter: localFilter ?? this.localFilter,
       playedFilter: playedFilter ?? this.playedFilter,
     );
-    return next.mediaType == LibraryMediaType.photo
-        ? const LibraryFilterDraft(mediaType: LibraryMediaType.photo)
-        : next;
+    if (next.mediaType == LibraryMediaType.photo) {
+      return const LibraryFilterDraft(mediaType: LibraryMediaType.photo);
+    }
+    return next.mediaType.supportsLocalSourceFilter
+        ? next
+        : LibraryFilterDraft(
+            mediaType: next.mediaType,
+            localFilter: LibraryLocalMediaFilter.all,
+            playedFilter: next.playedFilter,
+          );
   }
 
   LibraryFilterDraft reset() => const LibraryFilterDraft();

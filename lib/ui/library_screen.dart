@@ -245,6 +245,26 @@ Future<EmbyItemPage> _loadLibraryMediaPage({
   tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
 );
 
+Future<EmbyItemPage> _loadLocalMediaScanPage({
+  required EmbyApi api,
+  required String parentId,
+  required LibraryBrowseState state,
+  required int startIndex,
+  required int limit,
+}) => api.getLocalMediaScanCandidates(
+  parentId: parentId,
+  startIndex: startIndex,
+  limit: limit,
+  mediaType: state.mediaType,
+  playedFilter: state.playedFilter,
+  favorites: state.scope == LibraryBrowseScope.favorites,
+  sortBy: state.sortBy,
+  sortOrder: state.sortOrder,
+  alphabetFilter: state.alphabetFilter,
+  genreId: state.facet?.kind == LibraryFacetKind.genre ? state.facet!.id : null,
+  tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
+);
+
 class LibraryBrowseScreen extends StatefulWidget {
   LibraryBrowseScreen.root({
     super.key,
@@ -690,6 +710,9 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
 
   bool get _isPhoto => _draft.mediaType == LibraryMediaType.photo;
 
+  bool get _supportsLocalSource =>
+      widget.supportsLocalSource && _draft.mediaType.supportsLocalSourceFilter;
+
   void _update(LibraryFilterDraft draft) => setState(() => _draft = draft);
 
   @override
@@ -720,7 +743,7 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
                     _update(_draft.copyWith(mediaType: value)),
               ),
             ],
-            if (widget.supportsLocalSource && !_isPhoto) ...[
+            if (_supportsLocalSource) ...[
               const SizedBox(height: 20),
               Text('来源', style: Theme.of(context).textTheme.labelLarge),
               const SizedBox(height: 8),
@@ -1469,14 +1492,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final key = _scanKeyForState(state);
     final api = widget.api;
     final parentId = widget.view.id;
-    final profile = widget.profile;
     return LibraryLocalMediaScanRequest(
       key: key,
       loadPage: ({required startIndex, required limit}) =>
-          _loadLibraryMediaPage(
+          _loadLocalMediaScanPage(
             api: api,
             parentId: parentId,
-            profile: profile,
             state: state,
             startIndex: startIndex,
             limit: limit,

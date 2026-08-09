@@ -170,9 +170,8 @@ class _LocalScanApi extends EmbyApi {
   bool requested = false;
 
   @override
-  Future<EmbyItemPage> getLibraryMediaItems({
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
     required String parentId,
-    LibraryContentProfile profile = LibraryContentProfile.unknown,
     int startIndex = 0,
     int limit = 60,
     LibraryMediaType mediaType = LibraryMediaType.all,
