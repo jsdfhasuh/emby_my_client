@@ -1093,7 +1093,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       _autoPlayedCount = 0;
     }
 
-    final next = await _queue.next(_currentItem);
+    late final EmbyItem? next;
+    try {
+      next = await _queue.next(_currentItem);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'player',
+        'Playback queue page load failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        _cancelAutoNext();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('播放队列加载失败，请稍后重试')));
+      }
+      return;
+    }
     if (!mounted) return;
     if (next == null) {
       _cancelAutoNext();

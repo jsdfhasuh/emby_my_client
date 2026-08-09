@@ -23,6 +23,8 @@ class PlaybackQueue {
 
   List<EmbyItem> get items => List.unmodifiable(_items);
 
+  bool get hasDeferredItems => false;
+
   int indexOf(EmbyItem item) =>
       _items.indexWhere((candidate) => candidate.id == item.id);
 
@@ -42,6 +44,13 @@ class PlaybackQueue {
         currentSeasonIndex + 1 < _seasons.length;
   }
 
+  void appendUnique(Iterable<EmbyItem> items) {
+    final ids = _items.map((item) => item.id).toSet();
+    for (final item in items) {
+      if (item.id.isNotEmpty && ids.add(item.id)) _items.add(item);
+    }
+  }
+
   Future<EmbyItem?> next(EmbyItem item) async {
     final index = indexOf(item);
     if (index >= 0 && index + 1 < _items.length) return _items[index + 1];
@@ -57,11 +66,7 @@ class PlaybackQueue {
     final nextSeason = _seasons[currentSeasonIndex + 1];
     final episodes = await api.getEpisodes(series, seasonId: nextSeason.id);
     _loadedSeasonId = nextSeason.id;
-    for (final episode in episodes) {
-      if (_items.every((existing) => existing.id != episode.id)) {
-        _items.add(episode);
-      }
-    }
+    appendUnique(episodes);
     final refreshedIndex = indexOf(item);
     return refreshedIndex >= 0 && refreshedIndex + 1 < _items.length
         ? _items[refreshedIndex + 1]

@@ -15,6 +15,7 @@ import '../library/library_grid_geometry.dart';
 import '../library/library_item_membership.dart';
 import '../library/library_local_media_scan_cache.dart';
 import '../library/library_local_media_scan_service.dart';
+import '../library/library_playback_queue.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
@@ -421,13 +422,13 @@ class _LibraryMediaActionBar extends StatelessWidget {
               children: [
                 IconButton(
                   key: const ValueKey('library-play-all-button'),
-                  tooltip: '播放全部',
+                  tooltip: canPlay ? '播放全部' : '统计完成后可用',
                   onPressed: canPlay ? onPlayAll : null,
                   icon: const Icon(Icons.play_arrow),
                 ),
                 IconButton(
                   key: const ValueKey('library-shuffle-button'),
-                  tooltip: '随机播放',
+                  tooltip: canPlay ? '随机播放' : '统计完成后可用',
                   onPressed: canPlay ? onShuffle : null,
                   icon: const Icon(Icons.shuffle),
                 ),
@@ -500,6 +501,110 @@ class _LibraryMediaActionBar extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+enum _LibraryPlaybackPreparationStatus { ready, cancelled, empty, failed }
+
+class _LibraryPlaybackPreparationResult {
+  const _LibraryPlaybackPreparationResult(this.status, [this.queue]);
+
+  final _LibraryPlaybackPreparationStatus status;
+  final LazyLibraryPlaybackQueue? queue;
+}
+
+class _LibraryPlaybackPreparationDialog extends StatefulWidget {
+  const _LibraryPlaybackPreparationDialog({
+    required this.prepare,
+    required this.onFailure,
+  });
+
+  final Future<LazyLibraryPlaybackQueue?> Function(
+    LibraryPlaybackCancellation cancellation,
+    LibraryPlaybackProgressCallback onProgress,
+  )
+  prepare;
+  final void Function(Object error, StackTrace stackTrace) onFailure;
+
+  @override
+  State<_LibraryPlaybackPreparationDialog> createState() =>
+      _LibraryPlaybackPreparationDialogState();
+}
+
+class _LibraryPlaybackPreparationDialogState
+    extends State<_LibraryPlaybackPreparationDialog> {
+  final _cancellation = LibraryPlaybackCancellation();
+  LibraryPlaybackPreparationProgress? _progress;
+  bool _cancelling = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_prepare());
+  }
+
+  Future<void> _prepare() async {
+    try {
+      final queue = await widget.prepare(_cancellation, (progress) {
+        if (mounted) setState(() => _progress = progress);
+      });
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        _LibraryPlaybackPreparationResult(
+          queue == null
+              ? _LibraryPlaybackPreparationStatus.empty
+              : _LibraryPlaybackPreparationStatus.ready,
+          queue,
+        ),
+      );
+    } on LibraryPlaybackCancelled {
+      if (mounted) {
+        Navigator.of(context).pop(
+          const _LibraryPlaybackPreparationResult(
+            _LibraryPlaybackPreparationStatus.cancelled,
+          ),
+        );
+      }
+    } catch (error, stackTrace) {
+      widget.onFailure(error, stackTrace);
+      if (mounted) {
+        Navigator.of(context).pop(
+          const _LibraryPlaybackPreparationResult(
+            _LibraryPlaybackPreparationStatus.failed,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _progress;
+    final total = progress?.totalCount;
+    final scanned = progress?.rawScannedCount ?? 0;
+    return AlertDialog(
+      title: const Text('正在准备播放队列'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(total == null ? '正在读取完整结果' : '已读取 $scanned/$total 项'),
+        ],
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('library-playback-prepare-cancel'),
+          onPressed: _cancelling
+              ? null
+              : () {
+                  setState(() => _cancelling = true);
+                  _cancellation.cancel();
+                },
+          child: Text(_cancelling ? '正在取消' : '取消'),
+        ),
+      ],
     );
   }
 }
@@ -602,6 +707,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _suppressPositionNotifications = false;
   LibraryScanKey? _activeScanKey;
   LibraryLocalScanSnapshot? _scanSnapshot;
+  bool _preparingPlaybackQueue = false;
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
@@ -628,6 +734,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   List<EmbyItem> get _playableItems =>
       _items.where((item) => item.isPlayable).toList(growable: false);
+
+  bool get _canPlayCompleteResult =>
+      !_preparingPlaybackQueue &&
+      canPlayCompleteLibraryResult(
+        state: _state,
+        profile: widget.profile,
+        playableLoadedCount: _playableItems.length,
+        hasMore: _hasMore,
+        localScan: _scanSnapshot,
+      );
 
   LibraryLocalScanStatus get _scanStatus {
     if (!_usesLocalScan) {
@@ -1326,21 +1442,90 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   Future<void> _playAll({bool shuffle = false}) async {
-    final items = _playableItems.toList(growable: false);
-    if (items.isEmpty) return;
-    if (shuffle) items.shuffle();
+    if (!_canPlayCompleteResult) return;
+    setState(() => _preparingPlaybackQueue = true);
+    final state = _state;
+    late final PlaybackQueue queue;
+    try {
+      if (_usesLocalScan) {
+        final items = _playableItems.toList(growable: false);
+        if (shuffle) items.shuffle();
+        if (items.isEmpty) return;
+        queue = PlaybackQueue(api: widget.api, initialItems: items);
+      } else {
+        final initialItems = List<EmbyItem>.of(_items);
+        final initialRawCursor = _nextStartIndex;
+        final initialTotalCount = _totalCount;
+        final query = LibraryPlaybackQuerySnapshot(
+          libraryId: widget.view.id,
+          state: state,
+          profile: widget.profile,
+          fingerprint:
+              'library:${Object.hash(widget.view.id, state, widget.profile.kind).toUnsigned(32)}',
+        );
+        final result = await showDialog<_LibraryPlaybackPreparationResult>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => _LibraryPlaybackPreparationDialog(
+            prepare: (cancellation, onProgress) =>
+                LazyLibraryPlaybackQueue.prepare(
+                  api: widget.api,
+                  query: query,
+                  initialItems: initialItems,
+                  initialRawCursor: initialRawCursor,
+                  totalCount: initialTotalCount,
+                  loadPage: ({required startIndex, required limit}) =>
+                      _requestMediaPage(state, startIndex, limit),
+                  shuffle: shuffle,
+                  pageSize: _pageSize,
+                  cancellation: cancellation,
+                  onProgress: onProgress,
+                ),
+            onFailure: (error, stackTrace) => DiagnosticLog.instance.error(
+              'library',
+              'Library playback queue preparation failed',
+              error: error,
+              stackTrace: stackTrace,
+            ),
+          ),
+        );
+        if (!mounted ||
+            result == null ||
+            result.status == _LibraryPlaybackPreparationStatus.cancelled) {
+          return;
+        }
+        if (result.status == _LibraryPlaybackPreparationStatus.failed) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('播放队列准备失败，请稍后重试')));
+          return;
+        }
+        final preparedQueue = result.queue;
+        if (result.status == _LibraryPlaybackPreparationStatus.empty ||
+            preparedQueue == null) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('当前筛选结果没有可播放项目')));
+          return;
+        }
+        queue = preparedQueue;
+      }
+    } finally {
+      if (mounted) setState(() => _preparingPlaybackQueue = false);
+    }
+    if (!mounted || queue.items.isEmpty) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
           api: widget.api,
-          item: items.first,
-          queue: PlaybackQueue(api: widget.api, initialItems: items),
+          item: queue.items.first,
+          queue: queue,
         ),
       ),
     );
     if (!mounted) return;
     try {
-      await _refreshUserData(items.map((item) => item.id));
+      await _refreshUserData(queue.items.map((item) => item.id));
     } catch (error, stackTrace) {
       _reportUserDataRefreshFailure(error, stackTrace);
     }
@@ -1589,7 +1774,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                     SliverToBoxAdapter(
                       child: _LibraryMediaActionBar(
                         localFilter: _state.localFilter,
-                        canPlay: _playableItems.isNotEmpty,
+                        canPlay: _canPlayCompleteResult,
                         canReset: _isRoot,
                         onPlayAll: () => unawaited(_playAll()),
                         onShuffle: () => unawaited(_playAll(shuffle: true)),
