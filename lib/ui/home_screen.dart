@@ -117,6 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
           api: widget.api,
           initialItem: item,
           downloads: widget.downloads,
+          navigationActions: widget.navigationActions,
         ),
       ),
     );

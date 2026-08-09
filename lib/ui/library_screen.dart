@@ -1905,6 +1905,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               api: widget.api,
               initialItem: item,
               downloads: widget.downloads,
+              navigationActions: widget.navigationActions,
+              platformCapabilities: widget.platformCapabilities,
             ),
           ),
         );

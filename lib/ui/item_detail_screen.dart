@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 
@@ -6,9 +7,13 @@ import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_models.dart';
 import '../downloads/download_service.dart';
+import '../images/emby_image_request.dart';
+import '../library/item_detail_presentation.dart';
 import '../models/emby_models.dart';
+import '../platform/platform_capabilities.dart';
 import '../playback/playback_queue.dart';
 import '../realtime/realtime_refresh_binding.dart';
+import 'home_shell_navigation.dart';
 import 'person_detail_screen.dart';
 import 'player_screen.dart';
 import 'widgets/media_widgets.dart';
@@ -27,11 +32,17 @@ class ItemDetailScreen extends StatefulWidget {
     required this.api,
     required this.initialItem,
     this.downloads,
+    this.navigationActions,
+    this.platformCapabilities,
+    this.now,
   });
 
   final EmbyApi api;
   final EmbyItem initialItem;
   final DownloadService? downloads;
+  final HomeShellNavigationActions? navigationActions;
+  final PlatformCapabilities? platformCapabilities;
+  final DateTime Function()? now;
 
   @override
   State<ItemDetailScreen> createState() => _ItemDetailScreenState();
@@ -48,6 +59,9 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   bool _loadFailed = false;
   bool _loading = true;
   bool _loadingEpisodes = false;
+
+  PlatformCapabilities get _platformCapabilities =>
+      widget.platformCapabilities ?? PlatformCapabilities.current();
 
   @override
   void initState() {
@@ -337,6 +351,8 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
           personId: personId,
           initialPerson: person,
           downloads: widget.downloads,
+          navigationActions: widget.navigationActions,
+          platformCapabilities: widget.platformCapabilities,
         ),
       ),
     );
@@ -361,6 +377,189 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
       maxWidth: 1800,
     );
     final poster = widget.api.imageRequest(item, maxWidth: 500);
+    if (usesAmbientIPadDetailLayout(
+      _platformCapabilities,
+      MediaQuery.sizeOf(context),
+    )) {
+      return _buildAmbientDetail(
+        context,
+        item: item,
+        backdrop: backdrop,
+        poster: poster,
+      );
+    }
+    return _buildCompactDetail(
+      context,
+      item: item,
+      backdrop: backdrop,
+      poster: poster,
+    );
+  }
+
+  Widget _buildAmbientDetail(
+    BuildContext context, {
+    required EmbyItem item,
+    required EmbyImageRequest? backdrop,
+    required EmbyImageRequest? poster,
+  }) {
+    final size = MediaQuery.sizeOf(context);
+    final posterWidth = (size.width * 0.25).clamp(220.0, 320.0);
+    final technical = technicalPresentationForItem(item);
+    final estimatedEnd = estimatedPlaybackEndAt(
+      item,
+      widget.now?.call() ?? DateTime.now(),
+    );
+    final navigationActions = widget.navigationActions;
+
+    return Scaffold(
+      appBar: navigationActions == null
+          ? AppBar(
+              title: Text(
+                item.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            )
+          : LargeScreenPageChrome(
+              title: item.name,
+              navigationActions: navigationActions,
+            ),
+      body: Stack(
+        key: const ValueKey('item-detail-ambient-layout'),
+        fit: StackFit.expand,
+        children: [
+          DetailAmbientBackground(backdrop: backdrop, primary: poster),
+          CustomScrollView(
+            key: const ValueKey('item-detail-ambient-scroll'),
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(28, 28, 28, 48),
+                sliver: SliverToBoxAdapter(
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 1280),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                width: posterWidth,
+                                child: AspectRatio(
+                                  aspectRatio: 2 / 3,
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(6),
+                                    child: ColoredBox(
+                                      color: const Color(0x990D1012),
+                                      child: EmbyImage(
+                                        key: const ValueKey(
+                                          'item-detail-ambient-poster',
+                                        ),
+                                        request: poster,
+                                        fit: BoxFit.contain,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 32),
+                              Expanded(
+                                child: Column(
+                                  key: const ValueKey(
+                                    'item-detail-ambient-info',
+                                  ),
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      item.name,
+                                      key: const ValueKey('item-detail-title'),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .headlineMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w800,
+                                            height: 1.12,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      _metadataLabel(item),
+                                      style: const TextStyle(
+                                        color: Color(0xFFD2D7D9),
+                                        height: 1.45,
+                                      ),
+                                    ),
+                                    if (estimatedEnd != null) ...[
+                                      const SizedBox(height: 12),
+                                      _DetailFact(
+                                        key: const ValueKey(
+                                          'item-detail-estimated-finish',
+                                        ),
+                                        icon: Icons.schedule,
+                                        label:
+                                            '预计 ${_clockLabel(estimatedEnd)} 结束',
+                                      ),
+                                    ],
+                                    if (!technical.isEmpty) ...[
+                                      const SizedBox(height: 10),
+                                      Wrap(
+                                        key: const ValueKey(
+                                          'item-detail-technical-info',
+                                        ),
+                                        spacing: 16,
+                                        runSpacing: 8,
+                                        children: [
+                                          for (final fact in technical.facts)
+                                            _DetailFact(
+                                              icon: Icons.high_quality_outlined,
+                                              label: fact,
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                    const SizedBox(height: 20),
+                                    _buildPrimaryActions(item),
+                                    if (_hasCast(item)) ...[
+                                      const SizedBox(height: 24),
+                                      _buildCast(item),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (item.genres.isNotEmpty) ...[
+                            const SizedBox(height: 28),
+                            _buildGenres(item),
+                          ],
+                          if (_hasOverview(item)) ...[
+                            const SizedBox(height: 28),
+                            _buildOverview(context, item),
+                          ],
+                          if (item.isSeries) ...[
+                            const SizedBox(height: 32),
+                            _buildEpisodes(item),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCompactDetail(
+    BuildContext context, {
+    required EmbyItem item,
+    required EmbyImageRequest? backdrop,
+    required EmbyImageRequest? poster,
+  }) {
     final heroHeight = _heroHeight(context);
 
     return Scaffold(
@@ -420,6 +619,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                             children: [
                               Text(
                                 item.name,
+                                key: const ValueKey('item-detail-title'),
                                 style: Theme.of(context).textTheme.headlineSmall
                                     ?.copyWith(
                                       fontWeight: FontWeight.w800,
@@ -428,14 +628,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                               ),
                               const SizedBox(height: 9),
                               Text(
-                                [
-                                  item.subtitle,
-                                  item.runtimeLabel,
-                                  item.officialRating,
-                                  item.communityRating == null
-                                      ? null
-                                      : '★ ${item.communityRating!.toStringAsFixed(1)}',
-                                ].whereType<String>().join(' · '),
+                                _metadataLabel(item),
                                 style: const TextStyle(
                                   color: Color(0xFFB6BDBF),
                                   height: 1.4,
@@ -451,49 +644,15 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
                   ),
                   if (item.genres.isNotEmpty) ...[
                     const SizedBox(height: 22),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: item.genres
-                          .map((genre) => Chip(label: Text(genre)))
-                          .toList(),
-                    ),
+                    _buildGenres(item),
                   ],
-                  if (item.overview != null && item.overview!.isNotEmpty) ...[
+                  if (_hasOverview(item)) ...[
                     const SizedBox(height: 24),
-                    Text(
-                      '简介',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      item.overview!,
-                      style: const TextStyle(
-                        color: Color(0xFFC4CACC),
-                        fontSize: 15,
-                        height: 1.65,
-                      ),
-                    ),
+                    _buildOverview(context, item),
                   ],
-                  if ((item.type == 'Movie' ||
-                          item.type == 'Series' ||
-                          item.type == 'Episode') &&
-                      item.people.any((person) => person.isCast)) ...[
+                  if (_hasCast(item)) ...[
                     const SizedBox(height: 28),
-                    CastRow(
-                      people: item.people,
-                      imageRequestFor: (person) =>
-                          widget.api.imageRequestForTag(
-                            itemId: person.id ?? '',
-                            type: 'Primary',
-                            tag: person.primaryImageTag,
-                            maxWidth: 240,
-                            maxHeight: 360,
-                          ),
-                      onTap: _openPerson,
-                    ),
+                    _buildCast(item),
                   ],
                   if (item.isSeries) ...[
                     const SizedBox(height: 28),
@@ -507,6 +666,64 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
       ),
     );
   }
+
+  String _metadataLabel(EmbyItem item) => [
+    item.subtitle,
+    item.runtimeLabel,
+    item.officialRating,
+    item.communityRating == null
+        ? null
+        : '★ ${item.communityRating!.toStringAsFixed(1)}',
+  ].whereType<String>().where((value) => value.isNotEmpty).join(' · ');
+
+  bool _hasOverview(EmbyItem item) => item.overview?.isNotEmpty ?? false;
+
+  bool _hasCast(EmbyItem item) =>
+      (item.type == 'Movie' ||
+          item.type == 'Series' ||
+          item.type == 'Episode') &&
+      item.people.any((person) => person.isCast);
+
+  Widget _buildGenres(EmbyItem item) => Wrap(
+    spacing: 8,
+    runSpacing: 8,
+    children: item.genres
+        .map((genre) => Chip(label: Text(genre)))
+        .toList(growable: false),
+  );
+
+  Widget _buildOverview(BuildContext context, EmbyItem item) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        '简介',
+        style: Theme.of(
+          context,
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+      ),
+      const SizedBox(height: 10),
+      Text(
+        item.overview!,
+        style: const TextStyle(
+          color: Color(0xFFC4CACC),
+          fontSize: 15,
+          height: 1.65,
+        ),
+      ),
+    ],
+  );
+
+  Widget _buildCast(EmbyItem item) => CastRow(
+    people: item.people,
+    imageRequestFor: (person) => widget.api.imageRequestForTag(
+      itemId: person.id ?? '',
+      type: 'Primary',
+      tag: person.primaryImageTag,
+      maxWidth: 240,
+      maxHeight: 360,
+    ),
+    onTap: _openPerson,
+  );
 
   double _heroHeight(BuildContext context) {
     return detailHeroHeightForViewport(MediaQuery.sizeOf(context));
@@ -841,6 +1058,97 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     );
   }
 }
+
+class DetailAmbientBackground extends StatelessWidget {
+  const DetailAmbientBackground({
+    super.key,
+    required this.backdrop,
+    required this.primary,
+  });
+
+  final EmbyImageRequest? backdrop;
+  final EmbyImageRequest? primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final artwork = backdrop ?? primary;
+    return Stack(
+      key: const ValueKey('item-detail-ambient-background'),
+      fit: StackFit.expand,
+      children: [
+        if (artwork == null)
+          const DecoratedBox(
+            key: ValueKey('item-detail-ambient-background-fallback'),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF253036), Color(0xFF0D1012)],
+              ),
+            ),
+          )
+        else
+          ClipRect(
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: Transform.scale(
+                scale: 1.06,
+                child: ColorFiltered(
+                  colorFilter: const ColorFilter.mode(
+                    Color(0x99000000),
+                    BlendMode.darken,
+                  ),
+                  child: EmbyImage(
+                    key: const ValueKey('item-detail-ambient-background-image'),
+                    request: artwork,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0x33000000), Color(0xE60D1012)],
+              stops: [0.25, 1],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DetailFact extends StatelessWidget {
+  const _DetailFact({super.key, required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 17, color: const Color(0xFFB8C2C6)),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            label,
+            style: const TextStyle(color: Color(0xFFD2D7D9), height: 1.35),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+String _clockLabel(DateTime value) =>
+    '${value.hour.toString().padLeft(2, '0')}:'
+    '${value.minute.toString().padLeft(2, '0')}';
 
 enum _UserDataAction { favorite, played }
 

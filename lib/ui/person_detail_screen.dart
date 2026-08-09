@@ -6,6 +6,8 @@ import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../models/emby_models.dart';
 import '../people/person_detail_controller.dart';
+import '../platform/platform_capabilities.dart';
+import 'home_shell_navigation.dart';
 import 'item_detail_screen.dart';
 import 'widgets/media_widgets.dart';
 import 'widgets/person_widgets.dart';
@@ -17,12 +19,16 @@ class PersonDetailScreen extends StatefulWidget {
     required this.personId,
     required this.initialPerson,
     this.downloads,
+    this.navigationActions,
+    this.platformCapabilities,
   });
 
   final EmbyApi api;
   final String personId;
   final EmbyPerson initialPerson;
   final DownloadService? downloads;
+  final HomeShellNavigationActions? navigationActions;
+  final PlatformCapabilities? platformCapabilities;
 
   @override
   State<PersonDetailScreen> createState() => _PersonDetailScreenState();
@@ -77,6 +83,8 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
           api: widget.api,
           initialItem: item,
           downloads: widget.downloads,
+          navigationActions: widget.navigationActions,
+          platformCapabilities: widget.platformCapabilities,
         ),
       ),
     );

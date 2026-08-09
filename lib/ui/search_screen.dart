@@ -301,6 +301,7 @@ class _SearchScreenState extends State<SearchScreen> {
               api: widget.api,
               initialItem: item,
               downloads: widget.downloads,
+              navigationActions: widget.navigationActions,
             ),
           ),
         );
