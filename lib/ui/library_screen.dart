@@ -430,7 +430,8 @@ class _LibraryScopeBar extends StatelessWidget {
 
 class _LibraryBrowseToolbar extends StatelessWidget {
   const _LibraryBrowseToolbar({
-    required this.summaryLabel,
+    required this.primaryResultLabel,
+    required this.scanProgressLabel,
     required this.sortBy,
     required this.sortOrder,
     required this.showPlaybackActions,
@@ -449,7 +450,8 @@ class _LibraryBrowseToolbar extends StatelessWidget {
     required this.onMoreSelected,
   });
 
-  final String summaryLabel;
+  final String primaryResultLabel;
+  final String? scanProgressLabel;
   final LibrarySortBy sortBy;
   final LibrarySortOrder sortOrder;
   final bool showPlaybackActions;
@@ -489,14 +491,35 @@ class _LibraryBrowseToolbar extends StatelessWidget {
                     minWidth: largeLayout ? 150 : 56,
                     maxWidth: largeLayout ? 230 : 88,
                   ),
-                  child: Text(
-                    summaryLabel,
-                    key: const ValueKey('library-result-summary'),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        primaryResultLabel,
+                        key: const ValueKey('library-result-summary'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (scanProgressLabel case final progress?)
+                        Text(
+                          progress,
+                          key: const ValueKey('library-scan-progress'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant
+                                    .withValues(alpha: 0.78),
+                              ),
+                        ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -1072,6 +1095,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       return LibraryLocalScanStatus.inactive;
     }
     final snapshot = _scanSnapshot;
+    if (snapshot?.safeError == LibraryScanErrorKind.paginationStalled) {
+      return LibraryLocalScanStatus.paginationStalled;
+    }
     if (snapshot == null || snapshot.safeError != null) {
       return LibraryLocalScanStatus.interrupted;
     }
@@ -2156,7 +2182,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
                   if (_state.scope.supportsSorting || _isMediaScope)
                     SliverToBoxAdapter(
                       child: _LibraryBrowseToolbar(
-                        summaryLabel: _countLabel,
+                        primaryResultLabel: _countLabel,
+                        scanProgressLabel: _statistics.scanProgressLabel,
                         sortBy: _state.sortBy,
                         sortOrder: _state.sortOrder,
                         showPlaybackActions:
@@ -2264,7 +2291,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     ),
   );
 
-  String get _countLabel => _statistics.summaryLabel;
+  String get _countLabel => _statistics.primaryResultLabel;
 
   IconData get _emptyIcon => _state.localFilter != LibraryLocalMediaFilter.all
       ? _state.localFilter.emptyIcon

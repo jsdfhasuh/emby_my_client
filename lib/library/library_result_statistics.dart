@@ -5,7 +5,13 @@ import 'package:flutter/foundation.dart';
 import 'library_browse_state.dart';
 import 'library_scroll_position_controller.dart';
 
-enum LibraryLocalScanStatus { inactive, scanning, interrupted, complete }
+enum LibraryLocalScanStatus {
+  inactive,
+  scanning,
+  interrupted,
+  paginationStalled,
+  complete,
+}
 
 @immutable
 class LibraryResultStatistics {
@@ -53,8 +59,8 @@ class LibraryResultStatistics {
     if (isLocalScan && !hasExactLocalTotal) {
       return LibraryPositionPresentation(
         rangeLabel: '${snapshot.firstVisible}\u2013${snapshot.lastVisible}',
-        totalLabel: '${_localContextLabel(state)} 统计中',
-        statusLabel: _localProgressLabel,
+        totalLabel: primaryResultLabel,
+        statusLabel: scanProgressLabel,
       );
     }
 
@@ -89,18 +95,21 @@ class LibraryResultStatistics {
     );
   }
 
-  String get summaryLabel {
+  String get primaryResultLabel {
     if (isLocalScan) {
-      if (!hasExactLocalTotal) {
-        final sourceTotal = sourceTotalCount ?? totalCount;
-        final source = sourceTotal == null
-            ? '已扫描 ${_formatCount(scannedCount)} 项'
-            : '已扫描 ${_formatCount(scannedCount)} / '
-                  '${_formatCount(sourceTotal)} 项';
-        return '已匹配 ${_formatCount(loadedCount)} 项，$source，'
-            '$_localSummaryStatusLabel';
+      if (hasExactLocalTotal) {
+        return _localLabel(state, '共 ${_formatCount(loadedCount)} 项');
       }
-      return '${_localContextLabel(state)} 共 ${_formatCount(loadedCount)} 项';
+      if (scanStatus == LibraryLocalScanStatus.paginationStalled) {
+        return _localLabel(state, '分页异常');
+      }
+      if (scanStatus == LibraryLocalScanStatus.interrupted) {
+        return _localLabel(state, '扫描已暂停');
+      }
+      if (dirty || unknownClassificationCount > 0) {
+        return _localLabel(state, '统计待确认');
+      }
+      return _localLabel(state, '统计中');
     }
     if (dirty) {
       return '已加载 ${_formatCount(loadedCount)} 项，结果已变化，请刷新统计';
@@ -131,25 +140,8 @@ class LibraryResultStatistics {
     };
   }
 
-  String get _localSummaryStatusLabel {
-    if (scanStatus == LibraryLocalScanStatus.interrupted) {
-      return '统计中断，可重试';
-    }
-    if (dirty) return '结果已变化，请刷新统计';
-    if (unknownClassificationCount > 0) {
-      return '有 ${_formatCount(unknownClassificationCount)} 项无法判断';
-    }
-    return '继续统计中';
-  }
-
-  String get _localProgressLabel {
-    if (scanStatus == LibraryLocalScanStatus.interrupted) {
-      return '统计中断，可重试';
-    }
-    if (dirty) return '结果已变化，请刷新统计';
-    if (unknownClassificationCount > 0) {
-      return '有 ${_formatCount(unknownClassificationCount)} 项无法判断';
-    }
+  String? get scanProgressLabel {
+    if (!isLocalScan || hasExactLocalTotal) return null;
     final sourceTotal = sourceTotalCount ?? totalCount;
     return sourceTotal == null
         ? '已扫描 ${_formatCount(scannedCount)} 项'
@@ -225,7 +217,7 @@ String _rangePrefix(LibraryBrowseState state) {
 
 String _totalLabel(LibraryBrowseState state, int total) {
   if (state.localFilter != LibraryLocalMediaFilter.all) {
-    return '${_localContextLabel(state)} 共 ${_formatCount(total)} 项';
+    return _localLabel(state, '共 ${_formatCount(total)} 项');
   }
   if (state.mediaType == LibraryMediaType.photo &&
       state.scope != LibraryBrowseScope.favorites &&
@@ -244,6 +236,11 @@ String _totalLabel(LibraryBrowseState state, int total) {
 
 String _localContextLabel(LibraryBrowseState state) =>
     state.localFilter == LibraryLocalMediaFilter.strm ? 'STRM' : '普通媒体';
+
+String _localLabel(LibraryBrowseState state, String suffix) {
+  final context = _localContextLabel(state);
+  return context == 'STRM' ? '$context $suffix' : '$context$suffix';
+}
 
 bool _showsFilteredRemaining(LibraryBrowseState state) =>
     state.scope == LibraryBrowseScope.favorites ||

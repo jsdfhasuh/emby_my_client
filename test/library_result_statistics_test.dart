@@ -112,9 +112,9 @@ void main() {
   test('local scans report facts only until a complete result exists', () {
     for (final entry in const [
       (LibraryLocalScanStatus.scanning, '已扫描 60 / 200 项'),
-      (LibraryLocalScanStatus.interrupted, '统计中断，可重试'),
+      (LibraryLocalScanStatus.interrupted, '已扫描 60 / 200 项'),
     ]) {
-      final result = LibraryResultStatistics(
+      final statistics = LibraryResultStatistics(
         state: const LibraryBrowseState(
           localFilter: LibraryLocalMediaFilter.strm,
         ),
@@ -122,12 +122,21 @@ void main() {
         totalCount: 200,
         scannedCount: 60,
         scanStatus: entry.$1,
-      ).present(snapshot);
+      );
+      final result = statistics.present(snapshot);
       expect(result.rangeLabel, '25–48');
-      expect(result.totalLabel, 'STRM 统计中');
+      expect(
+        result.totalLabel,
+        entry.$1 == LibraryLocalScanStatus.interrupted
+            ? 'STRM 扫描已暂停'
+            : 'STRM 统计中',
+      );
       expect(result.statusLabel, entry.$2);
       expect(result.remainingLabel, isNull);
       expect(result.percentageLabel, isNull);
+      expect(statistics.primaryResultLabel, result.totalLabel);
+      expect(statistics.primaryResultLabel, isNot(contains('已匹配')));
+      expect(statistics.scanProgressLabel, entry.$2);
     }
 
     final complete =
@@ -177,6 +186,7 @@ void main() {
       expect(result.rangeLabel, '25–48');
       expect(result.remainingLabel, isNull);
       expect(result.percentageLabel, isNull);
+      expect(statistics.primaryResultLabel, contains('统计待确认'));
     }
 
     expect(
@@ -187,7 +197,7 @@ void main() {
         scanStatus: LibraryLocalScanStatus.complete,
         unknownClassificationCount: 2,
       ).present(snapshot).statusLabel,
-      '有 2 项无法判断',
+      '已扫描 60 项',
     );
     expect(
       const LibraryResultStatistics(
@@ -197,8 +207,42 @@ void main() {
         scanStatus: LibraryLocalScanStatus.complete,
         dirty: true,
       ).present(snapshot).statusLabel,
-      '结果已变化，请刷新统计',
+      '已扫描 60 项',
     );
+  });
+
+  test(
+    'pagination stalls expose a fixed local status without exact totals',
+    () {
+      const statistics = LibraryResultStatistics(
+        state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.strm),
+        loadedCount: 8,
+        scannedCount: 60,
+        sourceTotalCount: 200,
+        scanStatus: LibraryLocalScanStatus.paginationStalled,
+      );
+
+      final result = statistics.present(snapshot);
+      expect(statistics.primaryResultLabel, 'STRM 分页异常');
+      expect(statistics.scanProgressLabel, '已扫描 60 / 200 项');
+      expect(result.totalLabel, 'STRM 分页异常');
+      expect(result.remainingLabel, isNull);
+      expect(result.percentageLabel, isNull);
+    },
+  );
+
+  test('regular scans use separate primary and progress labels', () {
+    const statistics = LibraryResultStatistics(
+      state: LibraryBrowseState(localFilter: LibraryLocalMediaFilter.regular),
+      loadedCount: 76,
+      scannedCount: 1200,
+      sourceTotalCount: 3768,
+      scanStatus: LibraryLocalScanStatus.scanning,
+    );
+
+    expect(statistics.primaryResultLabel, '普通媒体统计中');
+    expect(statistics.scanProgressLabel, '已扫描 1,200 / 3,768 项');
+    expect(statistics.primaryResultLabel, isNot(contains('已匹配')));
   });
 
   test('ordinary dirty totals stop presenting exact statistics', () {
@@ -216,6 +260,6 @@ void main() {
     expect(result.remainingLabel, isNull);
     expect(result.percentageLabel, isNull);
     expect(result.statusLabel, '结果已变化，请刷新统计');
-    expect(statistics.summaryLabel, '已加载 60 项，结果已变化，请刷新统计');
+    expect(statistics.primaryResultLabel, '已加载 60 项，结果已变化，请刷新统计');
   });
 }

@@ -234,12 +234,40 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('共 60 项'), findsNothing);
+    expect(find.textContaining('已匹配'), findsNothing);
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-result-summary')))
+          .data,
+      'STRM 统计中',
+    );
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-scan-progress')))
+          .data,
+      '已扫描 120 / 180 项',
+    );
     expect(
       find.byKey(const ValueKey('library-position-percentage')),
       findsNothing,
     );
-    expect(find.text('STRM 统计中'), findsOneWidget);
-    expect(find.text('已扫描 120 / 180 项'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('library-position-remaining')),
+      findsNothing,
+    );
+    expect(find.text('共 180 项'), findsNothing);
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-position-total')))
+          .data,
+      'STRM 统计中',
+    );
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('library-position-status')))
+          .data,
+      '已扫描 120 / 180 项',
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     finalPage.complete();
