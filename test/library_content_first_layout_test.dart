@@ -1,9 +1,11 @@
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/library/library_grid_geometry.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
@@ -102,7 +104,8 @@ void main() {
     tester,
   ) async {
     final api = _LayoutApi();
-    await tester.pumpWidget(_libraryApp(api));
+    final scanService = _scanService(api);
+    await tester.pumpWidget(_libraryApp(api, scanService: scanService));
     await tester.pumpAndSettle();
 
     await openLibraryFilter(tester);
@@ -121,12 +124,15 @@ void main() {
     expect(api.calls, hasLength(2));
     expect(api.calls.last.mediaType, LibraryMediaType.movie);
     expect(api.calls.last.playedFilter, LibraryPlayedFilter.unplayed);
-    await _dispose(tester, api);
+    await _dispose(tester, api, scanService: scanService);
   });
 
   testWidgets('photo draft clears source and played filters', (tester) async {
     final api = _LayoutApi();
-    await tester.pumpWidget(_libraryApp(api, view: _homeVideosLibrary));
+    final scanService = _scanService(api);
+    await tester.pumpWidget(
+      _libraryApp(api, view: _homeVideosLibrary, scanService: scanService),
+    );
     await tester.pumpAndSettle();
 
     await openLibraryFilter(tester);
@@ -149,7 +155,92 @@ void main() {
     expect(find.text('播放状态'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('library-filter-cancel')));
     await _finishSheetAnimation(tester);
-    await _dispose(tester, api);
+    await _dispose(tester, api, scanService: scanService);
+  });
+
+  testWidgets('unavailable scanning hides source filters on iPad and Android', (
+    tester,
+  ) async {
+    for (final capabilities in [
+      PlatformCapabilities.ipad,
+      PlatformCapabilities.android,
+    ]) {
+      final api = _LayoutApi();
+      await tester.pumpWidget(
+        _libraryApp(api, view: _homeVideosLibrary, capabilities: capabilities),
+      );
+      await tester.pumpAndSettle();
+
+      await openLibraryFilter(tester);
+      expect(find.text('来源'), findsNothing);
+      expect(find.text('STRM'), findsNothing);
+      expect(find.text('普通媒体'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('library-filter-cancel')));
+      await _finishSheetAnimation(tester);
+      expect(api.calls, hasLength(1));
+      await _dispose(tester, api);
+    }
+  });
+
+  testWidgets('historical STRM state normalizes before its first query', (
+    tester,
+  ) async {
+    for (final capabilities in [
+      PlatformCapabilities.ipad,
+      PlatformCapabilities.android,
+    ]) {
+      final api = _LayoutApi();
+      await tester.pumpWidget(
+        _libraryApp(
+          api,
+          view: _homeVideosLibrary,
+          initialState: const LibraryBrowseState(
+            localFilter: LibraryLocalMediaFilter.strm,
+          ),
+          capabilities: capabilities,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(api.calls, hasLength(1));
+      expect(api.scanCalls, 0);
+      expect(find.byTooltip('筛选 · STRM'), findsNothing);
+      expect(find.textContaining('STRM 统计'), findsNothing);
+      expect(find.byKey(const ValueKey('library-item-grid-0')), findsOneWidget);
+      await _dispose(tester, api);
+    }
+  });
+
+  testWidgets('a shutting down scan service falls back to one media query', (
+    tester,
+  ) async {
+    final api = _LayoutApi();
+    final scanService = _scanService(api);
+    await tester.pumpWidget(
+      _libraryApp(
+        api,
+        view: _homeVideosLibrary,
+        initialState: const LibraryBrowseState(
+          localFilter: LibraryLocalMediaFilter.strm,
+        ),
+        scanService: scanService,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(api.scanCalls, 1);
+    expect(api.calls, isEmpty);
+
+    await scanService.cancelAll();
+    await tester.pumpAndSettle();
+
+    expect(scanService.isAvailable, isFalse);
+    expect(api.calls, hasLength(1));
+    expect(api.scanCalls, 1);
+    await openLibraryFilter(tester);
+    expect(find.text('来源'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('library-filter-cancel')));
+    await _finishSheetAnimation(tester);
+    await _dispose(tester, api, scanService: scanService);
   });
 
   testWidgets('pure photo libraries hide ineffective filtering', (
@@ -353,8 +444,16 @@ void _setView(WidgetTester tester, Size size) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-Future<void> _dispose(WidgetTester tester, EmbyApi api) async {
+Future<void> _dispose(
+  WidgetTester tester,
+  EmbyApi api, {
+  LibraryLocalMediaScanService? scanService,
+}) async {
   await tester.pumpWidget(const SizedBox.shrink());
+  if (scanService != null) {
+    await scanService.cancelAll();
+    scanService.dispose();
+  }
   await api.dispose();
 }
 
@@ -364,6 +463,7 @@ Widget _libraryApp(
   LibraryBrowseState initialState = const LibraryBrowseState(),
   PlatformCapabilities capabilities = PlatformCapabilities.android,
   HomeShellNavigationActions? navigationActions,
+  LibraryLocalMediaScanService? scanService,
   double textScale = 1,
 }) => MaterialApp(
   theme: ThemeData.dark(useMaterial3: true),
@@ -381,6 +481,7 @@ Widget _libraryApp(
     categorySettings: _allSettings,
     platformCapabilities: capabilities,
     navigationActions: navigationActions,
+    libraryScanService: scanService,
   ),
 );
 
@@ -396,6 +497,7 @@ class _LayoutApi extends EmbyApi {
 
   final int itemCount;
   final List<_LayoutCall> calls = [];
+  int scanCalls = 0;
 
   @override
   Future<EmbyItemPage> getLibraryMediaItems({
@@ -413,6 +515,34 @@ class _LayoutApi extends EmbyApi {
     String? tagId,
   }) async {
     calls.add(_LayoutCall(mediaType: mediaType, playedFilter: playedFilter));
+    return _page(mediaType: mediaType, profile: profile);
+  }
+
+  @override
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async {
+    scanCalls++;
+    return _page(
+      mediaType: mediaType,
+      profile: LibraryContentProfile.homeVideosAndPhotos,
+    );
+  }
+
+  EmbyItemPage _page({
+    required LibraryMediaType mediaType,
+    required LibraryContentProfile profile,
+  }) {
     final type =
         mediaType == LibraryMediaType.photo ||
             profile.kind == LibraryContentProfileKind.photos
@@ -438,6 +568,13 @@ class _LayoutApi extends EmbyApi {
     );
   }
 }
+
+LibraryLocalMediaScanService _scanService(EmbyApi api) =>
+    LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
 
 const _allSettings = LibraryCategorySettings(
   showMovies: true,

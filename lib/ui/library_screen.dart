@@ -1052,6 +1052,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   bool get _isMediaScope => _state.scope.supportsMediaFilters;
 
+  bool get _localSourceFilterAvailable =>
+      widget.profile.supportsLocalSourceFilter &&
+      (widget.libraryScanService?.isAvailable ?? false);
+
   bool get _usesLocalScan => _state.localFilter != LibraryLocalMediaFilter.all;
 
   bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
@@ -1073,7 +1077,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool get _showFilter =>
       _isMediaScope &&
       (_filterMediaTypes.length > 1 ||
-          widget.profile.supportsLocalSourceFilter ||
+          _localSourceFilterAvailable ||
           widget.profile.supportsPlayedFilter);
 
   String get _filterSummary {
@@ -1250,9 +1254,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     allowedScopes: _allowedScopesForPage,
     allowedMediaTypes: _visibleMediaTypes,
     supportsPlayedFilter: widget.profile.supportsPlayedFilter,
-    supportsLocalSourceFilter:
-        widget.profile.supportsLocalSourceFilter &&
-        widget.libraryScanService != null,
+    supportsLocalSourceFilter: _localSourceFilterAvailable,
   );
 
   @override
@@ -1565,7 +1567,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _onLibraryScanChanged() {
-    if (!mounted || !_usesLocalScan) return;
+    if (!mounted) return;
+    if (!_localSourceFilterAvailable) {
+      if (_usesLocalScan) _dispatch(_capabilitiesEvent());
+      return;
+    }
+    if (!_usesLocalScan) return;
     final key = _activeScanKey;
     if (key == null) return;
     final snapshot = widget.libraryScanService?.snapshotFor(key);
@@ -1818,7 +1825,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       builder: (_) => _LibraryFilterSheet(
         initialDraft: LibraryFilterDraft.fromState(_state),
         mediaTypes: _filterMediaTypes,
-        supportsLocalSource: widget.profile.supportsLocalSourceFilter,
+        supportsLocalSource: _localSourceFilterAvailable,
         supportsPlayed: widget.profile.supportsPlayedFilter,
       ),
     );

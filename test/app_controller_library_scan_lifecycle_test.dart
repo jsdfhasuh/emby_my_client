@@ -19,6 +19,20 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('scan service initialization failure leaves sign-in usable', () async {
+    final fixture = _ControllerFixture(
+      libraryScanServiceFactory: (api, scope) =>
+          throw StateError('scan factory fixture'),
+    );
+    addTearDown(fixture.dispose);
+
+    await fixture.signIn();
+
+    expect(fixture.controller.isSignedIn, isTrue);
+    expect(fixture.controller.libraryScanService, isNull);
+    expect(fixture.controller.api.session, _session);
+  });
+
   test('sign out waits for the active scan before disposing the API', () async {
     final fixture = _ControllerFixture();
     addTearDown(fixture.dispose);
@@ -251,8 +265,10 @@ void main() {
 }
 
 class _ControllerFixture {
-  _ControllerFixture({AccountDataCleanup? accountDataCleanup})
-    : storage = _MemorySessionStorage() {
+  _ControllerFixture({
+    AccountDataCleanup? accountDataCleanup,
+    LibraryScanServiceFactory? libraryScanServiceFactory,
+  }) : storage = _MemorySessionStorage() {
     clients = ClientRegistry<EmbyApi>(
       disposeClient: (api) async {
         disposedApis++;
@@ -292,8 +308,9 @@ class _ControllerFixture {
           realtimeConnector: (_) async => throw StateError('realtime disabled'),
         );
       },
-      libraryScanServiceFactory: (api, scope) =>
-          LibraryLocalMediaScanService(api: api, scope: scope),
+      libraryScanServiceFactory:
+          libraryScanServiceFactory ??
+          (api, scope) => LibraryLocalMediaScanService(api: api, scope: scope),
     );
   }
 
