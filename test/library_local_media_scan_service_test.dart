@@ -158,6 +158,110 @@ void main() {
     },
   );
 
+  test(
+    'backgrounding during retry delay sends no request until resume',
+    () async {
+      final delayStarted = Completer<void>();
+      final releaseDelay = Completer<void>();
+      var calls = 0;
+      var fail = true;
+      final harness = _harness(
+        delay: (duration) {
+          if (!delayStarted.isCompleted) delayStarted.complete();
+          return releaseDelay.future;
+        },
+      );
+      final key = _key(harness.scope, 'background-retry-library');
+      harness.service.ensureScan(
+        LibraryLocalMediaScanRequest(
+          key: key,
+          loadPage: ({required startIndex, required limit}) async {
+            calls++;
+            if (fail) throw StateError('private retry fixture');
+            return EmbyItemPage(
+              items: [_item('regular', 'Video', path: 'regular.mp4')],
+              rawItemCount: 1,
+              totalRecordCount: 1,
+            );
+          },
+        ),
+      );
+
+      await delayStarted.future;
+      harness.service.pauseAll();
+      releaseDelay.complete();
+      final paused = await _waitFor(
+        harness.service,
+        key,
+        (value) =>
+            value.status == LibraryScanStatus.paused && value.safeError == null,
+      );
+      expect(paused.rawCursor, 0);
+      expect(calls, 1);
+
+      fail = false;
+      harness.service.resumeAll();
+      final completed = await _waitFor(
+        harness.service,
+        key,
+        (value) => value.complete,
+      );
+      expect(completed.rawCursor, 1);
+      expect(calls, 2);
+      await harness.dispose();
+    },
+  );
+
+  test('reattaching a paused key replaces its stale page loader', () async {
+    var staleCalls = 0;
+    var freshCalls = 0;
+    final harness = _harness(delay: (_) async {});
+    final key = _key(harness.scope, 'reattached-loader-library');
+    harness.service.ensureScan(
+      LibraryLocalMediaScanRequest(
+        key: key,
+        loadPage: ({required startIndex, required limit}) async {
+          staleCalls++;
+          throw StateError('stale loader');
+        },
+      ),
+    );
+    await _waitFor(
+      harness.service,
+      key,
+      (value) => value.safeError == LibraryScanErrorKind.requestFailed,
+    );
+
+    harness.service.ensureScan(
+      LibraryLocalMediaScanRequest(
+        key: key,
+        loadPage: ({required startIndex, required limit}) async {
+          freshCalls++;
+          return EmbyItemPage(
+            items: [_item('fresh', 'Video', path: 'fresh.mp4')],
+            rawItemCount: 1,
+            totalRecordCount: 1,
+          );
+        },
+      ),
+    );
+    await harness.service.retry(key);
+    final completed = await _waitFor(
+      harness.service,
+      key,
+      (value) => value.complete,
+    );
+
+    expect(staleCalls, 4);
+    expect(freshCalls, 1);
+    expect(completed.regularCount, 1);
+    expect(
+      harness.service.itemsFor(key, LibraryLocalMediaFilter.regular).single.id,
+      'fresh',
+    );
+    await harness.dispose();
+  });
+
   test('authentication failures do not retry', () async {
     var calls = 0;
     final harness = _harness(delay: (_) async {});

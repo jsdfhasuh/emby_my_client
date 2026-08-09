@@ -223,6 +223,28 @@ class _LibraryQuerySnapshot {
   final bool loadFailed;
 }
 
+Future<EmbyItemPage> _loadLibraryMediaPage({
+  required EmbyApi api,
+  required String parentId,
+  required LibraryContentProfile profile,
+  required LibraryBrowseState state,
+  required int startIndex,
+  required int limit,
+}) => api.getLibraryMediaItems(
+  parentId: parentId,
+  profile: profile,
+  startIndex: startIndex,
+  limit: limit,
+  mediaType: state.mediaType,
+  playedFilter: state.playedFilter,
+  favorites: state.scope == LibraryBrowseScope.favorites,
+  sortBy: state.sortBy,
+  sortOrder: state.sortOrder,
+  alphabetFilter: state.alphabetFilter,
+  genreId: state.facet?.kind == LibraryFacetKind.genre ? state.facet!.id : null,
+  tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
+);
+
 class LibraryBrowseScreen extends StatefulWidget {
   LibraryBrowseScreen.root({
     super.key,
@@ -1358,21 +1380,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     LibraryBrowseState state,
     int startIndex, [
     int limit = _pageSize,
-  ]) => widget.api.getLibraryMediaItems(
+  ]) => _loadLibraryMediaPage(
+    api: widget.api,
     parentId: widget.view.id,
     profile: widget.profile,
+    state: state,
     startIndex: startIndex,
     limit: limit,
-    mediaType: state.mediaType,
-    playedFilter: state.playedFilter,
-    favorites: state.scope == LibraryBrowseScope.favorites,
-    sortBy: state.sortBy,
-    sortOrder: state.sortOrder,
-    alphabetFilter: state.alphabetFilter,
-    genreId: state.facet?.kind == LibraryFacetKind.genre
-        ? state.facet!.id
-        : null,
-    tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
   );
 
   Future<EmbyItemPage> _requestPage(int startIndex) => switch (_state.scope) {
@@ -1427,10 +1441,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   LibraryLocalMediaScanRequest _scanRequestForState(LibraryBrowseState state) {
     final key = _scanKeyForState(state);
+    final api = widget.api;
+    final parentId = widget.view.id;
+    final profile = widget.profile;
     return LibraryLocalMediaScanRequest(
       key: key,
       loadPage: ({required startIndex, required limit}) =>
-          _requestMediaPage(state, startIndex, limit),
+          _loadLibraryMediaPage(
+            api: api,
+            parentId: parentId,
+            profile: profile,
+            state: state,
+            startIndex: startIndex,
+            limit: limit,
+          ),
     );
   }
 

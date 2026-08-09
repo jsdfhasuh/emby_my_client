@@ -73,7 +73,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       throw StateError('Library scan key belongs to a different server scope');
     }
     final entry = _cache.putIfAbsent(request.key);
-    _loaders.putIfAbsent(request.key, () => request.loadPage);
+    _loaders[request.key] = request.loadPage;
     if (entry.status == LibraryScanStatus.queued) {
       _enqueue(request.key);
     }
@@ -231,14 +231,27 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       _notify();
       while (_isCurrent(entry, generation) && _foreground) {
         final page = await _loadWithRetry(entry, loader, generation);
-        if (page == null || !_isCurrent(entry, generation)) return;
+        if (page == null) {
+          if (_isCurrent(entry, generation) &&
+              !_foreground &&
+              entry.status == LibraryScanStatus.scanning) {
+            entry
+              ..status = LibraryScanStatus.paused
+              ..safeError = null;
+            _notify();
+          }
+          return;
+        }
+        if (!_isCurrent(entry, generation)) return;
         if (!_applyPage(entry, page)) {
           _notify();
           return;
         }
         _notify();
+        if (!_isCurrent(entry, generation)) return;
         if (entry.status == LibraryScanStatus.complete) {
           _cache.touchCompleted(entry.key);
+          _loaders.remove(entry.key);
           return;
         }
         if (entry.status != LibraryScanStatus.scanning) return;
@@ -265,6 +278,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       Duration(seconds: 4),
     ];
     for (var attempt = 0; ; attempt++) {
+      if (!_foreground) return null;
       try {
         return await loader(startIndex: entry.rawCursor, limit: pageSize);
       } catch (error, stackTrace) {
@@ -275,6 +289,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
           _notify();
           return null;
         }
+        if (!_foreground) return null;
         if (attempt >= retryDelays.length) {
           _pauseWithError(entry, LibraryScanErrorKind.requestFailed);
           _logFailure(error, stackTrace, LibraryScanErrorKind.requestFailed);
@@ -285,7 +300,11 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
           _delay(retryDelays[attempt]).then((_) => true),
           _cancelled.future.then((_) => false),
         ]);
-        if (!continueAfterDelay || !_isCurrent(entry, generation)) return null;
+        if (!continueAfterDelay ||
+            !_isCurrent(entry, generation) ||
+            !_foreground) {
+          return null;
+        }
       }
     }
   }

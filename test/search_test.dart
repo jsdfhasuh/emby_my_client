@@ -186,6 +186,120 @@ void main() {
     expect(find.text('项目 60'), findsOneWidget);
   });
 
+  testWidgets(
+    'known-total empty search page retries from the same raw cursor',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final starts = <int>[];
+      var cursorSixtyAttempts = 0;
+      final api = _api((options, handler) {
+        final startIndex = options.queryParameters['StartIndex'] as int;
+        starts.add(startIndex);
+        if (startIndex == 0) {
+          handler.resolve(
+            Response<dynamic>(
+              requestOptions: options,
+              statusCode: 200,
+              data: {
+                'TotalRecordCount': 61,
+                'Items': List.generate(60, _resultItem),
+              },
+            ),
+          );
+          return;
+        }
+        cursorSixtyAttempts++;
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: {
+              'TotalRecordCount': 61,
+              'Items': cursorSixtyAttempts == 1
+                  ? const <Map<String, dynamic>>[]
+                  : [_resultItem(60)],
+            },
+          ),
+        );
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: Scaffold(
+            body: SearchScreen(
+              api: api,
+              historyStore: MemorySearchHistoryStore(),
+            ),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), '停滞分页');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pumpAndSettle();
+
+      await tester.fling(
+        find.byType(CustomScrollView),
+        const Offset(0, -12000),
+        12000,
+      );
+      await tester.pumpAndSettle();
+
+      expect(starts, [0, 60]);
+      expect(find.widgetWithText(OutlinedButton, '继续加载'), findsOneWidget);
+      await tester.tap(find.widgetWithText(OutlinedButton, '继续加载'));
+      await tester.pumpAndSettle();
+
+      expect(starts, [0, 60, 60]);
+      expect(find.text('项目 60'), findsOneWidget);
+      await tester.fling(
+        find.byType(CustomScrollView),
+        const Offset(0, -1200),
+        3000,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('共 61 项结果'), findsOneWidget);
+    },
+  );
+
+  testWidgets('search total below loaded count uses a safe effective total', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [_resultItem(0), _resultItem(1)],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SearchScreen(
+            api: api,
+            historyStore: MemorySearchHistoryStore(),
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '总数回退');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.text('共 2 项结果'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('photo search opens the viewer instead of item details', (
     tester,
   ) async {

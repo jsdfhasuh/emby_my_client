@@ -10,6 +10,7 @@ import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_local_media_scan_service.dart';
+import '../library/library_raw_page_cursor.dart';
 import '../models/emby_models.dart';
 import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
@@ -58,6 +59,8 @@ class _SearchScreenState extends State<SearchScreen> {
   bool _hasMore = false;
   Object? _error;
   int? _totalCount;
+  bool _totalDirty = false;
+  bool _reportedTotalBelowLoaded = false;
   int _generation = 0;
   int _nextStartIndex = 0;
   String _activeQuery = '';
@@ -108,7 +111,7 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.extentAfter < 700) {
+    if (_error == null && _scrollController.position.extentAfter < 700) {
       unawaited(_loadMore());
     }
   }
@@ -140,6 +143,8 @@ class _SearchScreenState extends State<SearchScreen> {
       _hasSearched = true;
       _hasMore = true;
       _totalCount = null;
+      _totalDirty = false;
+      _reportedTotalBelowLoaded = false;
       _nextStartIndex = 0;
       _waitingForDebounce = waitingForDebounce;
       _loading = false;
@@ -156,6 +161,8 @@ class _SearchScreenState extends State<SearchScreen> {
       _hasSearched = false;
       _hasMore = false;
       _totalCount = null;
+      _totalDirty = false;
+      _reportedTotalBelowLoaded = false;
       _nextStartIndex = 0;
       _waitingForDebounce = false;
       _loading = false;
@@ -177,6 +184,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Future<void> _performSearch(String query, int generation) async {
     if (!mounted || generation != _generation || _loading) return;
+    final startIndex = _nextStartIndex;
     setState(() {
       _waitingForDebounce = false;
       _loading = true;
@@ -185,22 +193,31 @@ class _SearchScreenState extends State<SearchScreen> {
     try {
       final page = await widget.api.search(
         query,
-        startIndex: _nextStartIndex,
+        startIndex: startIndex,
         limit: _pageSize,
         itemType: _itemType,
       );
       if (!mounted || generation != _generation) return;
+      final cursor = advanceLibraryRawPageCursor(
+        currentStartIndex: startIndex,
+        currentTotalCount: _totalCount,
+        reportedTotalCount: page.totalRecordCount,
+        rawItemCount: page.rawItemCount,
+        pageSize: _pageSize,
+        dirty: _totalDirty,
+      );
       setState(() {
         final knownIds = _results.map((item) => item.id).toSet();
         _results.addAll(page.items.where((item) => knownIds.add(item.id)));
-        _nextStartIndex += page.rawItemCount;
-        _totalCount = page.totalRecordCount;
-        _hasMore =
-            page.rawItemCount > 0 &&
-            (page.totalRecordCount == null
-                ? page.rawItemCount == _pageSize
-                : _nextStartIndex < page.totalRecordCount!);
+        _nextStartIndex = cursor.nextStartIndex;
+        _totalCount = cursor.totalCount;
+        _totalDirty = cursor.dirty;
+        _hasMore = cursor.hasMore || cursor.paginationStalled;
+        _error = cursor.paginationStalled
+            ? const LibraryPaginationStalled()
+            : null;
       });
+      _recordCursorDiagnostics(cursor);
     } catch (error, stackTrace) {
       if (mounted && generation == _generation) {
         DiagnosticLog.instance.error(
@@ -223,10 +240,44 @@ class _SearchScreenState extends State<SearchScreen> {
         _waitingForDebounce ||
         !_hasSearched ||
         !_hasMore ||
+        _error != null ||
         _activeQuery.isEmpty) {
       return;
     }
     await _performSearch(_activeQuery, _generation);
+  }
+
+  void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {
+    if (cursor.totalChanged) {
+      DiagnosticLog.instance.warning(
+        'search',
+        'Search total changed; statistics require refresh',
+      );
+    }
+    final total = cursor.totalCount;
+    if (!_reportedTotalBelowLoaded &&
+        total != null &&
+        total < _results.length) {
+      _reportedTotalBelowLoaded = true;
+      DiagnosticLog.instance.warning(
+        'search',
+        'Search total below loaded count '
+            'total=$total loaded=${_results.length}',
+      );
+    }
+    if (cursor.paginationStalled) {
+      DiagnosticLog.instance.warning(
+        'search',
+        'Search pagination stalled before reported total',
+      );
+    }
+  }
+
+  int? get _effectiveTotalCount {
+    if (_totalDirty) return null;
+    final total = _totalCount;
+    if (total == null) return null;
+    return total < _results.length ? _results.length : total;
   }
 
   Future<void> _refresh() => _startSearch(_activeQuery);
@@ -281,7 +332,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 initialItems: _results,
                 initialItemId: item.id,
                 initialRawCursor: _nextStartIndex,
-                initialTotalCount: _totalCount,
+                initialTotalCount: _effectiveTotalCount,
                 initialHasMore: _hasMore,
                 loadPage: ({required startIndex, required limit}) =>
                     widget.api.search(
@@ -514,7 +565,7 @@ class _SearchScreenState extends State<SearchScreen> {
         padding: const EdgeInsets.only(bottom: 28),
         child: Center(
           child: OutlinedButton.icon(
-            onPressed: _loadMore,
+            onPressed: () => _performSearch(_activeQuery, _generation),
             icon: const Icon(Icons.refresh),
             label: const Text('继续加载'),
           ),
@@ -526,7 +577,11 @@ class _SearchScreenState extends State<SearchScreen> {
         padding: const EdgeInsets.only(bottom: 28),
         child: Center(
           child: Text(
-            _totalCount == null ? '已显示全部结果' : '共 ${_totalCount!} 项结果',
+            _totalDirty
+                ? '结果已变化，请刷新'
+                : _effectiveTotalCount == null
+                ? '已显示全部结果'
+                : '共 $_effectiveTotalCount 项结果',
             style: const TextStyle(color: Color(0xFF9DA6A9)),
           ),
         ),

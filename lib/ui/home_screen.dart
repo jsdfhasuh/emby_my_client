@@ -165,6 +165,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         );
+        return;
       case LibraryEntryAction.openDetail:
         await _openDetail(item);
         return;

@@ -258,6 +258,103 @@ void main() {
 
     expect(find.byType(PhotoViewerScreen), findsOneWidget);
   });
+
+  testWidgets('returning from a home photo preserves position without reload', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final views = [
+      for (var index = 0; index < 6; index++)
+        {
+          'Id': 'mixed-$index',
+          'Name': '家庭内容 $index',
+          'Type': 'CollectionFolder',
+          'CollectionType': 'homevideos',
+          'ImageTags': const <String, String>{},
+          'UserData': const <String, dynamic>{},
+        },
+    ];
+    var viewsRequests = 0;
+    var resumeRequests = 0;
+    var latestRequests = 0;
+    final api = _api((options, handler) {
+      if (options.path.endsWith('/Views')) {
+        viewsRequests++;
+        handler.resolve(_response(options, data: views));
+        return;
+      }
+      if (options.path.endsWith('/Items/Resume')) {
+        resumeRequests++;
+        handler.resolve(_response(options, data: {'Items': const []}));
+        return;
+      }
+      if (options.path.endsWith('/Items/Latest')) {
+        latestRequests++;
+        final libraryId = options.queryParameters['ParentId'] as String;
+        final index = int.parse(libraryId.split('-').last);
+        handler.resolve(
+          _response(
+            options,
+            data: {
+              'Items': [
+                {
+                  'Id': 'photo-$index',
+                  'Name': '图片 $index',
+                  'Type': 'Photo',
+                  'ImageTags': const <String, String>{},
+                  'UserData': const <String, dynamic>{},
+                },
+              ],
+            },
+          ),
+        );
+        return;
+      }
+      handler.resolve(_response(options, data: {'Items': const []}));
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(body: HomeScreen(api: api)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final verticalScrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.text('图片 5'),
+      500,
+      scrollable: verticalScrollable,
+    );
+    await tester.pumpAndSettle();
+    final before = tester
+        .state<ScrollableState>(verticalScrollable)
+        .position
+        .pixels;
+    final requestCounts = (viewsRequests, resumeRequests, latestRequests);
+
+    await tester.tap(find.text('图片 5'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PhotoViewerScreen), findsOneWidget);
+    await tester.tap(find.byTooltip('返回'));
+    await tester.pumpAndSettle();
+
+    final after = tester
+        .state<ScrollableState>(verticalScrollable)
+        .position
+        .pixels;
+    expect(after, before);
+    expect((viewsRequests, resumeRequests, latestRequests), requestCounts);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 EmbyApi _api(
