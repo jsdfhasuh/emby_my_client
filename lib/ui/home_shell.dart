@@ -5,6 +5,7 @@ import '../state/app_controller.dart';
 import 'diagnostic_log_screen.dart';
 import 'downloads/downloads_screen.dart';
 import 'home_screen.dart';
+import 'home_shell_navigation.dart';
 import 'library_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
@@ -20,6 +21,60 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+
+  late final HomeShellNavigationActions _navigationActions =
+      HomeShellNavigationActions(
+        showHome: () => _showShellTab(0),
+        showSearch: () => _showShellTab(2),
+        openSettings: _openSettingsFromRoute,
+        openAccount: _openAccountFromRoute,
+      );
+
+  void _showShellTab(int index) {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    if (mounted && _index != index) setState(() => _index = index);
+  }
+
+  Future<void> _openSettingsFromRoute() async {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    await Future<void>.delayed(Duration.zero);
+    if (mounted) await _handleAccountAction('settings');
+  }
+
+  Future<void> _openAccountFromRoute() async {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.account_circle_outlined),
+              title: Text(widget.controller.session!.username),
+              subtitle: Text(widget.controller.session!.serverName),
+            ),
+            const Divider(height: 1),
+            for (final item in const [
+              ('settings', Icons.settings_outlined, '设置'),
+              ('logs', Icons.description_outlined, '诊断日志'),
+              ('clear-image-cache', Icons.delete_sweep_outlined, '清理图片缓存'),
+              ('logout', Icons.logout, '退出登录'),
+            ])
+              ListTile(
+                leading: Icon(item.$2),
+                title: Text(item.$3),
+                onTap: () => Navigator.of(sheetContext).pop(item.$1),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action != null && mounted) await _handleAccountAction(action);
+  }
 
   Future<void> _handleAccountAction(String value) async {
     if (value == 'logout') {
@@ -76,18 +131,21 @@ class _HomeShellState extends State<HomeShell> {
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
         libraryScanService: widget.controller.libraryScanService,
+        navigationActions: _navigationActions,
       ),
       LibraryScreen(
         api: api,
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
         libraryScanService: widget.controller.libraryScanService,
+        navigationActions: _navigationActions,
       ),
       SearchScreen(
         api: api,
         downloads: downloads,
         categorySettings: widget.controller.libraryCategorySettings,
         libraryScanService: widget.controller.libraryScanService,
+        navigationActions: _navigationActions,
       ),
     ];
     const titles = ['首页', '媒体库', '搜索'];

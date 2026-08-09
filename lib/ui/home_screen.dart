@@ -14,6 +14,7 @@ import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
+import 'home_shell_navigation.dart';
 import 'library_screen.dart';
 import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
@@ -26,12 +27,14 @@ class HomeScreen extends StatefulWidget {
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
     this.libraryScanService,
+    this.navigationActions,
   });
 
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
   final LibraryLocalMediaScanService? libraryScanService;
+  final HomeShellNavigationActions? navigationActions;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -139,6 +142,7 @@ class _HomeScreenState extends State<HomeScreen> {
               categorySettings: widget.categorySettings,
               profile: profile,
               libraryScanService: widget.libraryScanService,
+              navigationActions: widget.navigationActions,
             ),
           ),
         );
@@ -179,6 +183,7 @@ class _HomeScreenState extends State<HomeScreen> {
           downloads: widget.downloads,
           categorySettings: widget.categorySettings,
           libraryScanService: widget.libraryScanService,
+          navigationActions: widget.navigationActions,
         ),
       ),
     );

@@ -9,6 +9,8 @@ import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   test('normalizes library browse scopes without overlapping state', () {
     final overlapping = LibraryBrowseState(
@@ -190,16 +192,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('共 116 项'), findsOneWidget);
-    expect(find.text('媒体类型'), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('library-media-type-all')),
-      findsOneWidget,
-    );
-    final movieQuickFilter = find.descendant(
-      of: find.byType(ChoiceChip),
-      matching: find.text('电影'),
-    );
-    expect(movieQuickFilter, findsOneWidget);
+    expect(find.text('媒体类型'), findsNothing);
+    expect(find.byKey(const ValueKey('library-media-type-all')), findsNothing);
     expect(find.byTooltip('排序方式'), findsOneWidget);
     expect(find.byTooltip('筛选'), findsOneWidget);
     expect(
@@ -207,20 +201,19 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.tap(movieQuickFilter);
-    await tester.pumpAndSettle();
-    expect(requests.last.queryParameters['IncludeItemTypes'], 'Movie');
-
-    await tester.tap(find.byTooltip('筛选'));
-    await tester.pumpAndSettle();
+    final requestCount = requests.length;
+    await openLibraryFilter(tester);
+    expect(find.text('媒体类型'), findsOneWidget);
     expect(find.text('播放状态'), findsOneWidget);
     expect(find.text('项目类型'), findsNothing);
     expect(find.text('只看收藏'), findsNothing);
 
-    await tester.tap(find.text('未播放'));
-    await tester.tap(find.text('查看结果'));
-    await tester.pumpAndSettle();
+    await selectLibraryMediaType(tester, 'movie');
+    await selectLibraryPlayedFilter(tester, 'unplayed');
+    expect(requests, hasLength(requestCount));
+    await applyLibraryFilter(tester);
 
+    expect(requests, hasLength(requestCount + 1));
     expect(requests.last.queryParameters['Filters'], 'IsUnplayed');
     expect(requests.last.queryParameters['IncludeItemTypes'], 'Movie');
     expect(requests.last.queryParameters, isNot(contains('IsFavorite')));
@@ -241,12 +234,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(_quickCategory('全部'), findsOneWidget);
-    expect(_quickCategory('电影'), findsNothing);
-    expect(_quickCategory('剧集'), findsNothing);
-    expect(_quickCategory('视频'), findsNothing);
-    expect(_quickCategory('收藏'), findsNothing);
-    expect(_quickCategory('文件夹'), findsNothing);
+    expect(find.text('媒体类型'), findsNothing);
+    expect(find.byType(ChoiceChip), findsNothing);
     expect(
       find.byKey(const ValueKey('library-section-favorites')),
       findsOneWidget,
@@ -292,22 +281,20 @@ void main() {
     );
     expect(
       tester
-          .widget<ChoiceChip>(
-            find.descendant(
-              of: find.byKey(const ValueKey('library-media-type-all')),
-              matching: find.byType(ChoiceChip),
-            ),
-          )
-          .selected,
-      isTrue,
-    );
-    expect(
-      tester
           .widget<FilterChip>(
             find.byKey(const ValueKey('library-section-favorites')),
           )
           .selected,
       isFalse,
+    );
+    await openLibraryFilter(tester);
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.byKey(const ValueKey('library-media-type-all')),
+          )
+          .selected,
+      isTrue,
     );
   });
 
@@ -486,9 +473,6 @@ void main() {
     expect(find.byType(PhotoViewerScreen), findsOneWidget);
   });
 }
-
-Finder _quickCategory(String label) =>
-    find.descendant(of: find.byType(ChoiceChip), matching: find.text(label));
 
 Finder _verticalScrollable() => find.byWidgetPredicate(
   (widget) =>

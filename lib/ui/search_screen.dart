@@ -16,6 +16,7 @@ import '../realtime/realtime_refresh_binding.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
+import 'home_shell_navigation.dart';
 import 'library_screen.dart';
 import 'photos/photo_viewer_screen.dart';
 import 'widgets/media_widgets.dart';
@@ -27,6 +28,7 @@ class SearchScreen extends StatefulWidget {
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
     this.libraryScanService,
+    this.navigationActions,
     this.historyStore,
   });
 
@@ -34,6 +36,7 @@ class SearchScreen extends StatefulWidget {
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
   final LibraryLocalMediaScanService? libraryScanService;
+  final HomeShellNavigationActions? navigationActions;
   final SearchHistoryStore? historyStore;
 
   @override
@@ -260,6 +263,7 @@ class _SearchScreenState extends State<SearchScreen> {
               downloads: widget.downloads,
               categorySettings: widget.categorySettings,
               libraryScanService: widget.libraryScanService,
+              navigationActions: widget.navigationActions,
               profile: profile,
             ),
           ),

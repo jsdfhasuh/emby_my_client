@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets('root scope chips honor folder and favorite visibility', (
     tester,
@@ -74,6 +76,7 @@ void main() {
 
     expect(_scopeChip('favorites'), findsNothing);
     expect(tester.widget<FilterChip>(_scopeChip('media')).selected, isTrue);
+    await openLibraryFilter(tester);
     expect(_mediaTypeChip(LibraryMediaType.movie), findsNothing);
     expect(
       tester.widget<ChoiceChip>(_mediaTypeChip(LibraryMediaType.all)).selected,
@@ -137,6 +140,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await openLibraryFilter(tester);
     expect(_mediaTypeChip(LibraryMediaType.movie), findsNothing);
     expect(
       tester.widget<ChoiceChip>(_mediaTypeChip(LibraryMediaType.all)).selected,
@@ -156,7 +160,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(_mediaTypeChip(LibraryMediaType.all), findsOneWidget);
+    expect(find.text('媒体类型'), findsNothing);
+    expect(_mediaTypeChip(LibraryMediaType.all), findsNothing);
     expect(_mediaTypeChip(LibraryMediaType.movie), findsNothing);
     expect(_mediaTypeChip(LibraryMediaType.series), findsNothing);
     expect(_mediaTypeChip(LibraryMediaType.video), findsNothing);
@@ -187,7 +192,8 @@ void main() {
         expect(_scopeChip('media'), findsOneWidget);
         expect(_scopeChip('genres'), findsOneWidget);
         expect(_scopeChip('tags'), findsOneWidget);
-        expect(_mediaTypeChip(LibraryMediaType.all), findsOneWidget);
+        expect(find.text('媒体类型'), findsNothing);
+        expect(_mediaTypeChip(LibraryMediaType.all), findsNothing);
         await _dispose(tester, api);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -327,10 +333,8 @@ Finder _scopeChip(String name) => find.byWidgetPredicate(
       widget.key == ValueKey<String>('library-section-$name'),
 );
 
-Finder _mediaTypeChip(LibraryMediaType mediaType) => find.descendant(
-  of: find.byKey(ValueKey<String>('library-media-type-${mediaType.name}')),
-  matching: find.byType(ChoiceChip),
-);
+Finder _mediaTypeChip(LibraryMediaType mediaType) =>
+    find.byKey(ValueKey<String>('library-media-type-${mediaType.name}'));
 
 Future<void> _dispose(WidgetTester tester, EmbyApi api) async {
   await tester.pumpWidget(const SizedBox.shrink());

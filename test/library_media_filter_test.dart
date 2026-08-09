@@ -8,6 +8,8 @@ import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets('filters STRM and regular media across server pages', (
     tester,
@@ -56,10 +58,9 @@ void main() {
       allOf(contains('Path'), contains('Container'), contains('MediaSources')),
     );
 
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
 
     expect(find.byKey(const ValueKey('library-item-strm-1')), findsOneWidget);
     expect(find.byKey(const ValueKey('library-item-regular-0')), findsNothing);
@@ -70,10 +71,9 @@ void main() {
     );
     expect(requests.last.queryParameters['StartIndex'], 60);
 
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-regular')));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'regular');
+    await applyLibraryFilter(tester);
 
     expect(
       find.byKey(const ValueKey('library-item-regular-0')),

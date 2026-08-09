@@ -14,6 +14,8 @@ import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets('raw cursor advances before duplicate and invalid item removal', (
     tester,
@@ -109,47 +111,34 @@ void main() {
       expect(api.requests, hasLength(1));
 
       await tester.tap(find.byKey(const ValueKey('library-section-media')));
-      await tester.tap(find.byKey(const ValueKey('library-media-type-all')));
       await tester.pumpAndSettle();
       expect(api.requests, hasLength(1));
 
-      await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('library-filter-all')));
-      await tester.pumpAndSettle();
-      expect(api.requests, hasLength(1));
-
-      await tester.tap(find.byTooltip('筛选'));
-      await tester.pumpAndSettle();
-      final allPlayed = find.descendant(
-        of: find.byType(SegmentedButton<LibraryPlayedFilter>),
-        matching: find.text('全部'),
-      );
-      await tester.tap(allPlayed);
-      await tester.tap(find.text('查看结果'));
-      await tester.pumpAndSettle();
+      await openLibraryFilter(tester);
+      await selectLibraryMediaType(tester, 'all');
+      await selectLibraryLocalFilter(tester, 'all');
+      await selectLibraryPlayedFilter(tester, 'all');
+      await applyLibraryFilter(tester);
       expect(api.requests, hasLength(1));
 
       await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('library-media-type-movie')));
-      await tester.pumpAndSettle();
+      await openLibraryFilter(tester);
+      await selectLibraryMediaType(tester, 'movie');
+      await applyLibraryFilter(tester);
       expect(api.requests.last.favorites, isTrue);
       expect(api.requests.last.mediaType, LibraryMediaType.movie);
 
-      await tester.tap(find.byTooltip('筛选'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('未播放'));
-      await tester.tap(find.text('查看结果'));
-      await tester.pumpAndSettle();
+      await openLibraryFilter(tester);
+      await selectLibraryPlayedFilter(tester, 'unplayed');
+      await applyLibraryFilter(tester);
       expect(api.requests.last.favorites, isTrue);
       expect(api.requests.last.mediaType, LibraryMediaType.movie);
       expect(api.requests.last.playedFilter, LibraryPlayedFilter.unplayed);
 
-      await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-      await tester.pumpAndSettle();
+      await openLibraryFilter(tester);
+      await selectLibraryLocalFilter(tester, 'strm');
+      await applyLibraryFilter(tester);
       expect(api.requests.last.favorites, isTrue);
       expect(api.requests.last.mediaType, LibraryMediaType.movie);
       expect(api.requests.last.playedFilter, LibraryPlayedFilter.unplayed);
@@ -172,10 +161,9 @@ void main() {
     await tester.pumpWidget(_rootApp(api, scanService: scanService));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
 
     expect(
       find.byKey(const ValueKey('library-item-strm-first')),
@@ -264,7 +252,11 @@ void main() {
 
       expect(find.widgetWithText(AppBar, '动作'), findsOneWidget);
       expect(find.byKey(const ValueKey('library-section-bar')), findsNothing);
-      expect(find.text('媒体类型'), findsOneWidget);
+      expect(find.text('媒体类型'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('library-filter-button')),
+        findsOneWidget,
+      );
       expect(requests.single.queryParameters['GenreIds'], 'genre-1');
 
       await tester.pumpWidget(const SizedBox.shrink());

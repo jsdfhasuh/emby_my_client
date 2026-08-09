@@ -14,6 +14,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets('letter rail previews, filters, labels, and resets position', (
     tester,
@@ -670,10 +672,9 @@ Future<void> _selectAlphabetWithoutSettling(
 }
 
 Future<void> _selectMediaFilter(WidgetTester tester, String key) async {
-  await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-  await tester.pumpAndSettle();
-  await tester.tap(find.byKey(ValueKey('library-filter-$key')));
-  await tester.pumpAndSettle();
+  await openLibraryFilter(tester);
+  await selectLibraryLocalFilter(tester, key);
+  await applyLibraryFilter(tester);
 }
 
 Future<void> _refreshLibrary(WidgetTester tester) async {

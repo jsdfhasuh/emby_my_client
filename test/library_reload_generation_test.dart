@@ -11,6 +11,8 @@ import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets(
     'stale pull refresh cannot pollute a directory or permanently block reload and paging',
@@ -145,8 +147,9 @@ void main() {
       );
       await _tapMenuRefresh(tester);
 
-      await tester.tap(find.byKey(const ValueKey('library-media-type-movie')));
-      await _pumpAsyncWork(tester);
+      await openLibraryFilter(tester);
+      await selectLibraryMediaType(tester, 'movie');
+      await applyLibraryFilter(tester);
       staleDirectory.complete(_directoryPage(0, prefix: 'stale-directory'));
       staleFavorites.complete(_singleMediaPage('stale-favorite'));
       await tester.pumpAndSettle();
@@ -154,14 +157,7 @@ void main() {
       final selectedFavorite = tester.widget<FilterChip>(
         find.byKey(const ValueKey('library-section-favorites')),
       );
-      final selectedMovie = tester.widget<ChoiceChip>(
-        find.descendant(
-          of: find.byKey(const ValueKey('library-media-type-movie')),
-          matching: find.byType(ChoiceChip),
-        ),
-      );
       expect(selectedFavorite.selected, isTrue);
-      expect(selectedMovie.selected, isTrue);
       expect(api.calls.last.scope, LibraryBrowseScope.favorites);
       expect(api.calls.last.mediaType, LibraryMediaType.movie);
       expect(find.text('stale-favorite'), findsNothing);
@@ -183,13 +179,9 @@ void main() {
       (call) => call.scope == LibraryBrowseScope.media && call.startIndex == 0,
     );
     await _pullToRefresh(tester);
-    await tester.tap(
-      find.byKey(const ValueKey('library-played-filter-button')),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('未播放'));
-    await tester.tap(find.text('查看结果'));
+    await openLibraryFilter(tester);
+    await selectLibraryPlayedFilter(tester, 'unplayed');
+    await tester.tap(find.byKey(const ValueKey('library-filter-apply')));
     await _pumpAsyncWork(tester);
 
     staleRefresh.complete(_singleMediaPage('stale-played-filter'));

@@ -16,6 +16,8 @@ import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'library_filter_test_helpers.dart';
+
 void main() {
   testWidgets('small continuous scrolling reuses the grid and visible cards', (
     tester,
@@ -89,10 +91,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
 
     final position = tester
         .state<ScrollableState>(_verticalScrollable())
@@ -203,9 +204,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
     await _pumpUntil(tester, () => starts.contains(120));
     await _showOverlay(tester);
 
@@ -248,11 +249,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('筛选'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('未播放'));
-    await tester.tap(find.text('查看结果'));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryPlayedFilter(tester, 'unplayed');
+    await applyLibraryFilter(tester);
 
     expect(find.text('未播放共 137 项'), findsOneWidget);
     await _showOverlay(tester);
@@ -286,10 +285,9 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('library-filter-strm')));
-    await tester.pumpAndSettle();
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
     await tester.scrollUntilVisible(
       find.byKey(const ValueKey('library-item-item-118')),
       900,
