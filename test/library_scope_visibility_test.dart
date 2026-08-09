@@ -192,6 +192,11 @@ void main() {
         expect(_scopeChip('media'), findsOneWidget);
         expect(_scopeChip('genres'), findsOneWidget);
         expect(_scopeChip('tags'), findsOneWidget);
+        expect(find.text('浏览方式'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('library-section-bar')),
+          findsOneWidget,
+        );
         expect(find.text('媒体类型'), findsNothing);
         expect(_mediaTypeChip(LibraryMediaType.all), findsNothing);
         await _dispose(tester, api);

@@ -283,6 +283,20 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(AppBar), findsOneWidget);
+    expect(find.text('浏览方式'), findsNothing);
+    expect(find.byKey(const ValueKey('library-section-bar')), findsOneWidget);
+    for (final scope in const [
+      'media',
+      'directories',
+      'genres',
+      'tags',
+      'favorites',
+    ]) {
+      expect(
+        find.byKey(ValueKey<String>('library-section-$scope')),
+        findsOneWidget,
+      );
+    }
     expect(find.text('媒体类型'), findsNothing);
     expect(find.byKey(const ValueKey('library-filter-button')), findsOneWidget);
     expect(find.byKey(const ValueKey('large-screen-home')), findsOneWidget);
@@ -403,6 +417,7 @@ void main() {
     (Size(1024, 768), 2.0),
     (Size(1366, 1024), 1.3),
     (Size(768, 1024), 2.0),
+    (Size(390, 844), 2.0),
   ]) {
     testWidgets(
       'iPad library fits ${entry.$1.width}x${entry.$1.height} at ${entry.$2}x text',
@@ -422,6 +437,7 @@ void main() {
           find.byKey(const ValueKey('library-item-grid-0')),
           findsOneWidget,
         );
+        expect(find.text('浏览方式'), findsNothing);
         expect(tester.takeException(), isNull);
         await _dispose(tester, api);
       },

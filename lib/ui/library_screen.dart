@@ -416,33 +416,26 @@ class _LibraryScopeBar extends StatelessWidget {
     return Padding(
       key: const ValueKey('library-section-bar'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('浏览方式', style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (final scope in visibleScopes) ...[
-                  FilterChip(
-                    key: ValueKey(
-                      'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
-                    ),
-                    label: Text(scope.label),
-                    selected: selected == scope,
-                    showCheckmark: false,
-                    onSelected: (isSelected) {
-                      if (isSelected) onSelected(scope);
-                    },
-                  ),
-                  if (scope != visibleScopes.last) const SizedBox(width: 8),
-                ],
-              ],
-            ),
-          ),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final scope in visibleScopes) ...[
+              FilterChip(
+                key: ValueKey(
+                  'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
+                ),
+                label: Text(scope.label),
+                selected: selected == scope,
+                showCheckmark: false,
+                onSelected: (isSelected) {
+                  if (isSelected) onSelected(scope);
+                },
+              ),
+              if (scope != visibleScopes.last) const SizedBox(width: 8),
+            ],
+          ],
+        ),
       ),
     );
   }
