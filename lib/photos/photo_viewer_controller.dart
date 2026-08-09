@@ -2,54 +2,54 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../core/diagnostic_log.dart';
 import '../images/emby_image_request.dart';
 import '../images/photo_prefetcher.dart';
 import '../models/emby_models.dart';
-import 'photo_browser_controller.dart';
+import 'photo_sequence_source.dart';
 
 typedef PhotoImageRequestBuilder = EmbyImageRequest? Function(EmbyItem item);
 
 class PhotoViewerController extends ChangeNotifier {
   PhotoViewerController({
-    required this.parentId,
-    required List<EmbyItem> initialDirectoryItems,
-    required String initialItemId,
-    required bool initialHasMore,
-    required PhotoPageLoader loadPage,
+    required PhotoSequenceSource source,
     required PhotoImageRequestBuilder imageRequestFor,
     required PhotoPrefetcher prefetcher,
     this.pageSize = 60,
     this.loadAheadThreshold = 8,
     this.controlsHideDelay = const Duration(seconds: 4),
-  }) : _loadPage = loadPage,
+  }) : _source = source,
        _imageRequestFor = imageRequestFor,
        _prefetcher = prefetcher,
-       _hasMore = initialHasMore,
-       _nextStartIndex = initialDirectoryItems.length {
-    final seen = <String>{};
+       _hasMore = source.initialHasMore,
+       _nextStartIndex = source.initialRawCursor,
+       _totalCount = source.initialTotalCount {
     _directoryItems.addAll(
-      initialDirectoryItems.where((item) => seen.add(item.id)),
+      source.initialItems.where((item) => _seenItemIds.add(item.id)),
     );
     _photos.addAll(_directoryItems.where((item) => item.isPhoto));
-    final initialIndex = _photos.indexWhere((item) => item.id == initialItemId);
+    final initialIndex = _photos.indexWhere(
+      (item) => item.id == source.initialItemId,
+    );
     _currentIndex = initialIndex < 0 ? 0 : initialIndex;
     _scheduleHideControls();
     _schedulePrefetch();
     unawaited(loadMoreIfNeeded());
   }
 
-  final String parentId;
   final int pageSize;
   final int loadAheadThreshold;
   final Duration controlsHideDelay;
-  final PhotoPageLoader _loadPage;
+  final PhotoSequenceSource _source;
   final PhotoImageRequestBuilder _imageRequestFor;
   final PhotoPrefetcher _prefetcher;
   final List<EmbyItem> _directoryItems = [];
   final List<EmbyItem> _photos = [];
+  final Set<String> _seenItemIds = {};
 
   int _currentIndex = 0;
   int _nextStartIndex;
+  int? _totalCount;
   bool _hasMore;
   bool _loadingMore = false;
   bool _controlsVisible = true;
@@ -65,6 +65,11 @@ class PhotoViewerController extends ChangeNotifier {
   Object? get loadMoreError => _loadMoreError;
   bool get canGoPrevious => _currentIndex > 0;
   bool get canGoNext => _currentIndex + 1 < _photos.length;
+  String get queryFingerprint => _source.queryFingerprint;
+  int get nextStartIndex => _nextStartIndex;
+  int? get totalCount => _totalCount;
+  String? get currentItemId =>
+      _photos.isEmpty ? null : _photos[_currentIndex].id;
 
   String get positionLabel {
     if (_photos.isEmpty) return '0 / 0';
@@ -98,24 +103,39 @@ class PhotoViewerController extends ChangeNotifier {
     try {
       var addedPhotos = 0;
       do {
-        final page = await _loadPage(
-          parentId: parentId,
+        final page = await _source.loadPage(
           startIndex: _nextStartIndex,
           limit: pageSize,
         );
         if (_disposed) return;
-        _nextStartIndex += page.length;
-        _hasMore = page.length == pageSize;
-        final seen = _directoryItems.map((item) => item.id).toSet();
-        final additions = page.where((item) => seen.add(item.id)).toList();
+        _nextStartIndex += page.rawItemCount;
+        if (page.totalRecordCount != null) {
+          _totalCount = page.totalRecordCount;
+        }
+        _hasMore =
+            page.rawItemCount > 0 &&
+            (_totalCount != null
+                ? _nextStartIndex < _totalCount!
+                : page.rawItemCount == pageSize);
+        final additions = page.items
+            .where((item) => _seenItemIds.add(item.id))
+            .toList();
         _directoryItems.addAll(additions);
         final photos = additions.where((item) => item.isPhoto).toList();
         _photos.addAll(photos);
         addedPhotos += photos.length;
       } while (_hasMore && addedPhotos == 0);
       _schedulePrefetch();
-    } catch (error) {
-      if (!_disposed) _loadMoreError = error;
+    } catch (error, stackTrace) {
+      if (!_disposed) {
+        DiagnosticLog.instance.error(
+          'photo',
+          'Photo viewer page load failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        _loadMoreError = error;
+      }
     } finally {
       if (!_disposed) {
         _loadingMore = false;

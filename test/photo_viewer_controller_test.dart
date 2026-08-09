@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:emby_my_client/images/emby_image_request.dart';
 import 'package:emby_my_client/images/photo_prefetcher.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/photos/photo_viewer_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -12,19 +13,22 @@ void main() {
     () async {
       final loaded = <String>[];
       final controller = PhotoViewerController(
-        parentId: 'root',
-        initialDirectoryItems: [
-          _item('folder', 'Folder'),
-          _item('photo-1', 'Photo'),
-          _item('photo-2', 'Photo'),
-          _item('photo-3', 'Photo'),
-          _item('photo-4', 'Photo'),
-          _item('photo-5', 'Photo'),
-          _item('photo-6', 'Photo'),
-        ],
-        initialItemId: 'photo-3',
-        initialHasMore: false,
-        loadPage: _emptyLoader,
+        source: _source(
+          initialItems: [
+            _item('folder', 'Folder'),
+            _item('photo-1', 'Photo'),
+            _item('photo-2', 'Photo'),
+            _item('photo-3', 'Photo'),
+            _item('photo-4', 'Photo'),
+            _item('photo-5', 'Photo'),
+            _item('photo-6', 'Photo'),
+          ],
+          initialItemId: 'photo-3',
+          initialRawCursor: 7,
+          initialTotalCount: 7,
+          initialHasMore: false,
+          loadPage: _emptyLoader,
+        ),
         imageRequestFor: _request,
         prefetcher: PhotoPrefetcher(
           load: (request) async => loaded.add(request.cacheKey),
@@ -55,31 +59,33 @@ void main() {
     () async {
       final starts = <int>[];
       final requestStarted = Completer<void>();
-      final response = Completer<List<EmbyItem>>();
+      final response = Completer<EmbyItemPage>();
       final controller = PhotoViewerController(
-        parentId: 'root',
-        initialDirectoryItems: [
-          _item('folder', 'Folder'),
-          _item('photo-1', 'Photo'),
-        ],
-        initialItemId: 'photo-1',
-        initialHasMore: true,
+        source: _source(
+          initialItems: [_item('folder', 'Folder'), _item('photo-1', 'Photo')],
+          initialItemId: 'photo-1',
+          initialRawCursor: 2,
+          initialTotalCount: null,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) {
+            starts.add(startIndex);
+            if (!requestStarted.isCompleted) requestStarted.complete();
+            return response.future;
+          },
+        ),
         pageSize: 2,
         loadAheadThreshold: 8,
-        loadPage: ({required parentId, startIndex = 0, limit = 60}) {
-          starts.add(startIndex);
-          if (!requestStarted.isCompleted) requestStarted.complete();
-          return response.future;
-        },
         imageRequestFor: _request,
         prefetcher: PhotoPrefetcher(load: (_) async {}),
       );
 
       await requestStarted.future;
-      response.complete([
-        _item('album', 'PhotoAlbum'),
-        _item('photo-2', 'Photo'),
-      ]);
+      response.complete(
+        EmbyItemPage(
+          items: [_item('album', 'PhotoAlbum'), _item('photo-2', 'Photo')],
+          rawItemCount: 2,
+        ),
+      );
       while (controller.isLoadingMore) {
         await Future<void>.delayed(Duration.zero);
       }
@@ -87,6 +93,44 @@ void main() {
       expect(starts, [2]);
       expect(controller.photos.map((item) => item.id), ['photo-1', 'photo-2']);
       expect(controller.positionLabel, '1 / 2+');
+      controller.dispose();
+    },
+  );
+
+  test(
+    'continues from the source raw cursor and honors the source total',
+    () async {
+      final starts = <int>[];
+      final controller = PhotoViewerController(
+        source: _source(
+          initialItems: [_item('photo-1', 'Photo')],
+          initialItemId: 'photo-1',
+          initialRawCursor: 60,
+          initialTotalCount: 62,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            return EmbyItemPage(
+              items: [_item('photo-2', 'Photo')],
+              rawItemCount: 2,
+              totalRecordCount: 62,
+            );
+          },
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+
+      while (controller.isLoadingMore) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(starts, [60]);
+      expect(controller.nextStartIndex, 62);
+      expect(controller.totalCount, 62);
+      expect(controller.queryFingerprint, 'test-query');
+      expect(controller.photos.map((item) => item.id), ['photo-1', 'photo-2']);
+      expect(controller.hasMore, isFalse);
       controller.dispose();
     },
   );
@@ -153,11 +197,27 @@ void main() {
   });
 }
 
-Future<List<EmbyItem>> _emptyLoader({
-  required String parentId,
-  int startIndex = 0,
-  int limit = 60,
-}) async => const [];
+Future<EmbyItemPage> _emptyLoader({
+  required int startIndex,
+  required int limit,
+}) async => const EmbyItemPage(items: [], totalRecordCount: 0);
+
+DirectoryPhotoSource _source({
+  required List<EmbyItem> initialItems,
+  required String initialItemId,
+  required int initialRawCursor,
+  required int? initialTotalCount,
+  required bool initialHasMore,
+  required PhotoPageLoader loadPage,
+}) => DirectoryPhotoSource(
+  queryFingerprint: 'test-query',
+  initialItems: initialItems,
+  initialItemId: initialItemId,
+  initialRawCursor: initialRawCursor,
+  initialTotalCount: initialTotalCount,
+  initialHasMore: initialHasMore,
+  loadPage: loadPage,
+);
 
 EmbyImageRequest? _request(EmbyItem item) => EmbyImageRequest(
   uri: Uri.parse('https://example.test/${item.id}.jpg'),

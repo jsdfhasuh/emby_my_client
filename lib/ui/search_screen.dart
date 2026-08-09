@@ -10,6 +10,7 @@ import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../models/emby_models.dart';
+import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
@@ -260,14 +261,28 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
         );
       case LibraryEntryAction.openPhoto:
+        final query = _activeQuery;
+        final itemType = _itemType;
         await Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
-              parentId: '',
-              initialDirectoryItems: _results,
-              initialItemId: item.id,
-              initialHasMore: false,
+              source: FilteredLibraryPhotoSource(
+                queryFingerprint:
+                    'search:${Object.hash(query, itemType).toUnsigned(32)}',
+                initialItems: _results,
+                initialItemId: item.id,
+                initialRawCursor: _nextStartIndex,
+                initialTotalCount: _totalCount,
+                initialHasMore: _hasMore,
+                loadPage: ({required startIndex, required limit}) =>
+                    widget.api.search(
+                      query,
+                      startIndex: startIndex,
+                      limit: limit,
+                      itemType: itemType,
+                    ),
+              ),
             ),
           ),
         );

@@ -724,24 +724,30 @@ class EmbyApi {
     return _parseLibraryPage(response.data);
   }
 
-  Future<List<EmbyItem>> getPhotoChildren({
+  Future<EmbyItemPage> getPhotoChildren({
     required String parentId,
     int startIndex = 0,
     int limit = 60,
-  }) => _getItemPage(
-    '/Users/${session.userId}/Items',
-    query: {
-      'ParentId': parentId,
-      'StartIndex': startIndex,
-      'Limit': limit,
-      'Recursive': false,
-      'IncludeItemTypes': 'Photo,PhotoAlbum,Folder',
-      'SortBy': 'SortName',
-      'SortOrder': 'Ascending',
-      'Fields': _listItemFields,
-      'EnableImages': true,
-    },
-  );
+  }) async {
+    final response = await _request(
+      () => _dio.get<dynamic>(
+        '/Users/${session.userId}/Items',
+        queryParameters: {
+          'ParentId': parentId,
+          'StartIndex': startIndex,
+          'Limit': limit,
+          'Recursive': false,
+          'IncludeItemTypes': 'Photo,PhotoAlbum,Folder',
+          'SortBy': 'SortName',
+          'SortOrder': 'Ascending',
+          'Fields': _listItemFields,
+          'EnableImages': true,
+          'EnableTotalRecordCount': true,
+        },
+      ),
+    );
+    return _parseLibraryPage(response.data);
+  }
 
   Future<EmbyItem> getItem(String itemId) async {
     final response = await _request(

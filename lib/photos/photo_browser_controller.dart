@@ -1,25 +1,19 @@
 import 'package:flutter/foundation.dart';
 
+import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
-
-typedef PhotoPageLoader =
-    Future<List<EmbyItem>> Function({
-      required String parentId,
-      int startIndex,
-      int limit,
-    });
+import 'photo_sequence_source.dart';
 
 class PhotoBrowserController extends ChangeNotifier {
   PhotoBrowserController({
-    required this.parentId,
     required PhotoPageLoader loadPage,
     this.pageSize = 60,
   }) : _loadPage = loadPage;
 
-  final String parentId;
   final int pageSize;
   final PhotoPageLoader _loadPage;
   final List<EmbyItem> _items = [];
+  final Set<String> _seenItemIds = {};
 
   bool _loading = false;
   bool _hasMore = true;
@@ -27,11 +21,14 @@ class PhotoBrowserController extends ChangeNotifier {
   Object? _error;
   int _generation = 0;
   int _nextStartIndex = 0;
+  int? _totalCount;
 
   List<EmbyItem> get items => List.unmodifiable(_items);
   bool get isLoading => _loading;
   bool get hasMore => _hasMore;
   Object? get error => _error;
+  int get nextStartIndex => _nextStartIndex;
+  int? get totalCount => _totalCount;
 
   Future<void> loadMore() async {
     if (_loading || !_hasMore || _disposed) return;
@@ -42,7 +39,9 @@ class PhotoBrowserController extends ChangeNotifier {
     if (_disposed) return;
     final generation = ++_generation;
     _items.clear();
+    _seenItemIds.clear();
     _nextStartIndex = 0;
+    _totalCount = null;
     _hasMore = true;
     _error = null;
     _notify();
@@ -59,23 +58,32 @@ class PhotoBrowserController extends ChangeNotifier {
     _notify();
     final startIndex = reset ? 0 : _nextStartIndex;
     try {
-      final page = await _loadPage(
-        parentId: parentId,
-        startIndex: startIndex,
-        limit: pageSize,
-      );
+      final page = await _loadPage(startIndex: startIndex, limit: pageSize);
       if (_disposed || generation != _generation) return;
-      final seen = _items.map((item) => item.id).toSet();
       _items.addAll(
-        page.where(
+        page.items.where(
           (item) =>
-              (item.isPhoto || item.isPhotoContainer) && seen.add(item.id),
+              (item.isPhoto || item.isPhotoContainer) &&
+              _seenItemIds.add(item.id),
         ),
       );
-      _nextStartIndex = startIndex + page.length;
-      _hasMore = page.length == pageSize;
-    } catch (error) {
+      _nextStartIndex = startIndex + page.rawItemCount;
+      if (page.totalRecordCount != null) {
+        _totalCount = page.totalRecordCount;
+      }
+      _hasMore =
+          page.rawItemCount > 0 &&
+          (_totalCount != null
+              ? _nextStartIndex < _totalCount!
+              : page.rawItemCount == pageSize);
+    } catch (error, stackTrace) {
       if (_disposed || generation != _generation) return;
+      DiagnosticLog.instance.error(
+        'photo',
+        'Photo directory page load failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
       _error = error;
     } finally {
       if (!_disposed && generation == _generation) {

@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:emby_my_client/ui/photos/zoomable_photo_page.dart';
 import 'package:flutter/material.dart';
@@ -15,10 +16,16 @@ void main() {
       MaterialApp(
         home: PhotoViewerScreen(
           api: api,
-          parentId: 'root',
-          initialDirectoryItems: const [_folder, _photo1, _photo2, _photo3],
-          initialItemId: 'photo-2',
-          initialHasMore: false,
+          source: DirectoryPhotoSource(
+            queryFingerprint: 'screen-test',
+            initialItems: const [_folder, _photo1, _photo2, _photo3],
+            initialItemId: 'photo-2',
+            initialRawCursor: 4,
+            initialTotalCount: 4,
+            initialHasMore: false,
+            loadPage: ({required startIndex, required limit}) async =>
+                const EmbyItemPage(items: [], totalRecordCount: 0),
+          ),
         ),
       ),
     );

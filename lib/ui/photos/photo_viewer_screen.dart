@@ -11,23 +11,14 @@ import '../../images/emby_image_request.dart';
 import '../../images/photo_prefetcher.dart';
 import '../../models/emby_models.dart';
 import '../../photos/photo_viewer_controller.dart';
+import '../../photos/photo_sequence_source.dart';
 import 'zoomable_photo_page.dart';
 
 class PhotoViewerScreen extends StatefulWidget {
-  const PhotoViewerScreen({
-    super.key,
-    required this.api,
-    required this.parentId,
-    required this.initialDirectoryItems,
-    required this.initialItemId,
-    required this.initialHasMore,
-  });
+  const PhotoViewerScreen({super.key, required this.api, required this.source});
 
   final EmbyApi api;
-  final String parentId;
-  final List<EmbyItem> initialDirectoryItems;
-  final String initialItemId;
-  final bool initialHasMore;
+  final PhotoSequenceSource source;
 
   @override
   State<PhotoViewerScreen> createState() => _PhotoViewerScreenState();
@@ -95,11 +86,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
       },
     );
     _controller = PhotoViewerController(
-      parentId: widget.parentId,
-      initialDirectoryItems: widget.initialDirectoryItems,
-      initialItemId: widget.initialItemId,
-      initialHasMore: widget.initialHasMore,
-      loadPage: widget.api.getPhotoChildren,
+      source: widget.source,
       imageRequestFor: _viewerRequest,
       prefetcher: prefetcher,
     );
@@ -202,7 +189,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
                   canGoNext: _controller.canGoNext,
                   loadingMore: _controller.isLoadingMore,
                   loadMoreError: _controller.loadMoreError,
-                  onBack: () => Navigator.of(context).maybePop(),
+                  onBack: () =>
+                      Navigator.of(context).maybePop(_controller.currentItemId),
                   onPrevious: () => _goTo(_controller.currentIndex - 1),
                   onNext: () => _goTo(_controller.currentIndex + 1),
                   onRetryLoadMore: () =>

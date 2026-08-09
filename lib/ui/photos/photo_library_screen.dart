@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../data/emby_api.dart';
 import '../../models/emby_models.dart';
 import '../../photos/photo_browser_controller.dart';
+import '../../photos/photo_sequence_source.dart';
 import '../../realtime/realtime_refresh_binding.dart';
 import '../widgets/media_widgets.dart';
 import 'photo_viewer_screen.dart';
@@ -32,8 +33,12 @@ class _PhotoLibraryScreenState extends State<PhotoLibraryScreen> {
   void initState() {
     super.initState();
     _controller = PhotoBrowserController(
-      parentId: widget.directory.id,
-      loadPage: widget.api.getPhotoChildren,
+      loadPage: ({required startIndex, required limit}) =>
+          widget.api.getPhotoChildren(
+            parentId: widget.directory.id,
+            startIndex: startIndex,
+            limit: limit,
+          ),
     );
     _scrollController.addListener(_onScroll);
     _realtimeRefresh = RealtimeRefreshBinding(
@@ -75,10 +80,20 @@ class _PhotoLibraryScreenState extends State<PhotoLibraryScreen> {
       MaterialPageRoute(
         builder: (_) => PhotoViewerScreen(
           api: widget.api,
-          parentId: widget.directory.id,
-          initialDirectoryItems: _controller.items,
-          initialItemId: item.id,
-          initialHasMore: _controller.hasMore,
+          source: DirectoryPhotoSource(
+            queryFingerprint: 'directory:${widget.directory.id.hashCode}',
+            initialItems: _controller.items,
+            initialItemId: item.id,
+            initialRawCursor: _controller.nextStartIndex,
+            initialTotalCount: _controller.totalCount,
+            initialHasMore: _controller.hasMore,
+            loadPage: ({required startIndex, required limit}) =>
+                widget.api.getPhotoChildren(
+                  parentId: widget.directory.id,
+                  startIndex: startIndex,
+                  limit: limit,
+                ),
+          ),
         ),
       ),
     );

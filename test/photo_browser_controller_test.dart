@@ -8,18 +8,25 @@ void main() {
   test('paginates, filters unsupported types and deduplicates IDs', () async {
     final calls = <int>[];
     final controller = PhotoBrowserController(
-      parentId: 'root',
       pageSize: 3,
-      loadPage: ({required parentId, startIndex = 0, limit = 60}) async {
+      loadPage: ({required startIndex, required limit}) async {
         calls.add(startIndex);
         if (startIndex == 0) {
-          return [
-            _item('folder-1', 'Folder'),
-            _item('photo-1', 'Photo'),
-            _item('movie-1', 'Movie'),
-          ];
+          return EmbyItemPage(
+            items: [
+              _item('folder-1', 'Folder'),
+              _item('photo-1', 'Photo'),
+              _item('movie-1', 'Movie'),
+            ],
+            rawItemCount: 3,
+            totalRecordCount: 5,
+          );
         }
-        return [_item('photo-1', 'Photo'), _item('album-1', 'PhotoAlbum')];
+        return EmbyItemPage(
+          items: [_item('photo-1', 'Photo'), _item('album-1', 'PhotoAlbum')],
+          rawItemCount: 2,
+          totalRecordCount: 5,
+        );
       },
     );
 
@@ -39,12 +46,11 @@ void main() {
   });
 
   test('refresh discards a stale earlier response', () async {
-    final first = Completer<List<EmbyItem>>();
-    final second = Completer<List<EmbyItem>>();
+    final first = Completer<EmbyItemPage>();
+    final second = Completer<EmbyItemPage>();
     var call = 0;
     final controller = PhotoBrowserController(
-      parentId: 'root',
-      loadPage: ({required parentId, startIndex = 0, limit = 60}) {
+      loadPage: ({required startIndex, required limit}) {
         call++;
         return call == 1 ? first.future : second.future;
       },
@@ -52,9 +58,9 @@ void main() {
 
     final oldLoad = controller.loadMore();
     final refresh = controller.refresh();
-    second.complete([_item('fresh', 'Photo')]);
+    second.complete(EmbyItemPage(items: [_item('fresh', 'Photo')]));
     await refresh;
-    first.complete([_item('stale', 'Photo')]);
+    first.complete(EmbyItemPage(items: [_item('stale', 'Photo')]));
     await oldLoad;
 
     expect(controller.items.map((item) => item.id), ['fresh']);
@@ -65,10 +71,9 @@ void main() {
   test('retains retryable error and recovers', () async {
     var fail = true;
     final controller = PhotoBrowserController(
-      parentId: 'root',
-      loadPage: ({required parentId, startIndex = 0, limit = 60}) async {
+      loadPage: ({required startIndex, required limit}) async {
         if (fail) throw StateError('offline');
-        return [_item('photo-1', 'Photo')];
+        return EmbyItemPage(items: [_item('photo-1', 'Photo')]);
       },
     );
 
@@ -82,6 +87,39 @@ void main() {
     expect(controller.items.single.id, 'photo-1');
     controller.dispose();
   });
+
+  test(
+    'advances by raw count after invalid response rows are removed',
+    () async {
+      final starts = <int>[];
+      final controller = PhotoBrowserController(
+        pageSize: 3,
+        loadPage: ({required startIndex, required limit}) async {
+          starts.add(startIndex);
+          return startIndex == 0
+              ? EmbyItemPage(
+                  items: [_item('photo-1', 'Photo')],
+                  rawItemCount: 3,
+                  totalRecordCount: 4,
+                )
+              : EmbyItemPage(
+                  items: [_item('photo-2', 'Photo')],
+                  rawItemCount: 1,
+                  totalRecordCount: 4,
+                );
+        },
+      );
+
+      await controller.loadMore();
+      await controller.loadMore();
+
+      expect(starts, [0, 3]);
+      expect(controller.nextStartIndex, 4);
+      expect(controller.items.map((item) => item.id), ['photo-1', 'photo-2']);
+      expect(controller.hasMore, isFalse);
+      controller.dispose();
+    },
+  );
 }
 
 EmbyItem _item(String id, String type) => EmbyItem(

@@ -153,7 +153,8 @@ void main() {
       limit: 30,
     );
 
-    expect(items.single.id, 'photo-1');
+    expect(items.items.single.id, 'photo-1');
+    expect(items.rawItemCount, 1);
     expect(captured?.path, '/Users/user-1/Items');
     expect(captured?.queryParameters, containsPair('ParentId', 'album-1'));
     expect(captured?.queryParameters, containsPair('StartIndex', 60));

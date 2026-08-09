@@ -9,6 +9,7 @@ import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
+import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
 import 'item_detail_screen.dart';
@@ -142,10 +143,16 @@ class _HomeScreenState extends State<HomeScreen> {
           MaterialPageRoute(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
-              parentId: section.library.id,
-              initialDirectoryItems: section.items,
-              initialItemId: item.id,
-              initialHasMore: false,
+              source: FilteredLibraryPhotoSource(
+                queryFingerprint: 'home-latest:${section.library.id.hashCode}',
+                initialItems: section.items,
+                initialItemId: item.id,
+                initialRawCursor: section.items.length,
+                initialTotalCount: section.items.length,
+                initialHasMore: false,
+                loadPage: ({required startIndex, required limit}) async =>
+                    const EmbyItemPage(items: [], totalRecordCount: 0),
+              ),
             ),
           ),
         );

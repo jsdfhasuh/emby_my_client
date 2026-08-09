@@ -16,6 +16,7 @@ import '../library/library_item_membership.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
+import '../photos/photo_sequence_source.dart';
 import '../playback/playback_queue.dart';
 import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
@@ -1185,6 +1186,71 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  PhotoSequenceSource _photoSequenceSource(EmbyItem initialItem) {
+    final state = _state;
+    final api = widget.api;
+    final viewId = widget.view.id;
+    final profile = widget.profile;
+    Future<EmbyItemPage> loadPage({
+      required int startIndex,
+      required int limit,
+    }) => switch (state.scope) {
+      LibraryBrowseScope.directory => api.getDirectoryChildren(
+        parentId: viewId,
+        startIndex: startIndex,
+        limit: limit,
+        sortBy: state.sortBy,
+        sortOrder: state.sortOrder,
+      ),
+      LibraryBrowseScope.media ||
+      LibraryBrowseScope.favorites ||
+      LibraryBrowseScope.facet => api.getLibraryMediaItems(
+        parentId: viewId,
+        profile: profile,
+        startIndex: startIndex,
+        limit: limit,
+        mediaType: state.mediaType,
+        playedFilter: state.playedFilter,
+        favorites: state.scope == LibraryBrowseScope.favorites,
+        sortBy: state.sortBy,
+        sortOrder: state.sortOrder,
+        alphabetFilter: state.alphabetFilter,
+        genreId: state.facet?.kind == LibraryFacetKind.genre
+            ? state.facet!.id
+            : null,
+        tagId: state.facet?.kind == LibraryFacetKind.tag
+            ? state.facet!.id
+            : null,
+      ),
+      LibraryBrowseScope.genres || LibraryBrowseScope.tags => Future.value(
+        const EmbyItemPage(items: [], totalRecordCount: 0),
+      ),
+    };
+
+    final fingerprint =
+        'library:${Object.hash(viewId, state, profile.kind).toUnsigned(32)}';
+    final initialItems = List<EmbyItem>.of(_items);
+    return state.scope == LibraryBrowseScope.directory
+        ? DirectoryPhotoSource(
+            queryFingerprint: fingerprint,
+            initialItems: initialItems,
+            initialItemId: initialItem.id,
+            initialRawCursor: _nextStartIndex,
+            initialTotalCount: _totalCount,
+            initialHasMore: _hasMore,
+            loadPage: loadPage,
+          )
+        : FilteredLibraryPhotoSource(
+            queryFingerprint: fingerprint,
+            initialItems: initialItems,
+            initialItemId: initialItem.id,
+            initialRawCursor: _nextStartIndex,
+            initialTotalCount: _totalCount,
+            initialHasMore: _hasMore,
+            loadPage: loadPage,
+          );
+  }
+
   Future<void> _open(EmbyItem item) async {
     switch (resolveLibraryEntryAction(widget.profile, _state.scope, item)) {
       case LibraryEntryAction.openDirectory:
@@ -1242,10 +1308,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           MaterialPageRoute(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
-              parentId: widget.view.id,
-              initialDirectoryItems: _items,
-              initialItemId: item.id,
-              initialHasMore: _hasMore,
+              source: _photoSequenceSource(item),
             ),
           ),
         );
