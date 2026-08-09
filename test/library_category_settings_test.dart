@@ -4,6 +4,8 @@ import 'package:emby_my_client/ui/settings_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'shared_preferences_async_test_backend.dart';
+
 void main() {
   test('library category settings are isolated by server scope', () async {
     final store = MemoryLibraryCategorySettingsStore();
@@ -19,6 +21,51 @@ void main() {
     expect((await store.load(_firstScope)).showFolders, isFalse);
     expect(await store.load(_secondScope), const LibraryCategorySettings());
   });
+
+  test(
+    'missing legacy photos key defaults to visible and remains clearable',
+    () async {
+      final prefix = 'library.${_firstScope.databaseKey}.category';
+      final backend = SharedPreferencesAsyncTestBackend.install(
+        initialValues: {
+          '$prefix.movies': true,
+          '$prefix.series': false,
+          '$prefix.videos': true,
+          '$prefix.favorites': false,
+          '$prefix.folders': true,
+        },
+      );
+      addTearDown(backend.restore);
+      final store = SharedPreferencesLibraryCategorySettingsStore(
+        preferences: backend.preferences,
+      );
+
+      final migrated = await store.load(_firstScope);
+
+      expect(migrated.showMovies, isTrue);
+      expect(migrated.showSeries, isFalse);
+      expect(migrated.showVideos, isTrue);
+      expect(migrated.showFavorites, isFalse);
+      expect(migrated.showFolders, isTrue);
+      expect(migrated.showPhotos, isTrue);
+      expect(await backend.preferences.getBool('$prefix.photos'), isNull);
+
+      await store.save(_firstScope, migrated.copyWith(showPhotos: false));
+      expect((await store.load(_firstScope)).showPhotos, isFalse);
+
+      await store.clear(_firstScope);
+      for (final category in const [
+        'movies',
+        'series',
+        'videos',
+        'photos',
+        'favorites',
+        'folders',
+      ]) {
+        expect(await backend.preferences.getBool('$prefix.$category'), isNull);
+      }
+    },
+  );
 
   testWidgets('settings screen updates a media library category', (
     tester,

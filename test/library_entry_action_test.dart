@@ -75,14 +75,20 @@ void main() {
   });
 
   test('photos never enter details and unsupported types fail closed', () {
-    expect(
-      resolveLibraryEntryAction(
-        LibraryContentProfile.homeVideosAndPhotos,
-        LibraryBrowseScope.media,
-        _item('Photo'),
-      ),
-      LibraryEntryAction.openPhoto,
-    );
+    for (final scope in [
+      LibraryBrowseScope.media,
+      LibraryBrowseScope.favorites,
+      LibraryBrowseScope.facet,
+    ]) {
+      expect(
+        resolveLibraryEntryAction(
+          LibraryContentProfile.homeVideosAndPhotos,
+          scope,
+          _item('Photo'),
+        ),
+        LibraryEntryAction.openPhoto,
+      );
+    }
     expect(
       resolveLibraryEntryAction(
         LibraryContentProfile.movies,

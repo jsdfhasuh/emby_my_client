@@ -55,15 +55,20 @@ void main() {
   });
 
   test('photo search sends the exact Photo item type', () async {
-    RequestOptions? captured;
+    final requests = <RequestOptions>[];
     final api = _api((options, handler) {
-      captured = options;
+      requests.add(options);
       handler.resolve(_searchResponse(options));
     });
 
     await api.search('图片', itemType: SearchItemType.photo);
+    await api.search('全部');
 
-    expect(captured!.queryParameters['IncludeItemTypes'], 'Photo');
+    expect(requests.first.queryParameters['IncludeItemTypes'], 'Photo');
+    expect(
+      requests.last.queryParameters['IncludeItemTypes'],
+      'Movie,Series,Episode,Video,Photo,Folder,CollectionFolder,PhotoAlbum',
+    );
   });
 
   test('recent searches are case-insensitive, newest-first, and bounded', () {

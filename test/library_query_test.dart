@@ -277,6 +277,64 @@ void main() {
     );
   });
 
+  test(
+    'photo queries preserve pure, favorite, genre and tag semantics',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api((options, handler) {
+        requests.add(options);
+        handler.resolve(_response(options));
+      });
+      addTearDown(api.dispose);
+
+      await api.getLibraryMediaItems(
+        parentId: 'photos-1',
+        profile: LibraryContentProfile.photos,
+      );
+      await api.getLibraryMediaItems(
+        parentId: 'mixed-1',
+        profile: LibraryContentProfile.mixed,
+        mediaType: LibraryMediaType.photo,
+        favorites: true,
+      );
+      await api.getLibraryMediaItems(
+        parentId: 'mixed-1',
+        profile: LibraryContentProfile.mixed,
+        mediaType: LibraryMediaType.photo,
+        genreId: 'genre-1',
+      );
+      await api.getLibraryMediaItems(
+        parentId: 'mixed-1',
+        profile: LibraryContentProfile.mixed,
+        mediaType: LibraryMediaType.photo,
+        tagId: 'tag-1',
+      );
+
+      final pure = requests[0].queryParameters;
+      expect(pure['Recursive'], isTrue);
+      expect(pure['IncludeItemTypes'], 'Photo');
+      expect(pure, isNot(contains('Filters')));
+
+      final favorite = requests[1].queryParameters;
+      expect(favorite['IncludeItemTypes'], 'Photo');
+      expect(favorite['Filters'], 'IsFavorite');
+      expect(favorite, isNot(contains('GenreIds')));
+      expect(favorite, isNot(contains('TagIds')));
+
+      final genre = requests[2].queryParameters;
+      expect(genre['IncludeItemTypes'], 'Photo');
+      expect(genre['GenreIds'], 'genre-1');
+      expect(genre, isNot(contains('Filters')));
+      expect(genre, isNot(contains('TagIds')));
+
+      final tag = requests[3].queryParameters;
+      expect(tag['IncludeItemTypes'], 'Photo');
+      expect(tag['TagIds'], 'tag-1');
+      expect(tag, isNot(contains('Filters')));
+      expect(tag, isNot(contains('GenreIds')));
+    },
+  );
+
   test('photo query is explicit and retains raw response count', () async {
     RequestOptions? captured;
     final api = _api((options, handler) {
