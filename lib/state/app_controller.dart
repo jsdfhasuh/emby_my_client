@@ -18,6 +18,7 @@ import '../downloads/download_assets.dart';
 import '../downloads/download_preflight.dart';
 import '../downloads/download_settings.dart';
 import '../downloads/foreground_download_executor.dart';
+import '../library/library_local_media_scan_service.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
@@ -63,6 +64,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     SignInAuthenticator? authenticator,
     SignInApiFactory? apiFactory,
     DownloadServiceFactory? downloadServiceFactory,
+    LibraryScanServiceFactory? libraryScanServiceFactory,
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
@@ -71,6 +73,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
        _authenticate = authenticator ?? _defaultAuthenticate,
        _apiFactory = apiFactory,
        _downloadServiceFactory = downloadServiceFactory,
+       _libraryScanServiceFactory = libraryScanServiceFactory,
        _clients =
            clients ??
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
@@ -83,6 +86,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final SignInAuthenticator _authenticate;
   final SignInApiFactory? _apiFactory;
   final DownloadServiceFactory? _downloadServiceFactory;
+  final LibraryScanServiceFactory? _libraryScanServiceFactory;
   final LocalDatabase _database;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -93,6 +97,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   ServerScope? _scope;
   ServerCapabilities? _serverCapabilities;
   DownloadService? _downloads;
+  LibraryLocalMediaScanService? _libraryScanService;
   OfflineProgressSync? _offlineProgressSync;
   LibraryCategorySettings _libraryCategorySettings =
       const LibraryCategorySettings();
@@ -111,6 +116,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   ServerScope? get scope => _scope;
   ServerCapabilities? get serverCapabilities => _serverCapabilities;
   DownloadService? get downloads => _downloads;
+  LibraryLocalMediaScanService? get libraryScanService => _libraryScanService;
   LibraryCategorySettings get libraryCategorySettings =>
       _libraryCategorySettings;
   bool get isInitializing => _isInitializing;
@@ -306,6 +312,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _scope = scope;
     _serverCapabilities = capabilities;
     _libraryCategorySettings = settings;
+    _activateLibraryScanService(api, scope);
     if (!_disposed) notifyListeners();
     unawaited(_activateDownloadsSafely(api, scope));
     unawaited(_startRealtimeSafely(api));
@@ -459,6 +466,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final currentApi = currentScope == null
         ? null
         : _clients.clientFor(currentScope);
+    await _shutdownLibraryScanService();
     await _shutdownDownloads(stopExecutor: true);
     if (current != null) {
       try {
@@ -497,6 +505,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
     final currentApi = _clients.clientFor(currentScope);
     await _shutdownDownloads(stopExecutor: true, requireExecutorStopped: true);
+    await _shutdownLibraryScanService();
     try {
       await _accountDataCleaner.delete(
         scope: currentScope,
@@ -510,6 +519,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         stackTrace: stackTrace,
       );
       if (!_disposed && _scope == currentScope && currentApi != null) {
+        _activateLibraryScanService(currentApi, currentScope);
         try {
           await _activateDownloads(currentApi, currentScope);
         } catch (restoreError, restoreStackTrace) {
@@ -543,6 +553,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     if (_scope != scope || !identical(_clients.clientFor(scope), source)) {
       return;
     }
+    await _shutdownLibraryScanService();
     _session = null;
     _scope = null;
     _serverCapabilities = null;
@@ -561,6 +572,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _serverCapabilities = await _restoreCapabilities(session);
     _libraryCategorySettings = await _restoreLibraryCategorySettings(scope);
     _clients.register(scope, api);
+    _activateLibraryScanService(api, scope);
     await _activateDownloads(api, scope, safeLogging: true);
     unawaited(_startRealtimeSafely(api));
   }
@@ -771,6 +783,30 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  void _activateLibraryScanService(EmbyApi api, ServerScope scope) {
+    if (_disposed || _scope != scope || _libraryScanService != null) return;
+    try {
+      _libraryScanService =
+          _libraryScanServiceFactory?.call(api, scope) ??
+          LibraryLocalMediaScanService(api: api, scope: scope);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library-scan',
+        'Failed to initialize local media scan service',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _shutdownLibraryScanService() async {
+    final service = _libraryScanService;
+    _libraryScanService = null;
+    if (service == null) return;
+    await service.cancelAll();
+    service.dispose();
+  }
+
   Future<void> _shutdownDownloads({
     bool stopExecutor = false,
     bool requireExecutorStopped = false,
@@ -809,6 +845,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final realtime = scope == null ? null : _clients.clientFor(scope)?.realtime;
     switch (state) {
       case AppLifecycleState.resumed:
+        _libraryScanService?.resumeAll();
         if (realtime != null) unawaited(realtime.setForeground(true));
         if (_downloads != null) unawaited(_downloads!.refresh());
         unawaited(_syncOfflineProgress());
@@ -816,6 +853,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
+        _libraryScanService?.pauseAll();
         if (realtime != null) unawaited(realtime.setForeground(false));
     }
   }
@@ -879,6 +917,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _disposeResources() async {
+    await _shutdownLibraryScanService();
     await _shutdownDownloads();
     await _clients.dispose();
     await _database.close();
