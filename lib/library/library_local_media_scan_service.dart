@@ -40,24 +40,50 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
     this.maxCandidateItems = 20000,
     LibraryScanDelay? delay,
     LibraryLocalMediaScanCache? cache,
-  }) : _delay = delay ?? Future<void>.delayed,
-       _cache = cache ?? LibraryLocalMediaScanCache();
+  }) : _delay = delay,
+       _cache = cache ?? LibraryLocalMediaScanCache() {
+    _cache.bindEvictionListener(_releaseKeyResources);
+  }
 
   final EmbyApi api;
   final ServerScope scope;
   final int pageSize;
   final int maxCandidateItems;
-  final LibraryScanDelay _delay;
+  final LibraryScanDelay? _delay;
   final LibraryLocalMediaScanCache _cache;
   final Map<LibraryScanKey, LibraryScanPageLoader> _loaders = {};
   final Queue<LibraryScanKey> _pending = Queue();
   final Set<LibraryScanKey> _pendingSet = {};
+  final Map<LibraryScanKey, _LibraryScanRetryWait> _retryWaits = {};
   final Completer<void> _cancelled = Completer<void>();
 
   Future<void>? _activeOperation;
   bool _foreground = true;
   bool _acceptingScans = true;
   bool _disposed = false;
+
+  bool get isAvailable => _acceptingScans && !_disposed;
+
+  @visibleForTesting
+  int get debugLoaderCount => _loaders.length;
+
+  @visibleForTesting
+  Set<LibraryScanKey> get debugLoaderKeys => Set.unmodifiable(_loaders.keys);
+
+  @visibleForTesting
+  int get debugCompletedCacheCount => _cache.completedSessionCount;
+
+  @visibleForTesting
+  Set<LibraryScanKey> get debugCacheKeys => _cache.keys;
+
+  @visibleForTesting
+  int get debugPendingCount => _pending.length;
+
+  @visibleForTesting
+  int get debugRetryWaitCount => _retryWaits.length;
+
+  @visibleForTesting
+  bool get debugHasActiveOperation => _activeOperation != null;
 
   LibraryLocalScanSnapshot? snapshotFor(LibraryScanKey key) =>
       _cache[key]?.snapshot;
@@ -73,6 +99,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       throw StateError('Library scan key belongs to a different server scope');
     }
     final entry = _cache.putIfAbsent(request.key);
+    if (entry.status == LibraryScanStatus.complete) return entry.snapshot;
     _loaders[request.key] = request.loadPage;
     if (entry.status == LibraryScanStatus.queued) {
       _enqueue(request.key);
@@ -120,6 +147,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
   void pauseAll() {
     if (!_acceptingScans || !_foreground) return;
     _foreground = false;
+    _cancelRetryWaits();
   }
 
   void resumeAll() {
@@ -141,9 +169,6 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
         .toList(growable: false);
     for (final key in keys) {
       _cache.remove(key);
-      _loaders.remove(key);
-      _pendingSet.remove(key);
-      _pending.remove(key);
     }
     if (keys.isNotEmpty) _notify();
   }
@@ -151,10 +176,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
   void _removeScan(LibraryScanKey key) {
     final entry = _cache[key];
     if (entry != null) entry.generation++;
-    _cache.remove(key);
-    _loaders.remove(key);
-    _pendingSet.remove(key);
-    _pending.remove(key);
+    if (!_cache.remove(key)) _releaseKeyResources(key);
   }
 
   Future<void> cancelAll() async {
@@ -166,6 +188,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
     if (!_cancelled.isCompleted) _cancelled.complete();
     _pending.clear();
     _pendingSet.clear();
+    _cancelRetryWaits();
     for (final entry in _cache.entries) {
       entry.generation++;
       entry
@@ -174,6 +197,11 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
     }
     _notify();
     await _activeOperation;
+    _cache.clear();
+    _loaders.clear();
+    _pending.clear();
+    _pendingSet.clear();
+    _cancelRetryWaits();
   }
 
   void _enqueue(LibraryScanKey key) {
@@ -251,7 +279,7 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
         if (!_isCurrent(entry, generation)) return;
         if (entry.status == LibraryScanStatus.complete) {
           _cache.touchCompleted(entry.key);
-          _loaders.remove(entry.key);
+          _releaseKeyResources(entry.key);
           return;
         }
         if (entry.status != LibraryScanStatus.scanning) return;
@@ -296,10 +324,10 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
           _notify();
           return null;
         }
-        final continueAfterDelay = await Future.any<bool>([
-          _delay(retryDelays[attempt]).then((_) => true),
-          _cancelled.future.then((_) => false),
-        ]);
+        final continueAfterDelay = await _waitBeforeRetry(
+          entry.key,
+          retryDelays[attempt],
+        );
         if (!continueAfterDelay ||
             !_isCurrent(entry, generation) ||
             !_foreground) {
@@ -355,6 +383,45 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
       ..safeError = error;
   }
 
+  Future<bool> _waitBeforeRetry(LibraryScanKey key, Duration duration) async {
+    _cancelRetryWait(key);
+    final wait = _LibraryScanRetryWait();
+    _retryWaits[key] = wait;
+    final delay = _delay;
+    if (delay == null) {
+      wait.timer = Timer(duration, () => wait.complete(true));
+    } else {
+      unawaited(delay(duration).then((_) => wait.complete(true)));
+    }
+    try {
+      return await Future.any<bool>([
+        wait.future,
+        _cancelled.future.then((_) => false),
+      ]);
+    } finally {
+      if (identical(_retryWaits[key], wait)) _retryWaits.remove(key);
+      wait.cancel();
+    }
+  }
+
+  void _releaseKeyResources(LibraryScanKey key) {
+    _loaders.remove(key);
+    _pendingSet.remove(key);
+    _pending.remove(key);
+    _cancelRetryWait(key);
+  }
+
+  void _cancelRetryWait(LibraryScanKey key) =>
+      _retryWaits.remove(key)?.cancel();
+
+  void _cancelRetryWaits() {
+    final waits = _retryWaits.values.toList(growable: false);
+    _retryWaits.clear();
+    for (final wait in waits) {
+      wait.cancel();
+    }
+  }
+
   bool _isCurrent(LibraryLocalMediaScanCacheEntry entry, int generation) =>
       _acceptingScans &&
       !_disposed &&
@@ -383,9 +450,30 @@ class LibraryLocalMediaScanService extends ChangeNotifier {
     if (_disposed) return;
     assert(!_acceptingScans && _activeOperation == null);
     _disposed = true;
-    _loaders.clear();
     _cache.clear();
+    _cache.unbindEvictionListener();
+    _loaders.clear();
+    _pending.clear();
+    _pendingSet.clear();
+    _cancelRetryWaits();
     super.dispose();
+  }
+}
+
+class _LibraryScanRetryWait {
+  final Completer<bool> _completer = Completer<bool>();
+  Timer? timer;
+
+  Future<bool> get future => _completer.future;
+
+  void complete(bool value) {
+    if (!_completer.isCompleted) _completer.complete(value);
+  }
+
+  void cancel() {
+    timer?.cancel();
+    timer = null;
+    complete(false);
   }
 }
 

@@ -17,6 +17,8 @@ enum LibraryScanErrorKind {
   capacityReached,
 }
 
+typedef LibraryScanCacheEvictionListener = void Function(LibraryScanKey key);
+
 @immutable
 class LibraryScanKey {
   const LibraryScanKey({
@@ -206,6 +208,23 @@ class LibraryLocalMediaScanCache {
 
   Iterable<LibraryLocalMediaScanCacheEntry> get entries => _entries.values;
 
+  int get completedSessionCount => _entries.values
+      .where((entry) => entry.status == LibraryScanStatus.complete)
+      .length;
+
+  Set<LibraryScanKey> get keys => Set.unmodifiable(_entries.keys);
+
+  LibraryScanCacheEvictionListener? _evictionListener;
+
+  void bindEvictionListener(LibraryScanCacheEvictionListener listener) {
+    if (_evictionListener != null) {
+      throw StateError('Library scan cache already has an owner');
+    }
+    _evictionListener = listener;
+  }
+
+  void unbindEvictionListener() => _evictionListener = null;
+
   LibraryLocalMediaScanCacheEntry? operator [](LibraryScanKey key) =>
       _entries[key];
 
@@ -236,13 +255,25 @@ class LibraryLocalMediaScanCache {
           )
           .firstOrNull;
       if (oldestCompleted == null) break;
-      _entries.remove(oldestCompleted.key);
+      _evict(oldestCompleted.key);
     }
   }
 
-  void remove(LibraryScanKey key) => _entries.remove(key);
+  bool remove(LibraryScanKey key) => _evict(key) != null;
 
-  void clear() => _entries.clear();
+  void clear() {
+    final keys = _entries.keys.toList(growable: false);
+    _entries.clear();
+    for (final key in keys) {
+      _evictionListener?.call(key);
+    }
+  }
+
+  LibraryLocalMediaScanCacheEntry? _evict(LibraryScanKey key) {
+    final removed = _entries.remove(key);
+    if (removed != null) _evictionListener?.call(key);
+    return removed;
+  }
 }
 
 bool isLibraryLocalMediaCandidate(EmbyItem item) =>

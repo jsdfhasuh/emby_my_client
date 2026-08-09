@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   test('classification is conservative and excludes non-candidates', () {
     expect(isLibraryLocalMediaCandidate(_item('photo', 'Photo')), isFalse);
+    expect(isLibraryLocalMediaCandidate(_item('series', 'Series')), isFalse);
     expect(
       classifyLibraryLocalMedia(_item('strm', 'Movie', path: 'item.strm')),
       LibraryLocalMediaKind.strm,
@@ -283,6 +284,10 @@ void main() {
     );
     expect(snapshot.status, LibraryScanStatus.paused);
     expect(calls, 1);
+    expect(harness.service.debugLoaderKeys, {key});
+    harness.service.clearScan(key);
+    expect(harness.service.debugLoaderCount, 0);
+    expect(harness.service.debugCacheKeys, isEmpty);
     await harness.dispose();
   });
 
@@ -465,6 +470,144 @@ void main() {
     for (final key in keys.skip(1)) {
       expect(harness.service.snapshotFor(key)?.complete, isTrue);
     }
+    expect(harness.service.debugCompletedCacheCount, 3);
+    expect(harness.service.debugLoaderCount, 0);
+    await harness.dispose();
+  });
+
+  test('completed cache hits do not retain replacement loaders', () async {
+    final harness = _harness();
+    final key = _key(harness.scope, 'cache-hit');
+    var calls = 0;
+    LibraryLocalMediaScanRequest request() => LibraryLocalMediaScanRequest(
+      key: key,
+      loadPage: ({required startIndex, required limit}) async {
+        calls++;
+        return const EmbyItemPage(items: [], totalRecordCount: 0);
+      },
+    );
+
+    harness.service.ensureScan(request());
+    await _waitFor(harness.service, key, (value) => value.complete);
+    for (var index = 0; index < 25; index++) {
+      expect(harness.service.ensureScan(request()).complete, isTrue);
+    }
+
+    expect(calls, 1);
+    expect(harness.service.debugCompletedCacheCount, 1);
+    expect(harness.service.debugLoaderCount, 0);
+    await harness.dispose();
+  });
+
+  test(
+    'one hundred completed keys keep all service resources bounded',
+    () async {
+      final harness = _harness();
+      final keys = <LibraryScanKey>[];
+      var calls = 0;
+      for (var index = 0; index < 100; index++) {
+        final key = _key(harness.scope, 'stress-$index');
+        keys.add(key);
+        harness.service.ensureScan(
+          LibraryLocalMediaScanRequest(
+            key: key,
+            loadPage: ({required startIndex, required limit}) async {
+              calls++;
+              return const EmbyItemPage(items: [], totalRecordCount: 0);
+            },
+          ),
+        );
+        await _waitFor(harness.service, key, (value) => value.complete);
+      }
+      await _waitUntil(() => !harness.service.debugHasActiveOperation);
+
+      expect(calls, 100);
+      expect(harness.service.debugCompletedCacheCount, 3);
+      expect(harness.service.debugCacheKeys, keys.skip(97).toSet());
+      expect(harness.service.debugLoaderCount, 0);
+      expect(harness.service.debugPendingCount, 0);
+      expect(harness.service.debugRetryWaitCount, 0);
+      for (final evicted in keys.take(97)) {
+        expect(harness.service.snapshotFor(evicted), isNull);
+        expect(harness.service.debugLoaderKeys, isNot(contains(evicted)));
+      }
+
+      await harness.dispose();
+      expect(harness.service.debugCacheKeys, isEmpty);
+      expect(harness.service.debugLoaderCount, 0);
+      expect(harness.service.debugPendingCount, 0);
+      expect(harness.service.debugRetryWaitCount, 0);
+    },
+  );
+
+  test('completed LRU never evicts a non-complete session', () {
+    final evicted = <LibraryScanKey>[];
+    final cache = LibraryLocalMediaScanCache(maxCompletedSessions: 3)
+      ..bindEvictionListener(evicted.add);
+    final scope = ServerScope.fromSession(_session);
+    final activeKey = _key(scope, 'active');
+    cache.putIfAbsent(activeKey).status = LibraryScanStatus.scanning;
+    final completedKeys = <LibraryScanKey>[];
+    for (var index = 0; index < 4; index++) {
+      final key = _key(scope, 'complete-$index');
+      completedKeys.add(key);
+      cache.putIfAbsent(key).status = LibraryScanStatus.complete;
+      cache.touchCompleted(key);
+    }
+
+    expect(cache[activeKey]?.status, LibraryScanStatus.scanning);
+    expect(cache.completedSessionCount, 3);
+    expect(
+      cache.keys,
+      containsAll(<LibraryScanKey>[activeKey, ...completedKeys.skip(1)]),
+    );
+    expect(evicted, [completedKeys.first]);
+    cache.clear();
+    cache.unbindEvictionListener();
+  });
+
+  test('clearScan cancels its retry wait and releases its loader', () async {
+    final harness = _harness();
+    final key = _key(harness.scope, 'retry-clear');
+    var calls = 0;
+    harness.service.ensureScan(
+      LibraryLocalMediaScanRequest(
+        key: key,
+        loadPage: ({required startIndex, required limit}) async {
+          calls++;
+          throw StateError('retry fixture');
+        },
+      ),
+    );
+    await _waitUntil(() => harness.service.debugRetryWaitCount == 1);
+
+    expect(harness.service.debugLoaderKeys, {key});
+    harness.service.clearScan(key);
+    expect(harness.service.snapshotFor(key), isNull);
+    expect(harness.service.debugLoaderCount, 0);
+    expect(harness.service.debugRetryWaitCount, 0);
+    await _waitUntil(() => !harness.service.debugHasActiveOperation);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(calls, 1);
+    await harness.dispose();
+  });
+
+  test('clearCompleted removes every completed cache record', () async {
+    final harness = _harness();
+    final key = _key(harness.scope, 'clear-completed');
+    harness.service.ensureScan(
+      LibraryLocalMediaScanRequest(
+        key: key,
+        loadPage: ({required startIndex, required limit}) async =>
+            const EmbyItemPage(items: [], totalRecordCount: 0),
+      ),
+    );
+    await _waitFor(harness.service, key, (value) => value.complete);
+
+    harness.service.clearCompleted();
+    expect(harness.service.debugCacheKeys, isEmpty);
+    expect(harness.service.debugLoaderCount, 0);
+    expect(harness.service.debugRetryWaitCount, 0);
     await harness.dispose();
   });
 
@@ -537,6 +680,10 @@ void main() {
     response.complete(const EmbyItemPage(items: [], totalRecordCount: 0));
     await cancellation;
     expect(cancelled, isTrue);
+    expect(harness.service.debugCacheKeys, isEmpty);
+    expect(harness.service.debugLoaderCount, 0);
+    expect(harness.service.debugPendingCount, 0);
+    expect(harness.service.debugRetryWaitCount, 0);
     harness.service.dispose();
     await harness.api.dispose();
   });

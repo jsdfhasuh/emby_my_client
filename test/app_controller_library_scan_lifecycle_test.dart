@@ -47,6 +47,10 @@ void main() {
     expect(signedOut, isTrue);
     expect(fixture.disposedApis, 1);
     expect(fixture.controller.libraryScanService, isNull);
+    expect(service.debugCacheKeys, isEmpty);
+    expect(service.debugLoaderCount, 0);
+    expect(service.debugPendingCount, 0);
+    expect(service.debugRetryWaitCount, 0);
   });
 
   test('controller dispose waits for scans before disposing clients', () async {
