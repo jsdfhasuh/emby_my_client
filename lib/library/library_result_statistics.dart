@@ -42,6 +42,7 @@ class LibraryResultStatistics {
       isLocalScanComplete && !dirty && unknownClassificationCount == 0;
 
   int? get effectiveTotal {
+    if (dirty) return null;
     if (isLocalScan && !hasExactLocalTotal) return null;
     if (hasExactLocalTotal) return loadedCount;
     final total = totalCount;
@@ -50,39 +51,38 @@ class LibraryResultStatistics {
 
   LibraryPositionPresentation present(LibraryPositionSnapshot snapshot) {
     if (isLocalScan && !hasExactLocalTotal) {
-      final sourceTotal = sourceTotalCount ?? totalCount;
       return LibraryPositionPresentation(
-        rangeLabel: '已匹配 $loadedCount 项',
-        totalLabel: sourceTotal == null
-            ? '已扫描 $scannedCount 项'
-            : '已扫描 $scannedCount/$sourceTotal 项',
-        statusLabel: _localStatusLabel,
+        rangeLabel: '${snapshot.firstVisible}\u2013${snapshot.lastVisible}',
+        totalLabel: '${_localContextLabel(state)} 统计中',
+        statusLabel: _localProgressLabel,
+      );
+    }
+
+    if (dirty) {
+      return LibraryPositionPresentation(
+        rangeLabel: _rangeLabel(state, snapshot),
+        statusLabel: '结果已变化，请刷新统计',
       );
     }
 
     final total = effectiveTotal;
-    final first = snapshot.firstVisible;
     final last = snapshot.lastVisible;
-    final prefix = _rangePrefix(state);
     final remaining = total == null ? null : math.max(0, total - last);
     final percentage = total == null || total <= 0
         ? null
-        : ((first + last) / 2 / total * 100).round().clamp(0, 100);
-    final showFilteredRemaining = _showsFilteredRemaining(state);
+        : (last / total * 100).round().clamp(0, 100);
 
     return LibraryPositionPresentation(
-      rangeLabel: prefix.isEmpty
-          ? '$first\u2013$last'
-          : '$prefix $first\u2013$last',
+      rangeLabel: _rangeLabel(state, snapshot),
       totalLabel: total == null ? null : _totalLabel(state, total),
       remainingLabel: remaining == null
           ? null
           : state.playedFilter == LibraryPlayedFilter.unplayed &&
                 state.scope != LibraryBrowseScope.directory
           ? '还剩 ${_formatCount(remaining)} 项'
-          : showFilteredRemaining
+          : _showsFilteredRemaining(state)
           ? '筛选结果还剩 ${_formatCount(remaining)} 项'
-          : null,
+          : '还剩 ${_formatCount(remaining)} 项',
       percentageLabel: _showsPercentage(state) && percentage != null
           ? '$percentage%'
           : null,
@@ -94,32 +94,44 @@ class LibraryResultStatistics {
       if (!hasExactLocalTotal) {
         final sourceTotal = sourceTotalCount ?? totalCount;
         final source = sourceTotal == null
-            ? '已扫描 $scannedCount 项'
-            : '已扫描 $scannedCount/$sourceTotal 项';
-        return '已匹配 $loadedCount 项，$source，$_localStatusLabel';
+            ? '已扫描 ${_formatCount(scannedCount)} 项'
+            : '已扫描 ${_formatCount(scannedCount)} / '
+                  '${_formatCount(sourceTotal)} 项';
+        return '已匹配 ${_formatCount(loadedCount)} 项，$source，'
+            '$_localSummaryStatusLabel';
       }
-      return '已匹配 $loadedCount 项';
+      return '${_localContextLabel(state)} 共 ${_formatCount(loadedCount)} 项';
+    }
+    if (dirty) {
+      return '已加载 ${_formatCount(loadedCount)} 项，结果已变化，请刷新统计';
     }
     final total = effectiveTotal;
     if (total == null) {
-      return loadedCount == 0 ? '正在统计' : '已加载 $loadedCount 项';
+      return loadedCount == 0 ? '正在统计' : '已加载 ${_formatCount(loadedCount)} 项';
+    }
+    final formattedTotal = _formatCount(total);
+    if (state.mediaType == LibraryMediaType.photo &&
+        state.scope != LibraryBrowseScope.favorites &&
+        state.scope.supportsMediaFilters) {
+      return '图片共 $formattedTotal 项';
     }
     return switch (state.scope) {
-      LibraryBrowseScope.directory => '目录共 $total 项',
-      LibraryBrowseScope.genres => '分类共 $total 项',
-      LibraryBrowseScope.tags => '标签共 $total 项',
-      LibraryBrowseScope.favorites => '收藏共 $total 项',
+      LibraryBrowseScope.directory => '目录共 $formattedTotal 项',
+      LibraryBrowseScope.genres => '分类共 $formattedTotal 项',
+      LibraryBrowseScope.tags => '标签共 $formattedTotal 项',
+      LibraryBrowseScope.favorites => '收藏共 $formattedTotal 项',
       LibraryBrowseScope.media || LibraryBrowseScope.facet
           when state.playedFilter == LibraryPlayedFilter.unplayed =>
-        '未播放共 $total 项',
+        '未播放共 $formattedTotal 项',
       LibraryBrowseScope.media || LibraryBrowseScope.facet
           when state.playedFilter == LibraryPlayedFilter.played =>
-        '已播放共 $total 项',
-      LibraryBrowseScope.media || LibraryBrowseScope.facet => '共 $total 项',
+        '已播放共 $formattedTotal 项',
+      LibraryBrowseScope.media ||
+      LibraryBrowseScope.facet => '共 $formattedTotal 项',
     };
   }
 
-  String get _localStatusLabel {
+  String get _localSummaryStatusLabel {
     if (scanStatus == LibraryLocalScanStatus.interrupted) {
       return '统计中断，可重试';
     }
@@ -127,7 +139,22 @@ class LibraryResultStatistics {
     if (unknownClassificationCount > 0) {
       return '有 ${_formatCount(unknownClassificationCount)} 项无法判断';
     }
-    return isLocalScanComplete ? '统计完成' : '继续统计中';
+    return '继续统计中';
+  }
+
+  String get _localProgressLabel {
+    if (scanStatus == LibraryLocalScanStatus.interrupted) {
+      return '统计中断，可重试';
+    }
+    if (dirty) return '结果已变化，请刷新统计';
+    if (unknownClassificationCount > 0) {
+      return '有 ${_formatCount(unknownClassificationCount)} 项无法判断';
+    }
+    final sourceTotal = sourceTotalCount ?? totalCount;
+    return sourceTotal == null
+        ? '已扫描 ${_formatCount(scannedCount)} 项'
+        : '已扫描 ${_formatCount(scannedCount)} / '
+              '${_formatCount(sourceTotal)} 项';
   }
 
   @override
@@ -154,6 +181,12 @@ class LibraryResultStatistics {
     dirty,
     unknownClassificationCount,
   );
+}
+
+String _rangeLabel(LibraryBrowseState state, LibraryPositionSnapshot snapshot) {
+  final prefix = _rangePrefix(state);
+  final range = '${snapshot.firstVisible}\u2013${snapshot.lastVisible}';
+  return prefix.isEmpty ? range : '$prefix $range';
 }
 
 @immutable
@@ -187,30 +220,36 @@ String _rangePrefix(LibraryBrowseState state) {
   if (state.playedFilter == LibraryPlayedFilter.played) return '已播放';
   if (state.localFilter == LibraryLocalMediaFilter.strm) return 'STRM';
   if (state.localFilter == LibraryLocalMediaFilter.regular) return '普通媒体';
-  return switch (state.mediaType) {
-    LibraryMediaType.all => '',
-    LibraryMediaType.movie => '电影',
-    LibraryMediaType.series => '剧集',
-    LibraryMediaType.video => '视频',
-    LibraryMediaType.photo => '图片',
+  return '';
+}
+
+String _totalLabel(LibraryBrowseState state, int total) {
+  if (state.localFilter != LibraryLocalMediaFilter.all) {
+    return '${_localContextLabel(state)} 共 ${_formatCount(total)} 项';
+  }
+  if (state.mediaType == LibraryMediaType.photo &&
+      state.scope != LibraryBrowseScope.favorites &&
+      state.scope.supportsMediaFilters) {
+    return '图片共 ${_formatCount(total)} 项';
+  }
+  return switch (state.scope) {
+    LibraryBrowseScope.directory => '目录共 ${_formatCount(total)} 项',
+    LibraryBrowseScope.genres => '分类共 ${_formatCount(total)} 项',
+    LibraryBrowseScope.tags => '标签共 ${_formatCount(total)} 项',
+    LibraryBrowseScope.media ||
+    LibraryBrowseScope.favorites ||
+    LibraryBrowseScope.facet => '共 ${_formatCount(total)} 项',
   };
 }
 
-String _totalLabel(LibraryBrowseState state, int total) =>
-    switch (state.scope) {
-      LibraryBrowseScope.directory => '目录共 ${_formatCount(total)} 项',
-      LibraryBrowseScope.genres => '分类共 ${_formatCount(total)} 项',
-      LibraryBrowseScope.tags => '标签共 ${_formatCount(total)} 项',
-      LibraryBrowseScope.media ||
-      LibraryBrowseScope.favorites ||
-      LibraryBrowseScope.facet => '共 ${_formatCount(total)} 项',
-    };
+String _localContextLabel(LibraryBrowseState state) =>
+    state.localFilter == LibraryLocalMediaFilter.strm ? 'STRM' : '普通媒体';
 
 bool _showsFilteredRemaining(LibraryBrowseState state) =>
     state.scope == LibraryBrowseScope.favorites ||
     state.playedFilter == LibraryPlayedFilter.played ||
-    state.mediaType != LibraryMediaType.all ||
-    state.localFilter != LibraryLocalMediaFilter.all;
+    (state.mediaType != LibraryMediaType.all &&
+        state.mediaType != LibraryMediaType.photo);
 
 bool _showsPercentage(LibraryBrowseState state) => switch (state.scope) {
   LibraryBrowseScope.directory ||

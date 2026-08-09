@@ -58,7 +58,7 @@ void main() {
     await api.dispose();
   });
 
-  testWidgets('an empty raw page stops pagination even with a larger total', (
+  testWidgets('a known-total empty page fails closed without retry looping', (
     tester,
   ) async {
     final api = _EmptyPageApi();
@@ -66,7 +66,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(api.calls, 1);
-    expect(find.text('这个媒体库是空的'), findsOneWidget);
+    expect(find.byKey(const ValueKey('library-load-error')), findsOneWidget);
+    expect(find.text('加载失败，请重试'), findsOneWidget);
+    expect(find.text('这个媒体库是空的'), findsNothing);
     await tester.drag(find.byType(CustomScrollView), const Offset(0, -300));
     await tester.pumpAndSettle();
     expect(api.calls, 1);

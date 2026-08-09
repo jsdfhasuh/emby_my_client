@@ -20,8 +20,8 @@ void main() {
 
     expect(result.rangeLabel, '25–48');
     expect(result.totalLabel, '共 100 项');
-    expect(result.percentageLabel, '37%');
-    expect(result.remainingLabel, isNull);
+    expect(result.percentageLabel, '48%');
+    expect(result.remainingLabel, '还剩 52 项');
   });
 
   test('unplayed, played and favorites use distinct remaining semantics', () {
@@ -34,7 +34,7 @@ void main() {
     ).present(snapshot);
     expect(unplayed.rangeLabel, '未播放 25–48');
     expect(unplayed.remainingLabel, '还剩 52 项');
-    expect(unplayed.percentageLabel, '37%');
+    expect(unplayed.percentageLabel, '48%');
 
     final played = LibraryResultStatistics(
       state: const LibraryBrowseState(playedFilter: LibraryPlayedFilter.played),
@@ -55,9 +55,10 @@ void main() {
     ).present(snapshot);
     expect(favoriteMovies.rangeLabel, '收藏电影 25–48');
     expect(favoriteMovies.remainingLabel, '筛选结果还剩 52 项');
+    expect(favoriteMovies.percentageLabel, '48%');
   });
 
-  test('directory, genre and tag totals never use media remaining labels', () {
+  test('directory, genre and tag totals use their own result space', () {
     for (final entry in const [
       (LibraryBrowseScope.directory, '目录共 100 项'),
       (LibraryBrowseScope.genres, '分类共 100 项'),
@@ -70,9 +71,22 @@ void main() {
       ).present(snapshot);
       expect(result.rangeLabel, '25–48');
       expect(result.totalLabel, entry.$2);
-      expect(result.remainingLabel, isNull);
-      expect(result.percentageLabel, '37%');
+      expect(result.remainingLabel, '还剩 52 项');
+      expect(result.percentageLabel, '48%');
     }
+  });
+
+  test('photo results use photo totals and the last visible position', () {
+    final result = const LibraryResultStatistics(
+      state: LibraryBrowseState(mediaType: LibraryMediaType.photo),
+      loadedCount: 60,
+      totalCount: 100,
+    ).present(snapshot);
+
+    expect(result.rangeLabel, '25–48');
+    expect(result.totalLabel, '图片共 100 项');
+    expect(result.remainingLabel, '还剩 52 项');
+    expect(result.percentageLabel, '48%');
   });
 
   test('effective total never falls below the loaded result count', () {
@@ -91,12 +105,13 @@ void main() {
     expect(statistics.effectiveTotal, 60);
     final result = statistics.present(loadedSnapshot);
     expect(result.totalLabel, '共 60 项');
-    expect(result.percentageLabel, '91%');
+    expect(result.remainingLabel, '还剩 0 项');
+    expect(result.percentageLabel, '100%');
   });
 
   test('local scans report facts only until a complete result exists', () {
     for (final entry in const [
-      (LibraryLocalScanStatus.scanning, '继续统计中'),
+      (LibraryLocalScanStatus.scanning, '已扫描 60 / 200 项'),
       (LibraryLocalScanStatus.interrupted, '统计中断，可重试'),
     ]) {
       final result = LibraryResultStatistics(
@@ -108,8 +123,8 @@ void main() {
         scannedCount: 60,
         scanStatus: entry.$1,
       ).present(snapshot);
-      expect(result.rangeLabel, '已匹配 12 项');
-      expect(result.totalLabel, '已扫描 60/200 项');
+      expect(result.rangeLabel, '25–48');
+      expect(result.totalLabel, 'STRM 统计中');
       expect(result.statusLabel, entry.$2);
       expect(result.remainingLabel, isNull);
       expect(result.percentageLabel, isNull);
@@ -133,9 +148,9 @@ void main() {
           ),
         );
     expect(complete.rangeLabel, 'STRM 1–6');
-    expect(complete.totalLabel, '共 12 项');
-    expect(complete.remainingLabel, '筛选结果还剩 6 项');
-    expect(complete.percentageLabel, '29%');
+    expect(complete.totalLabel, 'STRM 共 12 项');
+    expect(complete.remainingLabel, '还剩 6 项');
+    expect(complete.percentageLabel, '50%');
   });
 
   test('unknown and dirty scans never claim an exact local total', () {
@@ -159,7 +174,7 @@ void main() {
     ]) {
       final result = statistics.present(snapshot);
       expect(statistics.effectiveTotal, isNull);
-      expect(result.rangeLabel, '已匹配 8 项');
+      expect(result.rangeLabel, '25–48');
       expect(result.remainingLabel, isNull);
       expect(result.percentageLabel, isNull);
     }
@@ -184,5 +199,23 @@ void main() {
       ).present(snapshot).statusLabel,
       '结果已变化，请刷新统计',
     );
+  });
+
+  test('ordinary dirty totals stop presenting exact statistics', () {
+    const statistics = LibraryResultStatistics(
+      state: LibraryBrowseState(),
+      loadedCount: 60,
+      totalCount: 120,
+      dirty: true,
+    );
+
+    expect(statistics.effectiveTotal, isNull);
+    final result = statistics.present(snapshot);
+    expect(result.rangeLabel, '25–48');
+    expect(result.totalLabel, isNull);
+    expect(result.remainingLabel, isNull);
+    expect(result.percentageLabel, isNull);
+    expect(result.statusLabel, '结果已变化，请刷新统计');
+    expect(statistics.summaryLabel, '已加载 60 项，结果已变化，请刷新统计');
   });
 }

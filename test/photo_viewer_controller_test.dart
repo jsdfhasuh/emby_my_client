@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:emby_my_client/images/emby_image_request.dart';
 import 'package:emby_my_client/images/photo_prefetcher.dart';
+import 'package:emby_my_client/library/library_raw_page_cursor.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/photos/photo_viewer_controller.dart';
@@ -135,6 +136,112 @@ void main() {
     },
   );
 
+  test(
+    'known-total empty viewer page retries from the same raw cursor',
+    () async {
+      final starts = <int>[];
+      var attempts = 0;
+      final controller = PhotoViewerController(
+        source: _source(
+          initialItems: [_item('photo-1', 'Photo')],
+          initialItemId: 'photo-1',
+          initialRawCursor: 1,
+          initialTotalCount: 2,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            attempts++;
+            return attempts == 1
+                ? const EmbyItemPage(
+                    items: [],
+                    rawItemCount: 0,
+                    totalRecordCount: 2,
+                  )
+                : EmbyItemPage(
+                    items: [_item('photo-2', 'Photo')],
+                    rawItemCount: 1,
+                    totalRecordCount: 2,
+                  );
+          },
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+
+      await _waitForViewerLoad(controller);
+      expect(controller.loadMoreError, isA<LibraryPaginationStalled>());
+      expect(controller.nextStartIndex, 1);
+      expect(controller.hasMore, isTrue);
+
+      await controller.loadMoreIfNeeded(force: true);
+      expect(starts, [1, 1]);
+      expect(controller.loadMoreError, isNull);
+      expect(controller.photos.map((item) => item.id), ['photo-1', 'photo-2']);
+      expect(controller.hasMore, isFalse);
+      controller.dispose();
+    },
+  );
+
+  test('reported total changes mark the viewer sequence dirty', () async {
+    final controller = PhotoViewerController(
+      source: _source(
+        initialItems: [_item('photo-1', 'Photo')],
+        initialItemId: 'photo-1',
+        initialRawCursor: 1,
+        initialTotalCount: 3,
+        initialHasMore: true,
+        loadPage: ({required startIndex, required limit}) async => EmbyItemPage(
+          items: [_item('photo-2', 'Photo')],
+          rawItemCount: 1,
+          totalRecordCount: 4,
+        ),
+      ),
+      imageRequestFor: _request,
+      prefetcher: PhotoPrefetcher(load: (_) async {}),
+    );
+
+    await _waitForViewerLoad(controller);
+    expect(controller.totalCount, 4);
+    expect(controller.totalDirty, isTrue);
+    controller.dispose();
+  });
+
+  test(
+    'a page response arriving after dispose cannot update the viewer',
+    () async {
+      final started = Completer<void>();
+      final response = Completer<EmbyItemPage>();
+      final controller = PhotoViewerController(
+        source: _source(
+          initialItems: [_item('photo-1', 'Photo')],
+          initialItemId: 'photo-1',
+          initialRawCursor: 1,
+          initialTotalCount: 2,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) {
+            started.complete();
+            return response.future;
+          },
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+
+      await started.future;
+      controller.dispose();
+      response.complete(
+        EmbyItemPage(
+          items: [_item('stale-photo', 'Photo')],
+          rawItemCount: 1,
+          totalRecordCount: 2,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.photos.map((item) => item.id), ['photo-1']);
+    },
+  );
+
   test('prefetcher enforces concurrency and drops stale queued work', () async {
     final started = <String>[];
     final completers = <String, Completer<void>>{};
@@ -195,6 +302,14 @@ void main() {
     expect(prefetcher.completedCount, 1);
     prefetcher.dispose();
   });
+}
+
+Future<void> _waitForViewerLoad(PhotoViewerController controller) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (!controller.isLoadingMore) return;
+    await Future<void>.delayed(Duration.zero);
+  }
+  fail('Timed out waiting for photo viewer pagination');
 }
 
 Future<EmbyItemPage> _emptyLoader({

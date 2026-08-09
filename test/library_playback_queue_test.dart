@@ -7,6 +7,7 @@ import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/library/library_local_media_scan_cache.dart';
 import 'package:emby_my_client/library/library_playback_queue.dart';
+import 'package:emby_my_client/library/library_raw_page_cursor.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -169,6 +170,60 @@ void main() {
       await api.dispose();
     },
   );
+
+  test('known-total empty page rejects a partial lazy queue', () async {
+    final api = _api();
+    final first = _video('video-0');
+    final starts = <int>[];
+    final queue = await LazyLibraryPlaybackQueue.prepare(
+      api: api,
+      query: _query,
+      initialItems: [first],
+      initialRawCursor: 1,
+      totalCount: 2,
+      pageSize: 1,
+      loadPage: ({required startIndex, required limit}) async {
+        starts.add(startIndex);
+        return const EmbyItemPage(
+          items: [],
+          rawItemCount: 0,
+          totalRecordCount: 2,
+        );
+      },
+    );
+
+    expect(queue, isNotNull);
+    await expectLater(
+      queue!.next(first),
+      throwsA(isA<LibraryPaginationStalled>()),
+    );
+    expect(starts, [1]);
+    expect(queue.rawCursor, 1);
+    await api.dispose();
+  });
+
+  test('changed total rejects a no-longer-complete lazy queue', () async {
+    final api = _api();
+    final first = _video('video-0');
+    final queue = await LazyLibraryPlaybackQueue.prepare(
+      api: api,
+      query: _query,
+      initialItems: [first],
+      initialRawCursor: 1,
+      totalCount: 2,
+      pageSize: 1,
+      loadPage: ({required startIndex, required limit}) async => EmbyItemPage(
+        items: [_video('video-1')],
+        rawItemCount: 1,
+        totalRecordCount: 3,
+      ),
+    );
+
+    expect(queue, isNotNull);
+    await expectLater(queue!.next(first), throwsA(isA<LibraryResultChanged>()));
+    expect(queue.rawCursor, 1);
+    await api.dispose();
+  });
 
   test('complete-result availability enforces local scan exactness', () {
     const mediaState = LibraryBrowseState();

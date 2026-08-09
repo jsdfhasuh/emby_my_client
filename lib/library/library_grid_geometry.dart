@@ -1,12 +1,20 @@
 import 'package:flutter/rendering.dart';
 
 const libraryMediaGridGeometry = LibraryMediaGridGeometry();
+const libraryPhotoGridGeometry = LibraryPhotoGridGeometry();
+const libraryMixedGridGeometry = LibraryMixedGridGeometry();
 const libraryDirectoryGridGeometry = LibraryDirectoryGridGeometry();
 const libraryFacetGridGeometry = LibraryFacetGridGeometry();
 
 const libraryIPadMediaGridGeometry = LibraryMediaGridGeometry(
   crossAxisCount: 5,
   childAspectRatio: 0.44,
+);
+const libraryIPadPhotoGridGeometry = LibraryPhotoGridGeometry(
+  crossAxisCount: 5,
+);
+const libraryIPadMixedGridGeometry = LibraryMixedGridGeometry(
+  crossAxisCount: 5,
 );
 const libraryIPadDirectoryGridGeometry = LibraryDirectoryGridGeometry(
   crossAxisCount: 5,
@@ -72,6 +80,28 @@ class LibraryMediaGridGeometry extends LibraryGridGeometry {
     super.childAspectRatio = 0.46,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 18,
+  });
+}
+
+class LibraryPhotoGridGeometry extends LibraryGridGeometry {
+  const LibraryPhotoGridGeometry({
+    super.padding = const EdgeInsets.all(16),
+    super.maxCrossAxisExtent = 220,
+    super.crossAxisCount,
+    super.childAspectRatio = 1,
+    super.crossAxisSpacing = 12,
+    super.mainAxisSpacing = 12,
+  });
+}
+
+class LibraryMixedGridGeometry extends LibraryGridGeometry {
+  const LibraryMixedGridGeometry({
+    super.padding = const EdgeInsets.all(16),
+    super.maxCrossAxisExtent = 300,
+    super.crossAxisCount,
+    super.childAspectRatio = 4 / 3,
+    super.crossAxisSpacing = 12,
+    super.mainAxisSpacing = 12,
   });
 }
 

@@ -9,6 +9,8 @@ import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/home_shell_navigation.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
+import 'package:emby_my_client/ui/widgets/library_mixed_entry_card.dart';
+import 'package:emby_my_client/ui/widgets/library_photo_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,6 +19,8 @@ import 'library_filter_test_helpers.dart';
 void main() {
   test('all iPad library geometries use five columns', () {
     expect(libraryIPadMediaGridGeometry.crossAxisCount, 5);
+    expect(libraryIPadPhotoGridGeometry.crossAxisCount, 5);
+    expect(libraryIPadMixedGridGeometry.crossAxisCount, 5);
     expect(libraryIPadDirectoryGridGeometry.crossAxisCount, 5);
     expect(libraryIPadFacetGridGeometry.crossAxisCount, 5);
   });
@@ -222,6 +226,58 @@ void main() {
     await _dispose(tester, api);
   });
 
+  testWidgets('mixed iPad results use typed four-by-three cards', (
+    tester,
+  ) async {
+    _setView(tester, const Size(1024, 768));
+    final api = _LayoutApi(itemCount: 8);
+
+    await tester.pumpWidget(
+      _libraryApp(
+        api,
+        view: _homeVideosLibrary,
+        capabilities: PlatformCapabilities.ipad,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LibraryMixedEntryCard), findsWidgets);
+    expect(find.byType(LibraryPhotoCard), findsNothing);
+    final geometry =
+        tester.widget<SliverGrid>(find.byType(SliverGrid)).gridDelegate
+            as LibraryGridGeometry;
+    expect(geometry, isA<LibraryMixedGridGeometry>());
+    expect(geometry.crossAxisCount, 5);
+    expect(geometry.childAspectRatio, 4 / 3);
+    expect(tester.takeException(), isNull);
+    await _dispose(tester, api);
+  });
+
+  testWidgets('pure photo iPad results use square photo cards', (tester) async {
+    _setView(tester, const Size(1024, 768));
+    final api = _LayoutApi(itemCount: 8);
+
+    await tester.pumpWidget(
+      _libraryApp(
+        api,
+        view: _photoLibrary,
+        capabilities: PlatformCapabilities.ipad,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LibraryPhotoCard), findsWidgets);
+    expect(find.byType(LibraryMixedEntryCard), findsNothing);
+    final geometry =
+        tester.widget<SliverGrid>(find.byType(SliverGrid)).gridDelegate
+            as LibraryGridGeometry;
+    expect(geometry, isA<LibraryPhotoGridGeometry>());
+    expect(geometry.crossAxisCount, 5);
+    expect(geometry.childAspectRatio, 1);
+    expect(tester.takeException(), isNull);
+    await _dispose(tester, api);
+  });
+
   testWidgets('Android keeps compact chrome and adaptive columns', (
     tester,
   ) async {
@@ -357,7 +413,11 @@ class _LayoutApi extends EmbyApi {
     String? tagId,
   }) async {
     calls.add(_LayoutCall(mediaType: mediaType, playedFilter: playedFilter));
-    final type = mediaType == LibraryMediaType.photo ? 'Photo' : 'Movie';
+    final type =
+        mediaType == LibraryMediaType.photo ||
+            profile.kind == LibraryContentProfileKind.photos
+        ? 'Photo'
+        : 'Movie';
     final items = [
       for (var index = 0; index < itemCount; index++)
         EmbyItem(

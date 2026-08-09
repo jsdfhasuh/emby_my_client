@@ -4,8 +4,8 @@ import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
 import 'media_widgets.dart';
 
-class LibraryDirectoryEntryCard extends StatelessWidget {
-  const LibraryDirectoryEntryCard({
+class LibraryMixedEntryCard extends StatelessWidget {
+  const LibraryMixedEntryCard({
     super.key,
     required this.item,
     required this.imageRequest,
@@ -35,8 +35,8 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
     'Series' when item.userData.unplayedItemCount > 0 =>
       '${item.userData.unplayedItemCount} 集未播放',
     'Series' => item.productionYear?.toString() ?? '剧集',
-    'Episode' => _episodeLabel(item),
-    'Video' => item.productionYear?.toString() ?? '视频',
+    'Episode' => item.subtitle.isEmpty ? '单集' : item.subtitle,
+    'Video' => item.runtimeLabel ?? item.productionYear?.toString() ?? '视频',
     _ => '媒体',
   };
 
@@ -60,7 +60,7 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
             children: [
               if (request != null) ...[
                 ColorFiltered(
-                  key: const ValueKey('library-directory-image-underlay'),
+                  key: const ValueKey('library-mixed-image-underlay'),
                   colorFilter: const ColorFilter.mode(
                     Color(0x99000000),
                     BlendMode.darken,
@@ -68,7 +68,7 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                   child: EmbyImage(request: request, fit: BoxFit.cover),
                 ),
                 EmbyImage(
-                  key: const ValueKey('library-directory-image-foreground'),
+                  key: const ValueKey('library-mixed-image-foreground'),
                   request: request,
                   fit: BoxFit.contain,
                   icon: icon,
@@ -87,6 +87,10 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                   ),
                 ),
               ),
+              if (item.userData.isFavorite)
+                const Positioned(top: 8, left: 8, child: _MixedFavoriteBadge()),
+              if (item.isPlayable && item.userData.isPlayed)
+                const Positioned(top: 8, right: 8, child: _MixedPlayedBadge()),
               Positioned(
                 left: 12,
                 right: 12,
@@ -134,10 +138,28 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
   }
 }
 
-String _episodeLabel(EmbyItem item) {
-  final season = item.parentIndexNumber;
-  final episode = item.indexNumber;
-  if (season == null || episode == null) return '单集';
-  return 'S${season.toString().padLeft(2, '0')}'
-      'E${episode.toString().padLeft(2, '0')}';
+class _MixedFavoriteBadge extends StatelessWidget {
+  const _MixedFavoriteBadge();
+
+  @override
+  Widget build(BuildContext context) => const DecoratedBox(
+    decoration: BoxDecoration(color: Color(0xDD9A3D46), shape: BoxShape.circle),
+    child: Padding(
+      padding: EdgeInsets.all(5),
+      child: Icon(Icons.favorite, size: 15, color: Colors.white),
+    ),
+  );
+}
+
+class _MixedPlayedBadge extends StatelessWidget {
+  const _MixedPlayedBadge();
+
+  @override
+  Widget build(BuildContext context) => const DecoratedBox(
+    decoration: BoxDecoration(color: Color(0xDD25715C), shape: BoxShape.circle),
+    child: Padding(
+      padding: EdgeInsets.all(5),
+      child: Icon(Icons.check, size: 15, color: Colors.white),
+    ),
+  );
 }

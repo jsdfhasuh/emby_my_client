@@ -9,6 +9,8 @@ void main() {
   for (final entry in const [
     ('Folder', '目录', Icons.folder_outlined),
     ('CollectionFolder', '目录', Icons.folder_outlined),
+    ('PhotoAlbum', '相册', Icons.photo_album_outlined),
+    ('Photo', '图片', Icons.image_outlined),
     ('Movie', '2024', Icons.movie_outlined),
     ('Series', '7 集未播放', Icons.tv_outlined),
     ('Episode', 'S02E03', Icons.play_circle_outline),
@@ -66,6 +68,8 @@ void main() {
     final semantics = tester.ensureSemantics();
     for (final entry in const [
       ('Folder', '打开目录：Folder'),
+      ('PhotoAlbum', '打开目录：PhotoAlbum'),
+      ('Photo', '查看图片：Photo'),
       ('Movie', '查看媒体：Movie'),
     ]) {
       await tester.pumpWidget(

@@ -4,8 +4,8 @@ import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
 import 'media_widgets.dart';
 
-class LibraryDirectoryEntryCard extends StatelessWidget {
-  const LibraryDirectoryEntryCard({
+class LibraryPhotoCard extends StatelessWidget {
+  const LibraryPhotoCard({
     super.key,
     required this.item,
     required this.imageRequest,
@@ -16,41 +16,12 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
   final EmbyImageRequest? imageRequest;
   final VoidCallback onTap;
 
-  IconData get icon => switch (item.type) {
-    'Folder' || 'CollectionFolder' => Icons.folder_outlined,
-    'PhotoAlbum' => Icons.photo_album_outlined,
-    'Photo' => Icons.image_outlined,
-    'Movie' => Icons.movie_outlined,
-    'Series' => Icons.tv_outlined,
-    'Episode' => Icons.play_circle_outline,
-    'Video' => Icons.videocam_outlined,
-    _ => Icons.insert_drive_file_outlined,
-  };
-
-  String get subtitle => switch (item.type) {
-    'Folder' || 'CollectionFolder' => '目录',
-    'PhotoAlbum' => '相册',
-    'Photo' => '图片',
-    'Movie' => item.productionYear?.toString() ?? '电影',
-    'Series' when item.userData.unplayedItemCount > 0 =>
-      '${item.userData.unplayedItemCount} 集未播放',
-    'Series' => item.productionYear?.toString() ?? '剧集',
-    'Episode' => _episodeLabel(item),
-    'Video' => item.productionYear?.toString() ?? '视频',
-    _ => '媒体',
-  };
-
   @override
   Widget build(BuildContext context) {
     final request = imageRequest;
-    final action = item.isFolder
-        ? '打开目录'
-        : item.isPhoto
-        ? '查看图片'
-        : '查看媒体';
     return Semantics(
       button: true,
-      label: '$action：${item.name}',
+      label: '查看图片：${item.name}',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -60,7 +31,7 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
             children: [
               if (request != null) ...[
                 ColorFiltered(
-                  key: const ValueKey('library-directory-image-underlay'),
+                  key: const ValueKey('library-photo-image-underlay'),
                   colorFilter: const ColorFilter.mode(
                     Color(0x99000000),
                     BlendMode.darken,
@@ -68,15 +39,15 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                   child: EmbyImage(request: request, fit: BoxFit.cover),
                 ),
                 EmbyImage(
-                  key: const ValueKey('library-directory-image-foreground'),
+                  key: const ValueKey('library-photo-image-foreground'),
                   request: request,
                   fit: BoxFit.contain,
-                  icon: icon,
+                  icon: Icons.image_outlined,
                 ),
               ] else
                 ColoredBox(
                   color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  child: Icon(icon, size: 42),
+                  child: const Icon(Icons.image_outlined, size: 42),
                 ),
               const DecoratedBox(
                 decoration: BoxDecoration(
@@ -87,6 +58,8 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                   ),
                 ),
               ),
+              if (item.userData.isFavorite)
+                const Positioned(top: 8, left: 8, child: _PhotoFavoriteBadge()),
               Positioned(
                 left: 12,
                 right: 12,
@@ -94,7 +67,11 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Icon(icon, size: 20, color: Colors.white),
+                    const Icon(
+                      Icons.image_outlined,
+                      size: 20,
+                      color: Colors.white,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Column(
@@ -110,12 +87,10 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            subtitle,
+                          const Text(
+                            '图片',
                             maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: Color(0xFFD7DEE1),
                               fontSize: 12,
                             ),
@@ -134,10 +109,15 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
   }
 }
 
-String _episodeLabel(EmbyItem item) {
-  final season = item.parentIndexNumber;
-  final episode = item.indexNumber;
-  if (season == null || episode == null) return '单集';
-  return 'S${season.toString().padLeft(2, '0')}'
-      'E${episode.toString().padLeft(2, '0')}';
+class _PhotoFavoriteBadge extends StatelessWidget {
+  const _PhotoFavoriteBadge();
+
+  @override
+  Widget build(BuildContext context) => const DecoratedBox(
+    decoration: BoxDecoration(color: Color(0xDD9A3D46), shape: BoxShape.circle),
+    child: Padding(
+      padding: EdgeInsets.all(5),
+      child: Icon(Icons.favorite, size: 15, color: Colors.white),
+    ),
+  );
 }

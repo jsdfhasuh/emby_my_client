@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../core/diagnostic_log.dart';
+import '../library/library_raw_page_cursor.dart';
 import '../models/emby_models.dart';
 import 'photo_sequence_source.dart';
 
@@ -22,6 +23,8 @@ class PhotoBrowserController extends ChangeNotifier {
   int _generation = 0;
   int _nextStartIndex = 0;
   int? _totalCount;
+  bool _totalDirty = false;
+  bool _reportedTotalBelowLoaded = false;
 
   List<EmbyItem> get items => List.unmodifiable(_items);
   bool get isLoading => _loading;
@@ -29,6 +32,7 @@ class PhotoBrowserController extends ChangeNotifier {
   Object? get error => _error;
   int get nextStartIndex => _nextStartIndex;
   int? get totalCount => _totalCount;
+  bool get totalDirty => _totalDirty;
 
   Future<void> loadMore() async {
     if (_loading || !_hasMore || _disposed) return;
@@ -42,6 +46,8 @@ class PhotoBrowserController extends ChangeNotifier {
     _seenItemIds.clear();
     _nextStartIndex = 0;
     _totalCount = null;
+    _totalDirty = false;
+    _reportedTotalBelowLoaded = false;
     _hasMore = true;
     _error = null;
     _notify();
@@ -60,6 +66,14 @@ class PhotoBrowserController extends ChangeNotifier {
     try {
       final page = await _loadPage(startIndex: startIndex, limit: pageSize);
       if (_disposed || generation != _generation) return;
+      final cursor = advanceLibraryRawPageCursor(
+        currentStartIndex: startIndex,
+        currentTotalCount: _totalCount,
+        reportedTotalCount: page.totalRecordCount,
+        rawItemCount: page.rawItemCount,
+        pageSize: pageSize,
+        dirty: _totalDirty,
+      );
       _items.addAll(
         page.items.where(
           (item) =>
@@ -67,15 +81,14 @@ class PhotoBrowserController extends ChangeNotifier {
               _seenItemIds.add(item.id),
         ),
       );
-      _nextStartIndex = startIndex + page.rawItemCount;
-      if (page.totalRecordCount != null) {
-        _totalCount = page.totalRecordCount;
+      _nextStartIndex = cursor.nextStartIndex;
+      _totalCount = cursor.totalCount;
+      _totalDirty = cursor.dirty;
+      _hasMore = cursor.hasMore || cursor.paginationStalled;
+      _recordCursorDiagnostics(cursor);
+      if (cursor.paginationStalled) {
+        throw const LibraryPaginationStalled();
       }
-      _hasMore =
-          page.rawItemCount > 0 &&
-          (_totalCount != null
-              ? _nextStartIndex < _totalCount!
-              : page.rawItemCount == pageSize);
     } catch (error, stackTrace) {
       if (_disposed || generation != _generation) return;
       DiagnosticLog.instance.error(
@@ -90,6 +103,30 @@ class PhotoBrowserController extends ChangeNotifier {
         _loading = false;
         _notify();
       }
+    }
+  }
+
+  void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {
+    if (cursor.totalChanged) {
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo directory total changed; statistics require refresh',
+      );
+    }
+    final total = cursor.totalCount;
+    if (!_reportedTotalBelowLoaded && total != null && total < _items.length) {
+      _reportedTotalBelowLoaded = true;
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo directory total below loaded count '
+            'total=$total loaded=${_items.length}',
+      );
+    }
+    if (cursor.paginationStalled) {
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo directory pagination stalled before reported total',
+      );
     }
   }
 

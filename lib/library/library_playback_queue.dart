@@ -8,6 +8,7 @@ import '../playback/playback_queue.dart';
 import 'library_browse_state.dart';
 import 'library_content_profile.dart';
 import 'library_local_media_scan_cache.dart';
+import 'library_raw_page_cursor.dart';
 
 typedef LibraryPlaybackPageLoader =
     Future<EmbyItemPage> Function({
@@ -290,7 +291,20 @@ class _LibraryPlaybackPageSource {
     cancellation.throwIfCancelled();
     final page = await loadPage(startIndex: startIndex, limit: pageSize);
     cancellation.throwIfCancelled();
-    if (page.totalRecordCount != null) totalCount = page.totalRecordCount;
+    final cursor = advanceLibraryRawPageCursor(
+      currentStartIndex: startIndex,
+      currentTotalCount: totalCount,
+      reportedTotalCount: page.totalRecordCount,
+      rawItemCount: page.rawItemCount,
+      pageSize: pageSize,
+    );
+    totalCount = cursor.totalCount;
+    if (cursor.totalChanged) {
+      throw const LibraryResultChanged();
+    }
+    if (cursor.paginationStalled) {
+      throw const LibraryPaginationStalled();
+    }
     return _LibraryPlaybackChunk.buffered(
       startIndex: startIndex,
       rawItemCount: page.rawItemCount,

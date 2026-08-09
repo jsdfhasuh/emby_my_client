@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../core/diagnostic_log.dart';
 import '../images/emby_image_request.dart';
 import '../images/photo_prefetcher.dart';
+import '../library/library_raw_page_cursor.dart';
 import '../models/emby_models.dart';
 import 'photo_sequence_source.dart';
 
@@ -50,6 +51,8 @@ class PhotoViewerController extends ChangeNotifier {
   int _currentIndex = 0;
   int _nextStartIndex;
   int? _totalCount;
+  bool _totalDirty = false;
+  bool _reportedTotalBelowLoaded = false;
   bool _hasMore;
   bool _loadingMore = false;
   bool _controlsVisible = true;
@@ -68,6 +71,7 @@ class PhotoViewerController extends ChangeNotifier {
   String get queryFingerprint => _source.queryFingerprint;
   int get nextStartIndex => _nextStartIndex;
   int? get totalCount => _totalCount;
+  bool get totalDirty => _totalDirty;
   String? get currentItemId =>
       _photos.isEmpty ? null : _photos[_currentIndex].id;
 
@@ -103,20 +107,20 @@ class PhotoViewerController extends ChangeNotifier {
     try {
       var addedPhotos = 0;
       do {
+        final startIndex = _nextStartIndex;
         final page = await _source.loadPage(
-          startIndex: _nextStartIndex,
+          startIndex: startIndex,
           limit: pageSize,
         );
         if (_disposed) return;
-        _nextStartIndex += page.rawItemCount;
-        if (page.totalRecordCount != null) {
-          _totalCount = page.totalRecordCount;
-        }
-        _hasMore =
-            page.rawItemCount > 0 &&
-            (_totalCount != null
-                ? _nextStartIndex < _totalCount!
-                : page.rawItemCount == pageSize);
+        final cursor = advanceLibraryRawPageCursor(
+          currentStartIndex: startIndex,
+          currentTotalCount: _totalCount,
+          reportedTotalCount: page.totalRecordCount,
+          rawItemCount: page.rawItemCount,
+          pageSize: pageSize,
+          dirty: _totalDirty,
+        );
         final additions = page.items
             .where((item) => _seenItemIds.add(item.id))
             .toList();
@@ -124,6 +128,14 @@ class PhotoViewerController extends ChangeNotifier {
         final photos = additions.where((item) => item.isPhoto).toList();
         _photos.addAll(photos);
         addedPhotos += photos.length;
+        _nextStartIndex = cursor.nextStartIndex;
+        _totalCount = cursor.totalCount;
+        _totalDirty = cursor.dirty;
+        _hasMore = cursor.hasMore || cursor.paginationStalled;
+        _recordCursorDiagnostics(cursor);
+        if (cursor.paginationStalled) {
+          throw const LibraryPaginationStalled();
+        }
       } while (_hasMore && addedPhotos == 0);
       _schedulePrefetch();
     } catch (error, stackTrace) {
@@ -141,6 +153,32 @@ class PhotoViewerController extends ChangeNotifier {
         _loadingMore = false;
         _notify();
       }
+    }
+  }
+
+  void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {
+    if (cursor.totalChanged) {
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo viewer total changed; statistics require refresh',
+      );
+    }
+    final total = cursor.totalCount;
+    if (!_reportedTotalBelowLoaded &&
+        total != null &&
+        total < _directoryItems.length) {
+      _reportedTotalBelowLoaded = true;
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo viewer total below loaded count '
+            'total=$total loaded=${_directoryItems.length}',
+      );
+    }
+    if (cursor.paginationStalled) {
+      DiagnosticLog.instance.warning(
+        'photo',
+        'Photo viewer pagination stalled before reported total',
+      );
     }
   }
 

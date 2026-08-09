@@ -131,7 +131,16 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('共 1,286 项'), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('library-result-summary')))
+            .data,
+        '共 1,286 项',
+      );
+      expect(
+        find.byKey(const ValueKey('library-position-panel')),
+        findsNothing,
+      );
       expect(_opacity(tester), 0);
 
       final scrollable = _verticalScrollable();
@@ -141,7 +150,12 @@ void main() {
       await gesture.moveBy(const Offset(0, -420));
       await tester.pump();
       expect(_opacity(tester), 1);
-      expect(find.text('共 1,286 项'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('library-position-total')))
+            .data,
+        '共 1,286 项',
+      );
       expect(
         find.byKey(const ValueKey('library-position-range')),
         findsOneWidget,
@@ -162,7 +176,12 @@ void main() {
       expect(range.$1, greaterThan(1));
       expect(range.$2, greaterThanOrEqualTo(range.$1));
       expect(_percentage(tester), lessThan(100));
-      expect(find.text('共 1,286 项'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('library-position-total')))
+            .data,
+        '共 1,286 项',
+      );
 
       tester.view.physicalSize = const Size(852, 393);
       await tester.pumpAndSettle();
@@ -219,9 +238,8 @@ void main() {
       find.byKey(const ValueKey('library-position-percentage')),
       findsNothing,
     );
-    expect(find.text('已匹配 60 项'), findsOneWidget);
-    expect(find.text('已扫描 120/180 项'), findsOneWidget);
-    expect(find.text('继续统计中'), findsOneWidget);
+    expect(find.text('STRM 统计中'), findsOneWidget);
+    expect(find.text('已扫描 120 / 180 项'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     finalPage.complete();
@@ -297,7 +315,7 @@ void main() {
 
     tester.state<ScrollableState>(_verticalScrollable()).position.jumpTo(0);
     await tester.pumpAndSettle();
-    expect(find.text('已匹配 60 项'), findsOneWidget);
+    expect(find.text('STRM 共 60 项'), findsWidgets);
     await _showOverlay(tester);
     expect(
       find.byKey(const ValueKey('library-position-total')),
@@ -352,7 +370,7 @@ void main() {
     );
     expect(
       find.byKey(const ValueKey('library-position-remaining')),
-      findsNothing,
+      findsOneWidget,
     );
 
     tester.state<ScrollableState>(_verticalScrollable()).position.jumpTo(0);

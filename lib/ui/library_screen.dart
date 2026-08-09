@@ -16,6 +16,7 @@ import '../library/library_item_membership.dart';
 import '../library/library_local_media_scan_cache.dart';
 import '../library/library_local_media_scan_service.dart';
 import '../library/library_playback_queue.dart';
+import '../library/library_raw_page_cursor.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
 import '../models/emby_models.dart';
@@ -31,6 +32,8 @@ import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
 import 'widgets/library_alphabet_navigation.dart';
 import 'widgets/library_directory_entry_card.dart';
+import 'widgets/library_mixed_entry_card.dart';
+import 'widgets/library_photo_card.dart';
 import 'widgets/library_position_overlay.dart';
 import 'widgets/media_widgets.dart';
 
@@ -204,6 +207,8 @@ class _LibraryQuerySnapshot {
     required this.seenItemIds,
     required this.nextStartIndex,
     required this.totalCount,
+    required this.totalDirty,
+    required this.reportedTotalBelowLoaded,
     required this.hasMore,
     required this.loadFailed,
   });
@@ -212,6 +217,8 @@ class _LibraryQuerySnapshot {
   final Set<String> seenItemIds;
   final int nextStartIndex;
   final int? totalCount;
+  final bool totalDirty;
+  final bool reportedTotalBelowLoaded;
   final bool hasMore;
   final bool loadFailed;
 }
@@ -953,6 +960,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   final Set<String> _pendingRealtimeUserDataIds = {};
   int _nextStartIndex = 0;
   int? _totalCount;
+  bool _resultTotalDirty = false;
+  bool _reportedTotalBelowLoaded = false;
   int _generation = 0;
   int _positionGeneration = 0;
   bool _suppressPositionNotifications = false;
@@ -1026,6 +1035,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   bool get _canPlayCompleteResult =>
       !_preparingPlaybackQueue &&
+      !_loadFailed &&
+      !_resultTotalDirty &&
       canPlayCompleteLibraryResult(
         state: _state,
         profile: widget.profile,
@@ -1060,9 +1071,36 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     scannedCount: _scanSnapshot?.scannedRawCount ?? _nextStartIndex,
     sourceTotalCount: _scanSnapshot?.sourceTotalCount,
     scanStatus: _scanStatus,
-    dirty: _scanSnapshot?.dirty ?? false,
+    dirty: _usesLocalScan ? _scanSnapshot?.dirty ?? false : _resultTotalDirty,
     unknownClassificationCount: _scanSnapshot?.unknownCount ?? 0,
   );
+
+  bool get _usesPhotoCards =>
+      _isMediaScope &&
+      (_state.mediaType == LibraryMediaType.photo ||
+          widget.profile.kind == LibraryContentProfileKind.photos);
+
+  bool get _usesMixedCards =>
+      _isMediaScope &&
+      !_usesPhotoCards &&
+      _state.mediaType == LibraryMediaType.all &&
+      widget.profile.allowedMediaTypes.contains(LibraryMediaType.photo);
+
+  LibraryGridGeometry _mediaGridGeometry(bool largeIPadLandscape) {
+    if (_usesPhotoCards) {
+      return largeIPadLandscape
+          ? libraryIPadPhotoGridGeometry
+          : libraryPhotoGridGeometry;
+    }
+    if (_usesMixedCards) {
+      return largeIPadLandscape
+          ? libraryIPadMixedGridGeometry
+          : libraryMixedGridGeometry;
+    }
+    return largeIPadLandscape
+        ? libraryIPadMediaGridGeometry
+        : libraryMediaGridGeometry;
+  }
 
   LibraryGridGeometry _gridGeometry(bool largeIPadLandscape) =>
       switch (_state.scope) {
@@ -1076,10 +1114,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               : libraryFacetGridGeometry,
         LibraryBrowseScope.media ||
         LibraryBrowseScope.favorites ||
-        LibraryBrowseScope.facet =>
-          largeIPadLandscape
-              ? libraryIPadMediaGridGeometry
-              : libraryMediaGridGeometry,
+        LibraryBrowseScope.facet => _mediaGridGeometry(largeIPadLandscape),
       };
 
   @override
@@ -1248,22 +1283,27 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     try {
       final page = await _requestPage(startIndex);
       if (!mounted || generation != _generation) return;
+      final cursor = advanceLibraryRawPageCursor(
+        currentStartIndex: startIndex,
+        currentTotalCount: _totalCount,
+        reportedTotalCount: page.totalRecordCount,
+        rawItemCount: page.rawItemCount,
+        pageSize: _pageSize,
+        dirty: _resultTotalDirty,
+      );
       setState(() {
-        _nextStartIndex += page.rawItemCount;
-        if (page.totalRecordCount != null) {
-          _totalCount = page.totalRecordCount;
-        }
+        _nextStartIndex = cursor.nextStartIndex;
+        _totalCount = cursor.totalCount;
+        _resultTotalDirty = cursor.dirty;
         for (final item in page.items) {
           if (!_seenItemIds.add(item.id)) continue;
           _items.add(item);
         }
-        _hasMore = page.rawItemCount == 0
-            ? false
-            : _totalCount != null
-            ? _nextStartIndex < _totalCount!
-            : page.rawItemCount == _pageSize;
+        _hasMore = cursor.hasMore || cursor.paginationStalled;
+        _loadFailed = cursor.paginationStalled;
         _loading = false;
       });
+      _recordCursorDiagnostics(cursor);
     } catch (error, stackTrace) {
       if (!mounted || generation != _generation) return;
       DiagnosticLog.instance.error(
@@ -1276,6 +1316,31 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         _loading = false;
         _loadFailed = true;
       });
+    }
+  }
+
+  void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {
+    if (cursor.totalChanged) {
+      DiagnosticLog.instance.warning(
+        'library',
+        'Library total changed scope=${_state.scope.name}; '
+            'statistics require refresh',
+      );
+    }
+    final total = cursor.totalCount;
+    if (!_reportedTotalBelowLoaded && total != null && total < _items.length) {
+      _reportedTotalBelowLoaded = true;
+      DiagnosticLog.instance.warning(
+        'library',
+        'Library total below loaded count scope=${_state.scope.name} '
+            'total=$total loaded=${_items.length}',
+      );
+    }
+    if (cursor.paginationStalled) {
+      DiagnosticLog.instance.warning(
+        'library',
+        'Library pagination stalled scope=${_state.scope.name}',
+      );
     }
   }
 
@@ -1418,6 +1483,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _seenItemIds.clear();
       _nextStartIndex = 0;
       _totalCount = null;
+      _resultTotalDirty = false;
+      _reportedTotalBelowLoaded = false;
       _hasMore = false;
       _loadFailed = false;
       _loading = true;
@@ -1450,6 +1517,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         ..addAll(items.map((item) => item.id));
       _nextStartIndex = snapshot.rawCursor;
       _totalCount = null;
+      _resultTotalDirty = snapshot.dirty;
+      _reportedTotalBelowLoaded = false;
       _hasMore = false;
       _loading = switch (snapshot.status) {
         LibraryScanStatus.queued || LibraryScanStatus.scanning => true,
@@ -1538,6 +1607,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             seenItemIds: Set<String>.of(_seenItemIds),
             nextStartIndex: _nextStartIndex,
             totalCount: _totalCount,
+            totalDirty: _resultTotalDirty,
+            reportedTotalBelowLoaded: _reportedTotalBelowLoaded,
             hasMore: _hasMore,
             loadFailed: _loadFailed,
           )
@@ -1576,6 +1647,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _seenItemIds.clear();
       _nextStartIndex = 0;
       _totalCount = null;
+      _resultTotalDirty = false;
+      _reportedTotalBelowLoaded = false;
       _hasMore = true;
       _loading = false;
       _loadFailed = false;
@@ -1612,6 +1685,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           ..addAll(failureSnapshot.seenItemIds);
         _nextStartIndex = failureSnapshot.nextStartIndex;
         _totalCount = failureSnapshot.totalCount;
+        _resultTotalDirty = failureSnapshot.totalDirty;
+        _reportedTotalBelowLoaded = failureSnapshot.reportedTotalBelowLoaded;
         _hasMore = failureSnapshot.hasMore;
         _loading = false;
         _loadFailed = failureSnapshot.loadFailed;
@@ -1652,6 +1727,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _seenItemIds.clear();
       _nextStartIndex = 0;
       _totalCount = null;
+      _resultTotalDirty = false;
+      _reportedTotalBelowLoaded = false;
       _hasMore = true;
       _loading = false;
       _loadFailed = false;
@@ -1977,13 +2054,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           ),
           LibraryBrowseScope.media ||
           LibraryBrowseScope.favorites ||
-          LibraryBrowseScope.facet => MediaPosterCard(
-            key: ValueKey('library-item-${item.id}'),
-            item: item,
-            width: double.infinity,
-            imageRequest: widget.api.imageRequest(item),
-            onTap: () => _open(item),
-          ),
+          LibraryBrowseScope.facet => _buildMediaEntryCard(item),
         };
       }, childCount: _items.length),
     );
@@ -1995,6 +2066,33 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           return grid;
         },
       ),
+    );
+  }
+
+  Widget _buildMediaEntryCard(EmbyItem item) {
+    final key = ValueKey('library-item-${item.id}');
+    if (_usesPhotoCards && item.isPhoto) {
+      return LibraryPhotoCard(
+        key: key,
+        item: item,
+        imageRequest: widget.api.imageRequest(item, maxWidth: 600),
+        onTap: () => _open(item),
+      );
+    }
+    if (_usesPhotoCards || _usesMixedCards) {
+      return LibraryMixedEntryCard(
+        key: key,
+        item: item,
+        imageRequest: widget.api.imageRequest(item, maxWidth: 600),
+        onTap: () => _open(item),
+      );
+    }
+    return MediaPosterCard(
+      key: key,
+      item: item,
+      width: double.infinity,
+      imageRequest: widget.api.imageRequest(item),
+      onTap: () => _open(item),
     );
   }
 
