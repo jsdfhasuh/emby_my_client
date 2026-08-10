@@ -71,9 +71,7 @@ class PlaybackCacheEngineCapabilities {
   bool get supportsStreamBufferSize => _supportsOption('stream-buffer-size');
 
   bool get diskGatePassed =>
-      supportsDiskCache &&
-      supportsCacheDirectory &&
-      _supportsOption('demuxer-cache-unlink-files') &&
+      playbackCacheRequiredDiskOptionNames.every(_supportsOption) &&
       supportsImmediateUnlink &&
       supportsNativeCacheState &&
       supportsSeekableRanges &&
@@ -177,12 +175,7 @@ const playbackCacheOptionNames = <String>[
 
 const playbackCacheProfileOptionNames = playbackCacheOptionNames;
 
-const playbackCacheRequiredDiskOptionNames = <String>[
-  'cache',
-  'cache-on-disk',
-  'demuxer-cache-dir',
-  'demuxer-cache-unlink-files',
-];
+const playbackCacheRequiredDiskOptionNames = playbackCacheOptionNames;
 
 const playbackCachePropertyNames = <String>[
   'mpv-version',

@@ -8,6 +8,7 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/build/ios/artifacts}"
 RUN_NUMBER="${RUN_NUMBER:-${GITHUB_RUN_NUMBER:-local}}"
 COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}}"
 SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-12)"
+MPV_CAPABILITY_MANIFEST="${MPV_CAPABILITY_MANIFEST:-}"
 
 if [[ -n "${APP_SOURCE:-}" ]]; then
   APP_PATH="$APP_SOURCE"
@@ -55,6 +56,10 @@ if [[ ! -d "$APP_PATH" || ! -d "$DSYM_PATH" ]]; then
   echo "A device Runner.app and dSYM are required" >&2
   echo "app=${APP_PATH:-<missing>}" >&2
   echo "dsym=${DSYM_PATH:-<missing>}" >&2
+  exit 1
+fi
+if [[ -n "$MPV_CAPABILITY_MANIFEST" && ! -f "$MPV_CAPABILITY_MANIFEST" ]]; then
+  echo "Missing mpv capability manifest" >&2
   exit 1
 fi
 
@@ -336,6 +341,9 @@ cp "$ARTIFACT_DIR/macho-classification-final.txt" "$diagnostics_dir/"
 cp "$ARTIFACT_DIR/signing-order.txt" "$diagnostics_dir/"
 cp "$ipa_sha256" "$diagnostics_dir/"
 cp "$ARTIFACT_DIR/lockfiles-sha256.txt" "$diagnostics_dir/"
+if [[ -n "$MPV_CAPABILITY_MANIFEST" ]]; then
+  cp "$MPV_CAPABILITY_MANIFEST" "$diagnostics_dir/mpv-capability-manifest.json"
+fi
 cp -R "$fakesign_dump_dir/." "$diagnostics_dir/entitlements-fakesign/"
 cp -R "$final_dump_dir/." "$diagnostics_dir/entitlements-final/"
 diagnostics_zip="$ARTIFACT_DIR/emby-ios-core-diagnostics-${SHORT_SHA}-${RUN_NUMBER}.zip"

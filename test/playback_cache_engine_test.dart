@@ -8,27 +8,27 @@ import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test(
-    'disk profile writes all options and reads critical values back',
-    () async {
-      final access = _FakeNativeAccess();
-      final result = await PlaybackCacheProfileApplier(
-        access: access,
-        capabilities: _capabilities(),
-      ).apply(_profile(PlaybackCacheRuntimeMode.disk));
+  test('disk profile writes and reads every profile option back', () async {
+    final access = _FakeNativeAccess();
+    final result = await PlaybackCacheProfileApplier(
+      access: access,
+      capabilities: _capabilities(),
+    ).apply(_profile(PlaybackCacheRuntimeMode.disk));
 
-      expect(result.actualMode, PlaybackCacheRuntimeMode.disk);
-      expect(access.values, hasLength(playbackCacheProfileOptionNames.length));
-      expect(access.values['cache'], 'yes');
-      expect(access.values['cache-on-disk'], 'yes');
-      expect(access.values['demuxer-cache-unlink-files'], 'immediate');
-      expect(access.values['cache-secs'], '180');
-      expect(access.values['demuxer-max-bytes'], '${32 << 20}');
-      expect(access.values['demuxer-max-back-bytes'], '${16 << 20}');
-      expect(access.values['stream-buffer-size'], '${128 << 10}');
-      expect(result.readBack.keys, containsAll(_criticalOptions));
-    },
-  );
+    expect(result.actualMode, PlaybackCacheRuntimeMode.disk);
+    expect(access.values, hasLength(playbackCacheProfileOptionNames.length));
+    expect(access.values['cache'], 'yes');
+    expect(access.values['cache-on-disk'], 'yes');
+    expect(access.values['demuxer-cache-unlink-files'], 'immediate');
+    expect(access.values['cache-secs'], '180');
+    expect(access.values['demuxer-max-bytes'], '${32 << 20}');
+    expect(access.values['demuxer-max-back-bytes'], '${16 << 20}');
+    expect(access.values['stream-buffer-size'], '${128 << 10}');
+    expect(
+      result.readBack.keys,
+      unorderedEquals(playbackCacheProfileOptionNames),
+    );
+  });
 
   test(
     'critical disk failure applies and confirms a memory fallback',
@@ -49,6 +49,21 @@ void main() {
       expect(result.readBack['cache-on-disk'], 'no');
     },
   );
+
+  test('any profile read-back mismatch fails closed', () async {
+    final access = _FakeNativeAccess(readMismatchOn: 'stream-buffer-size');
+
+    final result = await PlaybackCacheProfileApplier(
+      access: access,
+      capabilities: _capabilities(),
+    ).apply(_profile(PlaybackCacheRuntimeMode.disk));
+
+    expect(result.actualMode, PlaybackCacheRuntimeMode.unconfirmed);
+    expect(
+      result.fallbackReason,
+      PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    );
+  });
 
   test('disk to memory to disabled fully resets inherited options', () async {
     final access = _FakeNativeAccess();
@@ -134,14 +149,6 @@ void main() {
   });
 }
 
-const _criticalOptions = [
-  'cache',
-  'cache-on-disk',
-  'demuxer-cache-dir',
-  'demuxer-cache-unlink-files',
-  'cache-secs',
-];
-
 ResolvedPlaybackCacheProfile _profile(PlaybackCacheRuntimeMode mode) =>
     ResolvedPlaybackCacheProfile(
       runtimeMode: mode,
@@ -179,15 +186,17 @@ PlaybackCacheEngineCapabilities _capabilities({
 );
 
 class _FakeNativeAccess implements NativePlaybackPropertyAccess {
-  _FakeNativeAccess({this.failOnceOn});
+  _FakeNativeAccess({this.failOnceOn, this.readMismatchOn});
 
   final String? failOnceOn;
+  final String? readMismatchOn;
   final Map<String, String> values = {};
   final Map<String, Object> nativeValues = {};
   bool _failed = false;
 
   @override
-  Future<String?> getString(String name) async => values[name];
+  Future<String?> getString(String name) async =>
+      name == readMismatchOn ? 'mismatch' : values[name];
 
   @override
   Future<Object?> getNative(String name) async =>
@@ -207,4 +216,7 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
     }
     values[name] = value;
   }
+
+  @override
+  Future<void> command(List<String> command) async {}
 }

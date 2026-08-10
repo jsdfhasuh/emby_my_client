@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'native_playback_property_access.dart';
@@ -70,7 +72,8 @@ class NativePlaybackCacheEngine implements PlaybackCacheEngine {
   Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() =>
       _capabilities ??= PlaybackCacheCapabilityProbe(
         access: access,
-        profileSwitchExperiment: const _RuntimeProfileSwitchExperiment(),
+        profileSwitchExperiment:
+            const RuntimePlaybackCacheProfileSwitchExperiment(),
       ).probe();
 
   @override
@@ -139,13 +142,7 @@ class PlaybackCacheProfileApplier {
   final NativePlaybackPropertyAccess access;
   final PlaybackCacheEngineCapabilities capabilities;
 
-  static const _criticalReadBack = <String>[
-    'cache',
-    'cache-on-disk',
-    'demuxer-cache-dir',
-    'demuxer-cache-unlink-files',
-    'cache-secs',
-  ];
+  static const _criticalReadBack = <String>[...playbackCacheOptionNames];
 
   Future<PlaybackCacheApplyResult> apply(
     ResolvedPlaybackCacheProfile profile,
@@ -237,7 +234,7 @@ class PlaybackCacheProfileApplier {
   }
 
   static bool _equivalent(String actual, String expected) =>
-      actual.trim().toLowerCase() == expected.trim().toLowerCase();
+      _equivalentNativeValue(actual, expected);
 }
 
 class PlaybackCacheProfileValues {
@@ -331,38 +328,182 @@ class PlaybackCacheProfileValues {
   };
 }
 
-class _RuntimeProfileSwitchExperiment
+class RuntimePlaybackCacheProfileSwitchExperiment
     implements PlaybackCacheProfileSwitchExperiment {
-  const _RuntimeProfileSwitchExperiment();
+  const RuntimePlaybackCacheProfileSwitchExperiment();
 
   @override
   Future<PlaybackCacheProfileSwitchStrategy> run({
     required NativePlaybackPropertyAccess access,
     required Map<String, String> resetValues,
   }) async {
+    Directory? root;
     try {
-      for (final name in const [
-        'cache',
-        'cache-on-disk',
-        'demuxer-cache-dir',
-        'cache-secs',
-      ]) {
-        final reset = resetValues[name];
-        if (reset == null) {
-          return PlaybackCacheProfileSwitchStrategy.requiresPlayerRecreation;
+      if (!playbackCacheProfileOptionNames.every(resetValues.containsKey)) {
+        return PlaybackCacheProfileSwitchStrategy.unsupported;
+      }
+      root = await Directory.systemTemp.createTemp('emby-mpv-capability-');
+      final media = File('${root.path}${Platform.pathSeparator}probe.wav');
+      await media.writeAsBytes(_waveProbeData, flush: true);
+      final profiles = _switchExperimentProfiles(
+        cacheDirectory: root,
+        directoryReset: resetValues['demuxer-cache-dir']!,
+      );
+      for (final profile in profiles) {
+        for (final entry in profile.entries) {
+          await access.setString(entry.key, entry.value);
         }
-        await access.setString(name, reset);
-        final readBack = await access.getString(name);
-        if (readBack?.trim().toLowerCase() != reset.trim().toLowerCase()) {
-          return PlaybackCacheProfileSwitchStrategy.requiresPlayerRecreation;
+        for (final entry in profile.entries) {
+          final readBack = await access.getString(entry.key);
+          if (readBack == null ||
+              !_equivalentNativeValue(readBack, entry.value)) {
+            return PlaybackCacheProfileSwitchStrategy.unsupported;
+          }
+        }
+        await access.command(['loadfile', media.path, 'replace']);
+        if (!await _waitForIdle(access, expected: false)) {
+          return PlaybackCacheProfileSwitchStrategy.unsupported;
+        }
+        await access.command(const ['stop']);
+        if (!await _waitForIdle(access, expected: true)) {
+          return PlaybackCacheProfileSwitchStrategy.unsupported;
         }
       }
       return PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop;
     } catch (_) {
       return PlaybackCacheProfileSwitchStrategy.unsupported;
+    } finally {
+      if (root != null) {
+        try {
+          await root.delete(recursive: true);
+        } catch (_) {
+          // A probe residue must not affect playback capability fallback.
+        }
+      }
     }
   }
+
+  static Future<bool> _waitForIdle(
+    NativePlaybackPropertyAccess access, {
+    required bool expected,
+  }) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (DateTime.now().isBefore(deadline)) {
+      final idle = _parseBoolean(await access.getString('idle-active'));
+      if (idle == expected) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    return false;
+  }
 }
+
+List<Map<String, String>> _switchExperimentProfiles({
+  required Directory cacheDirectory,
+  required String directoryReset,
+}) => [
+  {
+    'cache': 'yes',
+    'cache-on-disk': 'yes',
+    'demuxer-cache-dir': cacheDirectory.path,
+    'demuxer-cache-unlink-files': 'immediate',
+    'cache-secs': '30',
+    'demuxer-max-bytes': '16777216',
+    'demuxer-max-back-bytes': '8388608',
+    'demuxer-donate-buffer': 'yes',
+    'demuxer-seekable-cache': 'auto',
+    'cache-pause': 'yes',
+    'cache-pause-wait': '1',
+    'stream-buffer-size': '131072',
+  },
+  {
+    'cache': 'yes',
+    'cache-on-disk': 'no',
+    'demuxer-cache-dir': directoryReset,
+    'demuxer-cache-unlink-files': 'immediate',
+    'cache-secs': '30',
+    'demuxer-max-bytes': '16777216',
+    'demuxer-max-back-bytes': '8388608',
+    'demuxer-donate-buffer': 'yes',
+    'demuxer-seekable-cache': 'auto',
+    'cache-pause': 'yes',
+    'cache-pause-wait': '1',
+    'stream-buffer-size': '131072',
+  },
+  {
+    'cache': 'no',
+    'cache-on-disk': 'no',
+    'demuxer-cache-dir': directoryReset,
+    'demuxer-cache-unlink-files': 'immediate',
+    'cache-secs': '0',
+    'demuxer-max-bytes': '16777216',
+    'demuxer-max-back-bytes': '8388608',
+    'demuxer-donate-buffer': 'yes',
+    'demuxer-seekable-cache': 'auto',
+    'cache-pause': 'no',
+    'cache-pause-wait': '1',
+    'stream-buffer-size': '131072',
+  },
+];
+
+bool _equivalentNativeValue(String actual, String expected) {
+  final normalizedActual = actual.trim().toLowerCase();
+  final normalizedExpected = expected.trim().toLowerCase();
+  if (normalizedActual == normalizedExpected) return true;
+  final actualNumber = num.tryParse(normalizedActual);
+  final expectedNumber = num.tryParse(normalizedExpected);
+  return actualNumber != null &&
+      expectedNumber != null &&
+      actualNumber == expectedNumber;
+}
+
+const _waveProbeData = <int>[
+  0x52,
+  0x49,
+  0x46,
+  0x46,
+  0x26,
+  0x00,
+  0x00,
+  0x00,
+  0x57,
+  0x41,
+  0x56,
+  0x45,
+  0x66,
+  0x6d,
+  0x74,
+  0x20,
+  0x10,
+  0x00,
+  0x00,
+  0x00,
+  0x01,
+  0x00,
+  0x01,
+  0x00,
+  0x40,
+  0x1f,
+  0x00,
+  0x00,
+  0x80,
+  0x3e,
+  0x00,
+  0x00,
+  0x02,
+  0x00,
+  0x10,
+  0x00,
+  0x64,
+  0x61,
+  0x74,
+  0x61,
+  0x02,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+];
 
 List<PlaybackCacheRange> _parseRanges(Object? value) {
   if (value is! Iterable) return const [];

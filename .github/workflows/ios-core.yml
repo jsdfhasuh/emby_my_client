@@ -13,6 +13,7 @@ on:
       - 'lib/**'
       - 'test/**'
       - 'ios/**'
+      - 'scripts/android/**'
       - 'scripts/ios/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
@@ -35,6 +36,8 @@ env:
   DART_VERSION: 3.10.8
   COCOAPODS_VERSION: 1.16.2
   LDID_VERSION: 2.1.5
+  ANDROID_NDK_VERSION: 28.2.13676358
+  IMPLEMENTATION_START_HEAD: 61e124660c51dfee6fe91b778f46d39bd78a447a
 
 jobs:
   quality-and-android:
@@ -43,6 +46,24 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Verify protected files are unchanged from implementation start
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$IMPLEMENTATION_START_HEAD"
+          git diff --exit-code "$IMPLEMENTATION_START_HEAD" -- \
+            .metadata \
+            pubspec.yaml \
+            pubspec.lock \
+            ios/Podfile \
+            ios/Podfile.lock \
+            ios/Runner/Info.plist \
+            ':(glob)ios/**/*.entitlements' \
+            scripts/ios/runner-entitlements.plist \
+            scripts/ios/trollstore-entitlements.plist \
+            Gemfile \
+            Gemfile.lock
 
       - name: Install fixed Flutter revision
         shell: bash
@@ -84,12 +105,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes shellcheck
 
-      - name: Validate iOS shell scripts
+      - name: Validate Android and iOS shell scripts
         shell: bash
         run: |
           set -euo pipefail
+          bash -n scripts/android/*.sh
           bash -n scripts/ios/*.sh
           shellcheck --version
+          shellcheck scripts/android/*.sh
           shellcheck scripts/ios/*.sh
 
       - name: Format
@@ -116,6 +139,46 @@ jobs:
           test "${#apk_paths[@]}" -ge 4
           bash scripts/android/verify_mpv_capabilities.sh "${apk_paths[@]}"
 
+      - name: Run startable Android libmpv smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          android_sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          yes | "$android_sdk_root/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$android_sdk_root/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;$ANDROID_NDK_VERSION" \
+            'platform-tools' \
+            'emulator' \
+            'system-images;android-35;google_apis;x86_64'
+          echo no | "$android_sdk_root/cmdline-tools/latest/bin/avdmanager" \
+            create avd --force \
+            --name emby-mpv-capability \
+            --package 'system-images;android-35;google_apis;x86_64'
+          "$android_sdk_root/emulator/emulator" \
+            -avd emby-mpv-capability \
+            -no-window -no-audio -no-boot-anim -no-snapshot \
+            -gpu swiftshader_indirect >"$RUNNER_TEMP/android-emulator.log" 2>&1 &
+          emulator_pid=$!
+          cleanup_emulator() {
+            adb emu kill >/dev/null 2>&1 || true
+            wait "$emulator_pid" 2>/dev/null || true
+          }
+          trap cleanup_emulator EXIT
+          adb wait-for-device
+          booted=''
+          for _ in $(seq 1 180); do
+            booted="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            [[ "$booted" == '1' ]] && break
+            sleep 2
+          done
+          if [[ "$booted" != '1' ]]; then
+            cat "$RUNNER_TEMP/android-emulator.log" >&2
+            exit 1
+          fi
+          ANDROID_NDK_HOME="$android_sdk_root/ndk/$ANDROID_NDK_VERSION" \
+            bash scripts/android/run_mpv_startability_probe.sh \
+              build/app/outputs/flutter-apk/app-x86_64-debug.apk
+
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -137,6 +200,24 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Verify protected files are unchanged from implementation start
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$IMPLEMENTATION_START_HEAD"
+          git diff --exit-code "$IMPLEMENTATION_START_HEAD" -- \
+            .metadata \
+            pubspec.yaml \
+            pubspec.lock \
+            ios/Podfile \
+            ios/Podfile.lock \
+            ios/Runner/Info.plist \
+            ':(glob)ios/**/*.entitlements' \
+            scripts/ios/runner-entitlements.plist \
+            scripts/ios/trollstore-entitlements.plist \
+            Gemfile \
+            Gemfile.lock
 
       - name: Select Xcode 16.4
         shell: bash
@@ -234,12 +315,49 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          result_bundle="$RUNNER_TEMP/runner-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.xcresult"
+          attachment_dir="$RUNNER_TEMP/runner-test-attachments-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           xcodebuild test \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
+            -resultBundlePath "$result_bundle" \
             CODE_SIGNING_ALLOWED=NO
+          xcrun xcresulttool export attachments \
+            --path "$result_bundle" \
+            --output-path "$attachment_dir"
+          mkdir -p ../build/ios/artifacts
+          ATTACHMENT_DIR="$attachment_dir" \
+            CAPABILITY_OUTPUT='../build/ios/artifacts/mpv-capability-manifest.json' \
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          source_root = Path(os.environ['ATTACHMENT_DIR'])
+          output = Path(os.environ['CAPABILITY_OUTPUT'])
+          manifest = None
+          for candidate in source_root.rglob('*'):
+              if not candidate.is_file():
+                  continue
+              try:
+                  decoded = json.loads(candidate.read_text())
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                  continue
+              if decoded.get('schema') == 'emby-mpv-capabilities/v1':
+                  manifest = decoded
+                  output.write_bytes(candidate.read_bytes())
+                  break
+          assert manifest is not None
+          assert manifest['schema'] == 'emby-mpv-capabilities/v1'
+          assert manifest['diskCapabilityPassed'] is True
+          assert manifest['profileSwitchStrategy'] in {
+              'inPlaceAfterMediaStop', 'requiresPlayerRecreation'
+          }
+          assert all(manifest['options'].values())
+          assert manifest['resetValues']['demuxer-cache-dir'] == ''
+          print(json.dumps(manifest, sort_keys=True, separators=(',', ':')))
+          PY
 
       - name: Generate Runner entitlement mirrors
         shell: bash
@@ -284,6 +402,7 @@ jobs:
         env:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
+          MPV_CAPABILITY_MANIFEST: build/ios/artifacts/mpv-capability-manifest.json
         run: bash scripts/ios/build_trollstore_ipa.sh
 
       - name: Verify portable IPA checksum
@@ -318,6 +437,7 @@ jobs:
           path: |
             build/ios/artifacts/*-diagnostics-*.zip
             build/ios/artifacts/*.txt
+            build/ios/artifacts/*.json
             build/ios/artifacts/*.plist
             build/ios/artifacts/entitlements-fakesign/**
             build/ios/artifacts/entitlements-final/**

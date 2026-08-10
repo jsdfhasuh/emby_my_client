@@ -9,6 +9,7 @@ abstract interface class NativePlaybackPropertyAccess {
   Future<Object?> getNative(String name);
   Future<bool> hasOption(String name);
   Future<bool> hasProperty(String name);
+  Future<void> command(List<String> command);
 }
 
 class NativePlaybackOperationTimeout implements Exception {
@@ -50,11 +51,13 @@ class MediaKitNativePlaybackPropertyAccess
   const MediaKitNativePlaybackPropertyAccess(
     this.player, {
     this.timeout = const Duration(seconds: 1),
+    this.commandTimeout = const Duration(seconds: 2),
     this.timeoutReporter,
   });
 
   final NativePlayer player;
   final Duration timeout;
+  final Duration commandTimeout;
   final NativePlaybackTimeoutReporter? timeoutReporter;
 
   @override
@@ -102,4 +105,8 @@ class MediaKitNativePlaybackPropertyAccess
       r'(^|[^A-Za-z0-9_-])' + RegExp.escape(name) + r'([^A-Za-z0-9_-]|$)',
     ).hasMatch(raw);
   }
+
+  @override
+  Future<void> command(List<String> command) =>
+      player.command(command).timeout(commandTimeout);
 }

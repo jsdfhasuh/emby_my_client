@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -99,6 +100,23 @@ void main() {
     },
   );
 
+  test('missing any complete profile option blocks the disk gate', () async {
+    final access = _FakeNativeAccess.complete()
+      ..supportedOptions.remove('stream-buffer-size');
+    final experiment = _FakeExperiment(
+      PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
+    );
+
+    final result = await PlaybackCacheCapabilityProbe(
+      access: access,
+      profileSwitchExperiment: experiment,
+    ).probe();
+
+    expect(result.supportsDiskCache, isTrue);
+    expect(result.diskGatePassed, isFalse);
+    expect(experiment.calls, 0);
+  });
+
   test('native operations have a fixed timeout', () async {
     final pending = Completer<void>();
     NativePlaybackOperationKind? reported;
@@ -120,6 +138,33 @@ void main() {
     );
     expect(reported, NativePlaybackOperationKind.propertyRead);
   });
+
+  test(
+    'runtime experiment applies disk memory and disabled around stop',
+    () async {
+      final access = _FakeNativeAccess.complete();
+
+      final result = await PlaybackCacheCapabilityProbe(
+        access: access,
+        profileSwitchExperiment:
+            const RuntimePlaybackCacheProfileSwitchExperiment(),
+      ).probe();
+
+      expect(
+        result.profileSwitchStrategy,
+        PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
+      );
+      expect(access.commands, [
+        ['loadfile', isA<String>(), 'replace'],
+        ['stop'],
+        ['loadfile', isA<String>(), 'replace'],
+        ['stop'],
+        ['loadfile', isA<String>(), 'replace'],
+        ['stop'],
+      ]);
+      expect(access.profileCacheModes, ['yes/yes', 'yes/no', 'no/no']);
+    },
+  );
 }
 
 class _FakeExperiment implements PlaybackCacheProfileSwitchExperiment {
@@ -163,6 +208,8 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   final Set<String> supportedProperties;
   final Map<String, String> strings;
   final Map<String, Object> nativeValues;
+  final List<List<Object>> commands = [];
+  final List<String> profileCacheModes = [];
 
   @override
   Future<String?> getString(String name) async => strings[name];
@@ -181,5 +228,16 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   @override
   Future<void> setString(String name, String value) async {
     strings[name] = value;
+  }
+
+  @override
+  Future<void> command(List<String> command) async {
+    commands.add(List<Object>.of(command));
+    if (command.first == 'loadfile') {
+      profileCacheModes.add('${strings['cache']}/${strings['cache-on-disk']}');
+      strings['idle-active'] = 'no';
+    } else if (command.first == 'stop') {
+      strings['idle-active'] = 'yes';
+    }
   }
 }

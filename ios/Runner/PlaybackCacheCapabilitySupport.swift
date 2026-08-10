@@ -16,12 +16,7 @@ struct PlaybackCacheNativeCapabilitySnapshot {
   let profileSwitchStrategy: PlaybackCacheNativeProfileSwitchStrategy
 
   var diskCapabilityPassed: Bool {
-    let requiredOptions = Set([
-      "cache",
-      "cache-on-disk",
-      "demuxer-cache-dir",
-      "demuxer-cache-unlink-files",
-    ])
+    let requiredOptions = Set(PlaybackCacheNativeProbe.optionNames)
     return requiredOptions.isSubset(of: supportedOptions)
       && unlinkChoices.contains("immediate")
       && properties.contains("demuxer-cache-state")
@@ -33,6 +28,7 @@ enum PlaybackCacheNativeProbeError: Error {
   case createFailed
   case initializeFailed(Int32)
   case temporaryMediaFailed
+  case unsafeManifest
 }
 
 enum PlaybackCacheNativeProbe {
@@ -78,12 +74,7 @@ enum PlaybackCacheNativeProbe {
       }
     }
 
-    let requiredOptions = Set([
-      "cache",
-      "cache-on-disk",
-      "demuxer-cache-dir",
-      "demuxer-cache-unlink-files",
-    ])
+    let requiredOptions = Set(optionNames)
     let strategy: PlaybackCacheNativeProfileSwitchStrategy
     if requiredOptions.isSubset(of: supportedOptions)
       && choices.contains("immediate")
@@ -238,8 +229,8 @@ enum PlaybackCacheNativeProbe {
     for (name, value) in values {
       guard setString(context, name, value) else { return false }
     }
-    for name in ["cache", "cache-on-disk", "demuxer-cache-dir", "cache-secs"] {
-      guard normalized(stringProperty(context, name)) == normalized(values[name]) else {
+    for name in optionNames {
+      guard equivalent(stringProperty(context, name), values[name]) else {
         return false
       }
     }
@@ -382,7 +373,19 @@ enum PlaybackCacheNativeProbe {
   }
 
   private static func normalized(_ value: String?) -> String {
-    (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    (value ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+  }
+
+  private static func equivalent(_ actual: String?, _ expected: String?) -> Bool {
+    let left = normalized(actual)
+    let right = normalized(expected)
+    if left == right { return true }
+    guard let leftNumber = Double(left), let rightNumber = Double(right) else {
+      return false
+    }
+    return leftNumber == rightNumber
   }
 
   private static func nativeString(_ value: Any) -> String {
@@ -415,5 +418,60 @@ enum PlaybackCacheNativeProbe {
     append(2)
     append16(0)
     return data
+  }
+}
+
+extension PlaybackCacheNativeCapabilitySnapshot {
+  func safeManifestData() throws -> Data {
+    guard
+      let version = Self.safeToken(mpvVersion),
+      let safePlatform = Self.safeToken(platform),
+      Set(resetValues.keys) == Set(PlaybackCacheNativeProbe.optionNames),
+      resetValues["demuxer-cache-dir"] == ""
+    else {
+      throw PlaybackCacheNativeProbeError.unsafeManifest
+    }
+    var safeResets: [String: String] = [:]
+    for option in PlaybackCacheNativeProbe.optionNames {
+      guard let value = resetValues[option], Self.isSafeValue(value) else {
+        throw PlaybackCacheNativeProbeError.unsafeManifest
+      }
+      safeResets[option] = value
+    }
+    let manifest: [String: Any] = [
+      "schema": "emby-mpv-capabilities/v1",
+      "mpvVersionFingerprint": version,
+      "platform": safePlatform,
+      "options": Dictionary(uniqueKeysWithValues:
+        PlaybackCacheNativeProbe.optionNames.map {
+          ($0, supportedOptions.contains($0))
+        }
+      ),
+      "properties": Dictionary(uniqueKeysWithValues:
+        PlaybackCacheNativeProbe.requiredProperties.map {
+          ($0, properties.contains($0))
+        }
+      ),
+      "unlinkChoices": unlinkChoices.sorted(),
+      "resetValues": safeResets,
+      "profileSwitchStrategy": profileSwitchStrategy.rawValue,
+      "diskCapabilityPassed": diskCapabilityPassed,
+    ]
+    return try JSONSerialization.data(
+      withJSONObject: manifest,
+      options: [.prettyPrinted, .sortedKeys]
+    )
+  }
+
+  private static func safeToken(_ value: String) -> String? {
+    let pattern = "[A-Za-z0-9][A-Za-z0-9._+\\-]{0,63}"
+    guard let range = value.range(of: pattern, options: .regularExpression) else {
+      return nil
+    }
+    return String(value[range])
+  }
+
+  private static func isSafeValue(_ value: String) -> Bool {
+    value.range(of: "^[A-Za-z0-9._+\\-]*$", options: .regularExpression) != nil
   }
 }

@@ -16,6 +16,23 @@ final class RunnerTests: XCTestCase {
     )
     XCTAssertTrue(Set(snapshot.resetValues.keys).isSubset(of: snapshot.supportedOptions))
     XCTAssertTrue(snapshot.properties.contains("property-list"))
+    XCTAssertEqual(
+      snapshot.supportedOptions,
+      Set(PlaybackCacheNativeProbe.optionNames)
+    )
+    XCTAssertEqual(
+      Set(snapshot.resetValues.keys),
+      Set(PlaybackCacheNativeProbe.optionNames)
+    )
+    XCTAssertTrue(snapshot.unlinkChoices.contains("immediate"))
+    XCTAssertNotEqual(snapshot.profileSwitchStrategy, .unsupported)
+    XCTAssertTrue(snapshot.diskCapabilityPassed)
+
+    let manifest = try snapshot.safeManifestData()
+    let attachment = XCTAttachment(data: manifest)
+    attachment.name = "mpv-capability-manifest.json"
+    attachment.lifetime = .keepAlways
+    add(attachment)
 
     print("mpv_version=\(snapshot.mpvVersion)")
     print("mpv_platform=\(snapshot.platform)")
