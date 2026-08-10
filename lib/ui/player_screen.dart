@@ -22,6 +22,8 @@ import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
 import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
+import '../playback/playback_settings_repository.dart';
+import '../playback/playback_settings_scope.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
@@ -195,7 +197,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
-  final PlaybackSettingsStore _settingsStore = PlaybackSettingsStore();
+  late final PlaybackSettingsRepository _settingsRepository;
   final TrackMapper _trackMapper = const TrackMapper();
   PlaybackController? _playbackController;
   PlaybackSettings _settings = const PlaybackSettings();
@@ -232,6 +234,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _volumeFailureReported = false;
   late final PlayerCloseCoordinator _closeCoordinator;
   bool _playbackResourcesReleased = false;
+  bool _playbackInitializationStarted = false;
   double? _lastMetricsWidth;
   double? _lastMetricsHeight;
   AppLifecycleState? _lastLifecycleState;
@@ -289,6 +292,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       _handleSystemControlFailure(brightness: false, error: error);
     }
     unawaited(_enterFullscreen());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_playbackInitializationStarted) return;
+    _playbackInitializationStarted = true;
+    _settingsRepository = PlaybackSettingsRepositoryScope.of(context);
     unawaited(_initializePlaybackSafely());
   }
 
@@ -300,10 +311,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _initializePlayback() async {
-    final settings = await _settingsStore.load(widget.api.session);
+    final snapshot = await _settingsRepository.load(widget.api.session);
     if (!mounted) return;
-    _settings = settings;
-    _videoFit = _boxFit(settings.videoFit);
+    _settings = snapshot.settings;
+    _videoFit = _boxFit(snapshot.settings.videoFit);
     await _startCurrentItem();
   }
 
@@ -791,20 +802,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  Future<void> _saveSettings(PlaybackSettings settings) async {
+  Future<void> _patchSettings(PlaybackSettingsPatch patch) async {
+    final snapshot = await _settingsRepository.patch(widget.api.session, patch);
     if (mounted) {
       setState(() {
-        _settings = settings;
-        _videoFit = _boxFit(settings.videoFit);
+        _settings = snapshot.settings;
+        _videoFit = _boxFit(snapshot.settings.videoFit);
       });
     }
-    await _settingsStore.save(widget.api.session, settings);
   }
 
   Future<void> _changeMaximumBitrate(int bitrate) async {
     final controller = _playbackController;
     if (controller == null || bitrate == _settings.maxStreamingBitrate) return;
-    await _saveSettings(_settings.copyWith(maxStreamingBitrate: bitrate));
+    await _patchSettings(PlaybackSettingsPatch(maxStreamingBitrate: bitrate));
     await controller.setMaximumBitrate(bitrate);
   }
 
@@ -812,18 +823,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     final controller = _playbackController;
     if (controller == null) return;
     await controller.setPlaybackRate(rate);
-    await _saveSettings(_settings.copyWith(playbackRate: rate));
+    await _patchSettings(PlaybackSettingsPatch(playbackRate: rate));
   }
 
   Future<void> _changeVideoFit(String fit) =>
-      _saveSettings(_settings.copyWith(videoFit: fit));
+      _patchSettings(PlaybackSettingsPatch(videoFit: fit));
 
   Future<void> _changeAudioDelay(int milliseconds) async {
     await _playbackController?.setAudioDelay(
       Duration(milliseconds: milliseconds),
     );
-    await _saveSettings(
-      _settings.copyWith(audioDelayMilliseconds: milliseconds),
+    await _patchSettings(
+      PlaybackSettingsPatch(audioDelayMilliseconds: milliseconds),
     );
   }
 
@@ -831,8 +842,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _playbackController?.setSubtitleDelay(
       Duration(milliseconds: milliseconds),
     );
-    await _saveSettings(
-      _settings.copyWith(subtitleDelayMilliseconds: milliseconds),
+    await _patchSettings(
+      PlaybackSettingsPatch(subtitleDelayMilliseconds: milliseconds),
     );
   }
 
@@ -843,7 +854,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       outlineColor: settings.subtitleOutlineColor,
       position: settings.subtitlePosition,
     );
-    await _saveSettings(settings);
+    await _patchSettings(
+      PlaybackSettingsPatch(
+        subtitleFontSize: settings.subtitleFontSize,
+        subtitleColor: settings.subtitleColor,
+        subtitleOutlineColor: settings.subtitleOutlineColor,
+        subtitlePosition: settings.subtitlePosition,
+      ),
+    );
   }
 
   BoxFit _boxFit(String value) => switch (value) {
@@ -1447,7 +1465,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           onChanged: (value) {
             if (value == null) return;
             unawaited(
-              _saveSettings(_settings.copyWith(seekBackwardSeconds: value)),
+              _patchSettings(PlaybackSettingsPatch(seekBackwardSeconds: value)),
             );
           },
         ),
@@ -1467,7 +1485,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           onChanged: (value) {
             if (value == null) return;
             unawaited(
-              _saveSettings(_settings.copyWith(seekForwardSeconds: value)),
+              _patchSettings(PlaybackSettingsPatch(seekForwardSeconds: value)),
             );
           },
         ),

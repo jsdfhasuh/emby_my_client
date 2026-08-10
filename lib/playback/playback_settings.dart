@@ -1,9 +1,3 @@
-import 'dart:convert';
-
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-
-import '../models/emby_models.dart';
-
 class PlaybackSettings {
   const PlaybackSettings({
     this.maxStreamingBitrate = 120000000,
@@ -88,34 +82,6 @@ class PlaybackSettings {
     'subtitleOutlineColor': subtitleOutlineColor,
     'subtitlePosition': subtitlePosition,
   };
-}
-
-class PlaybackSettingsStore {
-  PlaybackSettingsStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
-
-  final FlutterSecureStorage _storage;
-
-  Future<PlaybackSettings> load(EmbySession session) async {
-    final value = await _storage.read(key: _key(session));
-    if (value == null || value.isEmpty) return const PlaybackSettings();
-    try {
-      return PlaybackSettings.fromJson(
-        Map<String, dynamic>.from(jsonDecode(value) as Map),
-      );
-    } catch (_) {
-      return const PlaybackSettings();
-    }
-  }
-
-  Future<void> save(EmbySession session, PlaybackSettings settings) =>
-      _storage.write(key: _key(session), value: jsonEncode(settings.toJson()));
-
-  Future<void> clear(EmbySession session) =>
-      _storage.delete(key: _key(session));
-
-  String _key(EmbySession session) =>
-      'playback_settings_v1_${session.serverId}_${session.userId}';
 }
 
 int? _asInt(dynamic value) {

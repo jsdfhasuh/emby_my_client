@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'playback/playback_settings_scope.dart';
 import 'state/app_controller.dart';
 import 'ui/home_shell.dart';
 import 'ui/login_screen.dart';
@@ -16,6 +17,10 @@ class EmbyClientApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: _darkTheme(),
+      builder: (context, child) => PlaybackSettingsRepositoryScope(
+        repository: controller.playbackSettingsRepository,
+        child: child ?? const SizedBox.shrink(),
+      ),
       home: ListenableBuilder(
         listenable: controller,
         builder: (context, _) {

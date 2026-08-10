@@ -7,6 +7,7 @@ import 'package:emby_my_client/data/local_database.dart';
 import 'package:emby_my_client/downloads/download_settings.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
+import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:emby_my_client/search/search_history_store.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -53,7 +54,7 @@ void main() {
       final downloadSettings = MemoryDownloadSettingsStore();
       final librarySettings = MemoryLibraryCategorySettingsStore();
       final searchHistory = MemorySearchHistoryStore();
-      final playbackSettings = PlaybackSettingsStore();
+      final playbackSettings = PlaybackSettingsRepository();
       await downloadSettings.save(
         _firstScope,
         const DownloadSettings(wifiOnly: false),
@@ -72,13 +73,13 @@ void main() {
       );
       await searchHistory.add(_firstScope, 'first query');
       await searchHistory.add(_secondScope, 'second query');
-      await playbackSettings.save(
+      await playbackSettings.patch(
         _firstSession,
-        const PlaybackSettings(maxStreamingBitrate: 1000000),
+        const PlaybackSettingsPatch(maxStreamingBitrate: 1000000),
       );
-      await playbackSettings.save(
+      await playbackSettings.patch(
         _secondSession,
-        const PlaybackSettings(maxStreamingBitrate: 2000000),
+        const PlaybackSettingsPatch(maxStreamingBitrate: 2000000),
       );
 
       final cleanup = AccountDataCleanup(
@@ -88,7 +89,7 @@ void main() {
         downloadSettingsStore: downloadSettings,
         libraryCategorySettingsStore: librarySettings,
         searchHistoryStore: searchHistory,
-        playbackSettingsStore: playbackSettings,
+        playbackSettingsRepository: playbackSettings,
       );
 
       await cleanup.delete(scope: _firstScope, session: _firstSession);
@@ -114,11 +115,15 @@ void main() {
       expect(await searchHistory.load(_firstScope), isEmpty);
       expect(await searchHistory.load(_secondScope), ['second query']);
       expect(
-        (await playbackSettings.load(_firstSession)).maxStreamingBitrate,
+        (await playbackSettings.load(
+          _firstSession,
+        )).settings.maxStreamingBitrate,
         const PlaybackSettings().maxStreamingBitrate,
       );
       expect(
-        (await playbackSettings.load(_secondSession)).maxStreamingBitrate,
+        (await playbackSettings.load(
+          _secondSession,
+        )).settings.maxStreamingBitrate,
         2000000,
       );
     },

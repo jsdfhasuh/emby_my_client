@@ -6,7 +6,7 @@ import '../core/server_scope.dart';
 import '../downloads/download_path_policy.dart';
 import '../downloads/download_settings.dart';
 import '../models/emby_models.dart';
-import '../playback/playback_settings.dart';
+import '../playback/playback_settings_repository.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
 import 'local_database.dart';
@@ -18,7 +18,7 @@ class AccountDataCleanup {
     DownloadSettingsStore? downloadSettingsStore,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
     SearchHistoryStore? searchHistoryStore,
-    PlaybackSettingsStore? playbackSettingsStore,
+    PlaybackSettingsRepository? playbackSettingsRepository,
   }) : _database = database,
        _directoryResolver = directoryResolver ?? defaultDownloadDirectory,
        _downloadSettingsStore =
@@ -28,15 +28,15 @@ class AccountDataCleanup {
            SharedPreferencesLibraryCategorySettingsStore(),
        _searchHistoryStore =
            searchHistoryStore ?? SharedPreferencesSearchHistoryStore(),
-       _playbackSettingsStore =
-           playbackSettingsStore ?? PlaybackSettingsStore();
+       _playbackSettingsRepository =
+           playbackSettingsRepository ?? PlaybackSettingsRepository();
 
   final LocalDatabase _database;
   final Future<Directory> Function(ServerScope scope) _directoryResolver;
   final DownloadSettingsStore _downloadSettingsStore;
   final LibraryCategorySettingsStore _libraryCategorySettingsStore;
   final SearchHistoryStore _searchHistoryStore;
-  final PlaybackSettingsStore _playbackSettingsStore;
+  final PlaybackSettingsRepository _playbackSettingsRepository;
 
   Future<void> delete({
     required ServerScope scope,
@@ -72,7 +72,7 @@ class AccountDataCleanup {
       _downloadSettingsStore.clear(scope),
       _libraryCategorySettingsStore.clear(scope),
       _searchHistoryStore.clear(scope),
-      _playbackSettingsStore.clear(session),
+      _playbackSettingsRepository.deleteAccountSettings(session),
     ]);
   }
 }

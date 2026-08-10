@@ -22,6 +22,7 @@ import '../library/library_local_media_scan_service.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
+import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
 
 typedef SignInAuthenticator =
@@ -59,6 +60,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     LocalDatabase? database,
     ClientRegistry<EmbyApi>? clients,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
+    PlaybackSettingsRepository? playbackSettingsRepository,
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
     SignInAuthenticator? authenticator,
@@ -68,6 +70,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
+       _playbackSettingsRepository =
+           playbackSettingsRepository ?? PlaybackSettingsRepository(),
        _accountDataCleanup = accountDataCleanup,
        _capabilities = capabilities ?? PlatformCapabilities.current(),
        _authenticate = authenticator ?? _defaultAuthenticate,
@@ -88,6 +92,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final DownloadServiceFactory? _downloadServiceFactory;
   final LibraryScanServiceFactory? _libraryScanServiceFactory;
   final LocalDatabase _database;
+  final PlaybackSettingsRepository _playbackSettingsRepository;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
   AccountDataCleanup? _accountDataCleanup;
@@ -122,6 +127,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   bool get isInitializing => _isInitializing;
   bool get isSignedIn => _session != null;
   bool get localDatabaseAvailable => _localDatabaseAvailable;
+  PlaybackSettingsRepository get playbackSettingsRepository =>
+      _playbackSettingsRepository;
   EmbyApi get api => _clients.requireClient(_scope!);
 
   Future<void> initialize() => _initialization ??= _initialize();
@@ -469,6 +476,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _shutdownLibraryScanService();
     await _shutdownDownloads(stopExecutor: true);
     if (current != null) {
+      await _playbackSettingsRepository.deactivate(current);
+    }
+    if (current != null) {
       try {
         await currentApi?.logout();
       } catch (_) {
@@ -554,6 +564,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     await _shutdownLibraryScanService();
+    final expiredSession = _session;
+    if (expiredSession != null) {
+      await _playbackSettingsRepository.deactivate(expiredSession);
+    }
     _session = null;
     _scope = null;
     _serverCapabilities = null;
@@ -623,6 +637,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       _accountDataCleanup ??= AccountDataCleanup(
         database: _database,
         libraryCategorySettingsStore: _categorySettingsStore,
+        playbackSettingsRepository: _playbackSettingsRepository,
       );
 
   EmbyApi _createApi(EmbySession session, ServerScope scope) {
@@ -920,6 +935,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _shutdownLibraryScanService();
     await _shutdownDownloads();
     await _clients.dispose();
+    await _playbackSettingsRepository.dispose();
     await _database.close();
   }
 }
