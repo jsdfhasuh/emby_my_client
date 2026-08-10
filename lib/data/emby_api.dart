@@ -11,6 +11,7 @@ import '../library/library_alphabet_filter.dart';
 import '../library/library_browse_state.dart' as browse;
 import '../library/library_content_profile.dart';
 import '../models/emby_models.dart';
+import '../playback/cache/playback_cache_policy.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
 import 'emby_user_data_service.dart';
@@ -1108,6 +1109,7 @@ class EmbyApi {
       subtitleStreamIndex: selectedSubtitle,
       errorCode: info.errorCode,
     );
+    final duration = Duration(microseconds: (item.runTimeTicks ?? 0) ~/ 10);
     return PlaybackPlan(
       uri: uri,
       mediaSourceId: source.id,
@@ -1121,6 +1123,16 @@ class EmbyApi {
       container: source.container,
       bitrate: source.bitrate,
       errorCode: info.errorCode,
+      sourceProtocol: source.protocol,
+      duration: duration,
+      transportKind: classifyPlaybackTransport(
+        method: method,
+        uri: uri,
+        sourceProtocol: source.protocol,
+        container: source.container,
+        liveStreamId: source.liveStreamId,
+        duration: duration,
+      ),
       mediaStreams: source.mediaStreams,
       transcodingReasons: source.transcodingReasons,
       availableMediaSources: sources,

@@ -124,6 +124,8 @@ void main() {
       expect(plan.mediaSourceId, 'direct');
       expect(plan.method, PlayMethod.directPlay);
       expect(plan.usesServerAuthentication, isTrue);
+      expect(plan.transportKind, PlaybackTransportKind.progressiveHttp);
+      expect(plan.duration, const Duration(hours: 1));
     });
 
     test(
@@ -589,6 +591,7 @@ const _item = EmbyItem(
   name: 'Movie',
   type: 'Movie',
   mediaType: 'Video',
+  runTimeTicks: 36000000000,
   imageTags: {},
   backdropImageTags: [],
   genres: [],

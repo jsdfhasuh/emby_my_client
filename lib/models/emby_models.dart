@@ -533,6 +533,14 @@ enum PlayMethod {
   final String serverValue;
 }
 
+enum PlaybackTransportKind {
+  offlineLocal,
+  progressiveHttp,
+  segmentedHttp,
+  live,
+  unknown,
+}
+
 class PlaybackMediaSource {
   const PlaybackMediaSource({
     required this.id,
@@ -640,6 +648,9 @@ class PlaybackPlan {
     this.container,
     this.bitrate,
     this.errorCode,
+    this.sourceProtocol,
+    this.duration,
+    this.transportKind = PlaybackTransportKind.unknown,
   });
 
   final Uri uri;
@@ -654,6 +665,9 @@ class PlaybackPlan {
   final String? container;
   final int? bitrate;
   final String? errorCode;
+  final String? sourceProtocol;
+  final Duration? duration;
+  final PlaybackTransportKind transportKind;
   final List<Map<String, dynamic>> mediaStreams;
   final List<String> transcodingReasons;
   final List<PlaybackMediaSource> availableMediaSources;
@@ -675,6 +689,9 @@ class PlaybackPlan {
     String? container,
     int? bitrate,
     String? errorCode,
+    String? sourceProtocol,
+    Duration? duration,
+    PlaybackTransportKind? transportKind,
     List<Map<String, dynamic>>? mediaStreams,
     List<String>? transcodingReasons,
     List<PlaybackMediaSource>? availableMediaSources,
@@ -698,6 +715,9 @@ class PlaybackPlan {
     container: container ?? this.container,
     bitrate: bitrate ?? this.bitrate,
     errorCode: errorCode ?? this.errorCode,
+    sourceProtocol: sourceProtocol ?? this.sourceProtocol,
+    duration: duration ?? this.duration,
+    transportKind: transportKind ?? this.transportKind,
     mediaStreams: mediaStreams ?? this.mediaStreams,
     transcodingReasons: transcodingReasons ?? this.transcodingReasons,
     availableMediaSources: availableMediaSources ?? this.availableMediaSources,

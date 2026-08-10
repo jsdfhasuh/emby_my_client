@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
+import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/offline/offline_playback_reporter.dart';
 import 'package:emby_my_client/offline/offline_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,7 +17,7 @@ void main() {
       '${directory.path}${Platform.pathSeparator}offline-video.mkv',
     );
     await file.writeAsBytes([1, 2, 3, 4]);
-    final offline = _offline(file.path);
+    final offline = _offline(file.path, runtimeTicks: 36000000000);
     final resolver = OfflinePlaybackResolver(offline);
 
     final plan = await resolver.resolve(offline.toEmbyItem());
@@ -25,6 +26,8 @@ void main() {
     expect(plan.uri, file.uri);
     expect(plan.playSessionId, isNull);
     expect(plan.usesServerAuthentication, isFalse);
+    expect(plan.transportKind, PlaybackTransportKind.offlineLocal);
+    expect(plan.duration, const Duration(hours: 1));
     expect(
       () => resolver.resolve(offline.toEmbyItem(), forceTranscode: true),
       throwsStateError,
