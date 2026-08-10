@@ -1,19 +1,30 @@
 import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
+import '../models/emby_models.dart';
+import '../playback/cache/playback_cache_settings.dart';
+import '../playback/cache/playback_cache_storage.dart';
+import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
+import 'playback_cache_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.accountName,
+    required this.session,
+    required this.playbackSettingsRepository,
+    required this.playbackCacheStorage,
     required this.onLibraryCategorySettingsChanged,
     required this.onDeleteAccountData,
   });
 
   final LibraryCategorySettings settings;
   final String accountName;
+  final EmbySession session;
+  final PlaybackSettingsRepository playbackSettingsRepository;
+  final PlaybackCacheStorage playbackCacheStorage;
   final Future<void> Function(LibraryCategorySettings settings)
   onLibraryCategorySettingsChanged;
   final Future<void> Function() onDeleteAccountData;
@@ -26,11 +37,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late LibraryCategorySettings _settings;
   bool _saving = false;
   bool _deletingAccountData = false;
+  PlaybackCacheSettings? _playbackCacheSettings;
 
   @override
   void initState() {
     super.initState();
     _settings = widget.settings;
+    _loadPlaybackCacheSummary();
+  }
+
+  Future<void> _loadPlaybackCacheSummary() async {
+    try {
+      final snapshot = await widget.playbackSettingsRepository.load(
+        widget.session,
+      );
+      if (mounted) {
+        setState(() => _playbackCacheSettings = snapshot.settings.cache);
+      }
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'playback-cache',
+        'Playback cache settings summary load failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _openPlaybackCacheSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlaybackCacheSettingsScreen(
+          session: widget.session,
+          repository: widget.playbackSettingsRepository,
+          storage: widget.playbackCacheStorage,
+        ),
+      ),
+    );
+    if (mounted) await _loadPlaybackCacheSummary();
   }
 
   Future<void> _update(LibraryCategorySettings settings) async {
@@ -161,6 +205,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: _settings.showFolders,
               onChanged: (value) =>
                   _update(_settings.copyWith(showFolders: value)),
+            ),
+            const Divider(height: 32),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Text(
+                '播放',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+            ListTile(
+              key: const ValueKey('playback-cache-settings-entry'),
+              leading: const Icon(Icons.storage_outlined),
+              title: const Text('播放缓存'),
+              subtitle: Text(
+                _playbackCacheSettings == null
+                    ? '正在读取缓存设置'
+                    : playbackCacheSettingsSummary(_playbackCacheSettings!),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _deletingAccountData ? null : _openPlaybackCacheSettings,
             ),
             const Divider(height: 32),
             Padding(

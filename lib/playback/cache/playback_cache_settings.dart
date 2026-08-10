@@ -36,6 +36,21 @@ class PlaybackCacheSettings {
   final int customSessionTargetBytes;
   final int reservedFreeBytes;
 
+  PlaybackCacheSettings copyWith({
+    PlaybackCacheMode? mode,
+    int? customForwardSeconds,
+    int? customBackwardSeconds,
+    int? customSessionTargetBytes,
+    int? reservedFreeBytes,
+  }) => PlaybackCacheSettings(
+    mode: mode ?? this.mode,
+    customForwardSeconds: customForwardSeconds ?? this.customForwardSeconds,
+    customBackwardSeconds: customBackwardSeconds ?? this.customBackwardSeconds,
+    customSessionTargetBytes:
+        customSessionTargetBytes ?? this.customSessionTargetBytes,
+    reservedFreeBytes: reservedFreeBytes ?? this.reservedFreeBytes,
+  );
+
   factory PlaybackCacheSettings.fromJsonValue(Object? value) {
     if (value is! Map) return const PlaybackCacheSettings();
     return PlaybackCacheSettings(

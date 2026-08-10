@@ -1,4 +1,7 @@
 import 'package:emby_my_client/core/server_scope.dart';
+import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/settings_screen.dart';
 import 'package:flutter/material.dart';
@@ -78,6 +81,9 @@ void main() {
         home: SettingsScreen(
           settings: const LibraryCategorySettings(),
           accountName: 'tester',
+          session: _session,
+          playbackSettingsRepository: _playbackRepository(),
+          playbackCacheStorage: _UnavailablePlaybackCacheStorage(),
           onLibraryCategorySettingsChanged: (settings) async {
             changes.add(settings);
           },
@@ -119,6 +125,9 @@ void main() {
         home: SettingsScreen(
           settings: const LibraryCategorySettings(),
           accountName: 'tester',
+          session: _session,
+          playbackSettingsRepository: _playbackRepository(),
+          playbackCacheStorage: _UnavailablePlaybackCacheStorage(),
           onLibraryCategorySettingsChanged: (_) async {},
           onDeleteAccountData: () async {
             deleteCalls++;
@@ -127,6 +136,7 @@ void main() {
       ),
     );
 
+    await tester.scrollUntilVisible(find.text('删除此账户数据'), 300);
     await tester.tap(find.text('删除此账户数据'));
     await tester.pumpAndSettle();
     expect(find.text('删除此账户数据？'), findsOneWidget);
@@ -136,6 +146,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(deleteCalls, 0);
 
+    await tester.scrollUntilVisible(find.text('删除此账户数据'), 300);
     await tester.tap(find.text('删除此账户数据'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除并退出'));
@@ -147,3 +158,46 @@ void main() {
 
 const _firstScope = ServerScope(serverId: 'server-1', userId: 'user-1');
 const _secondScope = ServerScope(serverId: 'server-1', userId: 'user-2');
+
+const _session = EmbySession(
+  serverUrl: 'https://example.test',
+  serverName: 'Test',
+  serverId: 'server-1',
+  userId: 'user-1',
+  username: 'tester',
+  accessToken: 'token',
+  deviceId: 'device',
+);
+
+PlaybackSettingsRepository _playbackRepository() =>
+    PlaybackSettingsRepository(storage: _MemoryPlaybackSettingsStorage());
+
+class _MemoryPlaybackSettingsStorage implements PlaybackSettingsStorage {
+  final Map<String, String> values = {};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+
+  @override
+  Future<void> delete(String key) async => values.remove(key);
+}
+
+class _UnavailablePlaybackCacheStorage implements PlaybackCacheStorage {
+  @override
+  Future<PlaybackCacheStorageSnapshot> prepareSession() async =>
+      const PlaybackCacheStorageSnapshot.unavailable(
+        PlaybackCacheStorageFailureReason.storageCapacityUnknown,
+      );
+
+  @override
+  Future<int?> freeBytesFor(_) async => null;
+
+  @override
+  Future<void> cleanupSession(PlaybackCacheSession session) async {}
+
+  @override
+  Future<void> cleanupNonActiveMarkedSessions() async {}
+}

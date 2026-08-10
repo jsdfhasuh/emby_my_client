@@ -93,6 +93,10 @@ class _HomeShellState extends State<HomeShell> {
           builder: (_) => SettingsScreen(
             settings: widget.controller.libraryCategorySettings,
             accountName: widget.controller.session!.username,
+            session: widget.controller.session!,
+            playbackSettingsRepository:
+                widget.controller.playbackSettingsRepository,
+            playbackCacheStorage: widget.controller.playbackCacheStorage,
             onLibraryCategorySettingsChanged:
                 widget.controller.updateLibraryCategorySettings,
             onDeleteAccountData: widget.controller.deleteCurrentAccountData,

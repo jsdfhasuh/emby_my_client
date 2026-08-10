@@ -28,6 +28,7 @@ import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
 import '../playback/player_session_coordinator.dart';
+import 'widgets/playback_cache_status_section.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
@@ -1485,228 +1486,249 @@ class _PlayerScreenState extends State<PlayerScreen>
     ],
   );
 
-  Widget _buildPlayerOptions(BuildContext sheetContext) => ListView(
-    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-    children: [
-      const Text('播放速度'),
-      const SizedBox(height: 8),
-      SegmentedButton<double>(
-        segments: const [
-          ButtonSegment(value: 0.5, label: Text('0.5×')),
-          ButtonSegment(value: 1, label: Text('1×')),
-          ButtonSegment(value: 1.5, label: Text('1.5×')),
-          ButtonSegment(value: 2, label: Text('2×')),
-        ],
-        selected: {_settings.playbackRate},
-        onSelectionChanged: (values) {
-          Navigator.pop(sheetContext);
-          unawaited(_changePlaybackRate(values.single));
-        },
-      ),
-      const SizedBox(height: 22),
-      const Text('画面模式'),
-      const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: const [
-          ButtonSegment(
-            value: 'contain',
-            icon: Icon(Icons.fit_screen),
-            label: Text('适应'),
+  Widget _buildPlayerOptions(BuildContext sheetContext) {
+    final controller = _playbackController;
+    if (controller == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        children: [
+          const Text('播放速度'),
+          const SizedBox(height: 8),
+          SegmentedButton<double>(
+            segments: const [
+              ButtonSegment(value: 0.5, label: Text('0.5×')),
+              ButtonSegment(value: 1, label: Text('1×')),
+              ButtonSegment(value: 1.5, label: Text('1.5×')),
+              ButtonSegment(value: 2, label: Text('2×')),
+            ],
+            selected: {_settings.playbackRate},
+            onSelectionChanged: (values) {
+              Navigator.pop(sheetContext);
+              unawaited(_changePlaybackRate(values.single));
+            },
           ),
-          ButtonSegment(
-            value: 'cover',
-            icon: Icon(Icons.crop),
-            label: Text('裁剪'),
-          ),
-          ButtonSegment(
-            value: 'fill',
-            icon: Icon(Icons.aspect_ratio),
-            label: Text('填充'),
-          ),
-        ],
-        selected: {_settings.videoFit},
-        onSelectionChanged: (values) {
-          Navigator.pop(sheetContext);
-          unawaited(_changeVideoFit(values.single));
-        },
-      ),
-      const SizedBox(height: 22),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.fast_rewind),
-        title: const Text('快退时长'),
-        trailing: DropdownButton<int>(
-          value: _settings.seekBackwardSeconds,
-          items: const [
-            DropdownMenuItem(value: 5, child: Text('5 秒')),
-            DropdownMenuItem(value: 10, child: Text('10 秒')),
-            DropdownMenuItem(value: 15, child: Text('15 秒')),
-            DropdownMenuItem(value: 30, child: Text('30 秒')),
-          ],
-          onChanged: (value) {
-            if (value == null) return;
-            unawaited(
-              _patchSettings(PlaybackSettingsPatch(seekBackwardSeconds: value)),
-            );
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.fast_forward),
-        title: const Text('快进时长'),
-        trailing: DropdownButton<int>(
-          value: _settings.seekForwardSeconds,
-          items: const [
-            DropdownMenuItem(value: 5, child: Text('5 秒')),
-            DropdownMenuItem(value: 10, child: Text('10 秒')),
-            DropdownMenuItem(value: 15, child: Text('15 秒')),
-            DropdownMenuItem(value: 30, child: Text('30 秒')),
-          ],
-          onChanged: (value) {
-            if (value == null) return;
-            unawaited(
-              _patchSettings(PlaybackSettingsPatch(seekForwardSeconds: value)),
-            );
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.graphic_eq),
-        title: const Text('音频延迟'),
-        trailing: DropdownButton<int>(
-          value: _settings.audioDelayMilliseconds,
-          items: const [
-            DropdownMenuItem(value: -1000, child: Text('-1.0 秒')),
-            DropdownMenuItem(value: -500, child: Text('-0.5 秒')),
-            DropdownMenuItem(value: 0, child: Text('0 秒')),
-            DropdownMenuItem(value: 500, child: Text('+0.5 秒')),
-            DropdownMenuItem(value: 1000, child: Text('+1.0 秒')),
-          ],
-          onChanged: (value) {
-            if (value != null) unawaited(_changeAudioDelay(value));
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.subtitles),
-        title: const Text('字幕延迟'),
-        trailing: DropdownButton<int>(
-          value: _settings.subtitleDelayMilliseconds,
-          items: const [
-            DropdownMenuItem(value: -1000, child: Text('-1.0 秒')),
-            DropdownMenuItem(value: -500, child: Text('-0.5 秒')),
-            DropdownMenuItem(value: 0, child: Text('0 秒')),
-            DropdownMenuItem(value: 500, child: Text('+0.5 秒')),
-            DropdownMenuItem(value: 1000, child: Text('+1.0 秒')),
-          ],
-          onChanged: (value) {
-            if (value != null) unawaited(_changeSubtitleDelay(value));
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.format_size),
-        title: const Text('字幕字号'),
-        trailing: DropdownButton<double>(
-          value: _settings.subtitleFontSize,
-          items: const [
-            DropdownMenuItem(value: 32, child: Text('小')),
-            DropdownMenuItem(value: 42, child: Text('中')),
-            DropdownMenuItem(value: 52, child: Text('大')),
-            DropdownMenuItem(value: 64, child: Text('特大')),
-          ],
-          onChanged: (value) {
-            if (value == null) return;
-            unawaited(
-              _changeSubtitleStyle(_settings.copyWith(subtitleFontSize: value)),
-            );
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.vertical_align_bottom),
-        title: const Text('字幕位置'),
-        trailing: DropdownButton<int>(
-          value: _settings.subtitlePosition,
-          items: const [
-            DropdownMenuItem(value: 75, child: Text('偏上')),
-            DropdownMenuItem(value: 88, child: Text('居中')),
-            DropdownMenuItem(value: 100, child: Text('底部')),
-          ],
-          onChanged: (value) {
-            if (value == null) return;
-            unawaited(
-              _changeSubtitleStyle(_settings.copyWith(subtitlePosition: value)),
-            );
-          },
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.palette_outlined),
-        title: const Text('字幕颜色'),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final color in const [0xFFFFFFFF, 0xFFFFFF00, 0xFF80CBC4])
-              IconButton(
-                tooltip: switch (color) {
-                  0xFFFFFF00 => '黄色',
-                  0xFF80CBC4 => '青色',
-                  _ => '白色',
-                },
-                onPressed: () => unawaited(
-                  _changeSubtitleStyle(
-                    _settings.copyWith(subtitleColor: color),
-                  ),
-                ),
-                icon: Icon(
-                  color == _settings.subtitleColor
-                      ? Icons.check_circle
-                      : Icons.circle,
-                  color: Color(color),
-                ),
+          const SizedBox(height: 22),
+          const Text('画面模式'),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'contain',
+                icon: Icon(Icons.fit_screen),
+                label: Text('适应'),
               ),
-          ],
-        ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.format_color_text),
-        title: const Text('字幕描边'),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final color in const [0xFF000000, 0xFF404040, 0xFFFFFFFF])
-              IconButton(
-                tooltip: switch (color) {
-                  0xFF404040 => '深灰',
-                  0xFFFFFFFF => '白色',
-                  _ => '黑色',
-                },
-                onPressed: () => unawaited(
-                  _changeSubtitleStyle(
-                    _settings.copyWith(subtitleOutlineColor: color),
-                  ),
-                ),
-                icon: Icon(
-                  color == _settings.subtitleOutlineColor
-                      ? Icons.check_circle
-                      : Icons.circle,
-                  color: Color(color),
-                  shadows: const [Shadow(color: Colors.white54, blurRadius: 2)],
-                ),
+              ButtonSegment(
+                value: 'cover',
+                icon: Icon(Icons.crop),
+                label: Text('裁剪'),
               ),
-          ],
-        ),
+              ButtonSegment(
+                value: 'fill',
+                icon: Icon(Icons.aspect_ratio),
+                label: Text('填充'),
+              ),
+            ],
+            selected: {_settings.videoFit},
+            onSelectionChanged: (values) {
+              Navigator.pop(sheetContext);
+              unawaited(_changeVideoFit(values.single));
+            },
+          ),
+          const SizedBox(height: 22),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.fast_rewind),
+            title: const Text('快退时长'),
+            trailing: DropdownButton<int>(
+              value: _settings.seekBackwardSeconds,
+              items: const [
+                DropdownMenuItem(value: 5, child: Text('5 秒')),
+                DropdownMenuItem(value: 10, child: Text('10 秒')),
+                DropdownMenuItem(value: 15, child: Text('15 秒')),
+                DropdownMenuItem(value: 30, child: Text('30 秒')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(
+                    PlaybackSettingsPatch(seekBackwardSeconds: value),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.fast_forward),
+            title: const Text('快进时长'),
+            trailing: DropdownButton<int>(
+              value: _settings.seekForwardSeconds,
+              items: const [
+                DropdownMenuItem(value: 5, child: Text('5 秒')),
+                DropdownMenuItem(value: 10, child: Text('10 秒')),
+                DropdownMenuItem(value: 15, child: Text('15 秒')),
+                DropdownMenuItem(value: 30, child: Text('30 秒')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(
+                    PlaybackSettingsPatch(seekForwardSeconds: value),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.graphic_eq),
+            title: const Text('音频延迟'),
+            trailing: DropdownButton<int>(
+              value: _settings.audioDelayMilliseconds,
+              items: const [
+                DropdownMenuItem(value: -1000, child: Text('-1.0 秒')),
+                DropdownMenuItem(value: -500, child: Text('-0.5 秒')),
+                DropdownMenuItem(value: 0, child: Text('0 秒')),
+                DropdownMenuItem(value: 500, child: Text('+0.5 秒')),
+                DropdownMenuItem(value: 1000, child: Text('+1.0 秒')),
+              ],
+              onChanged: (value) {
+                if (value != null) unawaited(_changeAudioDelay(value));
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.subtitles),
+            title: const Text('字幕延迟'),
+            trailing: DropdownButton<int>(
+              value: _settings.subtitleDelayMilliseconds,
+              items: const [
+                DropdownMenuItem(value: -1000, child: Text('-1.0 秒')),
+                DropdownMenuItem(value: -500, child: Text('-0.5 秒')),
+                DropdownMenuItem(value: 0, child: Text('0 秒')),
+                DropdownMenuItem(value: 500, child: Text('+0.5 秒')),
+                DropdownMenuItem(value: 1000, child: Text('+1.0 秒')),
+              ],
+              onChanged: (value) {
+                if (value != null) unawaited(_changeSubtitleDelay(value));
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.format_size),
+            title: const Text('字幕字号'),
+            trailing: DropdownButton<double>(
+              value: _settings.subtitleFontSize,
+              items: const [
+                DropdownMenuItem(value: 32, child: Text('小')),
+                DropdownMenuItem(value: 42, child: Text('中')),
+                DropdownMenuItem(value: 52, child: Text('大')),
+                DropdownMenuItem(value: 64, child: Text('特大')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _changeSubtitleStyle(
+                    _settings.copyWith(subtitleFontSize: value),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.vertical_align_bottom),
+            title: const Text('字幕位置'),
+            trailing: DropdownButton<int>(
+              value: _settings.subtitlePosition,
+              items: const [
+                DropdownMenuItem(value: 75, child: Text('偏上')),
+                DropdownMenuItem(value: 88, child: Text('居中')),
+                DropdownMenuItem(value: 100, child: Text('底部')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _changeSubtitleStyle(
+                    _settings.copyWith(subtitlePosition: value),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.palette_outlined),
+            title: const Text('字幕颜色'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final color in const [0xFFFFFFFF, 0xFFFFFF00, 0xFF80CBC4])
+                  IconButton(
+                    tooltip: switch (color) {
+                      0xFFFFFF00 => '黄色',
+                      0xFF80CBC4 => '青色',
+                      _ => '白色',
+                    },
+                    onPressed: () => unawaited(
+                      _changeSubtitleStyle(
+                        _settings.copyWith(subtitleColor: color),
+                      ),
+                    ),
+                    icon: Icon(
+                      color == _settings.subtitleColor
+                          ? Icons.check_circle
+                          : Icons.circle,
+                      color: Color(color),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.format_color_text),
+            title: const Text('字幕描边'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final color in const [0xFF000000, 0xFF404040, 0xFFFFFFFF])
+                  IconButton(
+                    tooltip: switch (color) {
+                      0xFF404040 => '深灰',
+                      0xFFFFFFFF => '白色',
+                      _ => '黑色',
+                    },
+                    onPressed: () => unawaited(
+                      _changeSubtitleStyle(
+                        _settings.copyWith(subtitleOutlineColor: color),
+                      ),
+                    ),
+                    icon: Icon(
+                      color == _settings.subtitleOutlineColor
+                          ? Icons.check_circle
+                          : Icons.circle,
+                      color: Color(color),
+                      shadows: const [
+                        Shadow(color: Colors.white54, blurRadius: 2),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          PlaybackCacheStatusSection(
+            settings: _settings.cache,
+            state: controller.state,
+          ),
+        ],
       ),
-    ],
-  );
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
