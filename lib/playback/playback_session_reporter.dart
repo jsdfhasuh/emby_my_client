@@ -84,12 +84,11 @@ class PlaybackSessionReporter implements PlaybackReporter {
     if (_started) {
       try {
         await api.reportPlaybackStopped(item, plan, position: position);
-      } catch (error, stackTrace) {
-        DiagnosticLog.instance.error(
+      } catch (error) {
+        DiagnosticLog.instance.warning(
           'playback',
-          'PlaybackStopped report failed item=${item.id}',
-          error: error,
-          stackTrace: stackTrace,
+          'event=playback_stopped_report_failed '
+              'errorType=${error.runtimeType}',
         );
       }
     }
@@ -100,22 +99,20 @@ class PlaybackSessionReporter implements PlaybackReporter {
   Future<void> cleanup(PlaybackPlan plan) async {
     try {
       await api.closeLiveStream(plan);
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'playback',
-        'LiveStream cleanup failed item=${item.id}',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_live_stream_cleanup_failed '
+            'errorType=${error.runtimeType}',
       );
     }
     try {
       await api.stopActiveEncoding(plan);
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'playback',
-        'ActiveEncoding cleanup failed item=${item.id}',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_encoding_cleanup_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }

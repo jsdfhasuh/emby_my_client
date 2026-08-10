@@ -61,6 +61,17 @@ void main() {
     );
 
     diagnostics.cacheCapabilitiesResolved(capabilities);
+    expect(
+      lines,
+      contains(
+        allOf(
+          contains('option_cache=true'),
+          contains('option_demuxer_cache_dir=true'),
+          contains('option_stream_buffer_size=true'),
+          contains('property_demuxer_cache_state=true'),
+        ),
+      ),
+    );
     for (final payload in const [
       'Authorization: Basic credential',
       'Bearer accessTokenValue',

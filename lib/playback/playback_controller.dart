@@ -246,12 +246,11 @@ class PlaybackController extends ChangeNotifier {
         );
         try {
           await reporter.reportStart(_state.position);
-        } catch (error, stackTrace) {
-          DiagnosticLog.instance.error(
+        } catch (error) {
+          DiagnosticLog.instance.warning(
             'playback',
-            'PlaybackStart report failed item=${item.id}',
-            error: error,
-            stackTrace: stackTrace,
+            'event=playback_start_report_failed '
+                'errorType=${error.runtimeType}',
           );
         }
         _throwIfStale(token);
@@ -259,15 +258,13 @@ class PlaybackController extends ChangeNotifier {
         await _startCacheMonitoring(token);
         DiagnosticLog.instance.info(
           'player',
-          'Playback ready item=${item.id} '
-              'method=${plan.method.serverValue} '
-              'positionMs=${_state.position.inMilliseconds}',
+          'event=playback_ready method=${plan.method.serverValue}',
         );
         return;
       } on _PlaybackCancelled {
         if (plan != null) await reporter.stop(_state.position);
         return;
-      } catch (error, stackTrace) {
+      } catch (error) {
         if (!_isCurrent(token)) return;
         _discardReadyWaitAfterStartupError();
         final canRetry =
@@ -302,11 +299,9 @@ class PlaybackController extends ChangeNotifier {
           continue;
         }
 
-        DiagnosticLog.instance.error(
+        DiagnosticLog.instance.warning(
           'player',
-          'Failed to initialize playback item=${item.id}',
-          error: error,
-          stackTrace: stackTrace,
+          'event=playback_start_failed errorType=${error.runtimeType}',
         );
         if (_isCurrent(token)) {
           final friendly = friendlyPlaybackError(error);
@@ -324,12 +319,11 @@ class PlaybackController extends ChangeNotifier {
         try {
           await _stopCacheCoordinator();
           await engine.stop();
-        } catch (stopError, stopStackTrace) {
-          DiagnosticLog.instance.error(
+        } catch (stopError) {
+          DiagnosticLog.instance.warning(
             'player',
-            'Failed to stop player after startup failure item=${item.id}',
-            error: stopError,
-            stackTrace: stopStackTrace,
+            'event=playback_start_cleanup_failed '
+                'errorType=${stopError.runtimeType}',
           );
         }
         if (plan != null) await reporter.stop(_state.position);
@@ -762,11 +756,7 @@ class PlaybackController extends ChangeNotifier {
     }
     await _cancelSubscriptions();
 
-    DiagnosticLog.instance.info(
-      'player',
-      'Closing player item=${item.id} '
-          'positionMs=${_state.position.inMilliseconds}',
-    );
+    DiagnosticLog.instance.info('player', 'event=playback_closing');
     final cleanup = _stopReporterSafely();
     final release = () async {
       await _stopEngine();
@@ -884,7 +874,10 @@ class PlaybackController extends ChangeNotifier {
         _engineLogLastWritten.clear();
       }
       _engineLogLastWritten[fingerprint] = now;
-      DiagnosticLog.instance.warning('libmpv', log);
+      DiagnosticLog.instance.warning(
+        'libmpv',
+        'event=libmpv_log fingerprint=$fingerprint',
+      );
     }
 
     if (_startupFailureSignaled || !_isStartupPhase(_state.phase)) return;
@@ -1322,7 +1315,7 @@ class PlaybackController extends ChangeNotifier {
     if (lower.contains('log message buffer overflow')) return 'log-overflow';
     if (lower.contains('failed to resolve hostname')) return 'dns-resolution';
     if (lower.contains('failed to open http')) return 'http-open';
-    return lower;
+    return 'other';
   }
 
   Future<void> _applySelectedDirectPlayTracks(
@@ -1419,12 +1412,11 @@ class PlaybackController extends ChangeNotifier {
         position: _state.position,
         isPaused: !_state.isPlaying,
       );
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'playback',
-        'Playback progress report failed item=${item.id}',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_progress_report_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }
@@ -1465,12 +1457,11 @@ class PlaybackController extends ChangeNotifier {
         disposeTimeout,
         PlaybackOperationTimeoutKind.engineDispose,
       );
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Player release failed item=${item.id}',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_engine_dispose_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }
@@ -1483,12 +1474,11 @@ class PlaybackController extends ChangeNotifier {
         stopTimeout,
         PlaybackOperationTimeoutKind.engineStop,
       );
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Player stop failed during shutdown',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_engine_stop_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }
@@ -1500,12 +1490,11 @@ class PlaybackController extends ChangeNotifier {
         reporterTimeout,
         PlaybackOperationTimeoutKind.reporterStop,
       );
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'playback',
-        'Playback reporter stop failed during shutdown',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_reporter_stop_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }

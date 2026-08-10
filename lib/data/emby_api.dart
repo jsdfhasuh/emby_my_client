@@ -994,8 +994,8 @@ class EmbyApi {
   }) async {
     DiagnosticLog.instance.info(
       'playback',
-      'Requesting PlaybackInfo item=${item.id} '
-          'resumeTicks=${item.userData.playbackPositionTicks} '
+      'event=playback_plan_requested '
+          'hasResume=${item.userData.playbackPositionTicks > 0} '
           'forceTranscode=$forceTranscode',
     );
 
@@ -1013,11 +1013,7 @@ class EmbyApi {
     }
     DiagnosticLog.instance.info(
       'playback',
-      'PlaybackInfo returned ${sources.length} source(s): '
-          '${sources.map((source) => '${source.id}'
-              '(direct=${source.supportsDirectPlay},'
-              'stream=${source.supportsDirectStream},'
-              'transcode=${source.supportsTranscoding})').join(', ')}',
+      'event=playback_sources_received hasSources=${sources.isNotEmpty}',
     );
 
     PlaybackMediaSource? preferredSource;
@@ -1028,8 +1024,8 @@ class EmbyApi {
       if (preferredSource == null) {
         DiagnosticLog.instance.warning(
           'playback',
-          'Requested media source $mediaSourceId is unavailable; '
-              'using server selection',
+          'event=preferred_playback_source_unavailable '
+              'action=use_server_selection',
         );
       }
     } else if (mediaSourceIndex != null &&
@@ -1101,13 +1097,8 @@ class EmbyApi {
     final selectedSubtitle =
         subtitleStreamIndex ?? source.defaultSubtitleStreamIndex;
     _logPlaybackDecision(
-      source,
       method: method,
-      uri: uri,
-      maxStreamingBitrate: maxStreamingBitrate,
-      audioStreamIndex: selectedAudio,
-      subtitleStreamIndex: selectedSubtitle,
-      errorCode: info.errorCode,
+      usesServerAuthentication: _usesServerAuthentication(uri),
     );
     final duration = Duration(microseconds: (item.runTimeTicks ?? 0) ~/ 10);
     return PlaybackPlan(
@@ -1423,61 +1414,14 @@ class EmbyApi {
     return uri.replace(queryParameters: parameters);
   }
 
-  void _logPlaybackDecision(
-    PlaybackMediaSource source, {
+  void _logPlaybackDecision({
     required PlayMethod method,
-    required Uri uri,
-    required int maxStreamingBitrate,
-    required int? audioStreamIndex,
-    required int? subtitleStreamIndex,
-    required String? errorCode,
+    required bool usesServerAuthentication,
   }) {
-    Map<String, dynamic>? streamOfType(String type) {
-      for (final stream in source.mediaStreams) {
-        if (stream['Type']?.toString().toLowerCase() == type) return stream;
-      }
-      return null;
-    }
-
-    final video = streamOfType('video');
-    final audio = source.mediaStreams
-        .where(
-          (stream) =>
-              stream['Type']?.toString().toLowerCase() == 'audio' &&
-              (audioStreamIndex == null ||
-                  stream['Index']?.toString() == audioStreamIndex.toString()),
-        )
-        .firstOrNull;
-    final subtitle = source.mediaStreams
-        .where(
-          (stream) =>
-              stream['Type']?.toString().toLowerCase() == 'subtitle' &&
-              (subtitleStreamIndex == null ||
-                  stream['Index']?.toString() ==
-                      subtitleStreamIndex.toString()),
-        )
-        .firstOrNull;
-
-    final uriForLog = _usesServerAuthentication(uri)
-        ? uri.toString()
-        : '${uri.scheme}://${uri.host}'
-              '${uri.hasPort ? ':${uri.port}' : ''}/<remote>';
     DiagnosticLog.instance.info(
       'playback',
-      'Selected ${method.serverValue} source=${source.id} '
-          'container=${source.container ?? 'unknown'} '
-          'bitrate=${source.bitrate ?? 'unknown'} maxBitrate=$maxStreamingBitrate '
-          'video=${video?['Codec'] ?? 'unknown'}/'
-          '${video?['Profile'] ?? 'unknown'}/L${video?['Level'] ?? 'unknown'} '
-          '${video?['Width'] ?? '?'}x${video?['Height'] ?? '?'} '
-          'hdr=${video?['VideoRangeType'] ?? video?['VideoRange'] ?? 'SDR'} '
-          'audio=$audioStreamIndex:${audio?['Codec'] ?? 'unknown'}/'
-          '${audio?['Channels'] ?? '?'}ch '
-          'subtitle=$subtitleStreamIndex:${subtitle?['Codec'] ?? 'off'} '
-          'external=${subtitle?['IsExternal'] ?? false} '
-          'errorCode=${errorCode ?? 'none'} '
-          'transcodingReasons=${source.transcodingReasons.join('|')} '
-          'uri=$uriForLog',
+      'event=playback_plan_selected method=${method.serverValue} '
+          'usesServerAuthentication=$usesServerAuthentication',
     );
   }
 

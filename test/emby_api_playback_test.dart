@@ -98,6 +98,66 @@ void main() {
   });
 
   group('playback plan selection', () {
+    test('logs only fixed playback-plan categories', () async {
+      final logLines = <String>[];
+      DiagnosticLog.instance.setTestSink(logLines.add);
+      addTearDown(() => DiagnosticLog.instance.setTestSink(null));
+      const privateItemId = 'private-item-id-42';
+      const privateSourceId = 'private-source-id-73';
+      const privateSourceName = 'Private Living Room Stream';
+      const privateUrl = 'https://private.example.test/media/private.m3u8';
+      final api = _api((options, handler) {
+        handler.resolve(
+          _response(options, {
+            'MediaSources': [
+              {
+                ..._source(
+                  id: privateSourceId,
+                  directStream: true,
+                  directStreamUrl: privateUrl,
+                ),
+                'Name': privateSourceName,
+                'TranscodingReasons': ['Private media reason'],
+              },
+            ],
+          }),
+        );
+      });
+      const item = EmbyItem(
+        id: privateItemId,
+        name: 'Private Media Title',
+        type: 'Movie',
+        mediaType: 'Video',
+        runTimeTicks: 36000000000,
+        imageTags: {},
+        backdropImageTags: [],
+        genres: [],
+        userData: EmbyUserData(),
+      );
+
+      await api.getPlaybackPlan(item, mediaSourceId: 'missing-private-source');
+
+      final output = logLines.join('\n');
+      expect(output, contains('event=playback_plan_requested'));
+      expect(output, contains('event=playback_sources_received'));
+      expect(output, contains('event=preferred_playback_source_unavailable'));
+      expect(output, contains('event=playback_plan_selected'));
+      for (final sensitiveValue in [
+        privateItemId,
+        privateSourceId,
+        privateSourceName,
+        privateUrl,
+        'private.example.test',
+        'Private Media Title',
+        'Private media reason',
+        'missing-private-source',
+      ]) {
+        expect(output, isNot(contains(sensitiveValue)));
+      }
+      expect(output, isNot(contains('source=')));
+      expect(output, isNot(contains('uri=')));
+    });
+
     test('prioritizes DirectPlay over DirectStream and Transcode', () async {
       final api = _api((options, handler) {
         handler.resolve(

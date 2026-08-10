@@ -346,12 +346,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _initializePlaybackSafely() async {
     try {
       await _initializePlayback();
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Unexpected playback initialization failure',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_initialization_failed '
+            'errorType=${error.runtimeType}',
       );
       if (!mounted) return;
       setState(() {
@@ -475,17 +474,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         PlayerDiagnosticEvent.fullscreenOrientationApplied,
         orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
       );
-    } catch (error, stackTrace) {
+    } catch (error) {
       _logPlayerEvent(
         PlayerDiagnosticEvent.fullscreenOrientationFailed,
         orientationPolicy: PlayerOrientationPolicy.landscapePlayback,
         errorType: PlayerDiagnosticErrorType.orientation,
       );
-      DiagnosticLog.instance.error(
+      DiagnosticLog.instance.warning(
         'player',
-        'Playback fullscreen request failed',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_fullscreen_request_failed '
+            'errorType=${error.runtimeType}',
       );
     }
   }
@@ -509,7 +507,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         PlayerDiagnosticEvent.orientationRestoreApplied,
         orientationPolicy: _restoreOrientationPolicy,
       );
-    } catch (error, stackTrace) {
+    } catch (error) {
       _logPlayerEvent(
         PlayerDiagnosticEvent.systemUiRestoreFailed,
         orientationPolicy: _restoreOrientationPolicy,
@@ -520,11 +518,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         orientationPolicy: _restoreOrientationPolicy,
         errorType: PlayerDiagnosticErrorType.orientation,
       );
-      DiagnosticLog.instance.error(
+      DiagnosticLog.instance.warning(
         'player',
-        'Playback system UI restore failed',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_system_ui_restore_failed '
+            'errorType=${error.runtimeType}',
       );
       rethrow;
     }
@@ -549,23 +546,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     _pipController.dispose();
     try {
       await _realtimeSubscription?.cancel();
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Realtime subscription cleanup failed',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_realtime_subscription_cleanup_failed '
+            'errorType=${error.runtimeType}',
       );
     }
     if (widget.offlineItem == null) {
       try {
         await widget.api.realtime.setBackgroundConnectionRequired(false);
-      } catch (error, stackTrace) {
-        DiagnosticLog.instance.error(
+      } catch (error) {
+        DiagnosticLog.instance.warning(
           'player',
-          'Realtime background cleanup failed',
-          error: error,
-          stackTrace: stackTrace,
+          'event=playback_realtime_background_cleanup_failed '
+              'errorType=${error.runtimeType}',
         );
       }
     }
@@ -574,12 +569,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       controller.removeListener(_syncPlaybackState);
       try {
         await controller.shutdown();
-      } catch (error, stackTrace) {
-        DiagnosticLog.instance.error(
+      } catch (error) {
+        DiagnosticLog.instance.warning(
           'player',
-          'Playback controller shutdown failed',
-          error: error,
-          stackTrace: stackTrace,
+          'event=playback_controller_shutdown_failed '
+              'errorType=${error.runtimeType}',
         );
       } finally {
         controller.dispose();
@@ -587,12 +581,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else {
       try {
         await _player.dispose();
-      } catch (error, stackTrace) {
-        DiagnosticLog.instance.error(
+      } catch (error) {
+        DiagnosticLog.instance.warning(
           'player',
-          'Player cleanup failed',
-          error: error,
-          stackTrace: stackTrace,
+          'event=playback_player_cleanup_failed '
+              'errorType=${error.runtimeType}',
         );
       }
     }
@@ -696,7 +689,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       default:
         DiagnosticLog.instance.info(
           'realtime',
-          'Ignored unsupported Playstate command=${message.command}',
+          'event=remote_playstate_unsupported',
         );
     }
   }
@@ -756,18 +749,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         source: SeekSource.horizontalDrag,
       );
       seekSucceeded = result.disposition == SeekDisposition.executed;
-      DiagnosticLog.instance.info(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Horizontal seek item=${_currentItem.id} '
-            'fromMs=${startPosition.inMilliseconds} '
-            'toMs=${target.inMilliseconds}',
-      );
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'player',
-        'Horizontal seek failed item=${_currentItem.id}',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_seek_ui_failed errorType=${error.runtimeType}',
       );
     }
 
@@ -1197,12 +1182,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     late final EmbyItem? next;
     try {
       next = await _queue.next(_currentItem);
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Playback queue page load failed',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_queue_load_failed errorType=${error.runtimeType}',
       );
       if (mounted) {
         _cancelAutoNext();
@@ -1322,12 +1305,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       final supported = await _pipController.isSupported;
       if (!supported || !mounted) return;
       await _pipController.enter(isPlaying: _playing);
-    } catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
+    } catch (error) {
+      DiagnosticLog.instance.warning(
         'player',
-        'Failed to enter picture-in-picture',
-        error: error,
-        stackTrace: stackTrace,
+        'event=playback_pip_enter_failed errorType=${error.runtimeType}',
       );
     }
   }

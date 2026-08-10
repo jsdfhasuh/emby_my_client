@@ -162,6 +162,24 @@ void main() {
     expect(await outside.exists(), isTrue);
   });
 
+  test(
+    'cold cleanup never follows a marked symlink outside the root',
+    () async {
+      if (Platform.isWindows) return;
+      await cacheRoot.create(recursive: true);
+      const nonce = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+      final outside = await _writeMarkedSession(temporaryRoot, nonce);
+      final linkedPath = path.join(cacheRoot.path, 'session-$nonce');
+      final link = Link(linkedPath);
+      await link.create(outside.path);
+
+      await storage().cleanupNonActiveMarkedSessions();
+
+      expect(await link.exists(), isTrue);
+      expect(await outside.exists(), isTrue);
+    },
+  );
+
   test('concurrent prepare and cleanup operations remain serialized', () async {
     final cacheStorage = PlatformPlaybackCacheStorage(
       rootResolver: () async => cacheRoot,

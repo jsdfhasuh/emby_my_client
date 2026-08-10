@@ -91,11 +91,11 @@ class ResolvedPlaybackCacheProfile {
   }) {
     final forwardBytes = min(
       demuxerForwardMetadataBytes,
-      maximumMetadataBytes - 8 * 1024 * 1024,
+      min(64 * 1024 * 1024, maximumMetadataBytes - 8 * 1024 * 1024),
     );
     final backwardBytes = min(
-      demuxerBackwardMetadataBytes,
-      maximumMetadataBytes - forwardBytes,
+      min(demuxerBackwardMetadataBytes, 16 * 1024 * 1024),
+      max(0, maximumMetadataBytes - forwardBytes),
     );
     return ResolvedPlaybackCacheProfile(
       runtimeMode: PlaybackCacheRuntimeMode.memoryFallback,
@@ -351,7 +351,7 @@ class PlaybackCacheProfileResolver {
     required PlaybackCacheRuntimeMode runtimeMode,
     required PlaybackCacheFallbackReason reason,
     required PlaybackCacheSettings settings,
-    int maximumMetadataBytes = 128 * _mib,
+    int maximumMetadataBytes = 64 * _mib,
   }) {
     final metadata = _metadataBudget(
       forwardSeconds: preset.forwardSeconds,
@@ -362,6 +362,14 @@ class PlaybackCacheProfileResolver {
       ),
       maximumCapBytes: maximumMetadataBytes,
     );
+    final forwardMetadataBytes = min(
+      metadata?.forwardBytes ?? 16 * _mib,
+      64 * _mib,
+    );
+    final backwardMetadataBytes = min(
+      metadata?.backwardBytes ?? 8 * _mib,
+      16 * _mib,
+    );
     return ResolvedPlaybackCacheProfile(
       runtimeMode: runtimeMode,
       transportKind: transportKind,
@@ -370,9 +378,12 @@ class PlaybackCacheProfileResolver {
       backwardTarget: Duration(seconds: preset.backwardSeconds),
       sessionTargetBytes: 0,
       reservedFreeBytes: settings.reservedFreeBytes,
-      demuxerForwardMetadataBytes: metadata?.forwardBytes ?? 16 * _mib,
-      demuxerBackwardMetadataBytes: metadata?.backwardBytes ?? 8 * _mib,
-      metadataBudgetCapBytes: metadata?.capBytes ?? 32 * _mib,
+      demuxerForwardMetadataBytes: forwardMetadataBytes,
+      demuxerBackwardMetadataBytes: backwardMetadataBytes,
+      metadataBudgetCapBytes: max(
+        forwardMetadataBytes + backwardMetadataBytes,
+        metadata?.capBytes ?? 32 * _mib,
+      ),
       streamBufferBytes: defaultStreamBufferBytes,
       donateBuffer: true,
       sessionDirectory: null,

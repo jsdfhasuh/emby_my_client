@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
@@ -233,6 +234,34 @@ void main() {
       );
       expect(unsupported.sessionDirectory, isNull);
       expect(unknown.sessionDirectory, isNull);
+    });
+
+    test('memory fallback metadata matches the complete mpv profile', () {
+      final profile = resolver.resolve(
+        plan: _plan(),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.aggressive,
+        ),
+        capabilities: _capabilities(passed: false),
+        storage: _storage(80 << 30),
+      );
+      final values = PlaybackCacheProfileValues.fromProfile(
+        profile,
+        resetValues: const {'demuxer-cache-dir': ''},
+      ).values;
+
+      expect(profile.runtimeMode, PlaybackCacheRuntimeMode.memoryFallback);
+      expect(profile.demuxerForwardMetadataBytes, lessThanOrEqualTo(64 << 20));
+      expect(profile.demuxerBackwardMetadataBytes, lessThanOrEqualTo(16 << 20));
+      expect(profile.totalMetadataBytes, lessThanOrEqualTo(64 << 20));
+      expect(
+        values['demuxer-max-bytes'],
+        profile.demuxerForwardMetadataBytes.toString(),
+      );
+      expect(
+        values['demuxer-max-back-bytes'],
+        profile.demuxerBackwardMetadataBytes.toString(),
+      );
     });
   });
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
@@ -562,6 +563,41 @@ void main() {
       );
     }
   });
+
+  test('raw engine output and item metadata never enter diagnostics', () async {
+    final lines = <String>[];
+    DiagnosticLog.instance.setTestSink(lines.add);
+    addTearDown(() => DiagnosticLog.instance.setTestSink(null));
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+
+    engine.logController.add(
+      r'Authorization: Bearer secret-token https://private.example/media/'
+      r'secret-title.mkv C:\Users\owner\private-cache',
+    );
+    engine.errorController.add('secret-title.mkv raw failure');
+    await Future<void>.delayed(Duration.zero);
+    await controller.shutdown();
+
+    final joined = lines.join('\n').toLowerCase();
+    expect(joined, contains('event=libmpv_log fingerprint=other'));
+    for (final forbidden in const [
+      'private-item-id',
+      'secret-title',
+      'secret-token',
+      'private.example',
+      r'c:\users',
+      'authorization',
+      'bearer',
+    ]) {
+      expect(joined, isNot(contains(forbidden)));
+    }
+  });
 }
 
 PlaybackController _controller({
@@ -906,8 +942,8 @@ PlaybackCacheEngineCapabilities _capabilities() =>
     );
 
 const _item = EmbyItem(
-  id: 'item',
-  name: 'Movie',
+  id: 'private-item-id',
+  name: 'secret-title',
   type: 'Movie',
   mediaType: 'Video',
   runTimeTicks: 36000000000,
