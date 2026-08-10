@@ -1,5 +1,6 @@
 import '../models/emby_models.dart';
 import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_coordinator.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'playback_engine.dart';
@@ -37,6 +38,7 @@ class PlaybackState {
     this.cacheProfile,
     this.cacheCapabilities,
     this.cacheSnapshot,
+    this.cacheObservation,
     this.cacheRuntimeMode = PlaybackCacheRuntimeMode.unconfirmed,
     this.cacheFallbackReason = PlaybackCacheFallbackReason.none,
     this.diskCacheFailureObserved = false,
@@ -59,6 +61,7 @@ class PlaybackState {
   final ResolvedPlaybackCacheProfile? cacheProfile;
   final PlaybackCacheEngineCapabilities? cacheCapabilities;
   final PlaybackCacheEngineSnapshot? cacheSnapshot;
+  final PlaybackCacheObservation? cacheObservation;
   final PlaybackCacheRuntimeMode cacheRuntimeMode;
   final PlaybackCacheFallbackReason cacheFallbackReason;
   final bool diskCacheFailureObserved;
@@ -91,6 +94,8 @@ class PlaybackState {
     PlaybackCacheEngineCapabilities? cacheCapabilities,
     PlaybackCacheEngineSnapshot? cacheSnapshot,
     bool clearCacheSnapshot = false,
+    PlaybackCacheObservation? cacheObservation,
+    bool clearCacheObservation = false,
     PlaybackCacheRuntimeMode? cacheRuntimeMode,
     PlaybackCacheFallbackReason? cacheFallbackReason,
     bool? diskCacheFailureObserved,
@@ -116,6 +121,9 @@ class PlaybackState {
     cacheSnapshot: clearCacheSnapshot
         ? null
         : cacheSnapshot ?? this.cacheSnapshot,
+    cacheObservation: clearCacheObservation
+        ? null
+        : cacheObservation ?? this.cacheObservation,
     cacheRuntimeMode: cacheRuntimeMode ?? this.cacheRuntimeMode,
     cacheFallbackReason: cacheFallbackReason ?? this.cacheFallbackReason,
     diskCacheFailureObserved:

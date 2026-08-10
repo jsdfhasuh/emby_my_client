@@ -819,7 +819,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_pipController.isActive || _pipController.isEntering) return;
       final controller = _playbackController;
       if (controller != null) unawaited(controller.pauseForLifecycle());
+    } else if (state == AppLifecycleState.resumed) {
+      final controller = _playbackController;
+      if (controller != null) unawaited(controller.resumeForLifecycle());
     }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    final controller = _playbackController;
+    if (controller != null) unawaited(controller.handleMemoryPressure());
   }
 
   @override

@@ -11,6 +11,7 @@ import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
+import 'package:emby_my_client/playback/playback_recovery_policy.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -108,6 +109,255 @@ void main() {
     expect(controller.state.phase, PlaybackPhase.ready);
     await controller.shutdown();
   });
+
+  test(
+    'executed seek enforces the cache budget with one memory reopen',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(
+        events: events,
+        snapshot: const PlaybackCacheEngineSnapshot(
+          fileCacheBytes: 0,
+          rawInputRateBytesPerSecond: 8 << 20,
+          seekableRanges: [],
+          pausedForCache: false,
+          cacheBufferingPercent: 0,
+          cacheOnDisk: true,
+        ),
+      );
+      final session = PlaybackItemSession.forTest('budget-session');
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+      );
+      await controller.start();
+      engine.snapshot = const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 500 << 20,
+        rawInputRateBytesPerSecond: 8 << 20,
+        seekableRanges: [],
+        pausedForCache: false,
+        cacheBufferingPercent: 0,
+        cacheOnDisk: true,
+      );
+
+      final result = await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.controls,
+      );
+
+      expect(result.disposition, SeekDisposition.executed);
+      expect(engine.openCalls, 2);
+      expect(
+        controller.state.cacheRuntimeMode,
+        PlaybackCacheRuntimeMode.memoryFallback,
+      );
+      expect(
+        controller.state.cacheFallbackReason,
+        PlaybackCacheFallbackReason.sessionBudgetReached,
+      );
+      expect(
+        session.hasUsed(AutomaticPlaybackOpenReason.cacheSafetyReopen),
+        isTrue,
+      );
+      await controller.handleMemoryPressure();
+      expect(engine.openCalls, 2);
+      await controller.shutdown();
+    },
+  );
+
+  test('approved seek failure is deduped and recovered once', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final session = PlaybackItemSession.forTest('recovery-session');
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      session: session,
+      recoveryPolicy: const PlaybackRecoveryPolicy(
+        seekRecoveryWindow: Duration(minutes: 1),
+        stablePlaybackWindow: Duration(minutes: 1),
+      ),
+    );
+    await controller.start();
+    engine.playingController.add(true);
+    await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.horizontalDrag,
+    );
+
+    engine.logController.add('partial file');
+    engine.errorController.add('partial file');
+    await _waitUntil(() => engine.openCalls == 2);
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(engine.openCalls, 2);
+    expect(
+      session.hasUsed(AutomaticPlaybackOpenReason.runtimeSameMethodRecovery),
+      isTrue,
+    );
+
+    await controller.seekAbsolute(
+      const Duration(minutes: 6),
+      source: SeekSource.horizontalDrag,
+    );
+    engine.errorController.add('Seek failed');
+    await _waitUntil(() => controller.state.phase == PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '播放连接异常，自动恢复失败，请返回后重试');
+    expect(engine.openCalls, 2);
+    await controller.shutdown();
+  });
+
+  test('stable playback closes the seek recovery window', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    var now = DateTime.utc(2026, 8, 10);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      clock: () => now,
+      recoveryPolicy: const PlaybackRecoveryPolicy(
+        seekRecoveryWindow: Duration(seconds: 30),
+        stablePlaybackWindow: Duration(seconds: 5),
+      ),
+    );
+    await controller.start();
+    engine.playingController.add(true);
+    await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.controls,
+    );
+    now = now.add(const Duration(seconds: 1));
+    engine.positionController.add(const Duration(minutes: 5, seconds: 1));
+    now = now.add(const Duration(seconds: 6));
+    engine.positionController.add(const Duration(minutes: 5, seconds: 7));
+
+    engine.errorController.add('error reading packet');
+    await _waitUntil(() => controller.state.phase == PlaybackPhase.failed);
+
+    expect(engine.openCalls, 1);
+    await controller.shutdown();
+  });
+
+  test('low space before open prevents a disk cache session', () async {
+    final events = <String>[];
+    final storage = _CacheStorage(events)..freeBytes = (2 << 30) + (100 << 20);
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(engine: engine, storage: storage);
+
+    await controller.start();
+
+    expect(engine.openCalls, 1);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.memoryFallback,
+    );
+    expect(
+      controller.state.cacheFallbackReason,
+      PlaybackCacheFallbackReason.lowSpace,
+    );
+    expect(events, contains('cleanup'));
+    await controller.shutdown();
+  });
+
+  test(
+    'memory pressure uses the shared safety reopen and 64 MiB cap',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final session = PlaybackItemSession.forTest('memory-pressure-session');
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+      );
+      await controller.start();
+
+      await controller.handleMemoryPressure();
+
+      expect(engine.openCalls, 2);
+      expect(
+        controller.state.cacheFallbackReason,
+        PlaybackCacheFallbackReason.memoryPressure,
+      );
+      expect(
+        controller.state.cacheProfile?.totalMetadataBytes,
+        lessThanOrEqualTo(64 << 20),
+      );
+      expect(
+        session.hasUsed(AutomaticPlaybackOpenReason.cacheSafetyReopen),
+        isTrue,
+      );
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'recovery waits while inactive and resumes with prior play intent',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        recoveryPolicy: const PlaybackRecoveryPolicy(
+          seekRecoveryWindow: Duration(minutes: 1),
+          stablePlaybackWindow: Duration(minutes: 1),
+        ),
+      );
+      await controller.start();
+      engine.playingController.add(true);
+      await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.remote,
+      );
+      await controller.pauseForLifecycle();
+      engine.errorController.add('Input/output error');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state.phase, PlaybackPhase.recoveryPending);
+      expect(engine.openCalls, 1);
+
+      await controller.resumeForLifecycle();
+      await _waitUntil(() => engine.openCalls == 2);
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.isPlaying, isTrue);
+      await controller.shutdown();
+    },
+  );
+
+  test('100 requests perform only two post-seek cache checks', () async {
+    final events = <String>[];
+    final seekGate = Completer<void>();
+    final engine = _CacheEngine(events: events, seekGate: seekGate);
+    final storage = _CacheStorage(events);
+    final controller = _controller(engine: engine, storage: storage);
+    await controller.start();
+    final readsBefore = engine.snapshotReads;
+    final freeReadsBefore = storage.freeReads;
+
+    final requests = List<Future<SeekResult>>.generate(
+      100,
+      (index) => controller.seekAbsolute(
+        Duration(seconds: index + 1),
+        source: SeekSource.horizontalDrag,
+      ),
+    );
+    await _waitUntil(() => engine.seekCalls == 1);
+    seekGate.complete();
+    final results = await Future.wait(requests);
+
+    expect(engine.seekCalls, 2);
+    expect(engine.maxConcurrentSeeks, 1);
+    expect(
+      results.where((result) => result.disposition == SeekDisposition.executed),
+      hasLength(2),
+    );
+    expect(engine.snapshotReads - readsBefore, 2);
+    expect(storage.freeReads - freeReadsBefore, 2);
+    await controller.shutdown();
+  });
 }
 
 PlaybackController _controller({
@@ -115,6 +365,8 @@ PlaybackController _controller({
   required _CacheStorage storage,
   PlaybackItemSession? session,
   PlaybackEngineRecreator? engineRecreator,
+  PlaybackRecoveryPolicy recoveryPolicy = const PlaybackRecoveryPolicy(),
+  PlaybackClock? clock,
 }) => PlaybackController(
   item: _item,
   engine: engine,
@@ -129,6 +381,10 @@ PlaybackController _controller({
     reservedFreeBytes: 2 << 30,
   ),
   progressInterval: const Duration(hours: 1),
+  cacheStatePollInterval: const Duration(hours: 1),
+  cacheSpacePollInterval: const Duration(hours: 1),
+  recoveryPolicy: recoveryPolicy,
+  clock: clock,
 );
 
 class _CacheStorage implements PlaybackCacheStorage {
@@ -136,6 +392,8 @@ class _CacheStorage implements PlaybackCacheStorage {
 
   final List<String> events;
   int prepares = 0;
+  int freeReads = 0;
+  int freeBytes = 20 << 30;
 
   @override
   Future<void> cleanupNonActiveMarkedSessions() async {}
@@ -146,7 +404,10 @@ class _CacheStorage implements PlaybackCacheStorage {
   }
 
   @override
-  Future<int?> freeBytesFor(Directory directory) async => 20 << 30;
+  Future<int?> freeBytesFor(Directory directory) async {
+    freeReads++;
+    return freeBytes;
+  }
 
   @override
   Future<PlaybackCacheStorageSnapshot> prepareSession() async {
@@ -157,7 +418,7 @@ class _CacheStorage implements PlaybackCacheStorage {
         directory: Directory.systemTemp,
         nonce: '0123456789abcdef0123456789abcdef',
       ),
-      freeBytes: 20 << 30,
+      freeBytes: freeBytes,
     );
   }
 }
@@ -167,11 +428,13 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     required this.events,
     this.snapshot,
     this.requireRecreationAfterOpen = false,
+    this.seekGate,
   });
 
   final List<String> events;
-  final PlaybackCacheEngineSnapshot? snapshot;
+  PlaybackCacheEngineSnapshot? snapshot;
   final bool requireRecreationAfterOpen;
+  final Completer<void>? seekGate;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -187,6 +450,10 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     sync: true,
   );
   int openCalls = 0;
+  int snapshotReads = 0;
+  int seekCalls = 0;
+  int concurrentSeeks = 0;
+  int maxConcurrentSeeks = 0;
 
   @override
   Stream<List<EngineTrack>> get audioTracksStream => audioController.stream;
@@ -276,11 +543,22 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() async => snapshot;
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() async {
+    snapshotReads++;
+    return snapshot;
+  }
 
   @override
-  Future<void> seek(Duration position) async =>
-      positionController.add(position);
+  Future<void> seek(Duration position) async {
+    seekCalls++;
+    concurrentSeeks++;
+    if (concurrentSeeks > maxConcurrentSeeks) {
+      maxConcurrentSeeks = concurrentSeeks;
+    }
+    await seekGate?.future;
+    positionController.add(position);
+    concurrentSeeks--;
+  }
 
   @override
   Future<void> selectAudioTrack(String trackId) async {}
@@ -378,3 +656,13 @@ const _item = EmbyItem(
   genres: [],
   userData: EmbyUserData(),
 );
+
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for the playback state');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}

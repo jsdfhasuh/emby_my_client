@@ -65,6 +65,39 @@ class ResolvedPlaybackCacheProfile {
 
   int get totalMetadataBytes =>
       demuxerForwardMetadataBytes + demuxerBackwardMetadataBytes;
+
+  ResolvedPlaybackCacheProfile memoryFallback(
+    PlaybackCacheFallbackReason reason, {
+    int maximumMetadataBytes = 64 * 1024 * 1024,
+  }) {
+    final forwardBytes = min(
+      demuxerForwardMetadataBytes,
+      maximumMetadataBytes - 8 * 1024 * 1024,
+    );
+    final backwardBytes = min(
+      demuxerBackwardMetadataBytes,
+      maximumMetadataBytes - forwardBytes,
+    );
+    return ResolvedPlaybackCacheProfile(
+      runtimeMode: PlaybackCacheRuntimeMode.memoryFallback,
+      transportKind: transportKind,
+      fallbackReason: reason,
+      forwardTarget: forwardTarget > const Duration(seconds: 60)
+          ? const Duration(seconds: 60)
+          : forwardTarget,
+      backwardTarget: backwardTarget > const Duration(seconds: 30)
+          ? const Duration(seconds: 30)
+          : backwardTarget,
+      sessionTargetBytes: 0,
+      reservedFreeBytes: reservedFreeBytes,
+      demuxerForwardMetadataBytes: forwardBytes,
+      demuxerBackwardMetadataBytes: backwardBytes,
+      metadataBudgetCapBytes: min(metadataBudgetCapBytes, maximumMetadataBytes),
+      streamBufferBytes: streamBufferBytes,
+      donateBuffer: donateBuffer,
+      sessionDirectory: null,
+    );
+  }
 }
 
 PlaybackTransportKind classifyPlaybackTransport({

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_coordinator.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
@@ -12,12 +13,14 @@ import 'cache/playback_cache_storage.dart';
 import 'emby_stream_resolver.dart';
 import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
+import 'playback_recovery_policy.dart';
 import 'playback_session_reporter.dart';
 import 'playback_state.dart';
 import 'track_mapper.dart';
 
 typedef PlaybackEngineRecreator =
     Future<PlaybackEngine> Function(PlaybackItemSession session);
+typedef PlaybackClock = DateTime Function();
 
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
@@ -38,9 +41,14 @@ class PlaybackController extends ChangeNotifier {
     this.disposeTimeout = const Duration(seconds: 5),
     this.reporterTimeout = const Duration(seconds: 3),
     this.progressInterval = const Duration(seconds: 10),
+    this.cacheStatePollInterval = const Duration(seconds: 1),
+    this.cacheSpacePollInterval = const Duration(seconds: 10),
+    this.recoveryPolicy = const PlaybackRecoveryPolicy(),
+    PlaybackClock? clock,
   }) : _engine = engine,
        session = session ?? PlaybackItemSession.create(),
        cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
+       _clock = clock ?? DateTime.now,
        _maxStreamingBitrate = maxStreamingBitrate {
     _createOperationCoordinator();
     _bindEngine();
@@ -62,6 +70,10 @@ class PlaybackController extends ChangeNotifier {
   final Duration disposeTimeout;
   final Duration reporterTimeout;
   final Duration progressInterval;
+  final Duration cacheStatePollInterval;
+  final Duration cacheSpacePollInterval;
+  final PlaybackRecoveryPolicy recoveryPolicy;
+  final PlaybackClock _clock;
   final TrackMapper _trackMapper = const TrackMapper();
 
   final List<StreamSubscription<dynamic>> _subscriptions = [];
@@ -79,8 +91,25 @@ class PlaybackController extends ChangeNotifier {
   bool _sawBuffering = false;
   bool _startupFailureSignaled = false;
   bool _disposed = false;
+  bool _shuttingDown = false;
   bool _engineDisposed = false;
   PlaybackCacheSession? _cacheSession;
+  PlaybackCacheCoordinator? _cacheCoordinator;
+  PlaybackCacheFallbackReason? _forcedCacheFallbackReason;
+  Future<void> _runtimeRecovery = Future<void>.value();
+  bool _runtimeRecoveryScheduled = false;
+  DateTime? _lastExecutedSeekAt;
+  DateTime? _stablePlaybackSince;
+  Duration? _lastStabilityPosition;
+  bool _seekBecameStable = false;
+  bool _lifecycleSuspended = false;
+  String? _pendingRecoveryFingerprint;
+  final Map<String, DateTime> _recoveryFingerprintLastSeen = {};
+  double _desiredPlaybackRate = 1;
+  bool _desiredPlaying = true;
+  Duration _desiredAudioDelay = Duration.zero;
+  Duration _desiredSubtitleDelay = Duration.zero;
+  _SubtitleStyle? _desiredSubtitleStyle;
   final Map<String, DateTime> _engineLogLastWritten = {};
 
   PlaybackState get state => _state;
@@ -106,10 +135,19 @@ class PlaybackController extends ChangeNotifier {
     Duration? resumePosition,
     bool playAfterReady = true,
     bool forceTranscodeInitially = false,
+    AutomaticPlaybackOpenReason transcodeFallbackReason =
+        AutomaticPlaybackOpenReason.startupTranscodeFallback,
+    String? openingStatusMessage,
   }) async {
     final token = ++_generation;
+    _desiredPlaying = playAfterReady;
     _setState(
-      const PlaybackState(phase: PlaybackPhase.resolving, isBuffering: true),
+      PlaybackState(
+        phase: PlaybackPhase.resolving,
+        isBuffering: true,
+        playbackRate: _desiredPlaybackRate,
+        statusMessage: openingStatusMessage,
+      ),
     );
     var forceTranscode = forceTranscodeInitially;
     var retriedWithTranscode = forceTranscodeInitially;
@@ -140,6 +178,7 @@ class PlaybackController extends ChangeNotifier {
             plan: plan,
             clearError: true,
             isBuffering: true,
+            statusMessage: openingStatusMessage,
           ),
         );
         _prepareReadyWait();
@@ -160,6 +199,7 @@ class PlaybackController extends ChangeNotifier {
           _state.copyWith(
             phase: PlaybackPhase.waitingForReady,
             isBuffering: true,
+            statusMessage: openingStatusMessage,
           ),
         );
         await _waitUntilReady(token);
@@ -167,6 +207,7 @@ class PlaybackController extends ChangeNotifier {
         if (plan.method == PlayMethod.directPlay) {
           await _applySelectedDirectPlayTracks(plan, token);
         }
+        await _restoreEnginePresentation(token);
 
         if (resume > Duration.zero) {
           final target = _clampToDuration(resume);
@@ -199,6 +240,7 @@ class PlaybackController extends ChangeNotifier {
         }
         _throwIfStale(token);
         _startProgressTimer();
+        await _startCacheMonitoring(token);
         DiagnosticLog.instance.info(
           'player',
           'Playback ready item=${item.id} '
@@ -218,17 +260,15 @@ class PlaybackController extends ChangeNotifier {
             plan != null &&
             plan.method != PlayMethod.transcode &&
             _state.phase != PlaybackPhase.ready &&
-            session.tryReserveAutomaticOpen(
-              AutomaticPlaybackOpenReason.startupTranscodeFallback,
-            );
+            session.tryReserveAutomaticOpen(transcodeFallbackReason);
         if (canRetry) {
           retriedWithTranscode = true;
           fellBackToTranscode = true;
           forceTranscode = true;
           DiagnosticLog.instance.warning(
             'player',
-            'Playback did not become ready item=${item.id}; '
-                'retrying once with Transcode: $error',
+            'Playback did not become ready; retrying once with Transcode '
+                'errorType=${error.runtimeType}',
           );
           _setState(
             _state.copyWith(
@@ -238,6 +278,7 @@ class PlaybackController extends ChangeNotifier {
             ),
           );
           try {
+            await _stopCacheCoordinator();
             await engine.stop();
           } catch (_) {}
           await reporter.stop(_state.position);
@@ -265,6 +306,7 @@ class PlaybackController extends ChangeNotifier {
           );
         }
         try {
+          await _stopCacheCoordinator();
           await engine.stop();
         } catch (stopError, stopStackTrace) {
           DiagnosticLog.instance.error(
@@ -302,19 +344,55 @@ class PlaybackController extends ChangeNotifier {
     final mayUseDisk =
         plan.transportKind == PlaybackTransportKind.progressiveHttp &&
         cacheSettings.mode != PlaybackCacheMode.memoryOnly &&
+        _forcedCacheFallbackReason == null &&
         capabilities.diskGatePassed;
     if (mayUseDisk) {
       storageSnapshot = await cacheStorage.prepareSession();
       _throwIfStale(token);
       _cacheSession = storageSnapshot.session;
+      final preliminaryRate = ((plan.bitrate ?? 0) / 8 * 2)
+          .round()
+          .clamp(8 * 1024 * 1024, 1 << 62)
+          .toInt();
+      final preliminaryLowSpaceTrigger = cacheLowSpaceTriggerBytes(
+        reservedFreeBytes: cacheSettings.reservedFreeBytes,
+        inputRateBytesPerSecond: preliminaryRate,
+        pollInterval: cacheSpacePollInterval,
+        expectedCloseLatency: const Duration(seconds: 2),
+      );
+      final available = storageSnapshot.freeBytes;
+      if (available != null && available <= preliminaryLowSpaceTrigger) {
+        _forcedCacheFallbackReason = PlaybackCacheFallbackReason.lowSpace;
+      }
     }
 
-    final profile = const PlaybackCacheProfileResolver().resolve(
+    var profile = const PlaybackCacheProfileResolver().resolve(
       plan: plan,
       settings: cacheSettings,
       capabilities: capabilities,
       storage: storageSnapshot,
     );
+    final forcedReason = _forcedCacheFallbackReason;
+    if (forcedReason != null &&
+        profile.runtimeMode != PlaybackCacheRuntimeMode.disabled) {
+      profile = profile.memoryFallback(forcedReason);
+    }
+    if (profile.runtimeMode == PlaybackCacheRuntimeMode.disk) {
+      final inputRate = ((plan.bitrate ?? 0) / 8 * 2).round().clamp(
+        8 * 1024 * 1024,
+        1 << 62,
+      );
+      final lowSpaceTrigger = cacheLowSpaceTriggerBytes(
+        reservedFreeBytes: profile.reservedFreeBytes,
+        inputRateBytesPerSecond: inputRate,
+        pollInterval: cacheSpacePollInterval,
+        expectedCloseLatency: const Duration(seconds: 2),
+      );
+      if ((storageSnapshot.freeBytes ?? 0) <= lowSpaceTrigger) {
+        _forcedCacheFallbackReason = PlaybackCacheFallbackReason.lowSpace;
+        profile = profile.memoryFallback(PlaybackCacheFallbackReason.lowSpace);
+      }
+    }
     PlaybackCacheApplyResult applyResult;
     if (cacheEngine == null) {
       applyResult = PlaybackCacheApplyResult(
@@ -347,6 +425,7 @@ class PlaybackController extends ChangeNotifier {
         cacheRuntimeMode: applyResult.actualMode,
         cacheFallbackReason: applyResult.fallbackReason,
         clearCacheSnapshot: true,
+        clearCacheObservation: true,
         diskCacheFailureObserved: false,
       ),
     );
@@ -362,16 +441,31 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play() async {
     if (!_state.isPlaying) await engine.play();
+    _desiredPlaying = true;
     await _reportProgress();
   }
 
   Future<void> pause() async {
     if (_state.isPlaying) await engine.pause();
+    _desiredPlaying = false;
     await _reportProgress();
   }
 
   Future<void> pauseForLifecycle() async {
-    await pause();
+    _lifecycleSuspended = true;
+    _cacheCoordinator?.pause();
+    if (_state.isPlaying) await engine.pause();
+    await _reportProgress();
+  }
+
+  Future<void> resumeForLifecycle() async {
+    _lifecycleSuspended = false;
+    await _cacheCoordinator?.resume();
+    if (_pendingRecoveryFingerprint != null) _scheduleRuntimeRecovery();
+  }
+
+  Future<void> handleMemoryPressure() async {
+    await _cacheCoordinator?.handleMemoryPressure();
   }
 
   Future<SeekResult> seekAbsolute(
@@ -383,7 +477,9 @@ class PlaybackController extends ChangeNotifier {
       source: source,
     );
     if (result.disposition == SeekDisposition.executed) {
+      _recordExecutedSeek();
       await _reportProgress();
+      await _cacheCoordinator?.afterExecutedSeek();
     }
     return result;
   }
@@ -397,7 +493,9 @@ class PlaybackController extends ChangeNotifier {
       source: source,
     );
     if (result.disposition == SeekDisposition.executed) {
+      _recordExecutedSeek();
       await _reportProgress();
+      await _cacheCoordinator?.afterExecutedSeek();
     }
     return result;
   }
@@ -496,25 +594,39 @@ class PlaybackController extends ChangeNotifier {
   Future<void> setPlaybackRate(double rate) async {
     final safeRate = rate.clamp(0.25, 3.0).toDouble();
     await engine.setRate(safeRate);
+    _desiredPlaybackRate = safeRate;
     _setState(_state.copyWith(playbackRate: safeRate));
   }
 
-  Future<void> setAudioDelay(Duration delay) => engine.setAudioDelay(delay);
+  Future<void> setAudioDelay(Duration delay) async {
+    await engine.setAudioDelay(delay);
+    _desiredAudioDelay = delay;
+  }
 
-  Future<void> setSubtitleDelay(Duration delay) =>
-      engine.setSubtitleDelay(delay);
+  Future<void> setSubtitleDelay(Duration delay) async {
+    await engine.setSubtitleDelay(delay);
+    _desiredSubtitleDelay = delay;
+  }
 
   Future<void> configureSubtitleStyle({
     required double fontSize,
     required int color,
     required int outlineColor,
     required int position,
-  }) => engine.configureSubtitleStyle(
-    fontSize: fontSize,
-    color: color,
-    outlineColor: outlineColor,
-    position: position,
-  );
+  }) async {
+    await engine.configureSubtitleStyle(
+      fontSize: fontSize,
+      color: color,
+      outlineColor: outlineColor,
+      position: position,
+    );
+    _desiredSubtitleStyle = _SubtitleStyle(
+      fontSize: fontSize,
+      color: color,
+      outlineColor: outlineColor,
+      position: position,
+    );
+  }
 
   Future<void> reconfigure({
     String? mediaSourceId,
@@ -528,9 +640,10 @@ class PlaybackController extends ChangeNotifier {
     final operation = _reconfiguration.then((_) async {
       if (_disposed || _engineDisposed) return;
       final position = _state.position;
-      final wasPlaying = _state.isPlaying;
+      final wasPlaying = _desiredPlaying;
       _generation++;
       _progressTimer?.cancel();
+      await _stopCacheCoordinator();
       _setState(
         _state.copyWith(
           phase: PlaybackPhase.resolving,
@@ -570,6 +683,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> shutdown() {
     final existing = _shutdownOperation;
     if (existing != null) return existing;
+    _shuttingDown = true;
     _operationCoordinator.shutdown();
     final operation = _shutdown();
     _shutdownOperation = operation;
@@ -578,7 +692,9 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _shutdown() async {
     _generation++;
+    _pendingRecoveryFingerprint = null;
     _progressTimer?.cancel();
+    await _stopCacheCoordinator();
     _setState(_state.copyWith(phase: PlaybackPhase.stopping));
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
@@ -611,6 +727,7 @@ class PlaybackController extends ChangeNotifier {
     _subscriptions.addAll([
       engine.positionStream.listen((position) {
         _operationCoordinator.updateCommittedPosition(position);
+        _updateStablePlayback(position);
         _setState(_state.copyWith(position: position));
         if (position > Duration.zero) _markReady();
       }),
@@ -627,6 +744,7 @@ class PlaybackController extends ChangeNotifier {
       }),
       engine.bufferingStream.listen((buffering) {
         if (buffering) _sawBuffering = true;
+        if (buffering) _stablePlaybackSince = null;
         _setState(_state.copyWith(isBuffering: buffering));
         if (!buffering && _sawBuffering) _markReady();
       }),
@@ -645,10 +763,11 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _handleEngineError(String error) {
+    final fingerprint = _approvedRecoveryFingerprint(error);
     DiagnosticLog.instance.error(
       'player',
-      'libmpv failed while playing item=${item.id}',
-      error: error,
+      'event=playback_engine_error '
+          'fingerprint=${fingerprint ?? 'unapproved'}',
     );
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
@@ -656,6 +775,14 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
     if (_state.phase == PlaybackPhase.ready) {
+      if (_requestRuntimeRecovery(error)) return;
+      if (fingerprint != null &&
+          session.hasUsed(
+            AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
+          )) {
+        _setRuntimeRecoveryFailed();
+        return;
+      }
       _setState(
         _state.copyWith(
           phase: PlaybackPhase.failed,
@@ -679,6 +806,12 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
       unawaited(_resolveObservedCacheFailure(_generation));
+    }
+    if ((_state.phase == PlaybackPhase.ready ||
+            _state.phase == PlaybackPhase.recoveryPending ||
+            _state.phase == PlaybackPhase.recovering) &&
+        _requestRuntimeRecovery(log)) {
+      return;
     }
     final fingerprint = _engineLogFingerprint(lower);
     final now = DateTime.now();
@@ -726,6 +859,335 @@ class PlaybackController extends ChangeNotifier {
         cacheFallbackReason: reason,
       ),
     );
+  }
+
+  Future<void> _startCacheMonitoring(int token) async {
+    await _stopCacheCoordinator();
+    _throwIfStale(token);
+    final cacheEngine = engine is PlaybackCacheEngine
+        ? engine as PlaybackCacheEngine
+        : null;
+    final profile = _state.cacheProfile;
+    final cacheSession = _cacheSession;
+    if (cacheEngine == null ||
+        profile == null ||
+        cacheSession == null ||
+        _state.cacheRuntimeMode != PlaybackCacheRuntimeMode.disk) {
+      return;
+    }
+    late final PlaybackCacheCoordinator coordinator;
+    coordinator = PlaybackCacheCoordinator(
+      engine: cacheEngine,
+      storage: cacheStorage,
+      session: cacheSession,
+      profile: profile,
+      mediaBitrate: _state.plan?.bitrate,
+      committedPosition: () => _state.position,
+      onObservation: (observation) {
+        if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
+        _setState(
+          _state.copyWith(
+            cacheSnapshot: observation.engineSnapshot,
+            clearCacheSnapshot: observation.engineSnapshot == null,
+            cacheObservation: observation,
+          ),
+        );
+      },
+      onSafetyReopen: _handleCacheSafetyReopen,
+      statePollInterval: cacheStatePollInterval,
+      spacePollInterval: cacheSpacePollInterval,
+    );
+    _cacheCoordinator = coordinator;
+    await coordinator.start();
+  }
+
+  Future<void> _stopCacheCoordinator() async {
+    final coordinator = _cacheCoordinator;
+    _cacheCoordinator = null;
+    await coordinator?.stop();
+  }
+
+  void _cancelCacheCoordinator() {
+    final coordinator = _cacheCoordinator;
+    _cacheCoordinator = null;
+    coordinator?.cancel();
+  }
+
+  Future<void> _handleCacheSafetyReopen(
+    PlaybackCacheSafetyReason safetyReason,
+  ) {
+    if (_disposed || _shuttingDown || _engineDisposed) {
+      return Future<void>.value();
+    }
+    if (!session.tryReserveAutomaticOpen(
+      AutomaticPlaybackOpenReason.cacheSafetyReopen,
+    )) {
+      return Future<void>.value();
+    }
+    _forcedCacheFallbackReason = switch (safetyReason) {
+      PlaybackCacheSafetyReason.budget =>
+        PlaybackCacheFallbackReason.sessionBudgetReached,
+      PlaybackCacheSafetyReason.lowSpace =>
+        PlaybackCacheFallbackReason.lowSpace,
+      PlaybackCacheSafetyReason.memoryPressure =>
+        PlaybackCacheFallbackReason.memoryPressure,
+    };
+    _operationCoordinator.invalidateForHigherPriorityOperation();
+    final operation = _reconfiguration.then((_) async {
+      if (_disposed || _shuttingDown || _engineDisposed) return;
+      final position = _state.requestedPosition ?? _state.position;
+      final wasPlaying = _desiredPlaying;
+      _generation++;
+      _progressTimer?.cancel();
+      _cancelCacheCoordinator();
+      _setState(
+        _state.copyWith(
+          isBuffering: true,
+          statusMessage: '正在调整缓存…',
+          cacheFallbackReason: _forcedCacheFallbackReason,
+        ),
+      );
+      await _stopForControlledRestart(position);
+      await _cleanupCacheSessionSafely();
+      if (_disposed || _shuttingDown) return;
+      await _startPlayback(
+        resumePosition: position,
+        playAfterReady: wasPlaying,
+        openingStatusMessage: '正在调整缓存…',
+      );
+      if (!_disposed &&
+          !_shuttingDown &&
+          _state.phase == PlaybackPhase.failed) {
+        _setState(
+          _state.copyWith(errorMessage: '缓存调整失败，请返回后重试', clearStatus: true),
+        );
+      }
+    });
+    _reconfiguration = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _stopForControlledRestart(Duration position) async {
+    try {
+      await _withDeadline(reporter.stop(position), reporterTimeout);
+    } catch (_) {
+      DiagnosticLog.instance.warning(
+        'playback',
+        'event=playback_reporter_stop_failed operation=controlled_restart',
+      );
+    }
+    try {
+      await _withDeadline(engine.stop(), stopTimeout);
+    } catch (_) {
+      DiagnosticLog.instance.warning(
+        'playback',
+        'event=playback_engine_stop_failed operation=controlled_restart',
+      );
+    }
+  }
+
+  Future<void> _restoreEnginePresentation(int token) async {
+    await engine.setRate(_desiredPlaybackRate);
+    _throwIfStale(token);
+    await engine.setAudioDelay(_desiredAudioDelay);
+    _throwIfStale(token);
+    await engine.setSubtitleDelay(_desiredSubtitleDelay);
+    _throwIfStale(token);
+    final style = _desiredSubtitleStyle;
+    if (style == null) return;
+    await engine.configureSubtitleStyle(
+      fontSize: style.fontSize,
+      color: style.color,
+      outlineColor: style.outlineColor,
+      position: style.position,
+    );
+    _throwIfStale(token);
+  }
+
+  void _recordExecutedSeek() {
+    _lastExecutedSeekAt = _clock();
+    _stablePlaybackSince = null;
+    _lastStabilityPosition = _state.position;
+    _seekBecameStable = false;
+  }
+
+  void _updateStablePlayback(Duration position) {
+    final lastSeek = _lastExecutedSeekAt;
+    if (lastSeek == null || _seekBecameStable) {
+      _lastStabilityPosition = position;
+      return;
+    }
+    final now = _clock();
+    if (now.difference(lastSeek) > recoveryPolicy.seekRecoveryWindow ||
+        !_state.isPlaying ||
+        _state.isBuffering) {
+      _stablePlaybackSince = null;
+      _lastStabilityPosition = position;
+      return;
+    }
+    final previous = _lastStabilityPosition;
+    _lastStabilityPosition = position;
+    if (previous == null || position <= previous) {
+      _stablePlaybackSince = null;
+      return;
+    }
+    final stableSince = _stablePlaybackSince ?? now;
+    _stablePlaybackSince = stableSince;
+    if (now.difference(stableSince) >= recoveryPolicy.stablePlaybackWindow) {
+      _seekBecameStable = true;
+    }
+  }
+
+  bool _requestRuntimeRecovery(String rawFailure) {
+    final fingerprint = _approvedRecoveryFingerprint(rawFailure);
+    if (fingerprint == null) return false;
+    if (_state.phase == PlaybackPhase.recoveryPending ||
+        _state.phase == PlaybackPhase.recovering) {
+      return true;
+    }
+    if (_state.phase != PlaybackPhase.ready || _disposed || _shuttingDown) {
+      return false;
+    }
+    final plan = _state.plan;
+    final lastSeek = _lastExecutedSeekAt;
+    if (plan == null ||
+        plan.transportKind != PlaybackTransportKind.progressiveHttp ||
+        lastSeek == null ||
+        _seekBecameStable ||
+        session.hasUsed(
+          AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
+        )) {
+      return false;
+    }
+    final now = _clock();
+    if (now.difference(lastSeek) > recoveryPolicy.seekRecoveryWindow) {
+      return false;
+    }
+    final lastFingerprint = _recoveryFingerprintLastSeen[fingerprint];
+    if (lastFingerprint != null &&
+        now.difference(lastFingerprint) <
+            recoveryPolicy.fingerprintDedupeWindow) {
+      return true;
+    }
+    _recoveryFingerprintLastSeen[fingerprint] = now;
+    _pendingRecoveryFingerprint = fingerprint;
+    _stablePlaybackSince = null;
+    _setState(
+      _state.copyWith(
+        phase: PlaybackPhase.recoveryPending,
+        isBuffering: true,
+        statusMessage: '正在恢复播放…',
+        clearError: true,
+      ),
+    );
+    DiagnosticLog.instance.warning(
+      'playback',
+      'event=playback_seek_recovery_pending fingerprint=$fingerprint',
+    );
+    if (!_lifecycleSuspended) _scheduleRuntimeRecovery();
+    return true;
+  }
+
+  void _scheduleRuntimeRecovery() {
+    if (_runtimeRecoveryScheduled ||
+        _pendingRecoveryFingerprint == null ||
+        _disposed ||
+        _shuttingDown ||
+        _lifecycleSuspended) {
+      return;
+    }
+    _runtimeRecoveryScheduled = true;
+    final operation = _reconfiguration.then((_) => _performRuntimeRecovery());
+    _runtimeRecovery = operation.whenComplete(() {
+      _runtimeRecoveryScheduled = false;
+    });
+    _reconfiguration = _runtimeRecovery.catchError((Object _) {});
+  }
+
+  Future<void> _performRuntimeRecovery() async {
+    final fingerprint = _pendingRecoveryFingerprint;
+    _pendingRecoveryFingerprint = null;
+    if (fingerprint == null ||
+        _disposed ||
+        _shuttingDown ||
+        _lifecycleSuspended) {
+      return;
+    }
+    final plan = _state.plan;
+    if (plan == null ||
+        !session.tryReserveAutomaticOpen(
+          AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
+        )) {
+      _setRuntimeRecoveryFailed();
+      return;
+    }
+    final position = _state.requestedPosition ?? _state.position;
+    final wasPlaying = _desiredPlaying;
+    final wasTranscoding = plan.method == PlayMethod.transcode;
+    _operationCoordinator.invalidateForHigherPriorityOperation();
+    _generation++;
+    _progressTimer?.cancel();
+    _cancelCacheCoordinator();
+    _setState(
+      _state.copyWith(
+        phase: PlaybackPhase.recovering,
+        isBuffering: true,
+        statusMessage: '正在恢复播放…',
+        clearError: true,
+      ),
+    );
+    DiagnosticLog.instance.warning(
+      'playback',
+      'event=playback_seek_recovery_started fingerprint=$fingerprint',
+    );
+    await _stopForControlledRestart(position);
+    await _cleanupCacheSessionSafely();
+    if (_disposed || _shuttingDown || _lifecycleSuspended) return;
+    await _startPlayback(
+      resumePosition: position,
+      playAfterReady: wasPlaying,
+      forceTranscodeInitially: wasTranscoding,
+      transcodeFallbackReason:
+          AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
+      openingStatusMessage: '正在恢复播放…',
+    );
+    if (_disposed || _shuttingDown) return;
+    if (_state.phase == PlaybackPhase.ready) {
+      DiagnosticLog.instance.info(
+        'playback',
+        'event=playback_seek_recovery_succeeded fingerprint=$fingerprint',
+      );
+      return;
+    }
+    _setRuntimeRecoveryFailed();
+  }
+
+  void _setRuntimeRecoveryFailed() {
+    if (_disposed || _shuttingDown) return;
+    _setState(
+      _state.copyWith(
+        phase: PlaybackPhase.failed,
+        isBuffering: false,
+        errorMessage: '播放连接异常，自动恢复失败，请返回后重试',
+        clearStatus: true,
+      ),
+    );
+    DiagnosticLog.instance.warning(
+      'playback',
+      'event=playback_seek_recovery_failed',
+    );
+  }
+
+  static String? _approvedRecoveryFingerprint(String failure) {
+    final normalized = failure.toLowerCase();
+    if (normalized.contains('seek failed')) return 'seekFailed';
+    if (normalized.contains('partial file')) return 'partialFile';
+    if (normalized.contains('input/output error') ||
+        normalized.contains('i/o error')) {
+      return 'inputOutputError';
+    }
+    if (normalized.contains('error reading packet')) return 'packetReadError';
+    return null;
   }
 
   void _createOperationCoordinator() {
@@ -883,7 +1345,8 @@ class PlaybackController extends ChangeNotifier {
     return position;
   }
 
-  bool _isCurrent(int token) => !_disposed && token == _generation;
+  bool _isCurrent(int token) =>
+      !_disposed && !_shuttingDown && token == _generation;
 
   void _throwIfStale(int token) {
     if (!_isCurrent(token)) throw const _PlaybackCancelled();
@@ -1020,4 +1483,18 @@ class _PlaybackCancelled implements Exception {
 
 class _PlaybackEngineRecreationRequired implements Exception {
   const _PlaybackEngineRecreationRequired();
+}
+
+class _SubtitleStyle {
+  const _SubtitleStyle({
+    required this.fontSize,
+    required this.color,
+    required this.outlineColor,
+    required this.position,
+  });
+
+  final double fontSize;
+  final int color;
+  final int outlineColor;
+  final int position;
 }
