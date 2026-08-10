@@ -46,6 +46,28 @@ class PlayerSessionCoordinator {
     await reopen(current);
   });
 
+  Future<T> recreateCurrentResource<T>({
+    required PlaybackItemSessionId sessionId,
+    required Future<T> Function() recreate,
+  }) {
+    final completer = Completer<T>();
+    unawaited(
+      _enqueue(() async {
+        if (_shutdown) {
+          throw StateError('Player session is shutting down');
+        }
+        final current = _currentSession;
+        if (current == null || current.id != sessionId) {
+          throw StateError('Playback item session is stale');
+        }
+        completer.complete(await recreate());
+      }).catchError((Object error, StackTrace stackTrace) {
+        if (!completer.isCompleted) completer.completeError(error, stackTrace);
+      }),
+    );
+    return completer.future;
+  }
+
   Future<void> shutdown(ClosePlaybackItem closeCurrent) {
     if (_shutdown) return _operation;
     _shutdown = true;

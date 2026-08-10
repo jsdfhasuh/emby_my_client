@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'playback/cache/playback_cache_storage_scope.dart';
 import 'playback/playback_settings_scope.dart';
 import 'state/app_controller.dart';
 import 'ui/home_shell.dart';
@@ -17,9 +18,12 @@ class EmbyClientApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: _darkTheme(),
-      builder: (context, child) => PlaybackSettingsRepositoryScope(
-        repository: controller.playbackSettingsRepository,
-        child: child ?? const SizedBox.shrink(),
+      builder: (context, child) => PlaybackCacheStorageScope(
+        storage: controller.playbackCacheStorage,
+        child: PlaybackSettingsRepositoryScope(
+          repository: controller.playbackSettingsRepository,
+          child: child ?? const SizedBox.shrink(),
+        ),
       ),
       home: ListenableBuilder(
         listenable: controller,

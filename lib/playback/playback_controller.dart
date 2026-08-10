@@ -4,6 +4,11 @@ import 'package:flutter/foundation.dart';
 
 import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
+import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_engine.dart';
+import 'cache/playback_cache_policy.dart';
+import 'cache/playback_cache_settings.dart';
+import 'cache/playback_cache_storage.dart';
 import 'emby_stream_resolver.dart';
 import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
@@ -11,14 +16,20 @@ import 'playback_session_reporter.dart';
 import 'playback_state.dart';
 import 'track_mapper.dart';
 
+typedef PlaybackEngineRecreator =
+    Future<PlaybackEngine> Function(PlaybackItemSession session);
+
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
     required this.item,
-    required this.engine,
+    required PlaybackEngine engine,
     required this.resolver,
     required this.reporter,
     required this.playbackHeaders,
+    this.engineRecreator,
     PlaybackItemSession? session,
+    this.cacheSettings = const PlaybackCacheSettings(),
+    PlaybackCacheStorage? cacheStorage,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
@@ -27,25 +38,23 @@ class PlaybackController extends ChangeNotifier {
     this.disposeTimeout = const Duration(seconds: 5),
     this.reporterTimeout = const Duration(seconds: 3),
     this.progressInterval = const Duration(seconds: 10),
-  }) : session = session ?? PlaybackItemSession.create(),
+  }) : _engine = engine,
+       session = session ?? PlaybackItemSession.create(),
+       cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
        _maxStreamingBitrate = maxStreamingBitrate {
-    _operationCoordinator = PlaybackOperationCoordinator(
-      sessionId: this.session.id,
-      seekEngine: engine.seek,
-      clampTarget: _clampToDuration,
-      onRequestedPositionChanged: _handleRequestedPositionChanged,
-      seekCallTimeout: seekCallTimeout,
-      seekSettleTimeout: resumeVerificationTimeout,
-    );
+    _createOperationCoordinator();
     _bindEngine();
   }
 
   final EmbyItem item;
-  final PlaybackEngine engine;
+  PlaybackEngine _engine;
   final PlaybackStreamResolver resolver;
   final PlaybackReporter reporter;
   final Map<String, String> playbackHeaders;
+  final PlaybackEngineRecreator? engineRecreator;
   final PlaybackItemSession session;
+  final PlaybackCacheSettings cacheSettings;
+  final PlaybackCacheStorage cacheStorage;
   final Duration readyTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
@@ -56,7 +65,7 @@ class PlaybackController extends ChangeNotifier {
   final TrackMapper _trackMapper = const TrackMapper();
 
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  late final PlaybackOperationCoordinator _operationCoordinator;
+  late PlaybackOperationCoordinator _operationCoordinator;
   PlaybackState _state = const PlaybackState();
   Completer<void>? _readyCompleter;
   Timer? _progressTimer;
@@ -71,9 +80,11 @@ class PlaybackController extends ChangeNotifier {
   bool _startupFailureSignaled = false;
   bool _disposed = false;
   bool _engineDisposed = false;
+  PlaybackCacheSession? _cacheSession;
   final Map<String, DateTime> _engineLogLastWritten = {};
 
   PlaybackState get state => _state;
+  PlaybackEngine get engine => _engine;
   int get maxStreamingBitrate => _maxStreamingBitrate;
   PlaybackItemSessionId get sessionId => session.id;
 
@@ -121,6 +132,8 @@ class PlaybackController extends ChangeNotifier {
         }
 
         reporter.activate(plan);
+        await _prepareCacheForPlan(plan, token);
+        _throwIfStale(token);
         _setState(
           _state.copyWith(
             phase: PlaybackPhase.opening,
@@ -228,6 +241,7 @@ class PlaybackController extends ChangeNotifier {
             await engine.stop();
           } catch (_) {}
           await reporter.stop(_state.position);
+          await _cleanupCacheSessionSafely();
           continue;
         }
 
@@ -261,9 +275,81 @@ class PlaybackController extends ChangeNotifier {
           );
         }
         if (plan != null) await reporter.stop(_state.position);
+        await _cleanupCacheSessionSafely();
         return;
       }
     }
+  }
+
+  Future<void> _prepareCacheForPlan(PlaybackPlan plan, int token) async {
+    final cacheEngine = engine is PlaybackCacheEngine
+        ? engine as PlaybackCacheEngine
+        : null;
+    PlaybackCacheEngineCapabilities capabilities;
+    try {
+      capabilities = cacheEngine == null
+          ? PlaybackCacheEngineCapabilities.unsupported()
+          : await cacheEngine.probeCacheCapabilities();
+    } catch (_) {
+      capabilities = PlaybackCacheEngineCapabilities.unsupported();
+    }
+    _throwIfStale(token);
+
+    PlaybackCacheStorageSnapshot storageSnapshot =
+        const PlaybackCacheStorageSnapshot.unavailable(
+          PlaybackCacheStorageFailureReason.storageCapacityUnknown,
+        );
+    final mayUseDisk =
+        plan.transportKind == PlaybackTransportKind.progressiveHttp &&
+        cacheSettings.mode != PlaybackCacheMode.memoryOnly &&
+        capabilities.diskGatePassed;
+    if (mayUseDisk) {
+      storageSnapshot = await cacheStorage.prepareSession();
+      _throwIfStale(token);
+      _cacheSession = storageSnapshot.session;
+    }
+
+    final profile = const PlaybackCacheProfileResolver().resolve(
+      plan: plan,
+      settings: cacheSettings,
+      capabilities: capabilities,
+      storage: storageSnapshot,
+    );
+    PlaybackCacheApplyResult applyResult;
+    if (cacheEngine == null) {
+      applyResult = PlaybackCacheApplyResult(
+        requestedMode: profile.runtimeMode,
+        actualMode: profile.runtimeMode == PlaybackCacheRuntimeMode.disabled
+            ? PlaybackCacheRuntimeMode.disabled
+            : PlaybackCacheRuntimeMode.unconfirmed,
+        fallbackReason: profile.runtimeMode == PlaybackCacheRuntimeMode.disabled
+            ? profile.fallbackReason
+            : PlaybackCacheFallbackReason.engineCapabilityUnavailable,
+        requiresPlayerRecreation: false,
+        readBack: const {},
+      );
+    } else {
+      applyResult = await cacheEngine.configureCache(profile, capabilities);
+    }
+    _throwIfStale(token);
+    if (applyResult.requiresPlayerRecreation) {
+      await _cleanupCacheSessionSafely();
+      await _recreateEngine(token);
+      return _prepareCacheForPlan(plan, token);
+    }
+    if (applyResult.actualMode != PlaybackCacheRuntimeMode.disk) {
+      await _cleanupCacheSessionSafely();
+    }
+    _setState(
+      _state.copyWith(
+        cacheProfile: profile,
+        cacheCapabilities: capabilities,
+        cacheRuntimeMode: applyResult.actualMode,
+        cacheFallbackReason: applyResult.fallbackReason,
+        clearCacheSnapshot: true,
+        diskCacheFailureObserved: false,
+      ),
+    );
   }
 
   Future<void> playOrPause() async {
@@ -457,6 +543,7 @@ class PlaybackController extends ChangeNotifier {
       } finally {
         await _withDeadline(reporter.stop(position), reporterTimeout);
       }
+      await _cleanupCacheSessionSafely();
 
       if (mediaSourceId != null) _selectedMediaSourceId = mediaSourceId;
       if (audioStreamIndex != null) {
@@ -508,6 +595,7 @@ class PlaybackController extends ChangeNotifier {
     final release = () async {
       await _stopEngine();
       await _disposeEngine();
+      await _cleanupCacheSessionSafely();
     }();
     await Future.wait([cleanup, release]);
     _setState(
@@ -580,6 +668,18 @@ class PlaybackController extends ChangeNotifier {
 
   void _handleEngineLog(String log) {
     final lower = log.toLowerCase();
+    if (lower.contains('failed to create file cache') &&
+        !_state.diskCacheFailureObserved) {
+      _setState(
+        _state.copyWith(
+          diskCacheFailureObserved: true,
+          cacheRuntimeMode: PlaybackCacheRuntimeMode.unconfirmed,
+          cacheFallbackReason:
+              PlaybackCacheFallbackReason.actualModeUnconfirmed,
+        ),
+      );
+      unawaited(_resolveObservedCacheFailure(_generation));
+    }
     final fingerprint = _engineLogFingerprint(lower);
     final now = DateTime.now();
     final lastWritten = _engineLogLastWritten[fingerprint];
@@ -599,6 +699,44 @@ class PlaybackController extends ChangeNotifier {
     if (completer == null || completer.isCompleted) return;
     _startupFailureSignaled = true;
     completer.completeError(log);
+  }
+
+  Future<void> _resolveObservedCacheFailure(int token) async {
+    final cacheEngine = engine is PlaybackCacheEngine
+        ? engine as PlaybackCacheEngine
+        : null;
+    final snapshot = await cacheEngine?.readCacheSnapshot();
+    if (!_isCurrent(token)) return;
+    final mode = snapshot?.cacheOnDisk == false
+        ? PlaybackCacheRuntimeMode.memoryFallback
+        : (snapshot?.fileCacheBytes ?? 0) > 0
+        ? PlaybackCacheRuntimeMode.disk
+        : PlaybackCacheRuntimeMode.unconfirmed;
+    final reason = switch (mode) {
+      PlaybackCacheRuntimeMode.disk => PlaybackCacheFallbackReason.none,
+      PlaybackCacheRuntimeMode.memoryFallback =>
+        PlaybackCacheFallbackReason.mpvCacheCreateFailed,
+      _ => PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    };
+    _setState(
+      _state.copyWith(
+        cacheSnapshot: snapshot,
+        clearCacheSnapshot: snapshot == null,
+        cacheRuntimeMode: mode,
+        cacheFallbackReason: reason,
+      ),
+    );
+  }
+
+  void _createOperationCoordinator() {
+    _operationCoordinator = PlaybackOperationCoordinator(
+      sessionId: session.id,
+      seekEngine: engine.seek,
+      clampTarget: _clampToDuration,
+      onRequestedPositionChanged: _handleRequestedPositionChanged,
+      seekCallTimeout: seekCallTimeout,
+      seekSettleTimeout: resumeVerificationTimeout,
+    );
   }
 
   static bool _isStartupPhase(PlaybackPhase phase) =>
@@ -806,6 +944,38 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  Future<void> _cleanupCacheSessionSafely() async {
+    final cacheSession = _cacheSession;
+    _cacheSession = null;
+    if (cacheSession == null) return;
+    try {
+      await _withDeadline(
+        cacheStorage.cleanupSession(cacheSession),
+        const Duration(seconds: 3),
+      );
+    } catch (_) {
+      DiagnosticLog.instance.warning(
+        'playback-cache',
+        'Cache session cleanup failed',
+      );
+    }
+  }
+
+  Future<void> _recreateEngine(int token) async {
+    final recreate = engineRecreator;
+    if (recreate == null) throw const _PlaybackEngineRecreationRequired();
+    _operationCoordinator.shutdown();
+    await _cancelSubscriptions();
+    await _disposeEngine();
+    _throwIfStale(token);
+    final replacement = await recreate(session);
+    _throwIfStale(token);
+    _engine = replacement;
+    _engineDisposed = false;
+    _createOperationCoordinator();
+    _bindEngine();
+  }
+
   Future<T> _withDeadline<T>(Future<T> operation, Duration timeout) =>
       operation.timeout(timeout);
 
@@ -846,4 +1016,8 @@ class PlaybackController extends ChangeNotifier {
 
 class _PlaybackCancelled implements Exception {
   const _PlaybackCancelled();
+}
+
+class _PlaybackEngineRecreationRequired implements Exception {
+  const _PlaybackEngineRecreationRequired();
 }

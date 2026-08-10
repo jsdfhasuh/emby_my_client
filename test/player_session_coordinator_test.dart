@@ -28,6 +28,29 @@ void main() {
     },
   );
 
+  test(
+    'resource recreation preserves and validates the current session',
+    () async {
+      final coordinator = PlayerSessionCoordinator();
+      final session = coordinator.beginInitialItem();
+
+      final value = await coordinator.recreateCurrentResource(
+        sessionId: session.id,
+        recreate: () async => 'replacement',
+      );
+
+      expect(value, 'replacement');
+      expect(coordinator.currentSession?.id, session.id);
+      await expectLater(
+        coordinator.recreateCurrentResource(
+          sessionId: const PlaybackItemSessionId('stale'),
+          recreate: () async => 'invalid',
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
   test('shutdown closes once and prevents later item work', () async {
     final coordinator = PlayerSessionCoordinator();
     coordinator.beginInitialItem();

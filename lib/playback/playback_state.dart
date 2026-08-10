@@ -1,4 +1,7 @@
 import '../models/emby_models.dart';
+import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_engine.dart';
+import 'cache/playback_cache_policy.dart';
 import 'playback_engine.dart';
 
 enum PlaybackPhase {
@@ -31,6 +34,12 @@ class PlaybackState {
     this.plan,
     this.errorMessage,
     this.statusMessage,
+    this.cacheProfile,
+    this.cacheCapabilities,
+    this.cacheSnapshot,
+    this.cacheRuntimeMode = PlaybackCacheRuntimeMode.unconfirmed,
+    this.cacheFallbackReason = PlaybackCacheFallbackReason.none,
+    this.diskCacheFailureObserved = false,
   });
 
   final PlaybackPhase phase;
@@ -47,6 +56,12 @@ class PlaybackState {
   final PlaybackPlan? plan;
   final String? errorMessage;
   final String? statusMessage;
+  final ResolvedPlaybackCacheProfile? cacheProfile;
+  final PlaybackCacheEngineCapabilities? cacheCapabilities;
+  final PlaybackCacheEngineSnapshot? cacheSnapshot;
+  final PlaybackCacheRuntimeMode cacheRuntimeMode;
+  final PlaybackCacheFallbackReason cacheFallbackReason;
+  final bool diskCacheFailureObserved;
 
   bool get isReady => phase == PlaybackPhase.ready;
   bool get hasError => phase == PlaybackPhase.failed;
@@ -71,6 +86,14 @@ class PlaybackState {
     bool clearError = false,
     String? statusMessage,
     bool clearStatus = false,
+    ResolvedPlaybackCacheProfile? cacheProfile,
+    bool clearCacheProfile = false,
+    PlaybackCacheEngineCapabilities? cacheCapabilities,
+    PlaybackCacheEngineSnapshot? cacheSnapshot,
+    bool clearCacheSnapshot = false,
+    PlaybackCacheRuntimeMode? cacheRuntimeMode,
+    PlaybackCacheFallbackReason? cacheFallbackReason,
+    bool? diskCacheFailureObserved,
   }) => PlaybackState(
     phase: phase ?? this.phase,
     position: position ?? this.position,
@@ -88,5 +111,14 @@ class PlaybackState {
     plan: clearPlan ? null : plan ?? this.plan,
     errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
     statusMessage: clearStatus ? null : statusMessage ?? this.statusMessage,
+    cacheProfile: clearCacheProfile ? null : cacheProfile ?? this.cacheProfile,
+    cacheCapabilities: cacheCapabilities ?? this.cacheCapabilities,
+    cacheSnapshot: clearCacheSnapshot
+        ? null
+        : cacheSnapshot ?? this.cacheSnapshot,
+    cacheRuntimeMode: cacheRuntimeMode ?? this.cacheRuntimeMode,
+    cacheFallbackReason: cacheFallbackReason ?? this.cacheFallbackReason,
+    diskCacheFailureObserved:
+        diskCacheFailureObserved ?? this.diskCacheFailureObserved,
   );
 }

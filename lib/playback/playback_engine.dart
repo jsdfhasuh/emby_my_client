@@ -1,6 +1,10 @@
 import 'package:media_kit/media_kit.dart';
 
 import '../core/diagnostic_log.dart';
+import 'cache/native_playback_property_access.dart';
+import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_engine.dart';
+import 'cache/playback_cache_policy.dart';
 
 typedef NativePropertyWriter =
     Future<void> Function(String property, String value);
@@ -84,11 +88,21 @@ abstract interface class PlaybackEngine {
   Future<void> dispose();
 }
 
-class MediaKitPlaybackEngine implements PlaybackEngine {
-  const MediaKitPlaybackEngine(this.player, {this.nativePropertyWriter});
+class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
+  MediaKitPlaybackEngine(this.player, {this.nativePropertyWriter}) {
+    final platform = player.platform;
+    if (platform is NativePlayer) {
+      _cacheEngine = NativePlaybackCacheEngine(
+        access: MediaKitNativePlaybackPropertyAccess(platform),
+        hasOpenedMedia: () => _hasOpenedMedia,
+      );
+    }
+  }
 
   final Player player;
   final NativePropertyWriter? nativePropertyWriter;
+  NativePlaybackCacheEngine? _cacheEngine;
+  bool _hasOpenedMedia = false;
 
   @override
   Stream<Duration> get positionStream => player.stream.position;
@@ -152,7 +166,39 @@ class MediaKitPlaybackEngine implements PlaybackEngine {
     Uri uri, {
     required Map<String, String> headers,
     required bool play,
-  }) => player.open(Media(uri.toString(), httpHeaders: headers), play: play);
+  }) async {
+    _hasOpenedMedia = true;
+    await player.open(Media(uri.toString(), httpHeaders: headers), play: play);
+  }
+
+  @override
+  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
+    final cacheEngine = _cacheEngine;
+    if (cacheEngine != null) return cacheEngine.probeCacheCapabilities();
+    return PlaybackCacheEngineCapabilities.unsupported();
+  }
+
+  @override
+  Future<PlaybackCacheApplyResult> configureCache(
+    ResolvedPlaybackCacheProfile profile,
+    PlaybackCacheEngineCapabilities capabilities,
+  ) async {
+    final cacheEngine = _cacheEngine;
+    if (cacheEngine != null) {
+      return cacheEngine.configureCache(profile, capabilities);
+    }
+    return PlaybackCacheApplyResult(
+      requestedMode: profile.runtimeMode,
+      actualMode: PlaybackCacheRuntimeMode.unconfirmed,
+      fallbackReason: PlaybackCacheFallbackReason.engineCapabilityUnavailable,
+      requiresPlayerRecreation: false,
+      readBack: const {},
+    );
+  }
+
+  @override
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
+      _cacheEngine?.readCacheSnapshot() ?? Future.value();
 
   @override
   Future<void> play() => player.play();

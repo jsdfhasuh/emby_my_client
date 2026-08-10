@@ -41,6 +41,18 @@ class PlaybackCacheEngineCapabilities {
     required this.resetValues,
   });
 
+  factory PlaybackCacheEngineCapabilities.unsupported({
+    String platform = 'unsupported',
+  }) => PlaybackCacheEngineCapabilities(
+    mpvVersionFingerprint: 'unavailable',
+    platform: platform,
+    optionSupport: const {},
+    propertySupport: const {},
+    supportsImmediateUnlink: false,
+    profileSwitchStrategy: PlaybackCacheProfileSwitchStrategy.unsupported,
+    resetValues: const {},
+  );
+
   final String mpvVersionFingerprint;
   final String platform;
   final Map<String, bool> optionSupport;

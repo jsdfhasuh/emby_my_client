@@ -16,6 +16,8 @@ import '../offline/offline_playback_reporter.dart';
 import '../offline/offline_playback_resolver.dart';
 import '../platform/platform_capabilities.dart';
 import '../playback/emby_stream_resolver.dart';
+import '../playback/cache/playback_cache_storage.dart';
+import '../playback/cache/playback_cache_storage_scope.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_engine.dart';
 import '../playback/playback_operation_coordinator.dart';
@@ -162,6 +164,7 @@ class PlayerScreen extends StatefulWidget {
     this.capabilities,
     this.systemControls,
     this.systemUiController,
+    this.cacheStorage,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -175,6 +178,7 @@ class PlayerScreen extends StatefulWidget {
   final PlatformCapabilities? capabilities;
   final PlayerSystemControls? systemControls;
   final PlayerSystemUiController? systemUiController;
+  final PlaybackCacheStorage? cacheStorage;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -200,6 +204,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
   late final PlaybackSettingsRepository _settingsRepository;
+  late final PlaybackCacheStorage _cacheStorage;
   final PlayerSessionCoordinator _playerSessionCoordinator =
       PlayerSessionCoordinator();
   late PlaybackItemSession _itemSession;
@@ -307,6 +312,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_playbackInitializationStarted) return;
     _playbackInitializationStarted = true;
     _settingsRepository = PlaybackSettingsRepositoryScope.of(context);
+    _cacheStorage =
+        widget.cacheStorage ?? PlaybackCacheStorageScope.of(context);
     unawaited(_initializePlaybackSafely());
   }
 
@@ -376,7 +383,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       resolver: resolver,
       reporter: reporter,
       playbackHeaders: playbackHeaders,
+      engineRecreator: _recreatePlaybackEngine,
       session: _itemSession,
+      cacheSettings: _settings.cache,
+      cacheStorage: _cacheStorage,
       maxStreamingBitrate: _settings.maxStreamingBitrate,
     )..addListener(_syncPlaybackState);
     _playbackController = controller;
@@ -395,6 +405,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     await controller.start();
   }
+
+  Future<PlaybackEngine> _recreatePlaybackEngine(PlaybackItemSession session) =>
+      _playerSessionCoordinator.recreateCurrentResource(
+        sessionId: session.id,
+        recreate: () async {
+          if (!mounted) throw StateError('Player route is unavailable');
+          _createPlayer();
+          setState(() {});
+          return MediaKitPlaybackEngine(_player);
+        },
+      );
 
   void _syncPlaybackState() {
     if (!mounted) return;
