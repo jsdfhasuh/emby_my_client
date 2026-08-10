@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../models/emby_models.dart';
+import 'cache/playback_cache_settings.dart';
 import 'playback_settings.dart';
 
 abstract interface class PlaybackSettingsStorage {
@@ -54,6 +55,7 @@ class PlaybackSettingsPatch {
     this.subtitleColor,
     this.subtitleOutlineColor,
     this.subtitlePosition,
+    this.cache,
   });
 
   final int? maxStreamingBitrate;
@@ -67,6 +69,7 @@ class PlaybackSettingsPatch {
   final int? subtitleColor;
   final int? subtitleOutlineColor;
   final int? subtitlePosition;
+  final PlaybackCacheSettings? cache;
 
   PlaybackSettings applyTo(PlaybackSettings current) => current.copyWith(
     maxStreamingBitrate: maxStreamingBitrate,
@@ -80,6 +83,7 @@ class PlaybackSettingsPatch {
     subtitleColor: subtitleColor,
     subtitleOutlineColor: subtitleOutlineColor,
     subtitlePosition: subtitlePosition,
+    cache: cache,
   );
 }
 

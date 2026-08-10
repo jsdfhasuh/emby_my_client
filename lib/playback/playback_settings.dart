@@ -1,3 +1,5 @@
+import 'cache/playback_cache_settings.dart';
+
 class PlaybackSettings {
   const PlaybackSettings({
     this.maxStreamingBitrate = 120000000,
@@ -11,6 +13,7 @@ class PlaybackSettings {
     this.subtitleColor = 0xFFFFFFFF,
     this.subtitleOutlineColor = 0xFF000000,
     this.subtitlePosition = 100,
+    this.cache = const PlaybackCacheSettings(),
   });
 
   final int maxStreamingBitrate;
@@ -24,6 +27,7 @@ class PlaybackSettings {
   final int subtitleColor;
   final int subtitleOutlineColor;
   final int subtitlePosition;
+  final PlaybackCacheSettings cache;
 
   PlaybackSettings copyWith({
     int? maxStreamingBitrate,
@@ -37,6 +41,7 @@ class PlaybackSettings {
     int? subtitleColor,
     int? subtitleOutlineColor,
     int? subtitlePosition,
+    PlaybackCacheSettings? cache,
   }) => PlaybackSettings(
     maxStreamingBitrate: maxStreamingBitrate ?? this.maxStreamingBitrate,
     seekBackwardSeconds: seekBackwardSeconds ?? this.seekBackwardSeconds,
@@ -51,6 +56,7 @@ class PlaybackSettings {
     subtitleColor: subtitleColor ?? this.subtitleColor,
     subtitleOutlineColor: subtitleOutlineColor ?? this.subtitleOutlineColor,
     subtitlePosition: subtitlePosition ?? this.subtitlePosition,
+    cache: cache ?? this.cache,
   );
 
   factory PlaybackSettings.fromJson(
@@ -67,6 +73,7 @@ class PlaybackSettings {
     subtitleColor: _asInt(json['subtitleColor']) ?? 0xFFFFFFFF,
     subtitleOutlineColor: _asInt(json['subtitleOutlineColor']) ?? 0xFF000000,
     subtitlePosition: _asInt(json['subtitlePosition']) ?? 100,
+    cache: PlaybackCacheSettings.fromJsonValue(json['cache']),
   );
 
   Map<String, dynamic> toJson() => {
@@ -81,6 +88,7 @@ class PlaybackSettings {
     'subtitleColor': subtitleColor,
     'subtitleOutlineColor': subtitleOutlineColor,
     'subtitlePosition': subtitlePosition,
+    'cache': cache.toJson(),
   };
 }
 

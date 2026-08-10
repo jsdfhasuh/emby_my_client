@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -47,6 +48,31 @@ void main() {
     final result = (await repository.load(_firstSession)).settings;
     expect(result.videoFit, 'cover');
     expect(result.playbackRate, 1.5);
+  });
+
+  test('a stale player rate patch preserves a newer cache patch', () async {
+    final repository = PlaybackSettingsRepository(storage: _MemoryStorage());
+    final stalePlayerSettings = (await repository.load(_firstSession)).settings;
+    const cache = PlaybackCacheSettings(
+      mode: PlaybackCacheMode.custom,
+      customForwardSeconds: 300,
+    );
+
+    await repository.patch(
+      _firstSession,
+      const PlaybackSettingsPatch(cache: cache),
+    );
+    await repository.patch(
+      _firstSession,
+      PlaybackSettingsPatch(
+        playbackRate: stalePlayerSettings.playbackRate + 0.25,
+      ),
+    );
+
+    final result = (await repository.load(_firstSession)).settings;
+    expect(result.playbackRate, 1.25);
+    expect(result.cache.mode, PlaybackCacheMode.custom);
+    expect(result.cache.customForwardSeconds, 300);
   });
 
   test('clear invalidates a patch blocked in storage read', () async {
