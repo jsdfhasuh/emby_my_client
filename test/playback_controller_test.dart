@@ -6,6 +6,7 @@ import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
+import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -221,7 +222,7 @@ void main() {
       resolution.completeError(TimeoutException('late PlaybackInfo timeout'));
       await startup;
 
-      expect(engine.stopCalls, 0);
+      expect(engine.stopCalls, 1);
       expect(engine.disposeCalls, 1);
       expect(controller.state.phase, PlaybackPhase.idle);
       controller.dispose();
@@ -258,6 +259,79 @@ void main() {
     );
     await controller.shutdown();
   });
+
+  test(
+    'controller exposes latest requested position and merges seeks',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engineLater(
+          () => engine.durationController.add(const Duration(hours: 1)),
+        );
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+      );
+      await controller.start();
+
+      final results = List<Future<SeekResult>>.generate(
+        100,
+        (index) => controller.seekAbsolute(
+          Duration(seconds: index + 1),
+          source: SeekSource.progressBar,
+        ),
+      );
+      expect(controller.state.displayPosition, const Duration(seconds: 100));
+      final settled = await Future.wait(results);
+
+      expect(engine.seekValues, [
+        const Duration(seconds: 1),
+        const Duration(seconds: 100),
+      ]);
+      expect(
+        settled.where(
+          (result) => result.disposition == SeekDisposition.superseded,
+        ),
+        hasLength(98),
+      );
+      expect(controller.state.position, const Duration(seconds: 100));
+      expect(controller.state.requestedPosition, isNull);
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'shutdown deadlines do not leave the controller route-blocking',
+    () async {
+      final engine = _FakeEngine(
+        stopOperation: Completer<void>().future,
+        disposeOperation: Completer<void>().future,
+      );
+      final reporter = _BlockingReporter();
+      final controller = PlaybackController(
+        item: _plainItem,
+        engine: engine,
+        resolver: _DelayedResolver(Completer<PlaybackPlan>().future),
+        reporter: reporter,
+        playbackHeaders: const {},
+        stopTimeout: const Duration(milliseconds: 10),
+        disposeTimeout: const Duration(milliseconds: 10),
+        reporterTimeout: const Duration(milliseconds: 10),
+      );
+
+      await controller.shutdown().timeout(const Duration(milliseconds: 200));
+
+      expect(engine.stopCalls, 1);
+      expect(engine.disposeCalls, 1);
+      expect(reporter.stopCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.idle);
+      controller.dispose();
+    },
+  );
 }
 
 PlaybackController _controller({
@@ -327,6 +401,10 @@ void engineLater(void Function() action) {
 }
 
 class _FakeEngine implements PlaybackEngine {
+  _FakeEngine({this.stopOperation, this.disposeOperation});
+
+  final Future<void>? stopOperation;
+  final Future<void>? disposeOperation;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -447,12 +525,42 @@ class _FakeEngine implements PlaybackEngine {
   Future<void> stop() async {
     stopCalls++;
     playingController.add(false);
+    await stopOperation;
   }
 
   @override
   Future<void> dispose() async {
     disposeCalls++;
+    await disposeOperation;
   }
+}
+
+class _BlockingReporter implements PlaybackReporter {
+  int stopCalls = 0;
+
+  @override
+  void activate(PlaybackPlan plan) {}
+
+  @override
+  Future<void> cleanup(PlaybackPlan plan) async {}
+
+  @override
+  Future<void> reportProgress({
+    required Duration position,
+    required bool isPaused,
+  }) async {}
+
+  @override
+  Future<void> reportStart(Duration position) async {}
+
+  @override
+  Future<void> stop(Duration position) {
+    stopCalls++;
+    return Completer<void>().future;
+  }
+
+  @override
+  void updatePlan(PlaybackPlan plan) {}
 }
 
 class _DelayedResolver implements PlaybackStreamResolver {

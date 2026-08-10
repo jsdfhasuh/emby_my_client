@@ -6,6 +6,7 @@ import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
 import 'emby_stream_resolver.dart';
 import 'playback_engine.dart';
+import 'playback_operation_coordinator.dart';
 import 'playback_session_reporter.dart';
 import 'playback_state.dart';
 import 'track_mapper.dart';
@@ -17,11 +18,25 @@ class PlaybackController extends ChangeNotifier {
     required this.resolver,
     required this.reporter,
     required this.playbackHeaders,
+    PlaybackItemSession? session,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
-    this.resumeVerificationTimeout = const Duration(seconds: 5),
+    this.resumeVerificationTimeout = const Duration(seconds: 2),
+    this.seekCallTimeout = const Duration(seconds: 8),
+    this.stopTimeout = const Duration(seconds: 5),
+    this.disposeTimeout = const Duration(seconds: 5),
+    this.reporterTimeout = const Duration(seconds: 3),
     this.progressInterval = const Duration(seconds: 10),
-  }) : _maxStreamingBitrate = maxStreamingBitrate {
+  }) : session = session ?? PlaybackItemSession.create(),
+       _maxStreamingBitrate = maxStreamingBitrate {
+    _operationCoordinator = PlaybackOperationCoordinator(
+      sessionId: this.session.id,
+      seekEngine: engine.seek,
+      clampTarget: _clampToDuration,
+      onRequestedPositionChanged: _handleRequestedPositionChanged,
+      seekCallTimeout: seekCallTimeout,
+      seekSettleTimeout: resumeVerificationTimeout,
+    );
     _bindEngine();
   }
 
@@ -30,12 +45,18 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackStreamResolver resolver;
   final PlaybackReporter reporter;
   final Map<String, String> playbackHeaders;
+  final PlaybackItemSession session;
   final Duration readyTimeout;
   final Duration resumeVerificationTimeout;
+  final Duration seekCallTimeout;
+  final Duration stopTimeout;
+  final Duration disposeTimeout;
+  final Duration reporterTimeout;
   final Duration progressInterval;
   final TrackMapper _trackMapper = const TrackMapper();
 
   final List<StreamSubscription<dynamic>> _subscriptions = [];
+  late final PlaybackOperationCoordinator _operationCoordinator;
   PlaybackState _state = const PlaybackState();
   Completer<void>? _readyCompleter;
   Timer? _progressTimer;
@@ -54,6 +75,7 @@ class PlaybackController extends ChangeNotifier {
 
   PlaybackState get state => _state;
   int get maxStreamingBitrate => _maxStreamingBitrate;
+  PlaybackItemSessionId get sessionId => session.id;
 
   Future<void> start({
     String? mediaSourceId,
@@ -63,6 +85,9 @@ class PlaybackController extends ChangeNotifier {
     _selectedMediaSourceId = mediaSourceId;
     _selectedAudioStreamIndex = audioStreamIndex;
     _selectedSubtitleStreamIndex = subtitleStreamIndex;
+    if (!session.tryReserveAutomaticOpen(AutomaticPlaybackOpenReason.initial)) {
+      return Future.error(StateError('Initial playback open is unavailable'));
+    }
     return _startPlayback();
   }
 
@@ -133,8 +158,10 @@ class PlaybackController extends ChangeNotifier {
         if (resume > Duration.zero) {
           final target = _clampToDuration(resume);
           _setState(_state.copyWith(phase: PlaybackPhase.seekingResume));
-          await engine.seek(target);
-          await _verifyResumePosition(target, token);
+          final result = await seekAbsolute(target, source: SeekSource.resume);
+          if (result.disposition != SeekDisposition.executed) {
+            throw TimeoutException('Resume seek did not settle');
+          }
           _throwIfStale(token);
           if (playAfterReady) await engine.play();
         }
@@ -177,7 +204,10 @@ class PlaybackController extends ChangeNotifier {
             resolver.canForceTranscode &&
             plan != null &&
             plan.method != PlayMethod.transcode &&
-            _state.phase != PlaybackPhase.ready;
+            _state.phase != PlaybackPhase.ready &&
+            session.tryReserveAutomaticOpen(
+              AutomaticPlaybackOpenReason.startupTranscodeFallback,
+            );
         if (canRetry) {
           retriedWithTranscode = true;
           fellBackToTranscode = true;
@@ -258,14 +288,43 @@ class PlaybackController extends ChangeNotifier {
     await pause();
   }
 
-  Future<void> seek(Duration position) async {
-    final target = _clampToDuration(position);
-    await engine.seek(target);
-    _setState(_state.copyWith(position: target));
-    await _reportProgress();
+  Future<SeekResult> seekAbsolute(
+    Duration position, {
+    required SeekSource source,
+  }) async {
+    final result = await _operationCoordinator.seekAbsolute(
+      position,
+      source: source,
+    );
+    if (result.disposition == SeekDisposition.executed) {
+      await _reportProgress();
+    }
+    return result;
   }
 
-  Future<void> seekRelative(Duration offset) => seek(_state.position + offset);
+  Future<SeekResult> seekRelative(
+    Duration offset, {
+    required SeekSource source,
+  }) async {
+    final result = await _operationCoordinator.seekRelative(
+      offset,
+      source: source,
+    );
+    if (result.disposition == SeekDisposition.executed) {
+      await _reportProgress();
+    }
+    return result;
+  }
+
+  void _handleRequestedPositionChanged(Duration? position) {
+    if (_disposed) return;
+    _setState(
+      _state.copyWith(
+        requestedPosition: position,
+        clearRequestedPosition: position == null,
+      ),
+    );
+  }
 
   Future<void> selectMediaSource(String mediaSourceId) =>
       reconfigure(mediaSourceId: mediaSourceId);
@@ -379,6 +438,7 @@ class PlaybackController extends ChangeNotifier {
     int? maxStreamingBitrate,
     bool forceTranscode = false,
   }) {
+    _operationCoordinator.invalidateForHigherPriorityOperation();
     final operation = _reconfiguration.then((_) async {
       if (_disposed || _engineDisposed) return;
       final position = _state.position;
@@ -393,9 +453,9 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
       try {
-        await engine.stop();
+        await _withDeadline(engine.stop(), stopTimeout);
       } finally {
-        await reporter.stop(position);
+        await _withDeadline(reporter.stop(position), reporterTimeout);
       }
 
       if (mediaSourceId != null) _selectedMediaSourceId = mediaSourceId;
@@ -423,6 +483,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> shutdown() {
     final existing = _shutdownOperation;
     if (existing != null) return existing;
+    _operationCoordinator.shutdown();
     final operation = _shutdown();
     _shutdownOperation = operation;
     return operation;
@@ -443,8 +504,11 @@ class PlaybackController extends ChangeNotifier {
       'Closing player item=${item.id} '
           'positionMs=${_state.position.inMilliseconds}',
     );
-    final cleanup = reporter.stop(_state.position);
-    final release = _disposeEngine();
+    final cleanup = _stopReporterSafely();
+    final release = () async {
+      await _stopEngine();
+      await _disposeEngine();
+    }();
     await Future.wait([cleanup, release]);
     _setState(
       _state.copyWith(
@@ -458,6 +522,7 @@ class PlaybackController extends ChangeNotifier {
   void _bindEngine() {
     _subscriptions.addAll([
       engine.positionStream.listen((position) {
+        _operationCoordinator.updateCommittedPosition(position);
         _setState(_state.copyWith(position: position));
         if (position > Duration.zero) _markReady();
       }),
@@ -649,19 +714,6 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
-  Future<void> _verifyResumePosition(Duration target, int token) async {
-    final deadline = DateTime.now().add(resumeVerificationTimeout);
-    while (DateTime.now().isBefore(deadline)) {
-      _throwIfStale(token);
-      final difference = (_state.position - target).abs();
-      if (difference <= const Duration(seconds: 2)) return;
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    throw TimeoutException(
-      'Resume seek was not applied near ${target.inMilliseconds}ms',
-    );
-  }
-
   void _startProgressTimer() {
     _progressTimer?.cancel();
     _progressTimer = Timer.periodic(
@@ -716,7 +768,7 @@ class PlaybackController extends ChangeNotifier {
     if (_engineDisposed) return;
     _engineDisposed = true;
     try {
-      await engine.dispose();
+      await _withDeadline(engine.dispose(), disposeTimeout);
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'player',
@@ -726,6 +778,36 @@ class PlaybackController extends ChangeNotifier {
       );
     }
   }
+
+  Future<void> _stopEngine() async {
+    if (_engineDisposed) return;
+    try {
+      await _withDeadline(engine.stop(), stopTimeout);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'player',
+        'Player stop failed during shutdown',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _stopReporterSafely() async {
+    try {
+      await _withDeadline(reporter.stop(_state.position), reporterTimeout);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'playback',
+        'Playback reporter stop failed during shutdown',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<T> _withDeadline<T>(Future<T> operation, Duration timeout) =>
+      operation.timeout(timeout);
 
   @override
   void dispose() {

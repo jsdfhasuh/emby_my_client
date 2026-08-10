@@ -18,12 +18,14 @@ import '../platform/platform_capabilities.dart';
 import '../playback/emby_stream_resolver.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_engine.dart';
+import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
 import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
+import '../playback/player_session_coordinator.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
@@ -198,6 +200,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
   late final PlaybackSettingsRepository _settingsRepository;
+  final PlayerSessionCoordinator _playerSessionCoordinator =
+      PlayerSessionCoordinator();
+  late PlaybackItemSession _itemSession;
   final TrackMapper _trackMapper = const TrackMapper();
   PlaybackController? _playbackController;
   PlaybackSettings _settings = const PlaybackSettings();
@@ -215,6 +220,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _buffering = true;
   bool _controlsVisible = true;
   bool _seeking = false;
+  int _seekGestureGeneration = 0;
   bool _controlsLocked = false;
   BoxFit _videoFit = BoxFit.contain;
   Offset? _doubleTapPosition;
@@ -244,6 +250,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _currentItem = widget.item;
+    _itemSession = _playerSessionCoordinator.beginInitialItem();
     _queue = widget.queue ?? PlaybackQueue.single(widget.api, widget.item);
     if (widget.offlineItem == null) {
       _realtimeSubscription = widget.api.realtime.events.listen((event) {
@@ -369,6 +376,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       resolver: resolver,
       reporter: reporter,
       playbackHeaders: playbackHeaders,
+      session: _itemSession,
       maxStreamingBitrate: _settings.maxStreamingBitrate,
     )..addListener(_syncPlaybackState);
     _playbackController = controller;
@@ -396,7 +404,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final playingChanged = _playing != playback.isPlaying;
     final justCompleted = !_completed && playback.isCompleted;
     setState(() {
-      if (!_seeking) _position = playback.position;
+      if (!_seeking) _position = playback.displayPosition;
       _duration = playback.duration;
       _buffer = playback.buffer;
       _playing = playback.isPlaying;
@@ -497,7 +505,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _closePlayer(PlayerExitReason reason) =>
       _closeCoordinator.close(reason);
 
-  Future<void> _stopPlaybackForClose() async {
+  Future<void> _stopPlaybackForClose() =>
+      _playerSessionCoordinator.shutdown(_releasePlaybackResources);
+
+  Future<void> _releasePlaybackResources() async {
     if (_playbackResourcesReleased) return;
     _playbackResourcesReleased = true;
     _controlsTimer?.cancel();
@@ -579,11 +590,23 @@ class _PlayerScreenState extends State<PlayerScreen>
     _restartControlsTimer();
   }
 
-  Future<void> _seekRelative(Duration offset) async {
+  Future<void> _seekRelative(
+    Duration offset, {
+    SeekSource source = SeekSource.controls,
+  }) async {
     final controller = _playbackController;
     if (controller == null) return;
-    final safeTarget = _clampPosition(_position + offset);
-    await controller.seek(safeTarget);
+    await controller.seekRelative(offset, source: source);
+    _restartControlsTimer();
+  }
+
+  Future<void> _seekAbsolute(
+    Duration target, {
+    required SeekSource source,
+  }) async {
+    final controller = _playbackController;
+    if (controller == null) return;
+    await controller.seekAbsolute(target, source: source);
     _restartControlsTimer();
   }
 
@@ -618,7 +641,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'seek':
         final ticks = message.seekPositionTicks;
         if (ticks != null) {
-          await controller.seek(Duration(microseconds: ticks ~/ 10));
+          await controller.seekAbsolute(
+            Duration(microseconds: ticks ~/ 10),
+            source: SeekSource.remote,
+          );
         }
       case 'nexttrack':
         await _playNext();
@@ -627,10 +653,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'rewind':
         await controller.seekRelative(
           Duration(seconds: -_settings.seekBackwardSeconds),
+          source: SeekSource.remote,
         );
       case 'fastforward':
         await controller.seekRelative(
           Duration(seconds: _settings.seekForwardSeconds),
+          source: SeekSource.remote,
         );
       default:
         DiagnosticLog.instance.info(
@@ -644,6 +672,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_error != null || _duration == Duration.zero) return;
 
     _controlsTimer?.cancel();
+    _seekGestureGeneration++;
     setState(() {
       _horizontalDragStartPosition = _position;
       _horizontalDragPreviewPosition = _position;
@@ -675,13 +704,25 @@ class _PlayerScreenState extends State<PlayerScreen>
     final startPosition = _horizontalDragStartPosition;
     final target = _horizontalDragPreviewPosition;
     if (startPosition == null || target == null) return;
+    final gestureGeneration = _seekGestureGeneration;
+
+    setState(() {
+      _horizontalDragStartPosition = null;
+      _horizontalDragPreviewPosition = null;
+      _horizontalDragDx = 0;
+      _seeking = false;
+      _controlsVisible = true;
+    });
 
     var seekSucceeded = false;
     try {
       final controller = _playbackController;
       if (controller == null) return;
-      await controller.seek(target);
-      seekSucceeded = true;
+      final result = await controller.seekAbsolute(
+        target,
+        source: SeekSource.horizontalDrag,
+      );
+      seekSucceeded = result.disposition == SeekDisposition.executed;
       DiagnosticLog.instance.info(
         'player',
         'Horizontal seek item=${_currentItem.id} '
@@ -697,14 +738,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
     }
 
-    if (!mounted) return;
+    if (!mounted || gestureGeneration != _seekGestureGeneration) return;
     setState(() {
-      _position = seekSucceeded ? target : startPosition;
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
-      _seeking = false;
-      _controlsVisible = true;
+      if (!seekSucceeded) _position = startPosition;
     });
     _restartControlsTimer();
   }
@@ -713,6 +749,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final startPosition = _horizontalDragStartPosition;
     if (startPosition == null) return;
 
+    _seekGestureGeneration++;
     setState(() {
       _position = startPosition;
       _horizontalDragStartPosition = null;
@@ -882,7 +919,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final seconds = position.dx < width / 2
         ? -_settings.seekBackwardSeconds
         : _settings.seekForwardSeconds;
-    unawaited(_seekRelative(Duration(seconds: seconds)));
+    unawaited(
+      _seekRelative(Duration(seconds: seconds), source: SeekSource.doubleTap),
+    );
   }
 
   void _onVerticalDragStart(DragStartDetails details) {
@@ -1045,7 +1084,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _skipIntro() {
     final end = _chapterMarker('introend')?.position;
-    if (end != null) unawaited(_playbackController?.seek(end));
+    if (end != null) {
+      unawaited(_seekAbsolute(end, source: SeekSource.skipIntro));
+    }
   }
 
   void _startNextCountdown() {
@@ -1148,33 +1189,40 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_switchingItem || item.id == _currentItem.id) return;
     _switchingItem = true;
     _nextCountdownTimer?.cancel();
-    final previousController = _playbackController;
-    if (previousController != null) {
-      previousController.removeListener(_syncPlaybackState);
-      await previousController.shutdown();
-    }
-    if (!mounted) return;
-
-    _createPlayer();
-    setState(() {
-      _currentItem = item;
-      _playbackController = null;
-      _plan = null;
-      _position = Duration.zero;
-      _duration = Duration.zero;
-      _buffer = Duration.zero;
-      _playing = false;
-      _buffering = true;
-      _completed = false;
-      _error = null;
-      _playbackStatus = null;
-      _showSkipIntro = false;
-      _autoNextCancelled = false;
-      _nextCountdown = null;
-      _controlsVisible = true;
-    });
     try {
-      await _startCurrentItem();
+      await _playerSessionCoordinator.switchItem(
+        closeCurrent: () async {
+          final previousController = _playbackController;
+          if (previousController == null) return;
+          previousController.removeListener(_syncPlaybackState);
+          await previousController.shutdown();
+          previousController.dispose();
+        },
+        openNext: (session) async {
+          if (!mounted) return;
+          _itemSession = session;
+          _createPlayer();
+          setState(() {
+            _currentItem = item;
+            _playbackController = null;
+            _plan = null;
+            _position = Duration.zero;
+            _duration = Duration.zero;
+            _buffer = Duration.zero;
+            _playing = false;
+            _buffering = true;
+            _completed = false;
+            _error = null;
+            _playbackStatus = null;
+            _showSkipIntro = false;
+            _autoNextCancelled = false;
+            _nextCountdown = null;
+            _controlsVisible = true;
+            _seekGestureGeneration++;
+          });
+          await _startCurrentItem();
+        },
+      );
     } finally {
       _switchingItem = false;
     }
@@ -1397,7 +1445,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           onTap: () {
             Navigator.pop(sheetContext);
             unawaited(
-              _playbackController?.seek(_currentItem.chapters[index].position),
+              _seekAbsolute(
+                _currentItem.chapters[index].position,
+                source: SeekSource.chapter,
+              ),
             );
           },
         ),
@@ -2096,7 +2147,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                     max: maxMs,
                     value: positionMs,
                     secondaryTrackValue: bufferMs,
-                    onChangeStart: (_) => setState(() => _seeking = true),
+                    onChangeStart: (_) {
+                      _seekGestureGeneration++;
+                      setState(() => _seeking = true);
+                    },
                     onChanged: (value) {
                       setState(
                         () => _position = Duration(milliseconds: value.round()),
@@ -2105,10 +2159,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                     onChangeEnd: (value) async {
                       final controller = _playbackController;
                       if (controller == null) return;
-                      await controller.seek(
+                      final gestureGeneration = _seekGestureGeneration;
+                      setState(() => _seeking = false);
+                      await controller.seekAbsolute(
                         Duration(milliseconds: value.round()),
+                        source: SeekSource.progressBar,
                       );
-                      if (mounted) setState(() => _seeking = false);
+                      if (!mounted ||
+                          gestureGeneration != _seekGestureGeneration) {
+                        return;
+                      }
                       _restartControlsTimer();
                     },
                   ),

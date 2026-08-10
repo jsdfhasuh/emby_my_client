@@ -9,6 +9,8 @@ enum PlaybackPhase {
   seekingResume,
   ready,
   retryingWithTranscode,
+  recoveryPending,
+  recovering,
   failed,
   stopping,
 }
@@ -17,6 +19,7 @@ class PlaybackState {
   const PlaybackState({
     this.phase = PlaybackPhase.idle,
     this.position = Duration.zero,
+    this.requestedPosition,
     this.duration = Duration.zero,
     this.buffer = Duration.zero,
     this.isPlaying = false,
@@ -32,6 +35,7 @@ class PlaybackState {
 
   final PlaybackPhase phase;
   final Duration position;
+  final Duration? requestedPosition;
   final Duration duration;
   final Duration buffer;
   final bool isPlaying;
@@ -46,10 +50,13 @@ class PlaybackState {
 
   bool get isReady => phase == PlaybackPhase.ready;
   bool get hasError => phase == PlaybackPhase.failed;
+  Duration get displayPosition => requestedPosition ?? position;
 
   PlaybackState copyWith({
     PlaybackPhase? phase,
     Duration? position,
+    Duration? requestedPosition,
+    bool clearRequestedPosition = false,
     Duration? duration,
     Duration? buffer,
     bool? isPlaying,
@@ -67,6 +74,9 @@ class PlaybackState {
   }) => PlaybackState(
     phase: phase ?? this.phase,
     position: position ?? this.position,
+    requestedPosition: clearRequestedPosition
+        ? null
+        : requestedPosition ?? this.requestedPosition,
     duration: duration ?? this.duration,
     buffer: buffer ?? this.buffer,
     isPlaying: isPlaying ?? this.isPlaying,
