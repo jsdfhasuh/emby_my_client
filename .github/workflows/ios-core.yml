@@ -150,6 +150,7 @@ jobs:
             'platform-tools' \
             'emulator' \
             'system-images;android-35;google_apis;x86_64'
+          export PATH="$android_sdk_root/platform-tools:$PATH"
           echo no | "$android_sdk_root/cmdline-tools/latest/bin/avdmanager" \
             create avd --force \
             --name emby-mpv-capability \
