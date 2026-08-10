@@ -313,7 +313,12 @@ PlaybackCacheEngineCapabilities _capabilities({bool passed = true}) =>
       profileSwitchStrategy: passed
           ? PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop
           : PlaybackCacheProfileSwitchStrategy.unsupported,
-      resetValues: const {},
+      resetValues: passed
+          ? {
+              for (final option in playbackCacheProfileOptionNames)
+                option: option == 'demuxer-cache-dir' ? '' : 'auto',
+            }
+          : const {},
     );
 
 PlaybackCacheStorageSnapshot _storage(int freeBytes) =>

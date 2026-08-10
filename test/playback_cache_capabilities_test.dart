@@ -117,6 +117,32 @@ void main() {
     expect(experiment.calls, 0);
   });
 
+  test(
+    'missing reset evidence blocks disk without running experiment',
+    () async {
+      final access = _FakeNativeAccess.complete()
+        ..strings.remove('option-info/cache-pause-wait/default-value');
+      final experiment = _FakeExperiment(
+        PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
+      );
+
+      final result = await PlaybackCacheCapabilityProbe(
+        access: access,
+        profileSwitchExperiment: experiment,
+      ).probe();
+
+      expect(result.optionSupport.values, everyElement(isTrue));
+      expect(result.hasCompleteResetValues, isFalse);
+      expect(result.diskGatePassed, isFalse);
+      expect(
+        result.profileSwitchStrategy,
+        PlaybackCacheProfileSwitchStrategy.unsupported,
+      );
+      expect(experiment.calls, 0);
+      expect(result.toSafeDiagnosticManifest()['resetValuesComplete'], isFalse);
+    },
+  );
+
   test('native operations have a fixed timeout', () async {
     final pending = Completer<void>();
     NativePlaybackOperationKind? reported;

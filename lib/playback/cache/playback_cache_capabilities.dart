@@ -69,9 +69,12 @@ class PlaybackCacheEngineCapabilities {
   bool get supportsFileCacheBytes => supportsNativeCacheState;
   bool get supportsRawInputRate => supportsNativeCacheState;
   bool get supportsStreamBufferSize => _supportsOption('stream-buffer-size');
+  bool get hasCompleteResetValues =>
+      playbackCacheProfileOptionNames.every(resetValues.containsKey);
 
   bool get diskGatePassed =>
       playbackCacheRequiredDiskOptionNames.every(_supportsOption) &&
+      hasCompleteResetValues &&
       supportsImmediateUnlink &&
       supportsNativeCacheState &&
       supportsSeekableRanges &&
@@ -89,6 +92,7 @@ class PlaybackCacheEngineCapabilities {
     for (final property in playbackCachePropertyNames)
       'property_${_safeKey(property)}': propertySupport[property] ?? false,
     'supportsImmediateUnlink': supportsImmediateUnlink,
+    'resetValuesComplete': hasCompleteResetValues,
     'profileSwitchStrategy': profileSwitchStrategy.name,
     'diskGatePassed': diskGatePassed,
   };
@@ -134,8 +138,12 @@ class PlaybackCacheCapabilityProbe {
     final requiredOptionsAvailable = playbackCacheRequiredDiskOptionNames.every(
       (name) => options[name] == true,
     );
+    final resetValuesComplete = playbackCacheProfileOptionNames.every(
+      resetValues.containsKey,
+    );
     var switchStrategy = PlaybackCacheProfileSwitchStrategy.unsupported;
     if (requiredOptionsAvailable &&
+        resetValuesComplete &&
         _containsChoice(choices, 'immediate') &&
         profileSwitchExperiment != null) {
       switchStrategy = await profileSwitchExperiment!.run(

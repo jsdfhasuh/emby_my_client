@@ -156,10 +156,15 @@ class PlaybackCacheProfileApplier {
       );
     }
 
-    final values = PlaybackCacheProfileValues.fromProfile(
-      profile,
-      resetValues: capabilities.resetValues,
-    );
+    final PlaybackCacheProfileValues values;
+    try {
+      values = PlaybackCacheProfileValues.fromProfile(
+        profile,
+        resetValues: capabilities.resetValues,
+      );
+    } catch (_) {
+      return _unconfirmed(requestedMode);
+    }
     final readBack = await _writeAndReadBack(values.values);
     if (readBack != null) {
       return PlaybackCacheApplyResult(
@@ -189,10 +194,15 @@ class PlaybackCacheProfileApplier {
     ResolvedPlaybackCacheProfile original,
     PlaybackCacheFallbackReason reason,
   ) async {
-    final fallback = PlaybackCacheProfileValues.memoryFallback(
-      original,
-      resetValues: capabilities.resetValues,
-    );
+    final PlaybackCacheProfileValues fallback;
+    try {
+      fallback = PlaybackCacheProfileValues.memoryFallback(
+        original,
+        resetValues: capabilities.resetValues,
+      );
+    } catch (_) {
+      return _unconfirmed(original.runtimeMode);
+    }
     final readBack = await _writeAndReadBack(fallback.values);
     if (readBack == null) {
       return PlaybackCacheApplyResult(
@@ -211,6 +221,16 @@ class PlaybackCacheProfileApplier {
       readBack: Map.unmodifiable(readBack),
     );
   }
+
+  PlaybackCacheApplyResult _unconfirmed(
+    PlaybackCacheRuntimeMode requestedMode,
+  ) => PlaybackCacheApplyResult(
+    requestedMode: requestedMode,
+    actualMode: PlaybackCacheRuntimeMode.unconfirmed,
+    fallbackReason: PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    requiresPlayerRecreation: false,
+    readBack: const {},
+  );
 
   Future<Map<String, String>?> _writeAndReadBack(
     Map<String, String> values,
@@ -291,7 +311,7 @@ class PlaybackCacheProfileValues {
   ) => {
     'cache': 'yes',
     'cache-on-disk': 'no',
-    'demuxer-cache-dir': resetValues['demuxer-cache-dir'] ?? '',
+    'demuxer-cache-dir': _requiredResetValue(resetValues, 'demuxer-cache-dir'),
     'demuxer-cache-unlink-files': 'immediate',
     'cache-secs': profile.forwardTarget.inSeconds.clamp(30, 60).toString(),
     'demuxer-max-bytes': min(
@@ -315,7 +335,7 @@ class PlaybackCacheProfileValues {
   ) => {
     'cache': 'no',
     'cache-on-disk': 'no',
-    'demuxer-cache-dir': resetValues['demuxer-cache-dir'] ?? '',
+    'demuxer-cache-dir': _requiredResetValue(resetValues, 'demuxer-cache-dir'),
     'demuxer-cache-unlink-files': 'immediate',
     'cache-secs': '0',
     'demuxer-max-bytes': (16 * 1024 * 1024).toString(),
@@ -326,6 +346,15 @@ class PlaybackCacheProfileValues {
     'cache-pause-wait': '1',
     'stream-buffer-size': (128 * 1024).toString(),
   };
+
+  static String _requiredResetValue(
+    Map<String, String> resetValues,
+    String name,
+  ) {
+    final value = resetValues[name];
+    if (value == null) throw StateError('Missing native reset value');
+    return value;
+  }
 }
 
 class RuntimePlaybackCacheProfileSwitchExperiment

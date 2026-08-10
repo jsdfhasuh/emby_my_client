@@ -65,6 +65,21 @@ void main() {
     );
   });
 
+  test('missing native directory reset fails closed without writing', () async {
+    final access = _FakeNativeAccess();
+    final result = await PlaybackCacheProfileApplier(
+      access: access,
+      capabilities: _capabilities(resetValues: const {}),
+    ).apply(_profile(PlaybackCacheRuntimeMode.memory));
+
+    expect(result.actualMode, PlaybackCacheRuntimeMode.unconfirmed);
+    expect(
+      result.fallbackReason,
+      PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    );
+    expect(access.values, isEmpty);
+  });
+
   test('disk to memory to disabled fully resets inherited options', () async {
     final access = _FakeNativeAccess();
     final applier = PlaybackCacheProfileApplier(
@@ -173,6 +188,7 @@ ResolvedPlaybackCacheProfile _profile(PlaybackCacheRuntimeMode mode) =>
 PlaybackCacheEngineCapabilities _capabilities({
   PlaybackCacheProfileSwitchStrategy strategy =
       PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
+  Map<String, String>? resetValues,
 }) => PlaybackCacheEngineCapabilities(
   mpvVersionFingerprint: 'mpv-test',
   platform: 'test',
@@ -182,8 +198,13 @@ PlaybackCacheEngineCapabilities _capabilities({
   },
   supportsImmediateUnlink: true,
   profileSwitchStrategy: strategy,
-  resetValues: const {'demuxer-cache-dir': 'reset-directory'},
+  resetValues: resetValues ?? _completeResetValues('reset-directory'),
 );
+
+Map<String, String> _completeResetValues(String directory) => {
+  for (final option in playbackCacheProfileOptionNames)
+    option: option == 'demuxer-cache-dir' ? directory : 'auto',
+};
 
 class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   _FakeNativeAccess({this.failOnceOn, this.readMismatchOn});

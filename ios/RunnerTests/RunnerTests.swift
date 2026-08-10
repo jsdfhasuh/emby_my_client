@@ -16,23 +16,33 @@ final class RunnerTests: XCTestCase {
     )
     XCTAssertTrue(Set(snapshot.resetValues.keys).isSubset(of: snapshot.supportedOptions))
     XCTAssertTrue(snapshot.properties.contains("property-list"))
-    XCTAssertEqual(
-      snapshot.supportedOptions,
-      Set(PlaybackCacheNativeProbe.optionNames)
-    )
-    XCTAssertEqual(
-      Set(snapshot.resetValues.keys),
-      Set(PlaybackCacheNativeProbe.optionNames)
-    )
-    XCTAssertTrue(snapshot.unlinkChoices.contains("immediate"))
-    XCTAssertNotEqual(snapshot.profileSwitchStrategy, .unsupported)
-    XCTAssertTrue(snapshot.diskCapabilityPassed)
 
     let manifest = try snapshot.safeManifestData()
     let attachment = XCTAttachment(data: manifest)
     attachment.name = "mpv-capability-manifest.json"
     attachment.lifetime = .keepAlways
     add(attachment)
+
+    let decoded = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: manifest) as? [String: Any]
+    )
+    let options = try XCTUnwrap(decoded["options"] as? [String: Bool])
+    let properties = try XCTUnwrap(decoded["properties"] as? [String: Bool])
+    let missingResets = try XCTUnwrap(decoded["missingResetValues"] as? [String])
+    XCTAssertEqual(Set(options.keys), Set(PlaybackCacheNativeProbe.optionNames))
+    XCTAssertEqual(Set(properties.keys), Set(PlaybackCacheNativeProbe.requiredProperties))
+    XCTAssertEqual(
+      Set(missingResets),
+      Set(PlaybackCacheNativeProbe.optionNames).subtracting(snapshot.resetValues.keys)
+    )
+    XCTAssertEqual(decoded["resetValuesComplete"] as? Bool, snapshot.hasCompleteResetValues)
+    XCTAssertEqual(decoded["diskCapabilityPassed"] as? Bool, snapshot.diskCapabilityPassed)
+    if snapshot.diskCapabilityPassed {
+      XCTAssertEqual(snapshot.supportedOptions, Set(PlaybackCacheNativeProbe.optionNames))
+      XCTAssertTrue(snapshot.hasCompleteResetValues)
+      XCTAssertTrue(snapshot.unlinkChoices.contains("immediate"))
+      XCTAssertNotEqual(snapshot.profileSwitchStrategy, .unsupported)
+    }
 
     print("mpv_version=\(snapshot.mpvVersion)")
     print("mpv_platform=\(snapshot.platform)")
@@ -48,6 +58,30 @@ final class RunnerTests: XCTestCase {
     print("mpv_unlink_immediate=\(snapshot.unlinkChoices.contains("immediate"))")
     print("mpv_profile_switch_strategy=\(snapshot.profileSwitchStrategy.rawValue)")
     print("mpv_disk_capability_passed=\(snapshot.diskCapabilityPassed)")
+  }
+
+  func testIncompleteNativeResetEvidenceBlocksDiskWithoutGuessing() throws {
+    let snapshot = PlaybackCacheNativeCapabilitySnapshot(
+      mpvVersion: "mpv-test",
+      platform: "darwin",
+      supportedOptions: Set(PlaybackCacheNativeProbe.optionNames),
+      properties: Set(PlaybackCacheNativeProbe.requiredProperties),
+      unlinkChoices: ["immediate"],
+      resetValues: ["cache": "auto"],
+      profileSwitchStrategy: .unsupported
+    )
+
+    XCTAssertFalse(snapshot.hasCompleteResetValues)
+    XCTAssertFalse(snapshot.diskCapabilityPassed)
+    let manifest = try snapshot.safeManifestData()
+    let decoded = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: manifest) as? [String: Any]
+    )
+    XCTAssertEqual(decoded["resetValuesComplete"] as? Bool, false)
+    XCTAssertEqual(
+      Set(try XCTUnwrap(decoded["missingResetValues"] as? [String])),
+      Set(PlaybackCacheNativeProbe.optionNames).subtracting(["cache"])
+    )
   }
 
   func testValidReportPassesAndFilenameUsesOnlyBundleBuildAndTime() throws {

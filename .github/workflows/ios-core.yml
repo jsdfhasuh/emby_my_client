@@ -373,12 +373,40 @@ jobs:
                   break
           assert manifest is not None
           assert manifest['schema'] == 'emby-mpv-capabilities/v1'
-          assert manifest['diskCapabilityPassed'] is True
-          assert manifest['profileSwitchStrategy'] in {
+          expected_options = {
+              'cache', 'cache-on-disk', 'demuxer-cache-dir',
+              'demuxer-cache-unlink-files', 'cache-secs',
+              'demuxer-max-bytes', 'demuxer-max-back-bytes',
+              'demuxer-donate-buffer', 'demuxer-seekable-cache',
+              'cache-pause', 'cache-pause-wait', 'stream-buffer-size',
+          }
+          expected_properties = {
+              'mpv-version', 'platform', 'property-list', 'demuxer-cache-state'
+          }
+          assert set(manifest['options']) == expected_options
+          assert set(manifest['properties']) == expected_properties
+          assert all(type(value) is bool for value in manifest['options'].values())
+          assert all(type(value) is bool for value in manifest['properties'].values())
+          reset_values = manifest['resetValues']
+          assert set(reset_values).issubset(expected_options)
+          assert all(isinstance(value, str) for value in reset_values.values())
+          missing_resets = manifest['missingResetValues']
+          assert set(missing_resets) == expected_options - set(reset_values)
+          resets_complete = not missing_resets
+          assert manifest['resetValuesComplete'] is resets_complete
+          approved_strategy = manifest['profileSwitchStrategy'] in {
               'inPlaceAfterMediaStop', 'requiresPlayerRecreation'
           }
-          assert all(manifest['options'].values())
-          assert manifest['resetValues']['demuxer-cache-dir'] == ''
+          calculated_gate = (
+              all(manifest['options'].values())
+              and resets_complete
+              and 'immediate' in manifest['unlinkChoices']
+              and manifest['properties']['demuxer-cache-state']
+              and approved_strategy
+          )
+          assert manifest['diskCapabilityPassed'] is calculated_gate
+          gate = 'PASSED' if calculated_gate else 'BLOCKED'
+          print(f'STOP_GATE_DISK_CACHE_CAPABILITY={gate}')
           print(json.dumps(manifest, sort_keys=True, separators=(',', ':')))
           PY
 

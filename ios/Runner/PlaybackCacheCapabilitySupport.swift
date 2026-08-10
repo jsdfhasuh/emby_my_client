@@ -15,9 +15,14 @@ struct PlaybackCacheNativeCapabilitySnapshot {
   let resetValues: [String: String]
   let profileSwitchStrategy: PlaybackCacheNativeProfileSwitchStrategy
 
+  var hasCompleteResetValues: Bool {
+    Set(resetValues.keys) == Set(PlaybackCacheNativeProbe.optionNames)
+  }
+
   var diskCapabilityPassed: Bool {
     let requiredOptions = Set(PlaybackCacheNativeProbe.optionNames)
     return requiredOptions.isSubset(of: supportedOptions)
+      && hasCompleteResetValues
       && unlinkChoices.contains("immediate")
       && properties.contains("demuxer-cache-state")
       && profileSwitchStrategy != .unsupported
@@ -77,6 +82,7 @@ enum PlaybackCacheNativeProbe {
     let requiredOptions = Set(optionNames)
     let strategy: PlaybackCacheNativeProfileSwitchStrategy
     if requiredOptions.isSubset(of: supportedOptions)
+      && Set(resetValues.keys) == requiredOptions
       && choices.contains("immediate")
     {
       strategy = try profileSwitchStrategy(resetValues: resetValues)
@@ -177,7 +183,9 @@ enum PlaybackCacheNativeProbe {
     cacheDirectory: URL,
     resetValues: [String: String]
   ) -> Bool {
-    let directoryReset = resetValues["demuxer-cache-dir"] ?? ""
+    guard let directoryReset = resetValues["demuxer-cache-dir"] else {
+      return false
+    }
     let values: [String: String]
     switch profile {
     case .disk:
@@ -423,20 +431,24 @@ enum PlaybackCacheNativeProbe {
 
 extension PlaybackCacheNativeCapabilitySnapshot {
   func safeManifestData() throws -> Data {
+    let optionNames = Set(PlaybackCacheNativeProbe.optionNames)
     guard
       let version = Self.safeToken(mpvVersion),
       let safePlatform = Self.safeToken(platform),
-      Set(resetValues.keys) == Set(PlaybackCacheNativeProbe.optionNames),
-      resetValues["demuxer-cache-dir"] == ""
+      Set(resetValues.keys).isSubset(of: optionNames),
+      Set(resetValues.keys).isSubset(of: supportedOptions)
     else {
       throw PlaybackCacheNativeProbeError.unsafeManifest
     }
     var safeResets: [String: String] = [:]
-    for option in PlaybackCacheNativeProbe.optionNames {
-      guard let value = resetValues[option], Self.isSafeValue(value) else {
+    for (option, value) in resetValues {
+      guard Self.isSafeValue(value) else {
         throw PlaybackCacheNativeProbeError.unsafeManifest
       }
       safeResets[option] = value
+    }
+    let missingResetValues = PlaybackCacheNativeProbe.optionNames.filter {
+      resetValues[$0] == nil
     }
     let manifest: [String: Any] = [
       "schema": "emby-mpv-capabilities/v1",
@@ -454,6 +466,8 @@ extension PlaybackCacheNativeCapabilitySnapshot {
       ),
       "unlinkChoices": unlinkChoices.sorted(),
       "resetValues": safeResets,
+      "resetValuesComplete": hasCompleteResetValues,
+      "missingResetValues": missingResetValues,
       "profileSwitchStrategy": profileSwitchStrategy.rawValue,
       "diskCapabilityPassed": diskCapabilityPassed,
     ]

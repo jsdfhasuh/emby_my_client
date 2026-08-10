@@ -938,7 +938,10 @@ PlaybackCacheEngineCapabilities _capabilities() =>
       supportsImmediateUnlink: true,
       profileSwitchStrategy:
           PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
-      resetValues: const {'demuxer-cache-dir': ''},
+      resetValues: {
+        for (final option in playbackCacheProfileOptionNames)
+          option: option == 'demuxer-cache-dir' ? '' : 'auto',
+      },
     );
 
 const _item = EmbyItem(
