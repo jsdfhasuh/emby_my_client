@@ -5,6 +5,7 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
+import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
@@ -266,6 +267,7 @@ void main() {
       final requests = <RequestOptions>[];
       final api = _api(requests);
       final engine = _FakeEngine();
+      final diagnostics = <String>[];
       engine.onOpen = (_) {
         engineLater(
           () => engine.durationController.add(const Duration(hours: 1)),
@@ -275,6 +277,7 @@ void main() {
         api: api,
         engine: engine,
         item: _plainItem,
+        diagnostics: _diagnostics(diagnostics),
       );
       await controller.start();
 
@@ -301,12 +304,20 @@ void main() {
       expect(controller.state.position, const Duration(seconds: 100));
       expect(controller.state.requestedPosition, isNull);
       await controller.shutdown();
+      final seekLines = diagnostics
+          .where((line) => line.contains('event=playback_seek_'))
+          .toList();
+      expect(seekLines, hasLength(3));
+      expect(seekLines, contains('event=playback_seek_requested count=100'));
+      expect(seekLines, contains('event=playback_seek_coalesced count=98'));
+      expect(seekLines, contains('event=playback_seek_executed count=2'));
     },
   );
 
   test(
     'shutdown deadlines do not leave the controller route-blocking',
     () async {
+      final diagnostics = <String>[];
       final engine = _FakeEngine(
         stopOperation: Completer<void>().future,
         disposeOperation: Completer<void>().future,
@@ -321,6 +332,7 @@ void main() {
         stopTimeout: const Duration(milliseconds: 10),
         disposeTimeout: const Duration(milliseconds: 10),
         reporterTimeout: const Duration(milliseconds: 10),
+        diagnostics: _diagnostics(diagnostics),
       );
 
       await controller.shutdown().timeout(const Duration(milliseconds: 200));
@@ -329,9 +341,85 @@ void main() {
       expect(engine.disposeCalls, 1);
       expect(reporter.stopCalls, 1);
       expect(controller.state.phase, PlaybackPhase.idle);
+      expect(
+        diagnostics,
+        contains('event=playback_operation_timeout kind=reporter_stop'),
+      );
+      expect(
+        diagnostics,
+        contains('event=playback_operation_timeout kind=engine_stop'),
+      );
+      expect(
+        diagnostics,
+        contains('event=playback_operation_timeout kind=engine_dispose'),
+      );
       controller.dispose();
     },
   );
+
+  test('automatic open budget exhaustion is fixed and path-free', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final diagnostics = <String>[];
+    final session = PlaybackItemSession.forTest('sensitive-session-id');
+    for (final reason in AutomaticPlaybackOpenReason.values) {
+      expect(session.tryReserveAutomaticOpen(reason), isTrue);
+    }
+    final controller = _controller(
+      api: api,
+      engine: _FakeEngine(),
+      item: _plainItem,
+      session: session,
+      diagnostics: _diagnostics(diagnostics),
+    );
+
+    await expectLater(controller.start(), throwsStateError);
+
+    expect(
+      diagnostics,
+      contains(
+        'event=playback_automatic_open_budget_exhausted '
+        'reason=initial automaticOpenCount=5_6',
+      ),
+    );
+    expect(diagnostics.join('\n'), isNot(contains('sensitive-session-id')));
+    await controller.shutdown();
+  });
+
+  test('shutdown cancels an outstanding seek and logs one aggregate', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final diagnostics = <String>[];
+    final seekGate = Completer<void>();
+    final engine = _FakeEngine(seekOperation: seekGate.future);
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: api,
+      engine: engine,
+      item: _plainItem,
+      diagnostics: _diagnostics(diagnostics),
+    );
+    await controller.start();
+
+    final seek = controller.seekAbsolute(
+      const Duration(minutes: 30),
+      source: SeekSource.remote,
+    );
+    await Future<void>.delayed(Duration.zero);
+    final shutdown = controller.shutdown();
+    final result = await seek;
+    await shutdown;
+
+    expect(result.disposition, SeekDisposition.cancelled);
+    expect(diagnostics, contains('event=playback_seek_cancelled count=1'));
+    seekGate.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
 }
 
 PlaybackController _controller({
@@ -339,6 +427,8 @@ PlaybackController _controller({
   required _FakeEngine engine,
   required EmbyItem item,
   Duration readyTimeout = const Duration(seconds: 1),
+  PlaybackDiagnostics? diagnostics,
+  PlaybackItemSession? session,
 }) => PlaybackController(
   item: item,
   engine: engine,
@@ -346,8 +436,15 @@ PlaybackController _controller({
   reporter: PlaybackSessionReporter(api: api, item: item),
   playbackHeaders: api.playbackHeaders,
   readyTimeout: readyTimeout,
+  diagnostics: diagnostics,
+  session: session,
   resumeVerificationTimeout: const Duration(milliseconds: 100),
   progressInterval: const Duration(hours: 1),
+);
+
+PlaybackDiagnostics _diagnostics(List<String> lines) => PlaybackDiagnostics(
+  writer: (_, _, message) => lines.add(message),
+  seekFlushInterval: const Duration(hours: 1),
 );
 
 EmbyApi _api(List<RequestOptions> requests, {bool remoteStrm = false}) {
@@ -401,10 +498,11 @@ void engineLater(void Function() action) {
 }
 
 class _FakeEngine implements PlaybackEngine {
-  _FakeEngine({this.stopOperation, this.disposeOperation});
+  _FakeEngine({this.stopOperation, this.disposeOperation, this.seekOperation});
 
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
+  final Future<void>? seekOperation;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -488,6 +586,7 @@ class _FakeEngine implements PlaybackEngine {
   @override
   Future<void> seek(Duration position) async {
     seekValues.add(position);
+    await seekOperation;
     positionController.add(position);
   }
 

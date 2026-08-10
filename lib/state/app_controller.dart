@@ -23,6 +23,7 @@ import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
 import '../playback/cache/playback_cache_storage.dart';
+import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
@@ -617,6 +618,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _cleanupPlaybackCacheResidue() async {
     try {
       await _playbackCacheStorage.cleanupNonActiveMarkedSessions();
+      PlaybackDiagnostics().cacheStaleCleanup();
     } catch (_) {
       DiagnosticLog.instance.warning(
         'playback-cache',

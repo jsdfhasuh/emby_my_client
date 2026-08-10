@@ -1,0 +1,378 @@
+import 'dart:async';
+
+import '../core/diagnostic_log.dart';
+import 'cache/playback_cache_capabilities.dart';
+import 'cache/playback_cache_coordinator.dart';
+import 'cache/playback_cache_engine.dart';
+import 'cache/playback_cache_policy.dart';
+import 'cache/playback_cache_settings.dart';
+import 'cache/playback_cache_storage.dart';
+import 'playback_operation_coordinator.dart';
+
+enum PlaybackDiagnosticLevel { info, warning }
+
+enum PlaybackDiagnosticEvent {
+  cacheCapabilitiesResolved('playback_cache_capabilities_resolved'),
+  cacheProfileSwitchStrategyResolved(
+    'playback_cache_profile_switch_strategy_resolved',
+  ),
+  cacheSettingsLoaded('playback_cache_settings_loaded'),
+  cacheProfileResolved('playback_cache_profile_resolved'),
+  cacheDirectoryReady('playback_cache_directory_ready'),
+  cacheDirectoryFailed('playback_cache_directory_failed'),
+  cacheDiskEnabled('playback_cache_disk_enabled'),
+  cacheMemoryFallback('playback_cache_memory_fallback'),
+  cacheActualModeUnconfirmed('playback_cache_actual_mode_unconfirmed'),
+  cacheMpvCreateFailed('playback_cache_mpv_create_failed'),
+  cacheBudgetGuardReached('playback_cache_budget_guard_reached'),
+  cacheLowSpace('playback_cache_low_space'),
+  cacheMemoryPressure('playback_cache_memory_pressure'),
+  cacheSessionCleaned('playback_cache_session_cleaned'),
+  cacheStaleCleanup('playback_cache_stale_cleanup'),
+  cacheSnapshotUnavailable('playback_cache_snapshot_unavailable'),
+  operationTimeout('playback_operation_timeout'),
+  automaticOpenBudgetExhausted('playback_automatic_open_budget_exhausted'),
+  seekRequested('playback_seek_requested'),
+  seekCoalesced('playback_seek_coalesced'),
+  seekExecuted('playback_seek_executed'),
+  seekFailed('playback_seek_failed'),
+  seekCancelled('playback_seek_cancelled'),
+  seekRecoveryPending('playback_seek_recovery_pending'),
+  seekRecoveryStarted('playback_seek_recovery_started'),
+  seekRecoverySucceeded('playback_seek_recovery_succeeded'),
+  seekRecoveryFailed('playback_seek_recovery_failed');
+
+  const PlaybackDiagnosticEvent(this.code);
+
+  final String code;
+}
+
+enum PlaybackOperationTimeoutKind {
+  nativePropertyRead('native_property_read'),
+  nativePropertyWrite('native_property_write'),
+  seekCall('seek_call'),
+  seekSettle('seek_settle'),
+  engineStop('engine_stop'),
+  engineDispose('engine_dispose'),
+  reporterStop('reporter_stop'),
+  cacheCleanup('cache_cleanup');
+
+  const PlaybackOperationTimeoutKind(this.code);
+
+  final String code;
+}
+
+enum PlaybackRecoveryFingerprint {
+  seekFailed('seek_failed'),
+  partialFile('partial_file'),
+  inputOutputError('input_output_error'),
+  packetReadError('packet_read_error');
+
+  const PlaybackRecoveryFingerprint(this.code);
+
+  final String code;
+}
+
+enum PlaybackRecoveryDiagnosticEvent { pending, started, succeeded, failed }
+
+typedef PlaybackDiagnosticWriter =
+    void Function(
+      PlaybackDiagnosticLevel level,
+      String component,
+      String message,
+    );
+
+class PlaybackDiagnostics {
+  PlaybackDiagnostics({
+    PlaybackDiagnosticWriter? writer,
+    this.seekFlushInterval = const Duration(milliseconds: 250),
+  }) : _writer = writer ?? _writeToDiagnosticLog;
+
+  final PlaybackDiagnosticWriter _writer;
+  final Duration seekFlushInterval;
+
+  Timer? _seekFlushTimer;
+  int _seekRequested = 0;
+  int _seekCoalesced = 0;
+  int _seekExecuted = 0;
+  int _seekFailed = 0;
+  int _seekCancelled = 0;
+
+  void cacheCapabilitiesResolved(PlaybackCacheEngineCapabilities capabilities) {
+    _emit(PlaybackDiagnosticEvent.cacheCapabilitiesResolved, [
+      'mpvVersionFingerprint=${_safeToken(capabilities.mpvVersionFingerprint)}',
+      'platform=${_platform(capabilities.platform)}',
+      'diskCache=${capabilities.supportsDiskCache}',
+      'cacheDirectory=${capabilities.supportsCacheDirectory}',
+      'immediateUnlink=${capabilities.supportsImmediateUnlink}',
+      'nativeCacheState=${capabilities.supportsNativeCacheState}',
+      'seekableRanges=${capabilities.supportsSeekableRanges}',
+      'fileCacheBytes=${capabilities.supportsFileCacheBytes}',
+      'rawInputRate=${capabilities.supportsRawInputRate}',
+      'streamBufferSize=${capabilities.supportsStreamBufferSize}',
+      'diskGatePassed=${capabilities.diskGatePassed}',
+    ]);
+    _emit(PlaybackDiagnosticEvent.cacheProfileSwitchStrategyResolved, [
+      'strategy=${capabilities.profileSwitchStrategy.name}',
+    ]);
+  }
+
+  void cacheSettingsLoaded(PlaybackCacheMode mode) {
+    _emit(PlaybackDiagnosticEvent.cacheSettingsLoaded, ['mode=${mode.name}']);
+  }
+
+  void cacheDirectoryResult(PlaybackCacheStorageSnapshot snapshot) {
+    if (snapshot.isAvailable) {
+      _emit(PlaybackDiagnosticEvent.cacheDirectoryReady, const [
+        'cacheDirectoryReady=true',
+      ]);
+      return;
+    }
+    _emit(
+      PlaybackDiagnosticEvent.cacheDirectoryFailed,
+      ['cacheDirectoryReady=false', 'reason=${snapshot.failureReason.name}'],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void cacheProfileResolved(ResolvedPlaybackCacheProfile profile) {
+    _emit(PlaybackDiagnosticEvent.cacheProfileResolved, [
+      'mode=${profile.runtimeMode.name}',
+      'forwardTarget=${_durationBucket(profile.forwardTarget)}',
+      'backTarget=${_durationBucket(profile.backwardTarget)}',
+      'sessionTarget=${_bytesBucket(profile.sessionTargetBytes)}',
+      'fallbackReason=${profile.fallbackReason.name}',
+    ]);
+  }
+
+  void cacheApplyResult(PlaybackCacheApplyResult result) {
+    switch (result.actualMode) {
+      case PlaybackCacheRuntimeMode.disk:
+        _emit(PlaybackDiagnosticEvent.cacheDiskEnabled, [
+          'mode=${result.actualMode.name}',
+        ]);
+      case PlaybackCacheRuntimeMode.memoryFallback:
+        _emit(
+          PlaybackDiagnosticEvent.cacheMemoryFallback,
+          [
+            'mode=${result.actualMode.name}',
+            'fallbackReason=${result.fallbackReason.name}',
+          ],
+          level: PlaybackDiagnosticLevel.warning,
+        );
+      case PlaybackCacheRuntimeMode.unconfirmed:
+        _emit(
+          PlaybackDiagnosticEvent.cacheActualModeUnconfirmed,
+          [
+            'mode=${result.actualMode.name}',
+            'fallbackReason=${result.fallbackReason.name}',
+          ],
+          level: PlaybackDiagnosticLevel.warning,
+        );
+      case PlaybackCacheRuntimeMode.disabled:
+      case PlaybackCacheRuntimeMode.memory:
+        break;
+    }
+  }
+
+  void cacheMpvCreateFailed() {
+    _emit(
+      PlaybackDiagnosticEvent.cacheMpvCreateFailed,
+      const ['observed=true'],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void cacheSafetyTriggered(PlaybackCacheSafetyReason reason) {
+    final event = switch (reason) {
+      PlaybackCacheSafetyReason.budget =>
+        PlaybackDiagnosticEvent.cacheBudgetGuardReached,
+      PlaybackCacheSafetyReason.lowSpace =>
+        PlaybackDiagnosticEvent.cacheLowSpace,
+      PlaybackCacheSafetyReason.memoryPressure =>
+        PlaybackDiagnosticEvent.cacheMemoryPressure,
+    };
+    _emit(event, [
+      'reason=${reason.name}',
+    ], level: PlaybackDiagnosticLevel.warning);
+  }
+
+  void cacheSessionCleaned() {
+    _emit(PlaybackDiagnosticEvent.cacheSessionCleaned, const [
+      'cacheDirectoryReady=false',
+    ]);
+  }
+
+  void cacheStaleCleanup() {
+    _emit(PlaybackDiagnosticEvent.cacheStaleCleanup, const ['completed=true']);
+  }
+
+  void cacheSnapshotUnavailable() {
+    _emit(
+      PlaybackDiagnosticEvent.cacheSnapshotUnavailable,
+      const ['snapshotAvailable=false'],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void operationTimeout(PlaybackOperationTimeoutKind kind) {
+    _emit(
+      PlaybackDiagnosticEvent.operationTimeout,
+      ['kind=${kind.code}'],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void automaticOpenBudgetExhausted({
+    required AutomaticPlaybackOpenReason reason,
+    required int automaticOpenCount,
+  }) {
+    _emit(
+      PlaybackDiagnosticEvent.automaticOpenBudgetExhausted,
+      [
+        'reason=${reason.name}',
+        'automaticOpenCount=${_openCountBucket(automaticOpenCount)}',
+      ],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void seekRequested() {
+    _seekRequested++;
+    _scheduleSeekFlush();
+  }
+
+  void seekCompleted(SeekResult result) {
+    switch (result.disposition) {
+      case SeekDisposition.executed:
+        _seekExecuted++;
+      case SeekDisposition.superseded:
+        _seekCoalesced++;
+      case SeekDisposition.cancelled:
+        _seekCancelled++;
+      case SeekDisposition.failed:
+        _seekFailed++;
+        switch (result.failureKind) {
+          case SeekFailureKind.callTimeout:
+            operationTimeout(PlaybackOperationTimeoutKind.seekCall);
+          case SeekFailureKind.settleTimeout:
+            operationTimeout(PlaybackOperationTimeoutKind.seekSettle);
+          case SeekFailureKind.engineError:
+          case SeekFailureKind.higherPriorityOperation:
+          case SeekFailureKind.staleSession:
+          case null:
+            break;
+        }
+    }
+    _scheduleSeekFlush();
+  }
+
+  void seekRecovery(
+    PlaybackRecoveryDiagnosticEvent recoveryEvent, {
+    PlaybackRecoveryFingerprint? fingerprint,
+  }) {
+    final event = switch (recoveryEvent) {
+      PlaybackRecoveryDiagnosticEvent.pending =>
+        PlaybackDiagnosticEvent.seekRecoveryPending,
+      PlaybackRecoveryDiagnosticEvent.started =>
+        PlaybackDiagnosticEvent.seekRecoveryStarted,
+      PlaybackRecoveryDiagnosticEvent.succeeded =>
+        PlaybackDiagnosticEvent.seekRecoverySucceeded,
+      PlaybackRecoveryDiagnosticEvent.failed =>
+        PlaybackDiagnosticEvent.seekRecoveryFailed,
+    };
+    _emit(
+      event,
+      [if (fingerprint != null) 'fingerprint=${fingerprint.code}'],
+      level: recoveryEvent == PlaybackRecoveryDiagnosticEvent.succeeded
+          ? PlaybackDiagnosticLevel.info
+          : PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void flushSeekSummary() {
+    _seekFlushTimer?.cancel();
+    _seekFlushTimer = null;
+    _emitSeekCount(PlaybackDiagnosticEvent.seekRequested, _seekRequested);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekCoalesced, _seekCoalesced);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekExecuted, _seekExecuted);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekFailed, _seekFailed);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekCancelled, _seekCancelled);
+    _seekRequested = 0;
+    _seekCoalesced = 0;
+    _seekExecuted = 0;
+    _seekFailed = 0;
+    _seekCancelled = 0;
+  }
+
+  void _scheduleSeekFlush() {
+    _seekFlushTimer ??= Timer(seekFlushInterval, flushSeekSummary);
+  }
+
+  void _emitSeekCount(PlaybackDiagnosticEvent event, int count) {
+    if (count == 0) return;
+    _emit(event, ['count=${count.clamp(1, 9999)}']);
+  }
+
+  void _emit(
+    PlaybackDiagnosticEvent event,
+    List<String> fields, {
+    PlaybackDiagnosticLevel level = PlaybackDiagnosticLevel.info,
+  }) {
+    final suffix = fields.isEmpty ? '' : ' ${fields.join(' ')}';
+    _writer(level, 'playback', 'event=${event.code}$suffix');
+  }
+
+  static void _writeToDiagnosticLog(
+    PlaybackDiagnosticLevel level,
+    String component,
+    String message,
+  ) {
+    switch (level) {
+      case PlaybackDiagnosticLevel.info:
+        DiagnosticLog.instance.info(component, message);
+      case PlaybackDiagnosticLevel.warning:
+        DiagnosticLog.instance.warning(component, message);
+    }
+  }
+
+  static String _safeToken(String value) =>
+      RegExp(
+        r'^(?:mpv(?:[._+\-][A-Za-z0-9]+){0,8}|unavailable)$',
+        caseSensitive: false,
+      ).hasMatch(value)
+      ? value
+      : 'unavailable';
+
+  static String _platform(String value) => switch (value.toLowerCase()) {
+    'ipados' || 'ios' || 'darwin' => 'iPadOS',
+    'android' => 'Android',
+    _ => 'unsupported',
+  };
+
+  static String _durationBucket(Duration value) => switch (value.inSeconds) {
+    <= 0 => 'none',
+    <= 30 => 'lte30s',
+    <= 60 => 'lte60s',
+    <= 180 => 'lte180s',
+    <= 300 => 'lte300s',
+    _ => 'gt300s',
+  };
+
+  static String _bytesBucket(int value) => switch (value) {
+    <= 0 => 'none',
+    <= 64 * 1024 * 1024 => 'lte64MiB',
+    <= 256 * 1024 * 1024 => 'lte256MiB',
+    <= 512 * 1024 * 1024 => 'lte512MiB',
+    <= 1024 * 1024 * 1024 => 'lte1GiB',
+    _ => 'gt1GiB',
+  };
+
+  static String _openCountBucket(int count) => switch (count) {
+    <= 0 => '0',
+    <= 2 => '1_2',
+    <= 4 => '3_4',
+    <= PlaybackItemSession.maximumAutomaticOpenCount => '5_6',
+    _ => 'exhausted',
+  };
+}

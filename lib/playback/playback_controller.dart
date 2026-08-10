@@ -11,6 +11,7 @@ import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
 import 'emby_stream_resolver.dart';
+import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
@@ -35,6 +36,7 @@ class PlaybackController extends ChangeNotifier {
     this.cacheSettings = const PlaybackCacheSettings(),
     this.testOverrides,
     PlaybackCacheStorage? cacheStorage,
+    PlaybackDiagnostics? diagnostics,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
@@ -50,6 +52,7 @@ class PlaybackController extends ChangeNotifier {
   }) : _engine = engine,
        session = session ?? PlaybackItemSession.create(),
        cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
+       _diagnostics = diagnostics ?? PlaybackDiagnostics(),
        _clock = clock ?? DateTime.now,
        _maxStreamingBitrate = maxStreamingBitrate {
     _testSeekFailurePending =
@@ -70,6 +73,7 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackCacheSettings cacheSettings;
   final PlaybackDiagnosticsTestOverrides? testOverrides;
   final PlaybackCacheStorage cacheStorage;
+  final PlaybackDiagnostics _diagnostics;
   final Duration readyTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
@@ -110,8 +114,9 @@ class PlaybackController extends ChangeNotifier {
   Duration? _lastStabilityPosition;
   bool _seekBecameStable = false;
   bool _lifecycleSuspended = false;
-  String? _pendingRecoveryFingerprint;
-  final Map<String, DateTime> _recoveryFingerprintLastSeen = {};
+  PlaybackRecoveryFingerprint? _pendingRecoveryFingerprint;
+  final Map<PlaybackRecoveryFingerprint, DateTime>
+  _recoveryFingerprintLastSeen = {};
   double _desiredPlaybackRate = 1;
   bool _desiredPlaying = true;
   Duration _desiredAudioDelay = Duration.zero;
@@ -120,6 +125,8 @@ class PlaybackController extends ChangeNotifier {
   final Map<String, DateTime> _engineLogLastWritten = {};
   bool _testSeekFailurePending = false;
   bool _testCacheFailureObservationPending = false;
+  bool _cacheSnapshotUnavailableLogged = false;
+  final Set<PlaybackCacheSafetyReason> _cacheSafetyDiagnosticsWritten = {};
 
   PlaybackState get state => _state;
   PlaybackEngine get engine => _engine;
@@ -134,7 +141,7 @@ class PlaybackController extends ChangeNotifier {
     _selectedMediaSourceId = mediaSourceId;
     _selectedAudioStreamIndex = audioStreamIndex;
     _selectedSubtitleStreamIndex = subtitleStreamIndex;
-    if (!session.tryReserveAutomaticOpen(AutomaticPlaybackOpenReason.initial)) {
+    if (!_tryReserveAutomaticOpen(AutomaticPlaybackOpenReason.initial)) {
       return Future.error(StateError('Initial playback open is unavailable'));
     }
     return _startPlayback();
@@ -269,7 +276,7 @@ class PlaybackController extends ChangeNotifier {
             plan != null &&
             plan.method != PlayMethod.transcode &&
             _state.phase != PlaybackPhase.ready &&
-            session.tryReserveAutomaticOpen(transcodeFallbackReason);
+            _tryReserveAutomaticOpen(transcodeFallbackReason);
         if (canRetry) {
           retriedWithTranscode = true;
           fellBackToTranscode = true;
@@ -345,6 +352,7 @@ class PlaybackController extends ChangeNotifier {
       capabilities = PlaybackCacheEngineCapabilities.unsupported();
     }
     _throwIfStale(token);
+    _diagnostics.cacheCapabilitiesResolved(capabilities);
 
     final effectiveCacheSettings = testOverrides?.sessionTargetBytes == null
         ? cacheSettings
@@ -364,10 +372,18 @@ class PlaybackController extends ChangeNotifier {
     if (mayUseDisk) {
       storageSnapshot = await cacheStorage.prepareSession();
       _throwIfStale(token);
+      _diagnostics.cacheDirectoryResult(storageSnapshot);
       _cacheSession = storageSnapshot.session;
       storageSnapshot =
           testOverrides?.applyStorageSimulation(storageSnapshot) ??
           storageSnapshot;
+      if (!storageSnapshot.isAvailable &&
+          storageSnapshot.failureReason ==
+              PlaybackCacheStorageFailureReason.storageCapacityUnknown &&
+          !_cacheSnapshotUnavailableLogged) {
+        _cacheSnapshotUnavailableLogged = true;
+        _diagnostics.cacheSnapshotUnavailable();
+      }
       final preliminaryRate = ((plan.bitrate ?? 0) / 8 * 2)
           .round()
           .clamp(8 * 1024 * 1024, 1 << 62)
@@ -381,6 +397,7 @@ class PlaybackController extends ChangeNotifier {
       final available = storageSnapshot.freeBytes;
       if (available != null && available <= preliminaryLowSpaceTrigger) {
         _forcedCacheFallbackReason = PlaybackCacheFallbackReason.lowSpace;
+        _recordCacheSafetyDiagnostic(PlaybackCacheSafetyReason.lowSpace);
       }
     }
 
@@ -412,9 +429,11 @@ class PlaybackController extends ChangeNotifier {
       );
       if ((storageSnapshot.freeBytes ?? 0) <= lowSpaceTrigger) {
         _forcedCacheFallbackReason = PlaybackCacheFallbackReason.lowSpace;
+        _recordCacheSafetyDiagnostic(PlaybackCacheSafetyReason.lowSpace);
         profile = profile.memoryFallback(PlaybackCacheFallbackReason.lowSpace);
       }
     }
+    _diagnostics.cacheProfileResolved(profile);
     PlaybackCacheApplyResult applyResult;
     if (cacheEngine == null) {
       applyResult = PlaybackCacheApplyResult(
@@ -437,6 +456,7 @@ class PlaybackController extends ChangeNotifier {
       await _recreateEngine(token);
       return _prepareCacheForPlan(plan, token);
     }
+    _diagnostics.cacheApplyResult(applyResult);
     if (applyResult.actualMode != PlaybackCacheRuntimeMode.disk) {
       await _cleanupCacheSessionSafely();
     }
@@ -498,10 +518,12 @@ class PlaybackController extends ChangeNotifier {
     Duration position, {
     required SeekSource source,
   }) async {
+    _diagnostics.seekRequested();
     final result = await _operationCoordinator.seekAbsolute(
       position,
       source: source,
     );
+    _diagnostics.seekCompleted(result);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
       _injectApprovedSeekFailureIfPending();
@@ -515,10 +537,12 @@ class PlaybackController extends ChangeNotifier {
     Duration offset, {
     required SeekSource source,
   }) async {
+    _diagnostics.seekRequested();
     final result = await _operationCoordinator.seekRelative(
       offset,
       source: source,
     );
+    _diagnostics.seekCompleted(result);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
       _injectApprovedSeekFailureIfPending();
@@ -680,9 +704,17 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
       try {
-        await _withDeadline(engine.stop(), stopTimeout);
+        await _withDeadline(
+          engine.stop(),
+          stopTimeout,
+          PlaybackOperationTimeoutKind.engineStop,
+        );
       } finally {
-        await _withDeadline(reporter.stop(position), reporterTimeout);
+        await _withDeadline(
+          reporter.stop(position),
+          reporterTimeout,
+          PlaybackOperationTimeoutKind.reporterStop,
+        );
       }
       await _cleanupCacheSessionSafely();
 
@@ -742,6 +774,7 @@ class PlaybackController extends ChangeNotifier {
       await _cleanupCacheSessionSafely();
     }();
     await Future.wait([cleanup, release]);
+    _diagnostics.flushSeekSummary();
     _setState(
       _state.copyWith(
         phase: PlaybackPhase.idle,
@@ -795,7 +828,7 @@ class PlaybackController extends ChangeNotifier {
     DiagnosticLog.instance.error(
       'player',
       'event=playback_engine_error '
-          'fingerprint=${fingerprint ?? 'unapproved'}',
+          'fingerprint=${fingerprint?.code ?? 'unapproved'}',
     );
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
@@ -825,6 +858,7 @@ class PlaybackController extends ChangeNotifier {
     final lower = log.toLowerCase();
     if (lower.contains('failed to create file cache') &&
         !_state.diskCacheFailureObserved) {
+      _diagnostics.cacheMpvCreateFailed();
       _setState(
         _state.copyWith(
           diskCacheFailureObserved: true,
@@ -868,6 +902,10 @@ class PlaybackController extends ChangeNotifier {
         : null;
     final snapshot = await cacheEngine?.readCacheSnapshot();
     if (!_isCurrent(token)) return;
+    if (snapshot == null && !_cacheSnapshotUnavailableLogged) {
+      _cacheSnapshotUnavailableLogged = true;
+      _diagnostics.cacheSnapshotUnavailable();
+    }
     final mode = snapshot?.cacheOnDisk == false
         ? PlaybackCacheRuntimeMode.memoryFallback
         : (snapshot?.fileCacheBytes ?? 0) > 0
@@ -913,6 +951,11 @@ class PlaybackController extends ChangeNotifier {
       committedPosition: () => _state.position,
       onObservation: (observation) {
         if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
+        if (observation.engineSnapshot == null &&
+            !_cacheSnapshotUnavailableLogged) {
+          _cacheSnapshotUnavailableLogged = true;
+          _diagnostics.cacheSnapshotUnavailable();
+        }
         _setState(
           _state.copyWith(
             cacheSnapshot: observation.engineSnapshot,
@@ -947,11 +990,12 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed || _shuttingDown || _engineDisposed) {
       return Future<void>.value();
     }
-    if (!session.tryReserveAutomaticOpen(
+    if (!_tryReserveAutomaticOpen(
       AutomaticPlaybackOpenReason.cacheSafetyReopen,
     )) {
       return Future<void>.value();
     }
+    _recordCacheSafetyDiagnostic(safetyReason);
     _forcedCacheFallbackReason = switch (safetyReason) {
       PlaybackCacheSafetyReason.budget =>
         PlaybackCacheFallbackReason.sessionBudgetReached,
@@ -997,7 +1041,11 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _stopForControlledRestart(Duration position) async {
     try {
-      await _withDeadline(reporter.stop(position), reporterTimeout);
+      await _withDeadline(
+        reporter.stop(position),
+        reporterTimeout,
+        PlaybackOperationTimeoutKind.reporterStop,
+      );
     } catch (_) {
       DiagnosticLog.instance.warning(
         'playback',
@@ -1005,7 +1053,11 @@ class PlaybackController extends ChangeNotifier {
       );
     }
     try {
-      await _withDeadline(engine.stop(), stopTimeout);
+      await _withDeadline(
+        engine.stop(),
+        stopTimeout,
+        PlaybackOperationTimeoutKind.engineStop,
+      );
     } catch (_) {
       DiagnosticLog.instance.warning(
         'playback',
@@ -1114,9 +1166,9 @@ class PlaybackController extends ChangeNotifier {
         clearError: true,
       ),
     );
-    DiagnosticLog.instance.warning(
-      'playback',
-      'event=playback_seek_recovery_pending fingerprint=$fingerprint',
+    _diagnostics.seekRecovery(
+      PlaybackRecoveryDiagnosticEvent.pending,
+      fingerprint: fingerprint,
     );
     if (!_lifecycleSuspended) _scheduleRuntimeRecovery();
     return true;
@@ -1149,7 +1201,7 @@ class PlaybackController extends ChangeNotifier {
     }
     final plan = _state.plan;
     if (plan == null ||
-        !session.tryReserveAutomaticOpen(
+        !_tryReserveAutomaticOpen(
           AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
         )) {
       _setRuntimeRecoveryFailed();
@@ -1170,9 +1222,9 @@ class PlaybackController extends ChangeNotifier {
         clearError: true,
       ),
     );
-    DiagnosticLog.instance.warning(
-      'playback',
-      'event=playback_seek_recovery_started fingerprint=$fingerprint',
+    _diagnostics.seekRecovery(
+      PlaybackRecoveryDiagnosticEvent.started,
+      fingerprint: fingerprint,
     );
     await _stopForControlledRestart(position);
     await _cleanupCacheSessionSafely();
@@ -1187,9 +1239,9 @@ class PlaybackController extends ChangeNotifier {
     );
     if (_disposed || _shuttingDown) return;
     if (_state.phase == PlaybackPhase.ready) {
-      DiagnosticLog.instance.info(
-        'playback',
-        'event=playback_seek_recovery_succeeded fingerprint=$fingerprint',
+      _diagnostics.seekRecovery(
+        PlaybackRecoveryDiagnosticEvent.succeeded,
+        fingerprint: fingerprint,
       );
       return;
     }
@@ -1206,21 +1258,26 @@ class PlaybackController extends ChangeNotifier {
         clearStatus: true,
       ),
     );
-    DiagnosticLog.instance.warning(
-      'playback',
-      'event=playback_seek_recovery_failed',
-    );
+    _diagnostics.seekRecovery(PlaybackRecoveryDiagnosticEvent.failed);
   }
 
-  static String? _approvedRecoveryFingerprint(String failure) {
+  static PlaybackRecoveryFingerprint? _approvedRecoveryFingerprint(
+    String failure,
+  ) {
     final normalized = failure.toLowerCase();
-    if (normalized.contains('seek failed')) return 'seekFailed';
-    if (normalized.contains('partial file')) return 'partialFile';
+    if (normalized.contains('seek failed')) {
+      return PlaybackRecoveryFingerprint.seekFailed;
+    }
+    if (normalized.contains('partial file')) {
+      return PlaybackRecoveryFingerprint.partialFile;
+    }
     if (normalized.contains('input/output error') ||
         normalized.contains('i/o error')) {
-      return 'inputOutputError';
+      return PlaybackRecoveryFingerprint.inputOutputError;
     }
-    if (normalized.contains('error reading packet')) return 'packetReadError';
+    if (normalized.contains('error reading packet')) {
+      return PlaybackRecoveryFingerprint.packetReadError;
+    }
     return null;
   }
 
@@ -1403,7 +1460,11 @@ class PlaybackController extends ChangeNotifier {
     if (_engineDisposed) return;
     _engineDisposed = true;
     try {
-      await _withDeadline(engine.dispose(), disposeTimeout);
+      await _withDeadline(
+        engine.dispose(),
+        disposeTimeout,
+        PlaybackOperationTimeoutKind.engineDispose,
+      );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'player',
@@ -1417,7 +1478,11 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _stopEngine() async {
     if (_engineDisposed) return;
     try {
-      await _withDeadline(engine.stop(), stopTimeout);
+      await _withDeadline(
+        engine.stop(),
+        stopTimeout,
+        PlaybackOperationTimeoutKind.engineStop,
+      );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'player',
@@ -1430,7 +1495,11 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _stopReporterSafely() async {
     try {
-      await _withDeadline(reporter.stop(_state.position), reporterTimeout);
+      await _withDeadline(
+        reporter.stop(_state.position),
+        reporterTimeout,
+        PlaybackOperationTimeoutKind.reporterStop,
+      );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'playback',
@@ -1449,7 +1518,9 @@ class PlaybackController extends ChangeNotifier {
       await _withDeadline(
         cacheStorage.cleanupSession(cacheSession),
         const Duration(seconds: 3),
+        PlaybackOperationTimeoutKind.cacheCleanup,
       );
+      _diagnostics.cacheSessionCleaned();
     } catch (_) {
       DiagnosticLog.instance.warning(
         'playback-cache',
@@ -1473,8 +1544,37 @@ class PlaybackController extends ChangeNotifier {
     _bindEngine();
   }
 
-  Future<T> _withDeadline<T>(Future<T> operation, Duration timeout) =>
-      operation.timeout(timeout);
+  bool _tryReserveAutomaticOpen(AutomaticPlaybackOpenReason reason) {
+    final reserved = session.tryReserveAutomaticOpen(reason);
+    if (!reserved &&
+        session.automaticOpenCount >=
+            PlaybackItemSession.maximumAutomaticOpenCount) {
+      _diagnostics.automaticOpenBudgetExhausted(
+        reason: reason,
+        automaticOpenCount: session.automaticOpenCount,
+      );
+    }
+    return reserved;
+  }
+
+  void _recordCacheSafetyDiagnostic(PlaybackCacheSafetyReason reason) {
+    if (_cacheSafetyDiagnosticsWritten.add(reason)) {
+      _diagnostics.cacheSafetyTriggered(reason);
+    }
+  }
+
+  Future<T> _withDeadline<T>(
+    Future<T> operation,
+    Duration timeout,
+    PlaybackOperationTimeoutKind timeoutKind,
+  ) async {
+    try {
+      return await operation.timeout(timeout);
+    } on TimeoutException {
+      _diagnostics.operationTimeout(timeoutKind);
+      rethrow;
+    }
+  }
 
   @override
   void dispose() {

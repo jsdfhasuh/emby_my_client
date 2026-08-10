@@ -9,6 +9,7 @@ import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
+import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_diagnostics_test_overrides.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
@@ -22,9 +23,14 @@ void main() {
     'cache is resolved and applied before open then cleaned after dispose',
     () async {
       final events = <String>[];
+      final diagnostics = <String>[];
       final engine = _CacheEngine(events: events);
       final storage = _CacheStorage(events);
-      final controller = _controller(engine: engine, storage: storage);
+      final controller = _controller(
+        engine: engine,
+        storage: storage,
+        diagnostics: _diagnostics(diagnostics),
+      );
 
       await controller.start();
 
@@ -38,6 +44,27 @@ void main() {
       await controller.shutdown();
       expect(events.indexOf('stop'), lessThan(events.indexOf('dispose')));
       expect(events.indexOf('dispose'), lessThan(events.indexOf('cleanup')));
+      expect(storage.activeSessions, 0);
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_capabilities_resolved')),
+      );
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_profile_resolved')),
+      );
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_disk_enabled')),
+      );
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_snapshot_unavailable')),
+      );
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_session_cleaned')),
+      );
     },
   );
 
@@ -242,9 +269,14 @@ void main() {
 
   test('low space before open prevents a disk cache session', () async {
     final events = <String>[];
+    final diagnostics = <String>[];
     final storage = _CacheStorage(events)..freeBytes = (2 << 30) + (100 << 20);
     final engine = _CacheEngine(events: events);
-    final controller = _controller(engine: engine, storage: storage);
+    final controller = _controller(
+      engine: engine,
+      storage: storage,
+      diagnostics: _diagnostics(diagnostics),
+    );
 
     await controller.start();
 
@@ -258,6 +290,12 @@ void main() {
       PlaybackCacheFallbackReason.lowSpace,
     );
     expect(events, contains('cleanup'));
+    expect(
+      diagnostics
+          .where((line) => line.contains('event=playback_cache_low_space'))
+          .length,
+      1,
+    );
     await controller.shutdown();
   });
 
@@ -265,12 +303,14 @@ void main() {
     'memory pressure uses the shared safety reopen and 64 MiB cap',
     () async {
       final events = <String>[];
+      final diagnostics = <String>[];
       final engine = _CacheEngine(events: events);
       final session = PlaybackItemSession.forTest('memory-pressure-session');
       final controller = _controller(
         engine: engine,
         storage: _CacheStorage(events),
         session: session,
+        diagnostics: _diagnostics(diagnostics),
       );
       await controller.start();
 
@@ -280,6 +320,10 @@ void main() {
       expect(
         controller.state.cacheFallbackReason,
         PlaybackCacheFallbackReason.memoryPressure,
+      );
+      expect(
+        diagnostics,
+        contains(contains('event=playback_cache_memory_pressure')),
       );
       expect(
         controller.state.cacheProfile?.totalMetadataBytes,
@@ -451,6 +495,73 @@ void main() {
       await controller.shutdown();
     },
   );
+
+  test(
+    'same-method recovery failure uses one transcode fallback transaction',
+    () async {
+      final events = <String>[];
+      final reporter = _TrackingReporter();
+      final session = PlaybackItemSession.forTest('recovery-transcode');
+      final engine = _CacheEngine(events: events, noReadyOnOpen: const {2});
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+        reporter: reporter,
+        readyTimeout: const Duration(milliseconds: 20),
+        recoveryPolicy: const PlaybackRecoveryPolicy(
+          seekRecoveryWindow: Duration(minutes: 1),
+          stablePlaybackWindow: Duration(minutes: 1),
+        ),
+      );
+
+      await controller.start();
+      await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.horizontalDrag,
+      );
+      engine.errorController.add('partial file');
+      await _waitUntil(() => engine.openCalls == 3);
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.plan?.method, PlayMethod.transcode);
+      expect(controller.sessionId, session.id);
+      expect(reporter.activateCalls, 3);
+      expect(reporter.stopCalls, 2);
+      expect(
+        session.hasUsed(AutomaticPlaybackOpenReason.runtimeSameMethodRecovery),
+        isTrue,
+      );
+      expect(
+        session.hasUsed(AutomaticPlaybackOpenReason.runtimeTranscodeRecovery),
+        isTrue,
+      );
+
+      await controller.shutdown();
+      expect(reporter.stopCalls, 3);
+    },
+  );
+
+  test('100 playback cycles leave no active cache sessions', () async {
+    for (var index = 0; index < 100; index++) {
+      final events = <String>[];
+      final storage = _CacheStorage(events);
+      final controller = _controller(
+        engine: _CacheEngine(events: events),
+        storage: storage,
+      );
+
+      await controller.start();
+      await controller.shutdown();
+
+      expect(storage.activeSessions, 0, reason: 'cycle ${index + 1}');
+      expect(
+        events.where((event) => event == 'cleanup'),
+        hasLength(1),
+        reason: 'cycle ${index + 1}',
+      );
+    }
+  });
 }
 
 PlaybackController _controller({
@@ -460,12 +571,15 @@ PlaybackController _controller({
   PlaybackEngineRecreator? engineRecreator,
   PlaybackRecoveryPolicy recoveryPolicy = const PlaybackRecoveryPolicy(),
   PlaybackDiagnosticsTestOverrides? testOverrides,
+  PlaybackDiagnostics? diagnostics,
+  PlaybackReporter? reporter,
+  Duration readyTimeout = const Duration(seconds: 18),
   PlaybackClock? clock,
 }) => PlaybackController(
   item: _item,
   engine: engine,
   resolver: const _Resolver(),
-  reporter: _Reporter(),
+  reporter: reporter ?? _Reporter(),
   playbackHeaders: const {},
   session: session,
   engineRecreator: engineRecreator,
@@ -475,6 +589,8 @@ PlaybackController _controller({
     reservedFreeBytes: 2 << 30,
   ),
   testOverrides: testOverrides,
+  diagnostics: diagnostics,
+  readyTimeout: readyTimeout,
   progressInterval: const Duration(hours: 1),
   cacheStatePollInterval: const Duration(hours: 1),
   cacheSpacePollInterval: const Duration(hours: 1),
@@ -489,6 +605,7 @@ class _CacheStorage implements PlaybackCacheStorage {
   int prepares = 0;
   int freeReads = 0;
   int freeBytes = 20 << 30;
+  int activeSessions = 0;
 
   @override
   Future<void> cleanupNonActiveMarkedSessions() async {}
@@ -496,6 +613,7 @@ class _CacheStorage implements PlaybackCacheStorage {
   @override
   Future<void> cleanupSession(PlaybackCacheSession session) async {
     events.add('cleanup');
+    activeSessions--;
   }
 
   @override
@@ -507,6 +625,7 @@ class _CacheStorage implements PlaybackCacheStorage {
   @override
   Future<PlaybackCacheStorageSnapshot> prepareSession() async {
     prepares++;
+    activeSessions++;
     events.add('prepare');
     return PlaybackCacheStorageSnapshot.available(
       session: PlaybackCacheSession(
@@ -524,12 +643,14 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     this.snapshot,
     this.requireRecreationAfterOpen = false,
     this.seekGate,
+    this.noReadyOnOpen = const {},
   });
 
   final List<String> events;
   PlaybackCacheEngineSnapshot? snapshot;
   final bool requireRecreationAfterOpen;
   final Completer<void>? seekGate;
+  final Set<int> noReadyOnOpen;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -607,7 +728,21 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   }) async {}
 
   @override
-  Future<void> dispose() async => events.add('dispose');
+  Future<void> dispose() async {
+    events.add('dispose');
+    await Future.wait([
+      positionController.close(),
+      durationController.close(),
+      bufferController.close(),
+      playingController.close(),
+      bufferingController.close(),
+      completedController.close(),
+      errorController.close(),
+      logController.close(),
+      audioController.close(),
+      subtitleController.close(),
+    ]);
+  }
 
   @override
   Future<void> loadExternalSubtitle(
@@ -624,7 +759,9 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   }) async {
     openCalls++;
     events.add('open');
-    durationController.add(const Duration(hours: 1));
+    if (!noReadyOnOpen.contains(openCalls)) {
+      durationController.add(const Duration(hours: 1));
+    }
   }
 
   @override
@@ -725,6 +862,32 @@ class _Reporter implements PlaybackReporter {
   @override
   void updatePlan(PlaybackPlan plan) {}
 }
+
+class _TrackingReporter implements PlaybackReporter {
+  int activateCalls = 0;
+  int stopCalls = 0;
+
+  @override
+  void activate(PlaybackPlan plan) => activateCalls++;
+  @override
+  Future<void> cleanup(PlaybackPlan plan) async {}
+  @override
+  Future<void> reportProgress({
+    required Duration position,
+    required bool isPaused,
+  }) async {}
+  @override
+  Future<void> reportStart(Duration position) async {}
+  @override
+  Future<void> stop(Duration position) async => stopCalls++;
+  @override
+  void updatePlan(PlaybackPlan plan) {}
+}
+
+PlaybackDiagnostics _diagnostics(List<String> lines) => PlaybackDiagnostics(
+  writer: (_, _, message) => lines.add(message),
+  seekFlushInterval: const Duration(hours: 1),
+);
 
 PlaybackCacheEngineCapabilities _capabilities() =>
     PlaybackCacheEngineCapabilities(

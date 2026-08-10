@@ -19,6 +19,7 @@ import '../playback/emby_stream_resolver.dart';
 import '../playback/cache/playback_cache_storage.dart';
 import '../playback/cache/playback_cache_storage_scope.dart';
 import '../playback/playback_controller.dart';
+import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../playback/playback_engine.dart';
@@ -336,6 +337,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _initializePlayback() async {
     final snapshot = await _settingsRepository.load(widget.api.session);
     if (!mounted) return;
+    PlaybackDiagnostics().cacheSettingsLoaded(snapshot.settings.cache.mode);
     _settings = snapshot.settings;
     _videoFit = _boxFit(snapshot.settings.videoFit);
     await _startCurrentItem();

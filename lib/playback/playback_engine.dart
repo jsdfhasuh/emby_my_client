@@ -5,6 +5,7 @@ import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
+import 'playback_diagnostics.dart';
 
 typedef NativePropertyWriter =
     Future<void> Function(String property, String value);
@@ -93,7 +94,17 @@ class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
     final platform = player.platform;
     if (platform is NativePlayer) {
       _cacheEngine = NativePlaybackCacheEngine(
-        access: MediaKitNativePlaybackPropertyAccess(platform),
+        access: MediaKitNativePlaybackPropertyAccess(
+          platform,
+          timeoutReporter: (operation) {
+            PlaybackDiagnostics().operationTimeout(switch (operation) {
+              NativePlaybackOperationKind.propertyRead =>
+                PlaybackOperationTimeoutKind.nativePropertyRead,
+              NativePlaybackOperationKind.propertyWrite =>
+                PlaybackOperationTimeoutKind.nativePropertyWrite,
+            });
+          },
+        ),
         hasOpenedMedia: () => _hasOpenedMedia,
       );
     }

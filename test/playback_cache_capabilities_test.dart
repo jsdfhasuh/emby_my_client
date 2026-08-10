@@ -101,21 +101,24 @@ void main() {
 
   test('native operations have a fixed timeout', () async {
     final pending = Completer<void>();
+    NativePlaybackOperationKind? reported;
 
     await expectLater(
       withNativePlaybackTimeout(
         pending.future,
-        operation: 'propertyRead',
+        operation: NativePlaybackOperationKind.propertyRead,
         timeout: const Duration(milliseconds: 5),
+        onTimeout: (operation) => reported = operation,
       ),
       throwsA(
         isA<NativePlaybackOperationTimeout>().having(
           (error) => error.operation,
           'operation',
-          'propertyRead',
+          NativePlaybackOperationKind.propertyRead,
         ),
       ),
     );
+    expect(reported, NativePlaybackOperationKind.propertyRead);
   });
 }
 
