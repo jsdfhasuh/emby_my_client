@@ -112,6 +112,7 @@ void main() {
     expect(find.widgetWithText(SwitchListTile, '目录'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '图片'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '文件夹'), findsNothing);
+    expect(find.text('播放验收测试'), findsNothing);
   });
 
   testWidgets('account data deletion requires explicit confirmation', (

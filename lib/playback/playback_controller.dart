@@ -11,6 +11,7 @@ import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
 import 'emby_stream_resolver.dart';
+import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_recovery_policy.dart';
@@ -32,6 +33,7 @@ class PlaybackController extends ChangeNotifier {
     this.engineRecreator,
     PlaybackItemSession? session,
     this.cacheSettings = const PlaybackCacheSettings(),
+    this.testOverrides,
     PlaybackCacheStorage? cacheStorage,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
@@ -50,6 +52,10 @@ class PlaybackController extends ChangeNotifier {
        cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
        _clock = clock ?? DateTime.now,
        _maxStreamingBitrate = maxStreamingBitrate {
+    _testSeekFailurePending =
+        testOverrides?.injectApprovedSeekFailureAfterNextExecutedSeek ?? false;
+    _testCacheFailureObservationPending =
+        testOverrides?.forceCacheCreateFailureObservation ?? false;
     _createOperationCoordinator();
     _bindEngine();
   }
@@ -62,6 +68,7 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackEngineRecreator? engineRecreator;
   final PlaybackItemSession session;
   final PlaybackCacheSettings cacheSettings;
+  final PlaybackDiagnosticsTestOverrides? testOverrides;
   final PlaybackCacheStorage cacheStorage;
   final Duration readyTimeout;
   final Duration resumeVerificationTimeout;
@@ -111,6 +118,8 @@ class PlaybackController extends ChangeNotifier {
   Duration _desiredSubtitleDelay = Duration.zero;
   _SubtitleStyle? _desiredSubtitleStyle;
   final Map<String, DateTime> _engineLogLastWritten = {};
+  bool _testSeekFailurePending = false;
+  bool _testCacheFailureObservationPending = false;
 
   PlaybackState get state => _state;
   PlaybackEngine get engine => _engine;
@@ -337,25 +346,34 @@ class PlaybackController extends ChangeNotifier {
     }
     _throwIfStale(token);
 
+    final effectiveCacheSettings = testOverrides?.sessionTargetBytes == null
+        ? cacheSettings
+        : cacheSettings.copyWith(
+            mode: PlaybackCacheMode.custom,
+            customSessionTargetBytes: testOverrides!.sessionTargetBytes,
+          );
     PlaybackCacheStorageSnapshot storageSnapshot =
         const PlaybackCacheStorageSnapshot.unavailable(
           PlaybackCacheStorageFailureReason.storageCapacityUnknown,
         );
     final mayUseDisk =
         plan.transportKind == PlaybackTransportKind.progressiveHttp &&
-        cacheSettings.mode != PlaybackCacheMode.memoryOnly &&
+        effectiveCacheSettings.mode != PlaybackCacheMode.memoryOnly &&
         _forcedCacheFallbackReason == null &&
         capabilities.diskGatePassed;
     if (mayUseDisk) {
       storageSnapshot = await cacheStorage.prepareSession();
       _throwIfStale(token);
       _cacheSession = storageSnapshot.session;
+      storageSnapshot =
+          testOverrides?.applyStorageSimulation(storageSnapshot) ??
+          storageSnapshot;
       final preliminaryRate = ((plan.bitrate ?? 0) / 8 * 2)
           .round()
           .clamp(8 * 1024 * 1024, 1 << 62)
           .toInt();
       final preliminaryLowSpaceTrigger = cacheLowSpaceTriggerBytes(
-        reservedFreeBytes: cacheSettings.reservedFreeBytes,
+        reservedFreeBytes: effectiveCacheSettings.reservedFreeBytes,
         inputRateBytesPerSecond: preliminaryRate,
         pollInterval: cacheSpacePollInterval,
         expectedCloseLatency: const Duration(seconds: 2),
@@ -368,7 +386,7 @@ class PlaybackController extends ChangeNotifier {
 
     var profile = const PlaybackCacheProfileResolver().resolve(
       plan: plan,
-      settings: cacheSettings,
+      settings: effectiveCacheSettings,
       capabilities: capabilities,
       storage: storageSnapshot,
     );
@@ -376,6 +394,10 @@ class PlaybackController extends ChangeNotifier {
     if (forcedReason != null &&
         profile.runtimeMode != PlaybackCacheRuntimeMode.disabled) {
       profile = profile.memoryFallback(forcedReason);
+    }
+    final streamBufferBytes = testOverrides?.streamBufferBytes;
+    if (streamBufferBytes != null) {
+      profile = profile.copyWith(streamBufferBytes: streamBufferBytes);
     }
     if (profile.runtimeMode == PlaybackCacheRuntimeMode.disk) {
       final inputRate = ((plan.bitrate ?? 0) / 8 * 2).round().clamp(
@@ -429,6 +451,10 @@ class PlaybackController extends ChangeNotifier {
         diskCacheFailureObserved: false,
       ),
     );
+    if (_testCacheFailureObservationPending) {
+      _testCacheFailureObservationPending = false;
+      _handleEngineLog('Failed to create file cache');
+    }
   }
 
   Future<void> playOrPause() async {
@@ -478,6 +504,7 @@ class PlaybackController extends ChangeNotifier {
     );
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
+      _injectApprovedSeekFailureIfPending();
       await _reportProgress();
       await _cacheCoordinator?.afterExecutedSeek();
     }
@@ -494,6 +521,7 @@ class PlaybackController extends ChangeNotifier {
     );
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
+      _injectApprovedSeekFailureIfPending();
       await _reportProgress();
       await _cacheCoordinator?.afterExecutedSeek();
     }
@@ -1009,6 +1037,12 @@ class PlaybackController extends ChangeNotifier {
     _stablePlaybackSince = null;
     _lastStabilityPosition = _state.position;
     _seekBecameStable = false;
+  }
+
+  void _injectApprovedSeekFailureIfPending() {
+    if (!_testSeekFailurePending || _state.phase != PlaybackPhase.ready) return;
+    _testSeekFailurePending = false;
+    _handleEngineError('partial file');
   }
 
   void _updateStablePlayback(Duration position) {

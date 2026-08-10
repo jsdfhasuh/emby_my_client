@@ -9,6 +9,7 @@ import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
+import 'package:emby_my_client/playback/playback_diagnostics_test_overrides.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_recovery_policy.dart';
@@ -358,6 +359,98 @@ void main() {
     expect(storage.freeReads - freeReadsBefore, 2);
     await controller.shutdown();
   });
+
+  test(
+    'acceptance overrides replace profile targets for one controller',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        testOverrides: const PlaybackDiagnosticsTestOverrides(
+          streamBufferBytes: 2 << 20,
+          sessionTargetBytes: 256 << 20,
+        ),
+      );
+
+      await controller.start();
+
+      expect(engine.lastProfile?.streamBufferBytes, 2 << 20);
+      expect(engine.lastProfile?.sessionTargetBytes, 256 << 20);
+      await controller.shutdown();
+    },
+  );
+
+  test('simulated low storage uses the normal safe fallback path', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      testOverrides: const PlaybackDiagnosticsTestOverrides(
+        storageSimulation: PlaybackDiagnosticsStorageSimulation.lowSpace,
+      ),
+    );
+
+    await controller.start();
+
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.memoryFallback,
+    );
+    expect(
+      controller.state.cacheFallbackReason,
+      PlaybackCacheFallbackReason.lowSpace,
+    );
+    await controller.shutdown();
+  });
+
+  test(
+    'acceptance failure observations are bounded and use real recovery',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(
+        events: events,
+        snapshot: const PlaybackCacheEngineSnapshot(
+          fileCacheBytes: null,
+          rawInputRateBytesPerSecond: null,
+          seekableRanges: [],
+          pausedForCache: false,
+          cacheBufferingPercent: null,
+          cacheOnDisk: false,
+        ),
+      );
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        recoveryPolicy: const PlaybackRecoveryPolicy(
+          seekRecoveryWindow: Duration(minutes: 1),
+          stablePlaybackWindow: Duration(minutes: 1),
+        ),
+        testOverrides: const PlaybackDiagnosticsTestOverrides(
+          injectApprovedSeekFailureAfterNextExecutedSeek: true,
+          forceCacheCreateFailureObservation: true,
+        ),
+      );
+
+      await controller.start();
+      expect(controller.state.diskCacheFailureObserved, isTrue);
+      expect(
+        controller.state.cacheRuntimeMode,
+        PlaybackCacheRuntimeMode.memoryFallback,
+      );
+      await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.controls,
+      );
+      await _waitUntil(() => engine.openCalls == 2);
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(engine.openCalls, 2);
+      await controller.shutdown();
+    },
+  );
 }
 
 PlaybackController _controller({
@@ -366,6 +459,7 @@ PlaybackController _controller({
   PlaybackItemSession? session,
   PlaybackEngineRecreator? engineRecreator,
   PlaybackRecoveryPolicy recoveryPolicy = const PlaybackRecoveryPolicy(),
+  PlaybackDiagnosticsTestOverrides? testOverrides,
   PlaybackClock? clock,
 }) => PlaybackController(
   item: _item,
@@ -380,6 +474,7 @@ PlaybackController _controller({
     mode: PlaybackCacheMode.balanced,
     reservedFreeBytes: 2 << 30,
   ),
+  testOverrides: testOverrides,
   progressInterval: const Duration(hours: 1),
   cacheStatePollInterval: const Duration(hours: 1),
   cacheSpacePollInterval: const Duration(hours: 1),
@@ -454,6 +549,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   int seekCalls = 0;
   int concurrentSeeks = 0;
   int maxConcurrentSeeks = 0;
+  ResolvedPlaybackCacheProfile? lastProfile;
 
   @override
   Stream<List<EngineTrack>> get audioTracksStream => audioController.stream;
@@ -483,6 +579,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     PlaybackCacheEngineCapabilities capabilities,
   ) async {
     events.add('configure');
+    lastProfile = profile;
     if (requireRecreationAfterOpen && openCalls > 0) {
       return PlaybackCacheApplyResult(
         requestedMode: profile.runtimeMode,

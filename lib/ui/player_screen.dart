@@ -19,6 +19,8 @@ import '../playback/emby_stream_resolver.dart';
 import '../playback/cache/playback_cache_storage.dart';
 import '../playback/cache/playback_cache_storage_scope.dart';
 import '../playback/playback_controller.dart';
+import '../playback/playback_diagnostics_test_overrides.dart';
+import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../playback/playback_engine.dart';
 import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
@@ -166,6 +168,7 @@ class PlayerScreen extends StatefulWidget {
     this.systemControls,
     this.systemUiController,
     this.cacheStorage,
+    this.diagnosticsTestOverrides,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -180,6 +183,7 @@ class PlayerScreen extends StatefulWidget {
   final PlayerSystemControls? systemControls;
   final PlayerSystemUiController? systemUiController;
   final PlaybackCacheStorage? cacheStorage;
+  final PlaybackDiagnosticsTestOverridesController? diagnosticsTestOverrides;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -206,6 +210,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late EmbyItem _currentItem;
   late final PlaybackSettingsRepository _settingsRepository;
   late final PlaybackCacheStorage _cacheStorage;
+  PlaybackDiagnosticsTestOverridesController? _diagnosticsTestOverrides;
   final PlayerSessionCoordinator _playerSessionCoordinator =
       PlayerSessionCoordinator();
   late PlaybackItemSession _itemSession;
@@ -315,6 +320,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _settingsRepository = PlaybackSettingsRepositoryScope.of(context);
     _cacheStorage =
         widget.cacheStorage ?? PlaybackCacheStorageScope.of(context);
+    _diagnosticsTestOverrides =
+        widget.diagnosticsTestOverrides ??
+        PlaybackDiagnosticsTestOverridesScope.maybeOf(context);
     unawaited(_initializePlaybackSafely());
   }
 
@@ -388,6 +396,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       session: _itemSession,
       cacheSettings: _settings.cache,
       cacheStorage: _cacheStorage,
+      testOverrides: _diagnosticsTestOverrides?.consumeForPlayback(),
       maxStreamingBitrate: _settings.maxStreamingBitrate,
     )..addListener(_syncPlaybackState);
     _playbackController = controller;

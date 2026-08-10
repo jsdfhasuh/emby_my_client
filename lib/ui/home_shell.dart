@@ -82,9 +82,14 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     if (value == 'logs') {
-      await Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const DiagnosticLogScreen()));
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => DiagnosticLogScreen(
+            playbackTestOverrides:
+                widget.controller.playbackDiagnosticsTestOverrides,
+          ),
+        ),
+      );
       return;
     }
     if (value == 'settings') {

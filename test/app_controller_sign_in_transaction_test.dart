@@ -11,6 +11,7 @@ import 'package:emby_my_client/data/local_database.dart';
 import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
+import 'package:emby_my_client/playback/playback_diagnostics_test_overrides.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -454,10 +455,15 @@ void main() {
   test('sign out removes the saved session', () async {
     final storage = _FakeSessionStorage()
       ..values['emby_device_id_v1'] = 'existing-device';
+    final overrides = PlaybackDiagnosticsTestOverridesController()
+      ..enable(
+        const PlaybackDiagnosticsTestOverrides(streamBufferBytes: 512 << 10),
+      );
     final controller = _controller(
       storage,
       clients: _ClientTracker().registry,
       apiFactory: (session, _) => _apiWithSuccessfulRequests(session),
+      playbackDiagnosticsTestOverrides: overrides,
     );
     addTearDown(controller.dispose);
     await controller.signIn(
@@ -470,6 +476,7 @@ void main() {
 
     expect(storage.values, isNot(contains('emby_session_v1')));
     expect(controller.isSignedIn, isFalse);
+    expect(overrides.isActive, isFalse);
   });
 
   test(
@@ -518,6 +525,7 @@ AppController _controller(
   SignInAuthenticator? authenticator,
   SignInApiFactory? apiFactory,
   DownloadServiceFactory? downloadServiceFactory,
+  PlaybackDiagnosticsTestOverridesController? playbackDiagnosticsTestOverrides,
   LocalDatabase? database,
 }) => AppController(
   store: SessionStore(sessionStorage: storage),
@@ -536,6 +544,7 @@ AppController _controller(
       }) async => _session,
   apiFactory: apiFactory ?? _idleApiFactory,
   downloadServiceFactory: downloadServiceFactory,
+  playbackDiagnosticsTestOverrides: playbackDiagnosticsTestOverrides,
 );
 
 EmbyApi _idleApiFactory(EmbySession session, ServerScope scope) =>

@@ -2,13 +2,21 @@ import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
 import '../platform/platform_capabilities.dart';
+import '../playback/playback_diagnostics_test_overrides.dart';
+import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import 'full_diagnostic_export_screen.dart';
+import 'playback_acceptance_test_screen.dart';
 import 'safe_diagnostic_export_screen.dart';
 
 class DiagnosticLogScreen extends StatefulWidget {
-  const DiagnosticLogScreen({super.key, this.capabilities});
+  const DiagnosticLogScreen({
+    super.key,
+    this.capabilities,
+    this.playbackTestOverrides,
+  });
 
   final PlatformCapabilities? capabilities;
+  final PlaybackDiagnosticsTestOverridesController? playbackTestOverrides;
 
   @override
   State<DiagnosticLogScreen> createState() => _DiagnosticLogScreenState();
@@ -18,11 +26,20 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
   late final PlatformCapabilities _capabilities =
       widget.capabilities ?? PlatformCapabilities.current();
   late Future<String> _future;
+  PlaybackDiagnosticsTestOverridesController? _playbackTestOverrides;
 
   @override
   void initState() {
     super.initState();
     _future = DiagnosticLog.instance.read();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _playbackTestOverrides ??=
+        widget.playbackTestOverrides ??
+        PlaybackDiagnosticsTestOverridesScope.maybeOf(context);
   }
 
   Future<void> _refresh() async {
@@ -67,6 +84,18 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
             onPressed: _refresh,
             icon: const Icon(Icons.refresh),
           ),
+          if (_playbackTestOverrides != null)
+            IconButton(
+              tooltip: '播放验收测试',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => PlaybackAcceptanceTestScreen(
+                    controller: _playbackTestOverrides!,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.science_outlined),
+            ),
           if (_capabilities.platformName == 'ios')
             IconButton(
               tooltip: '安全登录诊断',

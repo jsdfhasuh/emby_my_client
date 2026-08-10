@@ -66,6 +66,25 @@ class ResolvedPlaybackCacheProfile {
   int get totalMetadataBytes =>
       demuxerForwardMetadataBytes + demuxerBackwardMetadataBytes;
 
+  ResolvedPlaybackCacheProfile copyWith({
+    int? sessionTargetBytes,
+    int? streamBufferBytes,
+  }) => ResolvedPlaybackCacheProfile(
+    runtimeMode: runtimeMode,
+    transportKind: transportKind,
+    fallbackReason: fallbackReason,
+    forwardTarget: forwardTarget,
+    backwardTarget: backwardTarget,
+    sessionTargetBytes: sessionTargetBytes ?? this.sessionTargetBytes,
+    reservedFreeBytes: reservedFreeBytes,
+    demuxerForwardMetadataBytes: demuxerForwardMetadataBytes,
+    demuxerBackwardMetadataBytes: demuxerBackwardMetadataBytes,
+    metadataBudgetCapBytes: metadataBudgetCapBytes,
+    streamBufferBytes: streamBufferBytes ?? this.streamBufferBytes,
+    donateBuffer: donateBuffer,
+    sessionDirectory: sessionDirectory,
+  );
+
   ResolvedPlaybackCacheProfile memoryFallback(
     PlaybackCacheFallbackReason reason, {
     int maximumMetadataBytes = 64 * 1024 * 1024,

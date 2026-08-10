@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'playback/cache/playback_cache_storage_scope.dart';
+import 'playback/playback_diagnostics_test_overrides_scope.dart';
 import 'playback/playback_settings_scope.dart';
 import 'state/app_controller.dart';
 import 'ui/home_shell.dart';
@@ -20,9 +21,12 @@ class EmbyClientApp extends StatelessWidget {
       darkTheme: _darkTheme(),
       builder: (context, child) => PlaybackCacheStorageScope(
         storage: controller.playbackCacheStorage,
-        child: PlaybackSettingsRepositoryScope(
-          repository: controller.playbackSettingsRepository,
-          child: child ?? const SizedBox.shrink(),
+        child: PlaybackDiagnosticsTestOverridesScope(
+          controller: controller.playbackDiagnosticsTestOverrides,
+          child: PlaybackSettingsRepositoryScope(
+            repository: controller.playbackSettingsRepository,
+            child: child ?? const SizedBox.shrink(),
+          ),
         ),
       ),
       home: ListenableBuilder(

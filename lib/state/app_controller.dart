@@ -23,6 +23,7 @@ import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
 import '../playback/cache/playback_cache_storage.dart';
+import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
 
@@ -62,6 +63,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     ClientRegistry<EmbyApi>? clients,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
     PlaybackCacheStorage? playbackCacheStorage,
+    PlaybackDiagnosticsTestOverridesController?
+    playbackDiagnosticsTestOverrides,
     PlaybackSettingsRepository? playbackSettingsRepository,
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
@@ -74,6 +77,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
        _playbackCacheStorage =
            playbackCacheStorage ?? PlatformPlaybackCacheStorage(),
+       _playbackDiagnosticsTestOverrides =
+           playbackDiagnosticsTestOverrides ??
+           PlaybackDiagnosticsTestOverridesController(),
        _playbackSettingsRepository =
            playbackSettingsRepository ?? PlaybackSettingsRepository(),
        _accountDataCleanup = accountDataCleanup,
@@ -97,6 +103,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final LibraryScanServiceFactory? _libraryScanServiceFactory;
   final LocalDatabase _database;
   final PlaybackCacheStorage _playbackCacheStorage;
+  final PlaybackDiagnosticsTestOverridesController
+  _playbackDiagnosticsTestOverrides;
   final PlaybackSettingsRepository _playbackSettingsRepository;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -133,6 +141,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   bool get isSignedIn => _session != null;
   bool get localDatabaseAvailable => _localDatabaseAvailable;
   PlaybackCacheStorage get playbackCacheStorage => _playbackCacheStorage;
+  PlaybackDiagnosticsTestOverridesController
+  get playbackDiagnosticsTestOverrides => _playbackDiagnosticsTestOverrides;
   PlaybackSettingsRepository get playbackSettingsRepository =>
       _playbackSettingsRepository;
   EmbyApi get api => _clients.requireClient(_scope!);
@@ -469,6 +479,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _resetSessionState() {
+    _playbackDiagnosticsTestOverrides.clear();
     _session = null;
     _scope = null;
     _serverCapabilities = null;
@@ -476,6 +487,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> signOut() async {
+    _playbackDiagnosticsTestOverrides.clear();
     final current = _session;
     final currentScope = _scope;
     final currentApi = currentScope == null
@@ -516,6 +528,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _deleteCurrentAccountData() async {
+    _playbackDiagnosticsTestOverrides.clear();
     final currentSession = _session;
     final currentScope = _scope;
     if (currentSession == null || currentScope == null) {
@@ -571,6 +584,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     if (_scope != scope || !identical(_clients.clientFor(scope), source)) {
       return;
     }
+    _playbackDiagnosticsTestOverrides.clear();
     await _shutdownLibraryScanService();
     final expiredSession = _session;
     if (expiredSession != null) {
@@ -956,6 +970,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _shutdownDownloads();
     await _clients.dispose();
     await _playbackSettingsRepository.dispose();
+    _playbackDiagnosticsTestOverrides.dispose();
     await _database.close();
   }
 }
