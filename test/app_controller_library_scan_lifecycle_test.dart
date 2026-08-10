@@ -13,12 +13,38 @@ import 'package:emby_my_client/library/library_local_media_scan_cache.dart';
 import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('cold start requests best-effort cache residue cleanup', () async {
+    final cacheStorage = _TrackingPlaybackCacheStorage();
+    final controller = AppController(
+      store: SessionStore(sessionStorage: _MemorySessionStorage()),
+      capabilities: PlatformCapabilities.android,
+      libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+      playbackCacheStorage: cacheStorage,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+
+    expect(cacheStorage.cleanupResidueCalls, 1);
+  });
+
+  test('session activation requests cache residue cleanup', () async {
+    final cacheStorage = _TrackingPlaybackCacheStorage();
+    final fixture = _ControllerFixture(playbackCacheStorage: cacheStorage);
+    addTearDown(fixture.dispose);
+
+    await fixture.signIn();
+
+    expect(cacheStorage.cleanupResidueCalls, 1);
+  });
+
   test('scan service initialization failure leaves sign-in usable', () async {
     final fixture = _ControllerFixture(
       libraryScanServiceFactory: (api, scope) =>
@@ -268,6 +294,7 @@ class _ControllerFixture {
   _ControllerFixture({
     AccountDataCleanup? accountDataCleanup,
     LibraryScanServiceFactory? libraryScanServiceFactory,
+    PlaybackCacheStorage? playbackCacheStorage,
   }) : storage = _MemorySessionStorage() {
     clients = ClientRegistry<EmbyApi>(
       disposeClient: (api) async {
@@ -281,6 +308,7 @@ class _ControllerFixture {
       capabilities: PlatformCapabilities.ipad,
       libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
       accountDataCleanup: accountDataCleanup,
+      playbackCacheStorage: playbackCacheStorage,
       authenticator:
           ({
             required serverUrl,
@@ -329,6 +357,27 @@ class _ControllerFixture {
     if (controller.isSignedIn) await controller.signOut();
     controller.dispose();
   }
+}
+
+class _TrackingPlaybackCacheStorage implements PlaybackCacheStorage {
+  int cleanupResidueCalls = 0;
+
+  @override
+  Future<void> cleanupNonActiveMarkedSessions() async {
+    cleanupResidueCalls++;
+  }
+
+  @override
+  Future<void> cleanupSession(PlaybackCacheSession session) async {}
+
+  @override
+  Future<int?> freeBytesFor(Directory directory) async => null;
+
+  @override
+  Future<PlaybackCacheStorageSnapshot> prepareSession() async =>
+      const PlaybackCacheStorageSnapshot.unavailable(
+        PlaybackCacheStorageFailureReason.storageCapacityUnknown,
+      );
 }
 
 class _FailingAccountDataCleanup implements AccountDataCleanup {

@@ -22,6 +22,7 @@ import '../library/library_local_media_scan_service.dart';
 import '../models/emby_models.dart';
 import '../offline/offline_progress_sync.dart';
 import '../platform/platform_capabilities.dart';
+import '../playback/cache/playback_cache_storage.dart';
 import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
 
@@ -60,6 +61,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     LocalDatabase? database,
     ClientRegistry<EmbyApi>? clients,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
+    PlaybackCacheStorage? playbackCacheStorage,
     PlaybackSettingsRepository? playbackSettingsRepository,
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
@@ -70,6 +72,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
+       _playbackCacheStorage =
+           playbackCacheStorage ?? PlatformPlaybackCacheStorage(),
        _playbackSettingsRepository =
            playbackSettingsRepository ?? PlaybackSettingsRepository(),
        _accountDataCleanup = accountDataCleanup,
@@ -92,6 +96,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final DownloadServiceFactory? _downloadServiceFactory;
   final LibraryScanServiceFactory? _libraryScanServiceFactory;
   final LocalDatabase _database;
+  final PlaybackCacheStorage _playbackCacheStorage;
   final PlaybackSettingsRepository _playbackSettingsRepository;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
@@ -127,6 +132,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   bool get isInitializing => _isInitializing;
   bool get isSignedIn => _session != null;
   bool get localDatabaseAvailable => _localDatabaseAvailable;
+  PlaybackCacheStorage get playbackCacheStorage => _playbackCacheStorage;
   PlaybackSettingsRepository get playbackSettingsRepository =>
       _playbackSettingsRepository;
   EmbyApi get api => _clients.requireClient(_scope!);
@@ -135,6 +141,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _initialize() async {
     try {
+      await _cleanupPlaybackCacheResidue();
       await _openLocalDatabase();
       _recordSafeStage(
         component: SafeDiagnosticComponent.storage,
@@ -299,7 +306,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       rethrow;
     }
 
-    _commitSignIn(
+    await _commitSignIn(
       session: session,
       scope: prepared.scope,
       settings: prepared.settings,
@@ -308,13 +315,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
-  void _commitSignIn({
+  Future<void> _commitSignIn({
     required EmbySession session,
     required ServerScope scope,
     required LibraryCategorySettings settings,
     required ServerCapabilities capabilities,
     required EmbyApi api,
-  }) {
+  }) async {
+    await _cleanupPlaybackCacheResidue();
     _session = session;
     _scope = scope;
     _serverCapabilities = capabilities;
@@ -579,6 +587,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _activateSession(EmbySession session) async {
+    await _cleanupPlaybackCacheResidue();
     final scope = ServerScope.fromSession(session);
     final api = _apiFactory?.call(session, scope) ?? _createApi(session, scope);
     _session = session;
@@ -589,6 +598,17 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _activateLibraryScanService(api, scope);
     await _activateDownloads(api, scope, safeLogging: true);
     unawaited(_startRealtimeSafely(api));
+  }
+
+  Future<void> _cleanupPlaybackCacheResidue() async {
+    try {
+      await _playbackCacheStorage.cleanupNonActiveMarkedSessions();
+    } catch (_) {
+      DiagnosticLog.instance.warning(
+        'playback-cache',
+        'Cache residue cleanup failed',
+      );
+    }
   }
 
   Future<void> updateLibraryCategorySettings(
