@@ -155,6 +155,9 @@ jobs:
             create avd --force \
             --name emby-mpv-capability \
             --package 'system-images;android-35;google_apis;x86_64'
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
           "$android_sdk_root/emulator/emulator" \
             -avd emby-mpv-capability \
             -no-window -no-audio -no-boot-anim -no-snapshot \
@@ -165,7 +168,22 @@ jobs:
             wait "$emulator_pid" 2>/dev/null || true
           }
           trap cleanup_emulator EXIT
-          adb wait-for-device
+          device_ready=''
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/android-emulator.log" >&2
+              exit 1
+            fi
+            if adb devices | awk '$1 ~ /^emulator-/ && $2 == "device" { found=1 } END { exit !found }'; then
+              device_ready='1'
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$device_ready" != '1' ]]; then
+            cat "$RUNNER_TEMP/android-emulator.log" >&2
+            exit 1
+          fi
           booted=''
           for _ in $(seq 1 180); do
             booted="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
