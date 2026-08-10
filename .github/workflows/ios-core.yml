@@ -151,10 +151,14 @@ jobs:
             'emulator' \
             'system-images;android-35;google_apis;x86_64'
           export PATH="$android_sdk_root/platform-tools:$PATH"
+          avd_home="$RUNNER_TEMP/android-avd"
+          mkdir -p "$avd_home"
+          export ANDROID_AVD_HOME="$avd_home"
           echo no | "$android_sdk_root/cmdline-tools/latest/bin/avdmanager" \
             create avd --force \
             --name emby-mpv-capability \
             --package 'system-images;android-35;google_apis;x86_64'
+          "$android_sdk_root/emulator/emulator" -list-avds | grep -Fx emby-mpv-capability
           if [[ -e /dev/kvm ]]; then
             sudo chmod 0666 /dev/kvm
           fi
