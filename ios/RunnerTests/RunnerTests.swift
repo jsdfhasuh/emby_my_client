@@ -4,6 +4,35 @@ import UIKit
 import XCTest
 
 final class RunnerTests: XCTestCase {
+  func testBundledLibmpvCacheCapabilitiesAndProfileSwitching() throws {
+    let snapshot = try PlaybackCacheNativeProbe.probe()
+
+    XCTAssertFalse(snapshot.mpvVersion.isEmpty)
+    XCTAssertFalse(snapshot.platform.isEmpty)
+    XCTAssertTrue(
+      snapshot.supportedOptions.isSubset(
+        of: Set(PlaybackCacheNativeProbe.optionNames)
+      )
+    )
+    XCTAssertTrue(Set(snapshot.resetValues.keys).isSubset(of: snapshot.supportedOptions))
+    XCTAssertTrue(snapshot.properties.contains("property-list"))
+
+    print("mpv_version=\(snapshot.mpvVersion)")
+    print("mpv_platform=\(snapshot.platform)")
+    for option in PlaybackCacheNativeProbe.optionNames {
+      print("mpv_option_\(option)=\(snapshot.supportedOptions.contains(option))")
+      if let reset = snapshot.resetValues[option] {
+        print("mpv_option_reset_\(option)=\(reset)")
+      }
+    }
+    for property in PlaybackCacheNativeProbe.requiredProperties {
+      print("mpv_property_\(property)=\(snapshot.properties.contains(property))")
+    }
+    print("mpv_unlink_immediate=\(snapshot.unlinkChoices.contains("immediate"))")
+    print("mpv_profile_switch_strategy=\(snapshot.profileSwitchStrategy.rawValue)")
+    print("mpv_disk_capability_passed=\(snapshot.diskCapabilityPassed)")
+  }
+
   func testValidReportPassesAndFilenameUsesOnlyBundleBuildAndTime() throws {
     let data = try JSONSerialization.data(withJSONObject: validReport())
     let result = try SafeDiagnosticExportValidator.validate(

@@ -108,6 +108,14 @@ jobs:
           flutter build apk --debug
           flutter build apk --debug --split-per-abi
 
+      - name: Run Android native libmpv capability smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apk_paths < <(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name 'app*-debug.apk' -print | sort)
+          test "${#apk_paths[@]}" -ge 4
+          bash scripts/android/verify_mpv_capabilities.sh "${apk_paths[@]}"
+
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -221,7 +229,7 @@ jobs:
           xcrun simctl bootstatus "$simulator_udid" -b
           echo "IOS_SIMULATOR_UDID=$simulator_udid" >> "$GITHUB_ENV"
 
-      - name: Run native safe diagnostic XCTest
+      - name: Run native diagnostics and libmpv capability XCTest
         working-directory: ios
         shell: bash
         run: |
