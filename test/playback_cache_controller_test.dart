@@ -107,6 +107,61 @@ void main() {
     },
   );
 
+  test('cache failure snapshot errors degrade without escaping', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events)
+      ..snapshotError = StateError('private native read failure');
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+
+    engine.logController.add('Failed to create file cache');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.unconfirmed,
+    );
+    expect(
+      controller.state.cacheFallbackReason,
+      PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    );
+    await controller.shutdown();
+  });
+
+  test('cache failure snapshot reads have a fixed deadline', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      diagnostics: _diagnostics(diagnostics),
+      cacheCleanupTimeout: const Duration(milliseconds: 10),
+    );
+    await controller.start();
+    final snapshotGate = Completer<void>();
+    engine.snapshotOperation = snapshotGate.future;
+
+    engine.logController.add('Failed to create file cache');
+    await _waitUntil(
+      () => diagnostics.contains(
+        'event=playback_operation_timeout kind=cache_snapshot_read',
+      ),
+    );
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.unconfirmed,
+    );
+    snapshotGate.complete();
+    await controller.shutdown();
+  });
+
   test(
     'cache creation plus startup failure retries once with memory',
     () async {
@@ -467,6 +522,66 @@ void main() {
     expect(controller.state.phase, PlaybackPhase.failed);
     expect(controller.state.position, isNot(const Duration(minutes: 45)));
     await controller.shutdown();
+  });
+
+  test('shutdown bounds an in-flight cache status refresh', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final storage = _CacheStorage(events);
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: storage,
+      diagnostics: _diagnostics(diagnostics),
+      cacheCleanupTimeout: const Duration(milliseconds: 10),
+    );
+    await controller.start();
+    final freeBytesGate = Completer<void>();
+    storage.freeBytesGate = freeBytesGate.future;
+
+    final seek = controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.controls,
+    );
+    await _waitUntil(() => storage.freeReads >= 2);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+
+    expect(controller.state.phase, PlaybackPhase.idle);
+    expect(
+      diagnostics,
+      contains('event=playback_operation_timeout kind=cache_cleanup'),
+    );
+    freeBytesGate.complete();
+    expect((await seek).disposition, SeekDisposition.executed);
+  });
+
+  test('initial cache monitor refresh has a fixed deadline', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final freeBytesGate = Completer<void>();
+    final storage = _CacheStorage(events)..freeBytesGate = freeBytesGate.future;
+    final controller = _controller(
+      engine: _CacheEngine(events: events),
+      storage: storage,
+      diagnostics: _diagnostics(diagnostics),
+      cacheCleanupTimeout: const Duration(milliseconds: 10),
+    );
+
+    await controller.start().timeout(const Duration(milliseconds: 200));
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.unconfirmed,
+    );
+    expect(
+      diagnostics,
+      contains('event=playback_operation_timeout kind=cache_monitor_start'),
+    );
+    freeBytesGate.complete();
+    await controller.shutdown();
+    expect(storage.activeSessions, 0);
   });
 
   test(
@@ -843,6 +958,43 @@ void main() {
     }
   });
 
+  test(
+    'engine error and log fingerprints share the two-second limit',
+    () async {
+      final lines = <String>[];
+      DiagnosticLog.instance.setTestSink(lines.add);
+      addTearDown(() => DiagnosticLog.instance.setTestSink(null));
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      var now = DateTime.utc(2026, 8, 10);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        clock: () => now,
+      );
+      await controller.start();
+
+      engine.errorController.add('partial file');
+      engine.logController.add('partial file');
+      engine.errorController.add('partial file');
+      engine.errorController.add('failed to resolve hostname');
+      engine.logController.add('failed to resolve hostname');
+      now = now.add(const Duration(seconds: 2));
+      engine.errorController.add('partial file');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        lines.where((line) => line.contains('fingerprint=partial_file')),
+        hasLength(2),
+      );
+      expect(
+        lines.where((line) => line.contains('fingerprint=dns-resolution')),
+        hasLength(1),
+      );
+      await controller.shutdown();
+    },
+  );
+
   test('raw engine output and item metadata never enter diagnostics', () async {
     final lines = <String>[];
     DiagnosticLog.instance.setTestSink(lines.add);
@@ -889,6 +1041,7 @@ PlaybackController _controller({
   PlaybackDiagnostics? diagnostics,
   PlaybackReporter? reporter,
   Duration readyTimeout = const Duration(seconds: 18),
+  Duration cacheCleanupTimeout = const Duration(seconds: 3),
   PlaybackClock? clock,
 }) => PlaybackController(
   item: _item,
@@ -906,6 +1059,7 @@ PlaybackController _controller({
   testOverrides: testOverrides,
   diagnostics: diagnostics,
   readyTimeout: readyTimeout,
+  cacheCleanupTimeout: cacheCleanupTimeout,
   progressInterval: const Duration(hours: 1),
   cacheStatePollInterval: const Duration(hours: 1),
   cacheSpacePollInterval: const Duration(hours: 1),
@@ -921,6 +1075,7 @@ class _CacheStorage implements PlaybackCacheStorage {
   int freeReads = 0;
   int freeBytes = 20 << 30;
   int activeSessions = 0;
+  Future<void>? freeBytesGate;
 
   @override
   Future<void> cleanupNonActiveMarkedSessions() async {}
@@ -934,6 +1089,7 @@ class _CacheStorage implements PlaybackCacheStorage {
   @override
   Future<int?> freeBytesFor(Directory directory) async {
     freeReads++;
+    await freeBytesGate;
     return freeBytes;
   }
 
@@ -965,6 +1121,8 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
 
   final List<String> events;
   PlaybackCacheEngineSnapshot? snapshot;
+  Object? snapshotError;
+  Future<void>? snapshotOperation;
   final bool requireRecreationAfterOpen;
   final Completer<void>? seekGate;
   final Completer<void>? stopGate;
@@ -1115,6 +1273,8 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   @override
   Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() async {
     snapshotReads++;
+    await snapshotOperation;
+    if (snapshotError case final error?) throw error;
     return snapshot;
   }
 
@@ -1230,7 +1390,7 @@ PlaybackDiagnostics _diagnostics(List<String> lines) => PlaybackDiagnostics(
 
 PlaybackCacheEngineCapabilities _capabilities() =>
     PlaybackCacheEngineCapabilities(
-      mpvVersionFingerprint: 'mpv-test',
+      mpvVersionFingerprint: 'mpv-0.40.0-test',
       platform: 'test',
       optionSupport: {
         for (final option in playbackCacheOptionNames) option: true,

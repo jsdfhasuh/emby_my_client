@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../core/diagnostic_log.dart';
+import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
 import 'cache/playback_cache_engine.dart';
@@ -50,11 +51,14 @@ enum PlaybackDiagnosticEvent {
 enum PlaybackOperationTimeoutKind {
   nativePropertyRead('native_property_read'),
   nativePropertyWrite('native_property_write'),
+  engineOpen('engine_open'),
   seekCall('seek_call'),
   seekSettle('seek_settle'),
   engineStop('engine_stop'),
   engineDispose('engine_dispose'),
   reporterStop('reporter_stop'),
+  cacheSnapshotRead('cache_snapshot_read'),
+  cacheMonitorStart('cache_monitor_start'),
   cacheCleanup('cache_cleanup');
 
   const PlaybackOperationTimeoutKind(this.code);
@@ -242,6 +246,15 @@ class PlaybackDiagnostics {
     );
   }
 
+  void nativeOperationTimeout(NativePlaybackOperationKind operation) {
+    operationTimeout(switch (operation) {
+      NativePlaybackOperationKind.propertyRead =>
+        PlaybackOperationTimeoutKind.nativePropertyRead,
+      NativePlaybackOperationKind.propertyWrite =>
+        PlaybackOperationTimeoutKind.nativePropertyWrite,
+    });
+  }
+
   void automaticOpenBudgetExhausted({
     required AutomaticPlaybackOpenReason reason,
     required int automaticOpenCount,
@@ -355,13 +368,15 @@ class PlaybackDiagnostics {
     }
   }
 
-  static String _safeToken(String value) =>
-      RegExp(
-        r'^(?:mpv(?:[._+\-][A-Za-z0-9]+){0,8}|unavailable)$',
-        caseSensitive: false,
-      ).hasMatch(value)
-      ? value
-      : 'unavailable';
+  static String _safeToken(String value) {
+    if (value.length > 63) return 'unavailable';
+    return RegExp(
+          r'^(?:mpv-[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?|unavailable)$',
+          caseSensitive: false,
+        ).hasMatch(value)
+        ? value
+        : 'unavailable';
+  }
 
   static String _platform(String value) => switch (value.toLowerCase()) {
     'ipados' || 'ios' || 'darwin' => 'iPadOS',

@@ -221,11 +221,14 @@ bool _containsChoice(Object? value, String expected) {
 }
 
 String _safeFingerprint(String? value) {
-  final match = RegExp(
-    r'^\s*(mpv(?:[._+\-][A-Za-z0-9]+){0,8})(?:\s|$)',
+  final raw = value?.trim() ?? '';
+  final versionMatch = RegExp(
+    r'^mpv(?:\s+v?|[-_]v?)?([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?)',
     caseSensitive: false,
-  ).firstMatch(value ?? '');
-  return match?.group(1) ?? 'unavailable';
+  ).firstMatch(raw);
+  final version = versionMatch?.group(1);
+  if (version != null && version.length <= 59) return 'mpv-$version';
+  return 'unavailable';
 }
 
 String _safePlatform(String? value) {

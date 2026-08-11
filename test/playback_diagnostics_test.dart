@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_coordinator.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
@@ -229,8 +230,8 @@ void main() {
     diagnostics.operationTimeout(
       PlaybackOperationTimeoutKind.nativePropertyRead,
     );
-    diagnostics.operationTimeout(
-      PlaybackOperationTimeoutKind.nativePropertyRead,
+    diagnostics.nativeOperationTimeout(
+      NativePlaybackOperationKind.propertyRead,
     );
     diagnostics.operationTimeout(PlaybackOperationTimeoutKind.engineStop);
     now = now.add(const Duration(seconds: 2));

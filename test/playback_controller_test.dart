@@ -99,6 +99,83 @@ void main() {
     },
   );
 
+  test('startup failure cleanup obeys stop and reporter deadlines', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final diagnostics = <String>[];
+    final engine = _FakeEngine(stopOperation: Completer<void>().future)
+      ..openError = StateError('open failed');
+    final reporter = _BlockingReporter();
+    final controller = PlaybackController(
+      item: _plainItem,
+      engine: engine,
+      resolver: EmbyStreamResolver(api),
+      reporter: reporter,
+      playbackHeaders: api.playbackHeaders,
+      stopTimeout: const Duration(milliseconds: 10),
+      disposeTimeout: const Duration(milliseconds: 10),
+      reporterTimeout: const Duration(milliseconds: 10),
+      diagnostics: _diagnostics(diagnostics),
+      progressInterval: const Duration(hours: 1),
+    );
+
+    await controller.start().timeout(const Duration(milliseconds: 300));
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(engine.openPlayValues, hasLength(2));
+    expect(engine.stopCalls, 2);
+    expect(reporter.stopCalls, 2);
+    expect(
+      diagnostics,
+      contains('event=playback_operation_timeout kind=engine_stop'),
+    );
+    expect(
+      diagnostics,
+      contains('event=playback_operation_timeout kind=reporter_stop'),
+    );
+    await controller.shutdown().timeout(const Duration(milliseconds: 300));
+  });
+
+  test(
+    'a blocked engine open times out and rejects late engine events',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final diagnostics = <String>[];
+      final openGate = Completer<void>();
+      final engine = _FakeEngine(openOperation: openGate.future);
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 3));
+        engine.positionController.add(const Duration(minutes: 45));
+      };
+      final controller = PlaybackController(
+        item: _plainItem,
+        engine: engine,
+        resolver: EmbyStreamResolver(api),
+        reporter: PlaybackSessionReporter(api: api, item: _plainItem),
+        playbackHeaders: api.playbackHeaders,
+        openTimeout: const Duration(milliseconds: 10),
+        diagnostics: _diagnostics(diagnostics),
+        progressInterval: const Duration(hours: 1),
+      );
+
+      await controller.start().timeout(const Duration(milliseconds: 300));
+
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(engine.openPlayValues, hasLength(1));
+      expect(
+        diagnostics,
+        contains('event=playback_operation_timeout kind=engine_open'),
+      );
+      openGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.duration, Duration.zero);
+      expect(controller.state.position, Duration.zero);
+      await controller.shutdown();
+    },
+  );
+
   test('retries DirectPlay once with Transcode when ready times out', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -537,8 +614,14 @@ void engineLater(void Function() action) {
 }
 
 class _FakeEngine implements PlaybackEngine {
-  _FakeEngine({this.stopOperation, this.disposeOperation, this.seekOperation});
+  _FakeEngine({
+    this.openOperation,
+    this.stopOperation,
+    this.disposeOperation,
+    this.seekOperation,
+  });
 
+  final Future<void>? openOperation;
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
   final Future<void>? seekOperation;
@@ -608,6 +691,7 @@ class _FakeEngine implements PlaybackEngine {
     openUris.add(uri);
     openHeaders.add(Map<String, String>.from(headers));
     if (openError != null) throw openError!;
+    await openOperation;
     onOpen?.call(openPlayValues.length);
   }
 

@@ -39,11 +39,13 @@ class PlaybackController extends ChangeNotifier {
     PlaybackDiagnostics? diagnostics,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
+    this.openTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
     this.seekCallTimeout = const Duration(seconds: 8),
     this.stopTimeout = const Duration(seconds: 5),
     this.disposeTimeout = const Duration(seconds: 5),
     this.reporterTimeout = const Duration(seconds: 3),
+    this.cacheCleanupTimeout = const Duration(seconds: 3),
     this.progressInterval = const Duration(seconds: 10),
     this.cacheStatePollInterval = const Duration(seconds: 1),
     this.cacheSpacePollInterval = const Duration(seconds: 10),
@@ -74,11 +76,13 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackCacheStorage cacheStorage;
   final PlaybackDiagnostics _diagnostics;
   final Duration readyTimeout;
+  final Duration openTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
   final Duration stopTimeout;
   final Duration disposeTimeout;
   final Duration reporterTimeout;
+  final Duration cacheCleanupTimeout;
   final Duration progressInterval;
   final Duration cacheStatePollInterval;
   final Duration cacheSpacePollInterval;
@@ -173,6 +177,7 @@ class PlaybackController extends ChangeNotifier {
     while (_isCurrent(token)) {
       _cacheFailureObservationGeneration++;
       PlaybackPlan? plan;
+      var engineOpenTimedOut = false;
       try {
         plan = await resolver.resolve(
           item,
@@ -205,13 +210,23 @@ class PlaybackController extends ChangeNotifier {
             (item.resumePosition > const Duration(seconds: 10)
                 ? item.resumePosition
                 : Duration.zero);
-        await engine.open(
-          plan.uri,
-          headers: plan.usesServerAuthentication
-              ? playbackHeaders
-              : const <String, String>{},
-          play: resume == Duration.zero && playAfterReady,
-        );
+        try {
+          await _withDeadline(
+            engine.open(
+              plan.uri,
+              headers: plan.usesServerAuthentication
+                  ? playbackHeaders
+                  : const <String, String>{},
+              play: resume == Duration.zero && playAfterReady,
+            ),
+            openTimeout,
+            PlaybackOperationTimeoutKind.engineOpen,
+          );
+        } on _PlaybackOperationTimedOut catch (error) {
+          engineOpenTimedOut =
+              error.kind == PlaybackOperationTimeoutKind.engineOpen;
+          rethrow;
+        }
         _throwIfStale(token);
         _setState(
           _state.copyWith(
@@ -264,12 +279,13 @@ class PlaybackController extends ChangeNotifier {
         );
         return;
       } on _PlaybackCancelled {
-        if (plan != null) await reporter.stop(_state.position);
+        if (plan != null) await _stopReporterSafely();
         return;
       } catch (error) {
         if (!_isCurrent(token)) return;
         _discardReadyWaitAfterStartupError();
         final canRetryCacheInMemory =
+            !engineOpenTimedOut &&
             plan != null &&
             _state.diskCacheFailureObserved &&
             _state.cacheProfile?.runtimeMode == PlaybackCacheRuntimeMode.disk &&
@@ -294,6 +310,7 @@ class PlaybackController extends ChangeNotifier {
           continue;
         }
         final canRetry =
+            !engineOpenTimedOut &&
             !retriedWithTranscode &&
             resolver.canForceTranscode &&
             plan != null &&
@@ -339,18 +356,12 @@ class PlaybackController extends ChangeNotifier {
               clearStatus: true,
             ),
           );
+          _generation++;
         }
-        try {
-          await _stopCacheCoordinator();
-          await engine.stop();
-        } catch (stopError) {
-          DiagnosticLog.instance.warning(
-            'player',
-            'event=playback_start_cleanup_failed '
-                'errorType=${stopError.runtimeType}',
-          );
-        }
-        if (plan != null) await reporter.stop(_state.position);
+        await _cancelSubscriptions();
+        await _stopCacheCoordinator();
+        if (plan != null) await _stopReporterSafely();
+        await _stopEngine();
         await _cleanupCacheSessionSafely();
         return;
       }
@@ -852,11 +863,13 @@ class PlaybackController extends ChangeNotifier {
 
   void _handleEngineError(String error) {
     final fingerprint = _approvedRecoveryFingerprint(error);
-    DiagnosticLog.instance.error(
-      'player',
-      'event=playback_engine_error '
-          'fingerprint=${fingerprint?.code ?? 'unapproved'}',
-    );
+    final diagnosticFingerprint = _engineDiagnosticFingerprint(error);
+    if (_shouldWriteEngineFingerprint(diagnosticFingerprint)) {
+      DiagnosticLog.instance.error(
+        'player',
+        'event=playback_engine_error fingerprint=$diagnosticFingerprint',
+      );
+    }
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(error);
@@ -901,25 +914,18 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
     }
+    final fingerprint = _engineDiagnosticFingerprint(log);
+    if (_shouldWriteEngineFingerprint(fingerprint)) {
+      DiagnosticLog.instance.warning(
+        'libmpv',
+        'event=libmpv_log fingerprint=$fingerprint',
+      );
+    }
     if ((_state.phase == PlaybackPhase.ready ||
             _state.phase == PlaybackPhase.recoveryPending ||
             _state.phase == PlaybackPhase.recovering) &&
         _requestRuntimeRecovery(log)) {
       return;
-    }
-    final fingerprint = _engineLogFingerprint(lower);
-    final now = DateTime.now();
-    final lastWritten = _engineLogLastWritten[fingerprint];
-    if (lastWritten == null ||
-        now.difference(lastWritten) >= const Duration(seconds: 2)) {
-      if (_engineLogLastWritten.length >= 64) {
-        _engineLogLastWritten.clear();
-      }
-      _engineLogLastWritten[fingerprint] = now;
-      DiagnosticLog.instance.warning(
-        'libmpv',
-        'event=libmpv_log fingerprint=$fingerprint',
-      );
     }
 
     if (_startupFailureSignaled || !_isStartupPhase(_state.phase)) return;
@@ -938,7 +944,18 @@ class PlaybackController extends ChangeNotifier {
     final cacheEngine = engine is PlaybackCacheEngine
         ? engine as PlaybackCacheEngine
         : null;
-    final snapshot = await cacheEngine?.readCacheSnapshot();
+    PlaybackCacheEngineSnapshot? snapshot;
+    try {
+      snapshot = cacheEngine == null
+          ? null
+          : await _withDeadline(
+              cacheEngine.readCacheSnapshot(),
+              cacheCleanupTimeout,
+              PlaybackOperationTimeoutKind.cacheSnapshotRead,
+            );
+    } catch (_) {
+      snapshot = null;
+    }
     if (!_isCurrent(token) ||
         observationGeneration != _cacheFailureObservationGeneration) {
       return;
@@ -1010,13 +1027,57 @@ class PlaybackController extends ChangeNotifier {
       spacePollInterval: cacheSpacePollInterval,
     );
     _cacheCoordinator = coordinator;
-    await coordinator.start();
+    try {
+      await _withDeadline(
+        coordinator.start(),
+        cacheCleanupTimeout,
+        PlaybackOperationTimeoutKind.cacheMonitorStart,
+      );
+    } catch (error) {
+      if (identical(_cacheCoordinator, coordinator)) {
+        _cacheCoordinator = null;
+      }
+      coordinator.cancel();
+      if (_isCurrent(token)) {
+        if (!_cacheSnapshotUnavailableLogged) {
+          _cacheSnapshotUnavailableLogged = true;
+          _diagnostics.cacheSnapshotUnavailable();
+        }
+        _setState(
+          _state.copyWith(
+            cacheRuntimeMode: PlaybackCacheRuntimeMode.unconfirmed,
+            cacheFallbackReason:
+                PlaybackCacheFallbackReason.actualModeUnconfirmed,
+            clearCacheObservation: true,
+          ),
+        );
+      }
+      DiagnosticLog.instance.warning(
+        'playback-cache',
+        'event=playback_cache_monitor_start_failed '
+            'errorType=${error.runtimeType}',
+      );
+    }
+    _throwIfStale(token);
   }
 
   Future<void> _stopCacheCoordinator() async {
     final coordinator = _cacheCoordinator;
     _cacheCoordinator = null;
-    await coordinator?.stop();
+    if (coordinator == null) return;
+    try {
+      await _withDeadline(
+        coordinator.stop(),
+        cacheCleanupTimeout,
+        PlaybackOperationTimeoutKind.cacheCleanup,
+      );
+    } catch (error) {
+      DiagnosticLog.instance.warning(
+        'playback-cache',
+        'event=playback_cache_monitor_stop_failed '
+            'errorType=${error.runtimeType}',
+      );
+    }
   }
 
   void _cancelCacheCoordinator() {
@@ -1428,6 +1489,10 @@ class PlaybackController extends ChangeNotifier {
     return 'other';
   }
 
+  static String _engineDiagnosticFingerprint(String value) =>
+      _approvedRecoveryFingerprint(value)?.code ??
+      _engineLogFingerprint(value.toLowerCase());
+
   Future<void> _applySelectedDirectPlayTracks(
     PlaybackPlan plan,
     int token,
@@ -1620,7 +1685,7 @@ class PlaybackController extends ChangeNotifier {
     try {
       await _withDeadline(
         cacheStorage.cleanupSession(cacheSession),
-        const Duration(seconds: 3),
+        cacheCleanupTimeout,
         PlaybackOperationTimeoutKind.cacheCleanup,
       );
       _diagnostics.cacheSessionCleaned();
@@ -1666,17 +1731,32 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  bool _shouldWriteEngineFingerprint(String fingerprint) {
+    final now = _clock();
+    final lastWritten = _engineLogLastWritten[fingerprint];
+    if (lastWritten != null &&
+        now.difference(lastWritten) < const Duration(seconds: 2)) {
+      return false;
+    }
+    if (_engineLogLastWritten.length >= 64) {
+      _engineLogLastWritten.clear();
+    }
+    _engineLogLastWritten[fingerprint] = now;
+    return true;
+  }
+
   Future<T> _withDeadline<T>(
     Future<T> operation,
     Duration timeout,
     PlaybackOperationTimeoutKind timeoutKind,
   ) async {
-    try {
-      return await operation.timeout(timeout);
-    } on TimeoutException {
-      _diagnostics.operationTimeout(timeoutKind);
-      rethrow;
-    }
+    return operation.timeout(
+      timeout,
+      onTimeout: () {
+        _diagnostics.operationTimeout(timeoutKind);
+        throw _PlaybackOperationTimedOut(timeoutKind);
+      },
+    );
   }
 
   @override
@@ -1716,6 +1796,15 @@ class PlaybackController extends ChangeNotifier {
 
 class _PlaybackCancelled implements Exception {
   const _PlaybackCancelled();
+}
+
+class _PlaybackOperationTimedOut implements Exception {
+  const _PlaybackOperationTimedOut(this.kind);
+
+  final PlaybackOperationTimeoutKind kind;
+
+  @override
+  String toString() => 'Playback operation timeout: ${kind.code}';
 }
 
 class _PlaybackEngineRecreationRequired implements Exception {

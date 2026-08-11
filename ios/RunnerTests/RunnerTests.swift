@@ -62,7 +62,7 @@ final class RunnerTests: XCTestCase {
 
   func testIncompleteNativeResetEvidenceBlocksDiskWithoutGuessing() throws {
     let snapshot = PlaybackCacheNativeCapabilitySnapshot(
-      mpvVersion: "mpv-test",
+      mpvVersion: "mpv 0.40.0-test Copyright build path must not escape",
       platform: "darwin",
       supportedOptions: Set(PlaybackCacheNativeProbe.optionNames),
       properties: Set(PlaybackCacheNativeProbe.requiredProperties),
@@ -77,11 +77,52 @@ final class RunnerTests: XCTestCase {
     let decoded = try XCTUnwrap(
       JSONSerialization.jsonObject(with: manifest) as? [String: Any]
     )
+    XCTAssertEqual(decoded["mpvVersionFingerprint"] as? String, "mpv-0.40.0-test")
+    XCTAssertEqual(decoded["platform"] as? String, "iPadOS")
     XCTAssertEqual(decoded["resetValuesComplete"] as? Bool, false)
     XCTAssertEqual(
       Set(try XCTUnwrap(decoded["missingResetValues"] as? [String])),
       Set(PlaybackCacheNativeProbe.optionNames).subtracting(["cache"])
     )
+  }
+
+  func testNativeManifestRejectsVersionlessMpvIdentity() {
+    for identity in ["mpv", "mpv-test"] {
+      let snapshot = PlaybackCacheNativeCapabilitySnapshot(
+        mpvVersion: identity,
+        platform: "darwin",
+        supportedOptions: [],
+        properties: [],
+        unlinkChoices: [],
+        resetValues: [:],
+        profileSwitchStrategy: .unsupported
+      )
+
+      XCTAssertThrowsError(try snapshot.safeManifestData(), identity)
+    }
+  }
+
+  func testNativeManifestRejectsUnsafeIdentitySubstrings() {
+    let identities = [
+      ("Copyright mpv 0.40.0", "darwin"),
+      ("mpv 0.40.0", "username@host:8096"),
+      ("mpv 0.40.0", "linux"),
+      ("mpv 0.40.0", "192.168.0.1"),
+      ("mpv 1.2-" + String(repeating: "a", count: 60), "darwin"),
+    ]
+    for (version, platform) in identities {
+      let snapshot = PlaybackCacheNativeCapabilitySnapshot(
+        mpvVersion: version,
+        platform: platform,
+        supportedOptions: [],
+        properties: [],
+        unlinkChoices: [],
+        resetValues: [:],
+        profileSwitchStrategy: .unsupported
+      )
+
+      XCTAssertThrowsError(try snapshot.safeManifestData(), "\(version) \(platform)")
+    }
   }
 
   func testValidReportPassesAndFilenameUsesOnlyBundleBuildAndTime() throws {

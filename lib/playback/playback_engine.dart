@@ -90,20 +90,17 @@ abstract interface class PlaybackEngine {
 }
 
 class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
-  MediaKitPlaybackEngine(this.player, {this.nativePropertyWriter}) {
+  MediaKitPlaybackEngine(
+    this.player, {
+    this.nativePropertyWriter,
+    PlaybackDiagnostics? diagnostics,
+  }) : _diagnostics = diagnostics ?? PlaybackDiagnostics() {
     final platform = player.platform;
     if (platform is NativePlayer) {
       _cacheEngine = NativePlaybackCacheEngine(
         access: MediaKitNativePlaybackPropertyAccess(
           platform,
-          timeoutReporter: (operation) {
-            PlaybackDiagnostics().operationTimeout(switch (operation) {
-              NativePlaybackOperationKind.propertyRead =>
-                PlaybackOperationTimeoutKind.nativePropertyRead,
-              NativePlaybackOperationKind.propertyWrite =>
-                PlaybackOperationTimeoutKind.nativePropertyWrite,
-            });
-          },
+          timeoutReporter: _diagnostics.nativeOperationTimeout,
         ),
         hasOpenedMedia: () => _hasOpenedMedia,
       );
@@ -112,6 +109,7 @@ class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
 
   final Player player;
   final NativePropertyWriter? nativePropertyWriter;
+  final PlaybackDiagnostics _diagnostics;
   NativePlaybackCacheEngine? _cacheEngine;
   bool _hasOpenedMedia = false;
 

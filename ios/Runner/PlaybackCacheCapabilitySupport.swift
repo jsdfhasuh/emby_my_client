@@ -433,8 +433,8 @@ extension PlaybackCacheNativeCapabilitySnapshot {
   func safeManifestData() throws -> Data {
     let optionNames = Set(PlaybackCacheNativeProbe.optionNames)
     guard
-      let version = Self.safeToken(mpvVersion),
-      let safePlatform = Self.safeToken(platform),
+      let version = Self.safeMpvVersionFingerprint(mpvVersion),
+      let safePlatform = Self.safePlatform(platform),
       Set(resetValues.keys).isSubset(of: optionNames),
       Set(resetValues.keys).isSubset(of: supportedOptions)
     else {
@@ -477,12 +477,36 @@ extension PlaybackCacheNativeCapabilitySnapshot {
     )
   }
 
-  private static func safeToken(_ value: String) -> String? {
-    let pattern = "[A-Za-z0-9][A-Za-z0-9._+\\-]{0,63}"
-    guard let range = value.range(of: pattern, options: .regularExpression) else {
+  private static func safePlatform(_ value: String) -> String? {
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "darwin", "ios", "ipados":
+      return "iPadOS"
+    case "android":
+      return "Android"
+    default:
       return nil
     }
-    return String(value[range])
+  }
+
+  private static func safeMpvVersionFingerprint(_ value: String) -> String? {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let pattern = #"(?i)^mpv(?:\s+v?|[-_]v?)?([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?)"#
+    guard
+      let expression = try? NSRegularExpression(pattern: pattern),
+      let match = expression.firstMatch(
+        in: normalized,
+        range: NSRange(normalized.startIndex..., in: normalized)
+      ),
+      match.numberOfRanges == 2,
+      let versionRange = Range(match.range(at: 1), in: normalized)
+    else {
+      return nil
+    }
+    let version = String(normalized[versionRange])
+    guard version.utf8.count <= 59, isSafeValue(version) else {
+      return nil
+    }
+    return "mpv-\(version)"
   }
 
   private static func isSafeValue(_ value: String) -> Bool {

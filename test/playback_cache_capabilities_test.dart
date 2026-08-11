@@ -89,6 +89,42 @@ void main() {
     expect(encoded, isNot(contains('username')));
   });
 
+  test('safe manifest requires a numeric mpv version fingerprint', () {
+    for (final identity in ['mpv', 'mpv-test']) {
+      final capabilities = PlaybackCacheEngineCapabilities(
+        mpvVersionFingerprint: identity,
+        platform: 'iPadOS',
+        optionSupport: const {},
+        propertySupport: const {},
+        supportsImmediateUnlink: false,
+        profileSwitchStrategy: PlaybackCacheProfileSwitchStrategy.unsupported,
+        resetValues: const {},
+      );
+
+      expect(
+        capabilities.toSafeDiagnosticManifest()['mpvVersionFingerprint'],
+        'unavailable',
+        reason: identity,
+      );
+    }
+  });
+
+  test('probe rejects non-prefix and oversized mpv identities', () async {
+    for (final identity in ['Copyright mpv 0.40.0', 'mpv 1.2-${'a' * 60}']) {
+      final access = _FakeNativeAccess.complete()
+        ..strings['mpv-version'] = identity;
+
+      final result = await PlaybackCacheCapabilityProbe(
+        access: access,
+        profileSwitchExperiment: _FakeExperiment(
+          PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
+        ),
+      ).probe();
+
+      expect(result.mpvVersionFingerprint, 'unavailable', reason: identity);
+    }
+  });
+
   test('recreation-only switch remains an approved disk strategy', () async {
     final result = await PlaybackCacheCapabilityProbe(
       access: _FakeNativeAccess.complete(),
@@ -237,7 +273,7 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
     : supportedOptions = playbackCacheOptionNames.toSet(),
       supportedProperties = playbackCachePropertyNames.toSet(),
       strings = {
-        'mpv-version': 'mpv-0.40.0 Copyright build path must not escape',
+        'mpv-version': 'mpv 0.40.0 Copyright build path must not escape',
         'platform': 'darwin',
         for (final option in playbackCacheOptionNames)
           'option-info/$option/default-value': option == 'demuxer-cache-dir'
