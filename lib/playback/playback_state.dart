@@ -4,6 +4,15 @@ import 'cache/playback_cache_coordinator.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'playback_engine.dart';
+import 'playback_operation_coordinator.dart';
+
+Duration resolveCompletedSeekDisplayPosition({
+  required Duration startPosition,
+  required Duration requestedTarget,
+  required SeekResult? result,
+}) => result?.disposition == SeekDisposition.executed
+    ? result?.committedPosition ?? requestedTarget
+    : startPosition;
 
 enum PlaybackPhase {
   idle,

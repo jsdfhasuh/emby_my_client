@@ -320,8 +320,11 @@ String playbackCacheModeLabel(PlaybackCacheMode mode) => switch (mode) {
 };
 
 String playbackCacheSettingsSummary(PlaybackCacheSettings settings) {
+  if (settings.mode == PlaybackCacheMode.automatic) {
+    return '自动 · 根据可用空间动态决定';
+  }
   final targets = switch (settings.mode) {
-    PlaybackCacheMode.automatic => (180, 120),
+    PlaybackCacheMode.automatic => throw StateError('unreachable'),
     PlaybackCacheMode.memoryOnly => (60, 30),
     PlaybackCacheMode.spaceSaving => (90, 60),
     PlaybackCacheMode.balanced => (180, 120),

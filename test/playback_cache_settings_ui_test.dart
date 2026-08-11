@@ -14,6 +14,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('automatic summary never invents a fixed cache target', () {
+    final summary = playbackCacheSettingsSummary(
+      const PlaybackCacheSettings(mode: PlaybackCacheMode.automatic),
+    );
+
+    expect(summary, '自动 · 根据可用空间动态决定');
+    expect(summary, isNot(contains('前向')));
+    expect(summary, isNot(contains('后向')));
+  });
+
   testWidgets('preset selection saves cache patch for the next playback', (
     tester,
   ) async {
@@ -35,6 +45,18 @@ void main() {
     final saved = (await repository.load(_session)).settings.cache;
     expect(saved.mode, PlaybackCacheMode.custom);
     expect(find.text('已保存，将从下次播放生效'), findsOneWidget);
+  });
+
+  testWidgets('all six cache modes are available exactly once', (tester) async {
+    await _pumpSettings(
+      tester,
+      repository: PlaybackSettingsRepository(storage: _MemoryStorage()),
+      freeBytes: 12 << 30,
+    );
+
+    for (final mode in PlaybackCacheMode.values) {
+      expect(find.byKey(ValueKey('cache-mode-${mode.name}')), findsOneWidget);
+    }
   });
 
   testWidgets('known and unknown free space use fixed safe presentation', (

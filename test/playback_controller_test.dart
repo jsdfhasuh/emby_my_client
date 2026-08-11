@@ -13,6 +13,45 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('completed seek presentation commits only executed results', () {
+    const start = Duration(minutes: 2);
+    const requested = Duration(minutes: 8);
+    expect(
+      resolveCompletedSeekDisplayPosition(
+        startPosition: start,
+        requestedTarget: requested,
+        result: const SeekResult(
+          disposition: SeekDisposition.executed,
+          requestedTarget: requested,
+          committedPosition: Duration(minutes: 7, seconds: 59),
+          settled: true,
+        ),
+      ),
+      const Duration(minutes: 7, seconds: 59),
+    );
+    expect(
+      resolveCompletedSeekDisplayPosition(
+        startPosition: start,
+        requestedTarget: requested,
+        result: const SeekResult(
+          disposition: SeekDisposition.failed,
+          requestedTarget: requested,
+          settled: false,
+          failureKind: SeekFailureKind.engineError,
+        ),
+      ),
+      start,
+    );
+    expect(
+      resolveCompletedSeekDisplayPosition(
+        startPosition: start,
+        requestedTarget: requested,
+        result: null,
+      ),
+      start,
+    );
+  });
+
   test('opens paused, waits for ready, seeks and verifies resume', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
