@@ -81,15 +81,21 @@ typedef PlaybackDiagnosticWriter =
       String component,
       String message,
     );
+typedef PlaybackDiagnosticClock = DateTime Function();
 
 class PlaybackDiagnostics {
   PlaybackDiagnostics({
     PlaybackDiagnosticWriter? writer,
     this.seekFlushInterval = const Duration(milliseconds: 250),
-  }) : _writer = writer ?? _writeToDiagnosticLog;
+    this.timeoutRateLimit = const Duration(seconds: 2),
+    PlaybackDiagnosticClock? clock,
+  }) : _writer = writer ?? _writeToDiagnosticLog,
+       _clock = clock ?? DateTime.now;
 
   final PlaybackDiagnosticWriter _writer;
   final Duration seekFlushInterval;
+  final Duration timeoutRateLimit;
+  final PlaybackDiagnosticClock _clock;
 
   Timer? _seekFlushTimer;
   int _seekRequested = 0;
@@ -97,6 +103,7 @@ class PlaybackDiagnostics {
   int _seekExecuted = 0;
   int _seekFailed = 0;
   int _seekCancelled = 0;
+  final Map<PlaybackOperationTimeoutKind, DateTime> _timeoutLastWritten = {};
 
   void cacheCapabilitiesResolved(PlaybackCacheEngineCapabilities capabilities) {
     _emit(PlaybackDiagnosticEvent.cacheCapabilitiesResolved, [
@@ -222,6 +229,12 @@ class PlaybackDiagnostics {
   }
 
   void operationTimeout(PlaybackOperationTimeoutKind kind) {
+    final now = _clock();
+    final lastWritten = _timeoutLastWritten[kind];
+    if (lastWritten != null && now.difference(lastWritten) < timeoutRateLimit) {
+      return;
+    }
+    _timeoutLastWritten[kind] = now;
     _emit(
       PlaybackDiagnosticEvent.operationTimeout,
       ['kind=${kind.code}'],

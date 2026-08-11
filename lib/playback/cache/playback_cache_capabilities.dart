@@ -85,8 +85,8 @@ class PlaybackCacheEngineCapabilities {
   bool _supportsProperty(String name) => propertySupport[name] ?? false;
 
   Map<String, Object> toSafeDiagnosticManifest() => {
-    'mpvVersionFingerprint': mpvVersionFingerprint,
-    'platform': platform,
+    'mpvVersionFingerprint': _safeFingerprint(mpvVersionFingerprint),
+    'platform': _safePlatform(platform),
     for (final option in playbackCacheOptionNames)
       'option_${_safeKey(option)}': optionSupport[option] ?? false,
     for (final property in playbackCachePropertyNames)
@@ -222,15 +222,16 @@ bool _containsChoice(Object? value, String expected) {
 
 String _safeFingerprint(String? value) {
   final match = RegExp(
-    r'[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}',
+    r'^\s*(mpv(?:[._+\-][A-Za-z0-9]+){0,8})(?:\s|$)',
+    caseSensitive: false,
   ).firstMatch(value ?? '');
-  return match?.group(0) ?? 'unavailable';
+  return match?.group(1) ?? 'unavailable';
 }
 
 String _safePlatform(String? value) {
   final normalized = value?.trim().toLowerCase();
   return switch (normalized) {
-    'darwin' || 'ios' => 'iPadOS',
+    'darwin' || 'ios' || 'ipados' => 'iPadOS',
     'android' => 'Android',
     _ => 'unsupported',
   };

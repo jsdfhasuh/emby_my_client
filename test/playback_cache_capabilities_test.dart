@@ -67,6 +67,28 @@ void main() {
     },
   );
 
+  test('safe manifest revalidates constructor-provided identity strings', () {
+    final capabilities = PlaybackCacheEngineCapabilities(
+      mpvVersionFingerprint:
+          'Bearer secret-token https://private.example/media-title',
+      platform: 'username@host:8096',
+      optionSupport: const {},
+      propertySupport: const {},
+      supportsImmediateUnlink: false,
+      profileSwitchStrategy: PlaybackCacheProfileSwitchStrategy.unsupported,
+      resetValues: const {},
+    );
+
+    final manifest = capabilities.toSafeDiagnosticManifest();
+
+    expect(manifest['mpvVersionFingerprint'], 'unavailable');
+    expect(manifest['platform'], 'unsupported');
+    final encoded = manifest.toString().toLowerCase();
+    expect(encoded, isNot(contains('secret-token')));
+    expect(encoded, isNot(contains('private.example')));
+    expect(encoded, isNot(contains('username')));
+  });
+
   test('recreation-only switch remains an approved disk strategy', () async {
     final result = await PlaybackCacheCapabilityProbe(
       access: _FakeNativeAccess.complete(),

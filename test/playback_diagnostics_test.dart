@@ -217,4 +217,34 @@ void main() {
     expect(lines, contains('event=playback_seek_failed count=1'));
     expect(lines.join('\n'), isNot(contains('42')));
   });
+
+  test('repeated timeout kinds are rate limited independently', () {
+    final lines = <String>[];
+    var now = DateTime.utc(2026, 8, 10);
+    final diagnostics = PlaybackDiagnostics(
+      writer: (_, _, message) => lines.add(message),
+      clock: () => now,
+    );
+
+    diagnostics.operationTimeout(
+      PlaybackOperationTimeoutKind.nativePropertyRead,
+    );
+    diagnostics.operationTimeout(
+      PlaybackOperationTimeoutKind.nativePropertyRead,
+    );
+    diagnostics.operationTimeout(PlaybackOperationTimeoutKind.engineStop);
+    now = now.add(const Duration(seconds: 2));
+    diagnostics.operationTimeout(
+      PlaybackOperationTimeoutKind.nativePropertyRead,
+    );
+
+    expect(
+      lines.where((line) => line.contains('kind=native_property_read')),
+      hasLength(2),
+    );
+    expect(
+      lines.where((line) => line.contains('kind=engine_stop')),
+      hasLength(1),
+    );
+  });
 }
