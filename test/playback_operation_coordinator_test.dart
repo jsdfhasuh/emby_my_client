@@ -216,6 +216,69 @@ void main() {
       expect((await pending).disposition, SeekDisposition.cancelled);
       nativeGate.complete();
     });
+
+    test('control operations use the frozen priority order', () async {
+      final events = <String>[];
+      final userStarted = Completer<void>();
+      var invalidations = 0;
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('priority'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+        onControlOperationInvalidated: () => invalidations++,
+      );
+
+      final user = coordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.userReconfigure,
+        operation: (lease) async {
+          events.add('user-started');
+          userStarted.complete();
+          await lease.cancelled;
+          events.add('user-cancelled');
+        },
+      );
+      await userStarted.future;
+      final cache = coordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.cacheSafety,
+        operation: (_) async => events.add('cache'),
+      );
+      final recovery = coordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.runtimeRecovery,
+        operation: (_) async => events.add('recovery'),
+      );
+
+      await Future.wait([user, cache, recovery]);
+
+      expect(events, ['user-started', 'user-cancelled', 'recovery']);
+      expect(invalidations, 2);
+    });
+
+    test('shutdown releases active and pending control operations', () async {
+      final activeStarted = Completer<void>();
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('control-shutdown'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+      );
+      final active = coordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.userReconfigure,
+        operation: (lease) async {
+          activeStarted.complete();
+          await lease.cancelled;
+        },
+      );
+      await activeStarted.future;
+      var pendingRan = false;
+      final pending = coordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.userReconfigure,
+        operation: (_) async => pendingRan = true,
+      );
+
+      coordinator.shutdown();
+
+      await Future.wait([active, pending]);
+      expect(pendingRan, isFalse);
+    });
   });
 
   test('automatic open reasons are one-shot and bounded', () {

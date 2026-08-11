@@ -107,6 +107,78 @@ void main() {
     },
   );
 
+  test(
+    'cache creation plus startup failure retries once with memory',
+    () async {
+      final events = <String>[];
+      final session = PlaybackItemSession.forTest('cache-create-retry');
+      final engine = _CacheEngine(
+        events: events,
+        noReadyOnOpen: const {1},
+        logsOnOpen: const {
+          1: [
+            'Failed to create file cache',
+            'http: HTTP error 502 Bad Gateway',
+          ],
+        },
+      );
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+      );
+
+      await controller.start();
+
+      expect(engine.openCalls, 2);
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.plan?.method, PlayMethod.directPlay);
+      expect(engine.configuredProfiles.map((profile) => profile.runtimeMode), [
+        PlaybackCacheRuntimeMode.disk,
+        PlaybackCacheRuntimeMode.memoryFallback,
+      ]);
+      expect(
+        session.hasUsed(AutomaticPlaybackOpenReason.cacheCreateMemoryRetry),
+        isTrue,
+      );
+      expect(session.automaticOpenCount, 2);
+      await controller.shutdown();
+    },
+  );
+
+  test('cache creation memory retry cannot recurse', () async {
+    final events = <String>[];
+    final session = PlaybackItemSession.forTest('cache-create-one-shot');
+    final engine = _CacheEngine(
+      events: events,
+      noReadyOnOpen: const {1, 2},
+      logsOnOpen: const {
+        1: ['Failed to create file cache', 'http: HTTP error 502 Bad Gateway'],
+      },
+    );
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      session: session,
+      readyTimeout: const Duration(milliseconds: 20),
+    );
+
+    await controller.start();
+
+    expect(engine.openCalls, 3);
+    expect(controller.state.plan?.method, PlayMethod.transcode);
+    expect(
+      session.hasUsed(AutomaticPlaybackOpenReason.cacheCreateMemoryRetry),
+      isTrue,
+    );
+    expect(
+      session.hasUsed(AutomaticPlaybackOpenReason.startupTranscodeFallback),
+      isTrue,
+    );
+    expect(session.automaticOpenCount, 3);
+    await controller.shutdown();
+  });
+
   test('profile recreation preserves the logical item session', () async {
     final events = <String>[];
     final first = _CacheEngine(
@@ -268,6 +340,36 @@ void main() {
     await controller.shutdown();
   });
 
+  test(
+    'approved failure outside the absolute seek window never recovers',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      var now = DateTime.utc(2026, 8, 10);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        clock: () => now,
+        recoveryPolicy: const PlaybackRecoveryPolicy(
+          seekRecoveryWindow: Duration(seconds: 15),
+          stablePlaybackWindow: Duration(minutes: 1),
+        ),
+      );
+      await controller.start();
+      await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.controls,
+      );
+      now = now.add(const Duration(seconds: 15, microseconds: 1));
+
+      engine.errorController.add('partial file');
+      await _waitUntil(() => controller.state.phase == PlaybackPhase.failed);
+
+      expect(engine.openCalls, 1);
+      await controller.shutdown();
+    },
+  );
+
   test('low space before open prevents a disk cache session', () async {
     final events = <String>[];
     final diagnostics = <String>[];
@@ -337,6 +439,35 @@ void main() {
       await controller.shutdown();
     },
   );
+
+  test('cache safety reopen has one fixed total deadline', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events, noReadyOnOpen: const {2});
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      readyTimeout: const Duration(hours: 1),
+      recoveryPolicy: const PlaybackRecoveryPolicy(
+        recoveryAttemptTimeout: Duration(milliseconds: 20),
+      ),
+    );
+    await controller.start();
+
+    await controller.handleMemoryPressure().timeout(
+      const Duration(milliseconds: 500),
+    );
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '缓存调整失败，请返回后重试');
+    engine.durationController.add(const Duration(hours: 2));
+    engine.positionController.add(const Duration(minutes: 45));
+    await Future<void>.delayed(Duration.zero);
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.position, isNot(const Duration(minutes: 45)));
+    await controller.shutdown();
+  });
 
   test(
     'recovery waits while inactive and resumes with prior play intent',
@@ -543,14 +674,161 @@ void main() {
     },
   );
 
+  test('runtime recovery has one fixed total deadline', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _CacheEngine(events: events, noReadyOnOpen: const {2});
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      diagnostics: _diagnostics(diagnostics),
+      readyTimeout: const Duration(hours: 1),
+      recoveryPolicy: const PlaybackRecoveryPolicy(
+        seekRecoveryWindow: Duration(minutes: 1),
+        stablePlaybackWindow: Duration(minutes: 1),
+        recoveryAttemptTimeout: Duration(milliseconds: 20),
+      ),
+    );
+    await controller.start();
+    await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.controls,
+    );
+
+    engine.errorController.add('partial file');
+    await _waitUntil(() => controller.state.phase == PlaybackPhase.failed);
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.errorMessage, '播放连接异常，自动恢复失败，请返回后重试');
+    expect(
+      diagnostics,
+      contains('event=playback_seek_recovery_failed fingerprint=partial_file'),
+    );
+    engine.durationController.add(const Duration(hours: 2));
+    engine.positionController.add(const Duration(minutes: 45));
+    await Future<void>.delayed(Duration.zero);
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.position, isNot(const Duration(minutes: 45)));
+    await controller.shutdown();
+  });
+
+  test('stale engine events cannot write through a new generation', () async {
+    final events = <String>[];
+    final stopGate = Completer<void>();
+    final engine = _CacheEngine(events: events, stopGate: stopGate);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+    engine.positionController.add(const Duration(minutes: 5));
+
+    final reconfigure = controller.setMaximumBitrate(10 * 1000 * 1000);
+    await _waitUntil(() => events.contains('stop'));
+    engine.positionController.add(const Duration(minutes: 55));
+    engine.errorController.add('late old-engine failure');
+
+    expect(controller.state.position, const Duration(minutes: 5));
+    expect(controller.state.phase, isNot(PlaybackPhase.failed));
+    stopGate.complete();
+    await reconfigure;
+    expect(controller.state.position, const Duration(minutes: 5));
+    await controller.shutdown();
+  });
+
+  test(
+    'shutdown cancels queued reconfiguration before it can reopen',
+    () async {
+      final events = <String>[];
+      final stopGate = Completer<void>();
+      final engine = _CacheEngine(events: events, stopGate: stopGate);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+      );
+      await controller.start();
+
+      final first = controller.setMaximumBitrate(10 * 1000 * 1000);
+      await _waitUntil(() => events.contains('stop'));
+      final pending = controller.setMaximumBitrate(20 * 1000 * 1000);
+      final shutdown = controller.shutdown();
+
+      await Future.wait([
+        first,
+        pending,
+      ]).timeout(const Duration(milliseconds: 200));
+      stopGate.complete();
+      await shutdown;
+      expect(engine.openCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.idle);
+    },
+  );
+
+  test(
+    'shutdown cancels active runtime recovery before it can reopen',
+    () async {
+      final events = <String>[];
+      final stopGate = Completer<void>();
+      final engine = _CacheEngine(events: events, stopGate: stopGate);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        recoveryPolicy: const PlaybackRecoveryPolicy(
+          seekRecoveryWindow: Duration(minutes: 1),
+          stablePlaybackWindow: Duration(minutes: 1),
+        ),
+      );
+      await controller.start();
+      await controller.seekAbsolute(
+        const Duration(minutes: 5),
+        source: SeekSource.controls,
+      );
+
+      engine.errorController.add('partial file');
+      await _waitUntil(
+        () => controller.state.phase == PlaybackPhase.recovering,
+      );
+      await _waitUntil(() => events.contains('stop'));
+      final shutdown = controller.shutdown();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(engine.openCalls, 1);
+      stopGate.complete();
+      await shutdown;
+      expect(engine.openCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.idle);
+    },
+  );
+
+  test('shutdown cancels active cache safety before it can reopen', () async {
+    final events = <String>[];
+    final stopGate = Completer<void>();
+    final engine = _CacheEngine(events: events, stopGate: stopGate);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+
+    final safety = controller.handleMemoryPressure();
+    await _waitUntil(() => events.contains('stop'));
+    final shutdown = controller.shutdown();
+    await safety.timeout(const Duration(milliseconds: 200));
+
+    expect(engine.openCalls, 1);
+    stopGate.complete();
+    await shutdown;
+    expect(engine.openCalls, 1);
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
   test('100 playback cycles leave no active cache sessions', () async {
     for (var index = 0; index < 100; index++) {
       final events = <String>[];
       final storage = _CacheStorage(events);
-      final controller = _controller(
-        engine: _CacheEngine(events: events),
-        storage: storage,
-      );
+      final engine = _CacheEngine(events: events);
+      final controller = _controller(engine: engine, storage: storage);
 
       await controller.start();
       await controller.shutdown();
@@ -561,6 +839,7 @@ void main() {
         hasLength(1),
         reason: 'cycle ${index + 1}',
       );
+      expect(engine.hasAnyListener, isFalse, reason: 'cycle ${index + 1}');
     }
   });
 
@@ -679,14 +958,18 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     this.snapshot,
     this.requireRecreationAfterOpen = false,
     this.seekGate,
+    this.stopGate,
     this.noReadyOnOpen = const {},
+    this.logsOnOpen = const {},
   });
 
   final List<String> events;
   PlaybackCacheEngineSnapshot? snapshot;
   final bool requireRecreationAfterOpen;
   final Completer<void>? seekGate;
+  final Completer<void>? stopGate;
   final Set<int> noReadyOnOpen;
+  final Map<int, List<String>> logsOnOpen;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -707,6 +990,19 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   int concurrentSeeks = 0;
   int maxConcurrentSeeks = 0;
   ResolvedPlaybackCacheProfile? lastProfile;
+  final List<ResolvedPlaybackCacheProfile> configuredProfiles = [];
+
+  bool get hasAnyListener =>
+      positionController.hasListener ||
+      durationController.hasListener ||
+      bufferController.hasListener ||
+      playingController.hasListener ||
+      bufferingController.hasListener ||
+      completedController.hasListener ||
+      errorController.hasListener ||
+      logController.hasListener ||
+      audioController.hasListener ||
+      subtitleController.hasListener;
 
   @override
   Stream<List<EngineTrack>> get audioTracksStream => audioController.stream;
@@ -737,6 +1033,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   ) async {
     events.add('configure');
     lastProfile = profile;
+    configuredProfiles.add(profile);
     if (requireRecreationAfterOpen && openCalls > 0) {
       return PlaybackCacheApplyResult(
         requestedMode: profile.runtimeMode,
@@ -795,6 +1092,9 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   }) async {
     openCalls++;
     events.add('open');
+    for (final log in logsOnOpen[openCalls] ?? const <String>[]) {
+      logController.add(log);
+    }
     if (!noReadyOnOpen.contains(openCalls)) {
       durationController.add(const Duration(hours: 1));
     }
@@ -846,7 +1146,10 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void> setSubtitleDelay(Duration delay) async {}
 
   @override
-  Future<void> stop() async => events.add('stop');
+  Future<void> stop() async {
+    events.add('stop');
+    await stopGate?.future;
+  }
 }
 
 class _Resolver implements PlaybackStreamResolver {

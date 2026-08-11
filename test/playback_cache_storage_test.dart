@@ -212,6 +212,32 @@ void main() {
       isTrue,
     );
   });
+
+  test('100 real filesystem sessions leave no cache residue', () async {
+    final nonces = List<String>.generate(
+      100,
+      (index) => index.toRadixString(16).padLeft(32, '0'),
+    );
+    final cacheStorage = PlatformPlaybackCacheStorage(
+      rootResolver: () async => cacheRoot,
+      freeBytesResolver: (_) async => 8 << 30,
+      nonceFactory: _NonceSequence(nonces).next,
+    );
+
+    for (var index = 0; index < 100; index++) {
+      final snapshot = await cacheStorage.prepareSession();
+      expect(snapshot.isAvailable, isTrue, reason: 'cycle ${index + 1}');
+      await cacheStorage.cleanupSession(snapshot.session!);
+    }
+
+    expect(
+      await cacheRoot
+          .list()
+          .where((entity) => path.basename(entity.path).startsWith('session-'))
+          .isEmpty,
+      isTrue,
+    );
+  });
 }
 
 Future<Directory> _writeMarkedSession(Directory parent, String nonce) async {

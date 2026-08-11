@@ -61,6 +61,27 @@ enum AutomaticPlaybackOpenReason {
   runtimeTranscodeRecovery,
 }
 
+enum PlaybackControlOperationPriority {
+  userReconfigure,
+  cacheSafety,
+  runtimeRecovery,
+}
+
+class PlaybackControlOperationLease {
+  PlaybackControlOperationLease._({
+    required bool Function() isCurrent,
+    required this.cancelled,
+  }) : _isCurrent = isCurrent;
+
+  final bool Function() _isCurrent;
+  final Future<void> cancelled;
+
+  bool get isCurrent => _isCurrent();
+}
+
+typedef PlaybackControlOperation =
+    Future<void> Function(PlaybackControlOperationLease lease);
+
 class PlaybackItemSession {
   PlaybackItemSession._(this.id);
 
@@ -107,17 +128,20 @@ class PlaybackOperationCoordinator {
     required PlaybackEngineSeek seekEngine,
     required PlaybackTargetClamp clampTarget,
     RequestedPositionListener? onRequestedPositionChanged,
+    void Function()? onControlOperationInvalidated,
     this.seekCallTimeout = const Duration(seconds: 8),
     this.seekSettleTimeout = const Duration(seconds: 2),
     this.seekTolerance = const Duration(seconds: 2),
   }) : _seekEngine = seekEngine,
        _clampTarget = clampTarget,
-       _onRequestedPositionChanged = onRequestedPositionChanged;
+       _onRequestedPositionChanged = onRequestedPositionChanged,
+       _onControlOperationInvalidated = onControlOperationInvalidated;
 
   final PlaybackItemSessionId sessionId;
-  final PlaybackEngineSeek _seekEngine;
+  PlaybackEngineSeek _seekEngine;
   final PlaybackTargetClamp _clampTarget;
   final RequestedPositionListener? _onRequestedPositionChanged;
+  final void Function()? _onControlOperationInvalidated;
   final Duration seekCallTimeout;
   final Duration seekSettleTimeout;
   final Duration seekTolerance;
@@ -131,11 +155,58 @@ class PlaybackOperationCoordinator {
   bool _nativeSeekOutstanding = false;
   bool _shutdown = false;
   int _operationGeneration = 0;
+  final List<_ControlOperationRequest> _controlPending = [];
+  _ControlOperationRequest? _controlActive;
+  bool _controlDraining = false;
+  int _controlSequence = 0;
 
   Duration get committedPosition => _committedPosition;
   Duration? get requestedPosition => _requestedPosition;
   int get operationGeneration => _operationGeneration;
   bool get isShutdown => _shutdown;
+
+  Future<void> runControlOperation({
+    required PlaybackControlOperationPriority priority,
+    required PlaybackControlOperation operation,
+  }) {
+    if (_shutdown) return Future<void>.value();
+    invalidateForHigherPriorityOperation();
+
+    var invalidatedLowerPriorityOperation = false;
+    final active = _controlActive;
+    if (active != null && active.priority.index < priority.index) {
+      invalidatedLowerPriorityOperation |= _cancelControlOperation(active);
+    }
+    for (final pending in List<_ControlOperationRequest>.of(_controlPending)) {
+      if (pending.priority.index < priority.index) {
+        invalidatedLowerPriorityOperation |= _cancelControlOperation(pending);
+        _controlPending.remove(pending);
+      }
+    }
+    if (invalidatedLowerPriorityOperation) {
+      _onControlOperationInvalidated?.call();
+    }
+
+    final request = _ControlOperationRequest(
+      priority: priority,
+      sequence: _controlSequence++,
+      operation: operation,
+    );
+    _controlPending.add(request);
+    _controlPending.sort((left, right) {
+      final priorityOrder = right.priority.index.compareTo(left.priority.index);
+      return priorityOrder != 0
+          ? priorityOrder
+          : left.sequence.compareTo(right.sequence);
+    });
+    unawaited(_drainControlOperations());
+    return request.result.future;
+  }
+
+  void replaceSeekEngine(PlaybackEngineSeek seekEngine) {
+    invalidateForHigherPriorityOperation();
+    _seekEngine = seekEngine;
+  }
 
   Future<SeekResult> seekAbsolute(
     Duration target, {
@@ -190,6 +261,54 @@ class PlaybackOperationCoordinator {
     );
     _completeSettleWaiter();
     _refreshRequestedPosition();
+    final active = _controlActive;
+    if (active != null) _cancelControlOperation(active);
+    for (final pending in List<_ControlOperationRequest>.of(_controlPending)) {
+      _cancelControlOperation(pending);
+    }
+    _controlPending.clear();
+  }
+
+  Future<void> _drainControlOperations() async {
+    if (_controlDraining || _shutdown) return;
+    _controlDraining = true;
+    try {
+      while (!_shutdown && _controlPending.isNotEmpty) {
+        final request = _controlPending.removeAt(0);
+        if (request.isCancelled) continue;
+        _controlActive = request;
+        final lease = PlaybackControlOperationLease._(
+          isCurrent: () =>
+              !_shutdown &&
+              !request.isCancelled &&
+              identical(_controlActive, request),
+          cancelled: request.cancelled.future,
+        );
+        try {
+          await request.operation(lease);
+          if (!request.result.isCompleted) request.result.complete();
+        } catch (error, stackTrace) {
+          if (!request.result.isCompleted) {
+            request.result.completeError(error, stackTrace);
+          }
+        } finally {
+          if (identical(_controlActive, request)) _controlActive = null;
+        }
+      }
+    } finally {
+      _controlDraining = false;
+      if (!_shutdown && _controlPending.isNotEmpty) {
+        unawaited(_drainControlOperations());
+      }
+    }
+  }
+
+  bool _cancelControlOperation(_ControlOperationRequest request) {
+    if (request.isCancelled) return false;
+    request.isCancelled = true;
+    if (!request.cancelled.isCompleted) request.cancelled.complete();
+    if (!request.result.isCompleted) request.result.complete();
+    return true;
   }
 
   Future<SeekResult> _enqueue(Duration target, SeekSource source) {
@@ -446,4 +565,19 @@ class _SettleWaiter {
   final Duration target;
   final int generation;
   final Completer<void> completer = Completer<void>();
+}
+
+class _ControlOperationRequest {
+  _ControlOperationRequest({
+    required this.priority,
+    required this.sequence,
+    required this.operation,
+  });
+
+  final PlaybackControlOperationPriority priority;
+  final int sequence;
+  final PlaybackControlOperation operation;
+  final Completer<void> result = Completer<void>();
+  final Completer<void> cancelled = Completer<void>();
+  bool isCancelled = false;
 }
