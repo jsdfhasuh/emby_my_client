@@ -359,6 +359,12 @@ jobs:
           from pathlib import Path
           source_root = Path(os.environ['ATTACHMENT_DIR'])
           output = Path(os.environ['CAPABILITY_OUTPUT'])
+          def is_capability_manifest(value):
+              return (
+                  isinstance(value, dict)
+                  and value.get('schema') == 'emby-mpv-capabilities/v1'
+              )
+          assert not is_capability_manifest([])
           manifest = None
           for candidate in source_root.rglob('*'):
               if not candidate.is_file():
@@ -367,7 +373,7 @@ jobs:
                   decoded = json.loads(candidate.read_text())
               except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                   continue
-              if decoded.get('schema') == 'emby-mpv-capabilities/v1':
+              if is_capability_manifest(decoded):
                   manifest = decoded
                   output.write_bytes(candidate.read_bytes())
                   break
