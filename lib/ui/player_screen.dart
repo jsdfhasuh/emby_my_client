@@ -30,7 +30,7 @@ import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
-import '../playback/playback_state.dart';
+import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
 import '../playback/track_mapper.dart';
@@ -228,13 +228,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _buffer = Duration.zero;
   Duration? _horizontalDragStartPosition;
   Duration? _horizontalDragPreviewPosition;
-  Duration? _progressSeekStartPosition;
   double _horizontalDragDx = 0;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
   bool _seeking = false;
-  int _seekGestureGeneration = 0;
+  bool _uiSeekPending = false;
+  final UiSeekRequestGate _uiSeekRequestGate = UiSeekRequestGate();
   bool _controlsLocked = false;
   BoxFit _videoFit = BoxFit.contain;
   Offset? _doubleTapPosition;
@@ -438,7 +438,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final playingChanged = _playing != playback.isPlaying;
     final justCompleted = !_completed && playback.isCompleted;
     setState(() {
-      if (!_seeking) _position = playback.displayPosition;
+      if (!_seeking && !_uiSeekPending) _position = playback.displayPosition;
       _duration = playback.duration;
       _buffer = playback.buffer;
       _playing = playback.isPlaying;
@@ -621,21 +621,77 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _seekRelative(
     Duration offset, {
     SeekSource source = SeekSource.controls,
+  }) => _submitUiSeek(
+    source: source,
+    request: (controller) => controller.seekRelative(offset, source: source),
+  );
+
+  Future<void> _seekAbsolute(Duration target, {required SeekSource source}) =>
+      _submitUiSeek(
+        source: source,
+        request: (controller) =>
+            controller.seekAbsolute(target, source: source),
+      );
+
+  Future<SeekResult?> _submitUiSeek({
+    required SeekSource source,
+    required Future<SeekResult> Function(PlaybackController controller) request,
   }) async {
     final controller = _playbackController;
-    if (controller == null) return;
-    await controller.seekRelative(offset, source: source);
+    if (controller == null || _switchingItem) return null;
+    final generation = _uiSeekRequestGate.beginRequest();
+    if (mounted) setState(() => _uiSeekPending = true);
+
+    SeekResult? result;
+    Object? failure;
+    try {
+      result = await request(controller);
+    } catch (error) {
+      failure = error;
+      DiagnosticLog.instance.warning(
+        'player',
+        'event=playback_seek_ui_failed source=${source.name} '
+            'errorType=${error.runtimeType}',
+      );
+    }
+
+    if (!mounted || !_uiSeekRequestGate.isCurrent(generation)) {
+      return result;
+    }
+    final completion = _uiSeekRequestGate.completionFor(
+      generation: generation,
+      result: result,
+    );
+    final displayPosition = controller.state.displayPosition;
+    setState(() {
+      _uiSeekPending = false;
+      _position = completion == UiSeekCompletion.committed
+          ? result?.committedPosition ??
+                result?.requestedTarget ??
+                displayPosition
+          : displayPosition;
+    });
+    if (failure != null || completion == UiSeekCompletion.failed) {
+      _showFixedSeekFailure();
+    }
     _restartControlsTimer();
+    return result;
   }
 
-  Future<void> _seekAbsolute(
-    Duration target, {
-    required SeekSource source,
-  }) async {
-    final controller = _playbackController;
-    if (controller == null) return;
-    await controller.seekAbsolute(target, source: source);
-    _restartControlsTimer();
+  void _invalidateUiSeek() {
+    _uiSeekRequestGate.invalidate();
+    if (!mounted || !_uiSeekPending) {
+      _uiSeekPending = false;
+      return;
+    }
+    setState(() => _uiSeekPending = false);
+  }
+
+  void _showFixedSeekFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('跳转失败，请稍后重试')));
   }
 
   Future<void> _handleRemotePlaystate(EmbyPlaystateCommand message) async {
@@ -669,9 +725,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'seek':
         final ticks = message.seekPositionTicks;
         if (ticks != null) {
-          await controller.seekAbsolute(
-            Duration(microseconds: ticks ~/ 10),
+          await _submitUiSeek(
             source: SeekSource.remote,
+            request: (activeController) => activeController.seekAbsolute(
+              Duration(microseconds: ticks ~/ 10),
+              source: SeekSource.remote,
+            ),
           );
         }
       case 'nexttrack':
@@ -679,12 +738,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'previoustrack':
         await _playPrevious();
       case 'rewind':
-        await controller.seekRelative(
+        await _seekRelative(
           Duration(seconds: -_settings.seekBackwardSeconds),
           source: SeekSource.remote,
         );
       case 'fastforward':
-        await controller.seekRelative(
+        await _seekRelative(
           Duration(seconds: _settings.seekForwardSeconds),
           source: SeekSource.remote,
         );
@@ -700,7 +759,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_error != null || _duration == Duration.zero) return;
 
     _controlsTimer?.cancel();
-    _seekGestureGeneration++;
+    _invalidateUiSeek();
     setState(() {
       _horizontalDragStartPosition = _position;
       _horizontalDragPreviewPosition = _position;
@@ -729,10 +788,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
-    final startPosition = _horizontalDragStartPosition;
     final target = _horizontalDragPreviewPosition;
-    if (startPosition == null || target == null) return;
-    final gestureGeneration = _seekGestureGeneration;
+    if (_horizontalDragStartPosition == null || target == null) return;
 
     setState(() {
       _horizontalDragStartPosition = null;
@@ -741,35 +798,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       _seeking = false;
       _controlsVisible = true;
     });
-
-    var seekSucceeded = false;
-    try {
-      final controller = _playbackController;
-      if (controller == null) return;
-      final result = await controller.seekAbsolute(
-        target,
-        source: SeekSource.horizontalDrag,
-      );
-      seekSucceeded = result.disposition == SeekDisposition.executed;
-    } catch (error) {
-      DiagnosticLog.instance.warning(
-        'player',
-        'event=playback_seek_ui_failed errorType=${error.runtimeType}',
-      );
-    }
-
-    if (!mounted || gestureGeneration != _seekGestureGeneration) return;
-    setState(() {
-      if (!seekSucceeded) _position = startPosition;
-    });
-    _restartControlsTimer();
+    await _seekAbsolute(target, source: SeekSource.horizontalDrag);
   }
 
   void _onHorizontalDragCancel() {
     final startPosition = _horizontalDragStartPosition;
     if (startPosition == null) return;
 
-    _seekGestureGeneration++;
+    _invalidateUiSeek();
     setState(() {
       _position = startPosition;
       _horizontalDragStartPosition = null;
@@ -777,6 +813,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _horizontalDragDx = 0;
       _seeking = false;
       _controlsVisible = true;
+      _uiSeekPending = false;
     });
     _restartControlsTimer();
   }
@@ -1234,7 +1271,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             _playbackController = null;
             _plan = null;
             _position = Duration.zero;
-            _progressSeekStartPosition = null;
             _duration = Duration.zero;
             _buffer = Duration.zero;
             _playing = false;
@@ -1246,7 +1282,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _autoNextCancelled = false;
             _nextCountdown = null;
             _controlsVisible = true;
-            _seekGestureGeneration++;
+            _invalidateUiSeek();
           });
           await _startCurrentItem();
         },
@@ -2195,9 +2231,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                     value: positionMs,
                     secondaryTrackValue: bufferMs,
                     onChangeStart: (_) {
-                      _seekGestureGeneration++;
+                      _invalidateUiSeek();
                       setState(() {
-                        _progressSeekStartPosition = _position;
                         _seeking = true;
                       });
                     },
@@ -2207,38 +2242,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                       );
                     },
                     onChangeEnd: (value) async {
-                      final controller = _playbackController;
-                      final gestureGeneration = _seekGestureGeneration;
-                      final startPosition =
-                          _progressSeekStartPosition ?? _position;
                       final target = Duration(milliseconds: value.round());
-                      setState(() => _seeking = false);
-                      SeekResult? result;
-                      try {
-                        result = await controller?.seekAbsolute(
-                          target,
-                          source: SeekSource.progressBar,
-                        );
-                      } catch (error) {
-                        DiagnosticLog.instance.warning(
-                          'player',
-                          'event=playback_seek_ui_failed '
-                              'errorType=${error.runtimeType}',
-                        );
+                      if (mounted) {
+                        setState(() {
+                          _seeking = false;
+                        });
                       }
-                      if (!mounted ||
-                          gestureGeneration != _seekGestureGeneration) {
-                        return;
-                      }
-                      setState(() {
-                        _progressSeekStartPosition = null;
-                        _position = resolveCompletedSeekDisplayPosition(
-                          startPosition: startPosition,
-                          requestedTarget: target,
-                          result: result,
-                        );
-                      });
-                      _restartControlsTimer();
+                      await _seekAbsolute(
+                        target,
+                        source: SeekSource.progressBar,
+                      );
                     },
                   ),
                   Padding(
