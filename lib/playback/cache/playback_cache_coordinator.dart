@@ -44,6 +44,8 @@ class PlaybackCacheCoordinator {
     this.statePollInterval = const Duration(seconds: 1),
     this.spacePollInterval = const Duration(seconds: 10),
     this.expectedCloseLatency = const Duration(seconds: 2),
+    this.generation = 0,
+    this.isGenerationCurrent,
   });
 
   static const int _mib = 1024 * 1024;
@@ -59,6 +61,8 @@ class PlaybackCacheCoordinator {
   final Duration statePollInterval;
   final Duration spacePollInterval;
   final Duration expectedCloseLatency;
+  final int generation;
+  final bool Function(int generation)? isGenerationCurrent;
 
   Timer? _stateTimer;
   Timer? _spaceTimer;
@@ -128,7 +132,15 @@ class PlaybackCacheCoordinator {
   Future<void> _refresh(bool checkSpace) async {
     PlaybackCacheEngineSnapshot? snapshot;
     try {
-      snapshot = await engine.readCacheSnapshot();
+      final generationReader = engine is PlaybackCacheGenerationSnapshotReader
+          ? engine as PlaybackCacheGenerationSnapshotReader
+          : null;
+      snapshot = generationReader == null
+          ? await engine.readCacheSnapshot()
+          : await generationReader.readCacheSnapshotForGeneration(
+              generation: generation,
+              isGenerationCurrent: isGenerationCurrent ?? (_) => true,
+            );
     } catch (_) {
       snapshot = null;
     }

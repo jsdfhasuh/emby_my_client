@@ -1007,6 +1007,8 @@ class PlaybackController extends ChangeNotifier {
       profile: profile,
       mediaBitrate: _state.plan?.bitrate,
       committedPosition: () => _state.position,
+      generation: token,
+      isGenerationCurrent: _isCurrent,
       onObservation: (observation) {
         if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
         if (observation.engineSnapshot == null &&

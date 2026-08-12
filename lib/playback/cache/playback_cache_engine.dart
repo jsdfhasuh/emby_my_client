@@ -6,6 +6,7 @@ import 'native_playback_property_access.dart';
 import 'playback_cache_capabilities.dart';
 import 'playback_cache_option_bindings.dart';
 import 'playback_cache_policy.dart';
+import 'playback_cache_telemetry.dart';
 
 class PlaybackCacheRange {
   const PlaybackCacheRange({required this.start, required this.end});
@@ -22,6 +23,7 @@ class PlaybackCacheEngineSnapshot {
     required this.pausedForCache,
     required this.cacheBufferingPercent,
     required this.cacheOnDisk,
+    this.telemetryStatus = PlaybackCacheTelemetryStatus.available,
   });
 
   final int? fileCacheBytes;
@@ -30,6 +32,7 @@ class PlaybackCacheEngineSnapshot {
   final bool? pausedForCache;
   final int? cacheBufferingPercent;
   final bool? cacheOnDisk;
+  final PlaybackCacheTelemetryStatus telemetryStatus;
 }
 
 enum PlaybackCacheEvidence {
@@ -87,14 +90,29 @@ abstract interface class PlaybackCacheEngine {
   Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot();
 }
 
-class NativePlaybackCacheEngine implements PlaybackCacheEngine {
+abstract interface class PlaybackCacheGenerationSnapshotReader {
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForGeneration({
+    required int generation,
+    required bool Function(int generation) isGenerationCurrent,
+  });
+}
+
+class NativePlaybackCacheEngine
+    implements PlaybackCacheEngine, PlaybackCacheGenerationSnapshotReader {
   NativePlaybackCacheEngine({
     required this.access,
     required bool Function() hasOpenedMedia,
-  }) : _hasOpenedMedia = hasOpenedMedia;
+    PlaybackCacheTelemetryReader? telemetryReader,
+  }) : _hasOpenedMedia = hasOpenedMedia,
+       _telemetry = PlaybackCacheTelemetryReadCoordinator(
+         reader:
+             telemetryReader ??
+             NativePlaybackCacheTelemetryReader(access: access),
+       );
 
   final NativePlaybackPropertyAccess access;
   final bool Function() _hasOpenedMedia;
+  final PlaybackCacheTelemetryReadCoordinator _telemetry;
   Future<PlaybackCacheEngineCapabilities>? _capabilities;
 
   @override
@@ -128,9 +146,23 @@ class NativePlaybackCacheEngine implements PlaybackCacheEngine {
   }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() async {
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
+      readCacheSnapshotForGeneration(
+        generation: 0,
+        isGenerationCurrent: (_) => true,
+      );
+
+  @override
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForGeneration({
+    required int generation,
+    required bool Function(int generation) isGenerationCurrent,
+  }) async {
+    final telemetry = await _telemetry.readForGeneration(
+      generation: generation,
+      isGenerationCurrent: isGenerationCurrent,
+    );
+    if (telemetry == null) return null;
     try {
-      final state = await access.getNative('demuxer-cache-state');
       final cacheOnDisk = _parseBoolean(
         await access.getString('cache-on-disk'),
       );
@@ -138,26 +170,30 @@ class NativePlaybackCacheEngine implements PlaybackCacheEngine {
       final buffering = _parseInteger(
         await access.getString('cache-buffering-state'),
       );
-      if (state is! Map) {
-        return PlaybackCacheEngineSnapshot(
-          fileCacheBytes: null,
-          rawInputRateBytesPerSecond: null,
-          seekableRanges: const [],
-          pausedForCache: paused,
-          cacheBufferingPercent: buffering,
-          cacheOnDisk: cacheOnDisk,
-        );
-      }
+      if (!isGenerationCurrent(generation)) return null;
+      final state = telemetry.state;
       return PlaybackCacheEngineSnapshot(
-        fileCacheBytes: _parseInteger(state['file-cache-bytes']),
-        rawInputRateBytesPerSecond: _parseInteger(state['raw-input-rate']),
-        seekableRanges: _parseRanges(state['seekable-ranges']),
+        fileCacheBytes: state?.fileCacheBytes,
+        rawInputRateBytesPerSecond: state?.rawInputRateBytesPerSecond,
+        seekableRanges: [
+          for (final range in state?.seekableRanges ?? const [])
+            PlaybackCacheRange(start: range.start, end: range.end),
+        ],
         pausedForCache: paused,
         cacheBufferingPercent: buffering,
         cacheOnDisk: cacheOnDisk,
+        telemetryStatus: telemetry.status,
       );
     } catch (_) {
-      return null;
+      return PlaybackCacheEngineSnapshot(
+        fileCacheBytes: null,
+        rawInputRateBytesPerSecond: null,
+        seekableRanges: const [],
+        pausedForCache: null,
+        cacheBufferingPercent: null,
+        cacheOnDisk: null,
+        telemetryStatus: PlaybackCacheTelemetryStatus.readFailed,
+      );
     }
   }
 }
@@ -739,25 +775,6 @@ const _waveProbeData = <int>[
   0x00,
 ];
 
-List<PlaybackCacheRange> _parseRanges(Object? value) {
-  if (value is! Iterable) return const [];
-  final ranges = <PlaybackCacheRange>[];
-  for (final entry in value) {
-    if (entry is! Map) continue;
-    final start = _parseFiniteDouble(entry['start']);
-    final end = _parseFiniteDouble(entry['end']);
-    if (start == null || end == null || start < 0 || end <= start) continue;
-    ranges.add(
-      PlaybackCacheRange(
-        start: Duration(microseconds: (start * 1000000).round()),
-        end: Duration(microseconds: (end * 1000000).round()),
-      ),
-    );
-  }
-  ranges.sort((left, right) => left.start.compareTo(right.start));
-  return List.unmodifiable(ranges);
-}
-
 int? _parseInteger(Object? value) {
   if (value is int) return value >= 0 ? value : null;
   if (value is num && value.isFinite) {
@@ -766,13 +783,6 @@ int? _parseInteger(Object? value) {
   }
   final parsed = int.tryParse(value?.toString().trim() ?? '');
   return parsed != null && parsed >= 0 ? parsed : null;
-}
-
-double? _parseFiniteDouble(Object? value) {
-  final parsed = value is num
-      ? value.toDouble()
-      : double.tryParse(value?.toString().trim() ?? '');
-  return parsed != null && parsed.isFinite ? parsed : null;
 }
 
 bool? _parseBoolean(Object? value) {
