@@ -1029,6 +1029,76 @@ void main() {
       expect(joined, isNot(contains(forbidden)));
     }
   });
+
+  test('shutdown summary is emitted once after successful cleanup', () async {
+    final diagnostics = <String>[];
+    final events = <String>[];
+    final controller = _controller(
+      engine: _CacheEngine(events: events),
+      storage: _CacheStorage(events),
+      diagnostics: _diagnostics(diagnostics),
+    );
+
+    await controller.start();
+    await controller.shutdown();
+    await controller.shutdown();
+
+    expect(
+      diagnostics.where(
+        (line) => line.contains('event=playback_cache_session_summary'),
+      ),
+      hasLength(1),
+    );
+    expect(diagnostics.join('\n'), isNot(contains('private-item-id')));
+  });
+
+  test('shutdown summary retains failed cleanup outcome', () async {
+    final diagnostics = <String>[];
+    final storage = _CacheStorage(<String>[])
+      ..cleanupError = StateError('private cleanup failure');
+    final controller = _controller(
+      engine: _CacheEngine(events: <String>[]),
+      storage: storage,
+      diagnostics: _diagnostics(diagnostics),
+    );
+
+    await controller.start();
+    await controller.shutdown();
+
+    expect(
+      diagnostics.where(
+        (line) =>
+            line.contains('event=playback_cache_session_summary') &&
+            line.contains('cleanupResult=failed'),
+      ),
+      hasLength(1),
+    );
+    expect(diagnostics.join('\n'), isNot(contains('private cleanup failure')));
+  });
+
+  test('shutdown summary retains timed out cleanup outcome', () async {
+    final diagnostics = <String>[];
+    final storage = _CacheStorage(<String>[])
+      ..cleanupGate = Completer<void>().future;
+    final controller = _controller(
+      engine: _CacheEngine(events: <String>[]),
+      storage: storage,
+      diagnostics: _diagnostics(diagnostics),
+      cacheCleanupTimeout: const Duration(milliseconds: 10),
+    );
+
+    await controller.start();
+    await controller.shutdown().timeout(const Duration(milliseconds: 300));
+
+    expect(
+      diagnostics.where(
+        (line) =>
+            line.contains('event=playback_cache_session_summary') &&
+            line.contains('cleanupResult=timedOut'),
+      ),
+      hasLength(1),
+    );
+  });
 }
 
 PlaybackController _controller({
@@ -1076,6 +1146,8 @@ class _CacheStorage implements PlaybackCacheStorage {
   int freeBytes = 20 << 30;
   int activeSessions = 0;
   Future<void>? freeBytesGate;
+  Future<void>? cleanupGate;
+  Object? cleanupError;
 
   @override
   Future<void> cleanupNonActiveMarkedSessions() async {}
@@ -1083,6 +1155,8 @@ class _CacheStorage implements PlaybackCacheStorage {
   @override
   Future<void> cleanupSession(PlaybackCacheSession session) async {
     events.add('cleanup');
+    await cleanupGate;
+    if (cleanupError != null) throw cleanupError!;
     activeSessions--;
   }
 

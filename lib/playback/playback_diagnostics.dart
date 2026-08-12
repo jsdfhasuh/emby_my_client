@@ -4,10 +4,12 @@ import '../core/diagnostic_log.dart';
 import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
+import 'cache/playback_cache_evidence.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
+import 'cache/playback_cache_telemetry.dart';
 import 'playback_operation_coordinator.dart';
 
 enum PlaybackDiagnosticLevel { info, warning }
@@ -31,6 +33,8 @@ enum PlaybackDiagnosticEvent {
   cacheSessionCleaned('playback_cache_session_cleaned'),
   cacheStaleCleanup('playback_cache_stale_cleanup'),
   cacheSnapshotUnavailable('playback_cache_snapshot_unavailable'),
+  cacheObservation('playback_cache_observation'),
+  cacheSessionSummary('playback_cache_session_summary'),
   operationTimeout('playback_operation_timeout'),
   automaticOpenBudgetExhausted('playback_automatic_open_budget_exhausted'),
   seekRequested('playback_seek_requested'),
@@ -232,6 +236,40 @@ class PlaybackDiagnostics {
     );
   }
 
+  void cacheObservation(PlaybackCacheEvidenceObservation observation) {
+    _emit(
+      PlaybackDiagnosticEvent.cacheObservation,
+      _cacheObservationFields(observation),
+    );
+  }
+
+  void cacheSessionSummary(PlaybackCacheEvidenceSummary summary) {
+    _emit(PlaybackDiagnosticEvent.cacheSessionSummary, [
+      'requestedMode=${summary.requestedMode?.name ?? 'unknown'}',
+      'finalConfirmedMode=${summary.finalConfirmedMode?.name ?? 'unknown'}',
+      'cacheEvidence=${summary.cacheEvidence.name}',
+      'telemetryStatus=${_telemetryStatusSet(summary.telemetryStatuses)}',
+      'telemetryAvailableEver=${summary.telemetryStatuses.contains(PlaybackCacheTelemetryStatus.available)}',
+      'observedNonZeroFileCache=${summary.observedNonzeroBytes}',
+      'peakFileCacheBytes=${_bytesBucket(summary.peakBytes)}',
+      'maxActualForward=${_durationBucket(summary.maxActualForward ?? Duration.zero)}',
+      'maxActualBackward=${_durationBucket(summary.maxActualBackward ?? Duration.zero)}',
+      'cacheCreateResult=${_enumSet(summary.cacheCreateResults)}',
+      'cacheSnapshotUnavailable=${_countBucket(summary.snapshotUnavailableCount)}',
+      'safetyReopenReason=${_reopenReasonSet(summary.reopenReasons)}',
+      'cleanupResult=${summary.cleanupResult?.name ?? 'notApplicable'}',
+      'observationCount=${_countBucket(summary.observationCount)}',
+      'optionalTuningDegraded=${summary.optionalTuningDegraded}',
+      'optionalTuningUnavailable=${_countBucket(summary.optionalTuningUnavailableCount)}',
+      'testOverrideUsed=${summary.testOverrideUsed}',
+      'seekRequested=${_countBucket(summary.seekRequested)}',
+      'seekExecuted=${_countBucket(summary.seekExecuted)}',
+      'seekSuperseded=${_countBucket(summary.seekSuperseded)}',
+      'seekFailed=${_countBucket(summary.seekFailed)}',
+      'seekCancelled=${_countBucket(summary.seekCancelled)}',
+    ]);
+  }
+
   void operationTimeout(PlaybackOperationTimeoutKind kind) {
     final now = _clock();
     final lastWritten = _timeoutLastWritten[kind];
@@ -410,5 +448,43 @@ class PlaybackDiagnostics {
     <= 4 => '3_4',
     <= PlaybackItemSession.maximumAutomaticOpenCount => '5_6',
     _ => 'exhausted',
+  };
+
+  static List<String> _cacheObservationFields(
+    PlaybackCacheEvidenceObservation observation,
+  ) => [
+    'requestedMode=${observation.requestedMode?.name ?? 'unknown'}',
+    'confirmedMode=${observation.confirmedMode?.name ?? 'unknown'}',
+    'cacheEvidence=${observation.cacheEvidence.name}',
+    'telemetryStatus=${observation.telemetryStatus?.name ?? 'unknown'}',
+    'fileCacheBytes=${_bytesBucket(observation.fileCacheBytes ?? 0)}',
+    'actualForward=${_durationBucket(observation.actualForward ?? Duration.zero)}',
+    'actualBackward=${_durationBucket(observation.actualBackward ?? Duration.zero)}',
+    'fallbackReason=${observation.fallbackReason?.name ?? 'none'}',
+    'optionalTuningDegraded=${observation.optionalTuningDegraded}',
+    'optionalTuningUnavailable=${_countBucket(observation.optionalTuningUnavailableCount)}',
+    'testOverrideActive=${observation.testOverrideActive}',
+  ];
+
+  static String _telemetryStatusSet(Set<PlaybackCacheTelemetryStatus> values) =>
+      _enumSet(values);
+
+  static String _reopenReasonSet(Set<PlaybackCacheReopenReason> values) {
+    if (values.isEmpty) return 'none';
+    if (values.length > 1) return 'multiple';
+    return values.single.name;
+  }
+
+  static String _enumSet(Iterable<Enum> values) {
+    final names = values.map((value) => value.name).toList()..sort();
+    return names.isEmpty ? 'none' : names.join(',');
+  }
+
+  static String _countBucket(int value) => switch (value) {
+    <= 0 => '0',
+    <= 2 => '1_2',
+    <= 10 => '3_10',
+    <= 100 => '11_100',
+    _ => 'gt100',
   };
 }

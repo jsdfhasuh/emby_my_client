@@ -6,6 +6,7 @@ import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
+import 'cache/playback_cache_evidence.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
@@ -129,6 +130,8 @@ class PlaybackController extends ChangeNotifier {
   bool _cacheSnapshotUnavailableLogged = false;
   int _cacheFailureObservationGeneration = 0;
   final Set<PlaybackCacheSafetyReason> _cacheSafetyDiagnosticsWritten = {};
+  late final PlaybackCacheEvidenceAccumulator _cacheEvidence =
+      PlaybackCacheEvidenceAccumulator(sessionId: session.id, clock: _clock);
 
   PlaybackState get state => _state;
   PlaybackEngine get engine => _engine;
@@ -410,6 +413,7 @@ class PlaybackController extends ChangeNotifier {
           storageSnapshot.failureReason ==
               PlaybackCacheStorageFailureReason.storageCapacityUnknown &&
           !_cacheSnapshotUnavailableLogged) {
+        _cacheEvidence.recordCacheSnapshotUnavailable();
         _cacheSnapshotUnavailableLogged = true;
         _diagnostics.cacheSnapshotUnavailable();
       }
@@ -486,6 +490,26 @@ class PlaybackController extends ChangeNotifier {
       return _prepareCacheForPlan(plan, token);
     }
     _diagnostics.cacheApplyResult(applyResult);
+    final cacheCreateResult = _cacheCreateResult(applyResult);
+    if (cacheCreateResult != null) {
+      _cacheEvidence.recordCacheCreate(cacheCreateResult);
+    }
+    _cacheEvidence.observe(
+      PlaybackCacheEvidenceObservation(
+        cacheEvidence: applyResult.cacheEvidence,
+        requestedMode: applyResult.requestedMode,
+        confirmedMode: applyResult.actualMode,
+        fallbackReason: applyResult.fallbackReason,
+        optionalTuningDegraded: applyResult.optionalTuningDegraded,
+        optionalTuningUnavailableCount:
+            applyResult.optionalTuningUnavailable.length,
+        cacheCreateResult: cacheCreateResult,
+        cacheEnabled:
+            applyResult.actualMode != PlaybackCacheRuntimeMode.disabled,
+        cacheOnDisk: applyResult.actualMode == PlaybackCacheRuntimeMode.disk,
+        testOverrideActive: testOverrides?.isActive ?? false,
+      ),
+    );
     if (applyResult.actualMode != PlaybackCacheRuntimeMode.disk) {
       await _cleanupCacheSessionSafely();
     }
@@ -548,10 +572,18 @@ class PlaybackController extends ChangeNotifier {
     required SeekSource source,
   }) async {
     _diagnostics.seekRequested();
-    final result = await _operationCoordinator.seekAbsolute(
-      position,
-      source: source,
-    );
+    _cacheEvidence.recordSeekRequested();
+    late final SeekResult result;
+    try {
+      result = await _operationCoordinator.seekAbsolute(
+        position,
+        source: source,
+      );
+    } catch (_) {
+      _cacheEvidence.recordSeekCompleted(SeekDisposition.failed);
+      rethrow;
+    }
+    _cacheEvidence.recordSeekCompleted(result.disposition);
     _diagnostics.seekCompleted(result);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
@@ -567,10 +599,15 @@ class PlaybackController extends ChangeNotifier {
     required SeekSource source,
   }) async {
     _diagnostics.seekRequested();
-    final result = await _operationCoordinator.seekRelative(
-      offset,
-      source: source,
-    );
+    _cacheEvidence.recordSeekRequested();
+    late final SeekResult result;
+    try {
+      result = await _operationCoordinator.seekRelative(offset, source: source);
+    } catch (_) {
+      _cacheEvidence.recordSeekCompleted(SeekDisposition.failed);
+      rethrow;
+    }
+    _cacheEvidence.recordSeekCompleted(result.disposition);
     _diagnostics.seekCompleted(result);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
@@ -794,6 +831,7 @@ class PlaybackController extends ChangeNotifier {
     }();
     await Future.wait([cleanup, release]);
     _diagnostics.flushSeekSummary();
+    _diagnostics.cacheSessionSummary(_cacheEvidence.finalize());
     _setState(
       _state.copyWith(
         phase: PlaybackPhase.idle,
@@ -898,6 +936,7 @@ class PlaybackController extends ChangeNotifier {
     final lower = log.toLowerCase();
     if (lower.contains('failed to create file cache') &&
         !_state.diskCacheFailureObserved) {
+      _cacheEvidence.recordCacheCreate(PlaybackCacheCreateResult.failed);
       _diagnostics.cacheMpvCreateFailed();
       _setState(
         _state.copyWith(
@@ -961,6 +1000,7 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
     if (snapshot == null && !_cacheSnapshotUnavailableLogged) {
+      _cacheEvidence.recordCacheSnapshotUnavailable();
       _cacheSnapshotUnavailableLogged = true;
       _diagnostics.cacheSnapshotUnavailable();
     }
@@ -1013,6 +1053,7 @@ class PlaybackController extends ChangeNotifier {
         if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
         if (observation.engineSnapshot == null &&
             !_cacheSnapshotUnavailableLogged) {
+          _cacheEvidence.recordCacheSnapshotUnavailable();
           _cacheSnapshotUnavailableLogged = true;
           _diagnostics.cacheSnapshotUnavailable();
         }
@@ -1023,6 +1064,10 @@ class PlaybackController extends ChangeNotifier {
             cacheObservation: observation,
           ),
         );
+        final evidenceObservation = _cacheEvidenceObservation(observation);
+        if (_cacheEvidence.observe(evidenceObservation)) {
+          _diagnostics.cacheObservation(evidenceObservation);
+        }
       },
       onSafetyReopen: _handleCacheSafetyReopen,
       statePollInterval: cacheStatePollInterval,
@@ -1042,6 +1087,7 @@ class PlaybackController extends ChangeNotifier {
       coordinator.cancel();
       if (_isCurrent(token)) {
         if (!_cacheSnapshotUnavailableLogged) {
+          _cacheEvidence.recordCacheSnapshotUnavailable();
           _cacheSnapshotUnavailableLogged = true;
           _diagnostics.cacheSnapshotUnavailable();
         }
@@ -1066,7 +1112,10 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _stopCacheCoordinator() async {
     final coordinator = _cacheCoordinator;
     _cacheCoordinator = null;
-    if (coordinator == null) return;
+    if (coordinator == null) {
+      _flushCacheEvidenceObservation();
+      return;
+    }
     try {
       await _withDeadline(
         coordinator.stop(),
@@ -1079,6 +1128,8 @@ class PlaybackController extends ChangeNotifier {
         'event=playback_cache_monitor_stop_failed '
             'errorType=${error.runtimeType}',
       );
+    } finally {
+      _flushCacheEvidenceObservation();
     }
   }
 
@@ -1094,6 +1145,7 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed || _shuttingDown || _engineDisposed) {
       return Future<void>.value();
     }
+    _cacheEvidence.recordReopen(_reopenReason(safetyReason));
     if (!_tryReserveAutomaticOpen(
       AutomaticPlaybackOpenReason.cacheSafetyReopen,
     )) {
@@ -1683,15 +1735,24 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _cleanupCacheSessionSafely() async {
     final cacheSession = _cacheSession;
     _cacheSession = null;
-    if (cacheSession == null) return;
+    if (cacheSession == null) {
+      _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.notApplicable);
+      return;
+    }
     try {
       await _withDeadline(
         cacheStorage.cleanupSession(cacheSession),
         cacheCleanupTimeout,
         PlaybackOperationTimeoutKind.cacheCleanup,
       );
+      _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.succeeded);
       _diagnostics.cacheSessionCleaned();
-    } catch (_) {
+    } catch (error) {
+      _cacheEvidence.recordCleanup(
+        error is _PlaybackOperationTimedOut
+            ? PlaybackCacheCleanupResult.timedOut
+            : PlaybackCacheCleanupResult.failed,
+      );
       DiagnosticLog.instance.warning(
         'playback-cache',
         'Cache session cleanup failed',
@@ -1732,6 +1793,71 @@ class PlaybackController extends ChangeNotifier {
       _diagnostics.cacheSafetyTriggered(reason);
     }
   }
+
+  PlaybackCacheEvidenceObservation _cacheEvidenceObservation(
+    PlaybackCacheObservation observation,
+  ) {
+    final snapshot = observation.engineSnapshot;
+    final runtimeMode = _state.cacheRuntimeMode;
+    final evidence =
+        snapshot?.fileCacheBytes != null &&
+            snapshot!.fileCacheBytes! > 0 &&
+            snapshot.cacheOnDisk == true
+        ? PlaybackCacheEvidence.diskDataObserved
+        : runtimeMode == PlaybackCacheRuntimeMode.disk
+        ? PlaybackCacheEvidence.diskConfiguredOnly
+        : runtimeMode == PlaybackCacheRuntimeMode.disabled
+        ? PlaybackCacheEvidence.disabled
+        : runtimeMode == PlaybackCacheRuntimeMode.memory ||
+              runtimeMode == PlaybackCacheRuntimeMode.memoryFallback
+        ? PlaybackCacheEvidence.memoryProfileConfirmed
+        : PlaybackCacheEvidence.unconfirmed;
+    return PlaybackCacheEvidenceObservation(
+      cacheEvidence: evidence,
+      telemetryStatus: snapshot?.telemetryStatus,
+      fileCacheBytes: snapshot?.fileCacheBytes,
+      actualForward: observation.actualForward,
+      actualBackward: observation.actualBackward,
+      cacheSnapshotResult: snapshot == null
+          ? PlaybackCacheSnapshotResult.unavailable
+          : PlaybackCacheSnapshotResult.available,
+      requestedMode: _state.cacheProfile?.runtimeMode,
+      confirmedMode: runtimeMode,
+      fallbackReason: _state.cacheFallbackReason,
+      cacheEnabled: runtimeMode != PlaybackCacheRuntimeMode.disabled,
+      cacheOnDisk: snapshot?.cacheOnDisk,
+      testOverrideActive: testOverrides?.isActive ?? false,
+    );
+  }
+
+  static PlaybackCacheCreateResult? _cacheCreateResult(
+    PlaybackCacheApplyResult result,
+  ) {
+    if (result.requestedMode != PlaybackCacheRuntimeMode.disk) return null;
+    if (result.fallbackReason ==
+        PlaybackCacheFallbackReason.mpvCacheCreateFailed) {
+      return PlaybackCacheCreateResult.failed;
+    }
+    if (result.actualMode == PlaybackCacheRuntimeMode.disk) {
+      return PlaybackCacheCreateResult.succeeded;
+    }
+    return PlaybackCacheCreateResult.unavailable;
+  }
+
+  void _flushCacheEvidenceObservation() {
+    if (!_cacheEvidence.flush()) return;
+    final observation = _cacheEvidence.lastAppliedObservation;
+    if (observation != null) _diagnostics.cacheObservation(observation);
+  }
+
+  static PlaybackCacheReopenReason _reopenReason(
+    PlaybackCacheSafetyReason reason,
+  ) => switch (reason) {
+    PlaybackCacheSafetyReason.budget => PlaybackCacheReopenReason.budget,
+    PlaybackCacheSafetyReason.lowSpace => PlaybackCacheReopenReason.lowSpace,
+    PlaybackCacheSafetyReason.memoryPressure =>
+      PlaybackCacheReopenReason.memoryPressure,
+  };
 
   bool _shouldWriteEngineFingerprint(String fingerprint) {
     final now = _clock();

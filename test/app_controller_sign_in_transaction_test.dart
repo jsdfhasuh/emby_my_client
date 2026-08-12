@@ -12,7 +12,6 @@ import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/playback_diagnostics_test_overrides.dart';
-import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';

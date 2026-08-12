@@ -5,9 +5,11 @@ import 'package:emby_my_client/playback/cache/native_playback_property_access.da
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_coordinator.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_evidence.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_telemetry.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -193,6 +195,39 @@ void main() {
     expect(lines, contains('event=playback_seek_coalesced count=98'));
     expect(lines, contains('event=playback_seek_executed count=2'));
     expect(lines.join('\n'), isNot(contains('99:00:00')));
+  });
+
+  test('cache session summaries contain only fixed aggregate fields', () {
+    final lines = <String>[];
+    final diagnostics = PlaybackDiagnostics(
+      writer: (_, _, message) => lines.add(message),
+    );
+    final accumulator = PlaybackCacheEvidenceAccumulator(
+      sessionId: const PlaybackItemSessionId('private-session-id'),
+    );
+    accumulator.observe(
+      const PlaybackCacheEvidenceObservation(
+        cacheEvidence: PlaybackCacheEvidence.diskDataObserved,
+        telemetryStatus: PlaybackCacheTelemetryStatus.available,
+        fileCacheBytes: 10 << 20,
+        actualForward: Duration(seconds: 45),
+        actualBackward: Duration(seconds: 20),
+        requestedMode: PlaybackCacheRuntimeMode.disk,
+        confirmedMode: PlaybackCacheRuntimeMode.disk,
+        fallbackReason: PlaybackCacheFallbackReason.none,
+        testOverrideActive: true,
+      ),
+    );
+    accumulator.recordCleanup(PlaybackCacheCleanupResult.succeeded);
+    diagnostics.cacheSessionSummary(accumulator.finalize());
+
+    final output = lines.join('\n');
+    expect(output, contains('event=playback_cache_session_summary'));
+    expect(output, contains('cacheEvidence=diskDataObserved'));
+    expect(output, contains('peakFileCacheBytes=lte64MiB'));
+    expect(output, contains('testOverrideUsed=true'));
+    expect(output, isNot(contains('private-session-id')));
+    expect(output, isNot(contains('10')));
   });
 
   test('seek timeout categories remain fixed and aggregated', () {
