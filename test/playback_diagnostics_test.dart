@@ -68,10 +68,10 @@ void main() {
       lines,
       contains(
         allOf(
-          contains('option_cache=true'),
-          contains('option_demuxer_cache_dir=true'),
-          contains('option_stream_buffer_size=true'),
-          contains('property_demuxer_cache_state=true'),
+          contains('cacheDirectoryVariant=modern'),
+          contains('cacheDirectoryModernStatus=usable'),
+          contains('cacheUnlinkVariant=unavailable'),
+          contains('diskCache=true'),
         ),
       ),
     );
@@ -156,6 +156,8 @@ void main() {
     }
     expect(joined, contains('mpvversionfingerprint=unavailable'));
     expect(joined, contains('platform=unsupported'));
+    expect(joined, isNot(contains('option_demuxer_cache_dir')));
+    expect(joined, isNot(contains('property_demuxer_cache_state')));
     expect(joined, contains('event=playback_cache_disk_enabled'));
     expect(joined, contains('fingerprint=partial_file'));
   });

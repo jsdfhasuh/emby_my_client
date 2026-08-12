@@ -42,6 +42,20 @@ void main() {
   );
 
   test(
+    'probe requires reset read-back after restoring a native option',
+    () async {
+      final access = _FakeNativeAccess.complete()..failResetReadBack = true;
+      final result = await PlaybackCacheCapabilityProbe(access: access).probe();
+
+      expect(
+        result.bindings.statusFor(PlaybackCacheLogicalOption.cacheDirectory, 0),
+        PlaybackNativeOptionCandidateStatus.presentButIncomplete,
+      );
+      expect(result.supportsCacheDirectory, isFalse);
+    },
+  );
+
+  test(
     'missing immediate choice blocks disk without running experiment',
     () async {
       final access = _FakeNativeAccess.complete()
@@ -301,6 +315,7 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   final Map<String, Object> nativeValues;
   final List<List<Object>> commands = [];
   final List<String> profileCacheModes = [];
+  bool failResetReadBack = false;
 
   static String _resetValue(String option) => switch (option) {
     'demuxer-cache-dir' => '',
@@ -334,6 +349,10 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
 
   @override
   Future<void> setString(String name, String value) async {
+    if (failResetReadBack && name == 'demuxer-cache-dir' && value == '') {
+      strings[name] = 'unexpected-reset';
+      return;
+    }
     strings[name] = value;
   }
 

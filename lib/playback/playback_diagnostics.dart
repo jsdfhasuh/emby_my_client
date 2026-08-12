@@ -114,15 +114,16 @@ class PlaybackDiagnostics {
   final Map<PlaybackOperationTimeoutKind, DateTime> _timeoutLastWritten = {};
 
   void cacheCapabilitiesResolved(PlaybackCacheEngineCapabilities capabilities) {
+    final manifest = capabilities.bindings.toSafeDiagnosticManifest();
     _emit(PlaybackDiagnosticEvent.cacheCapabilitiesResolved, [
       'mpvVersionFingerprint=${_safeToken(capabilities.mpvVersionFingerprint)}',
       'platform=${_platform(capabilities.platform)}',
-      for (final option in playbackCacheOptionNames)
-        'option_${_safeCapabilityKey(option)}='
-            '${capabilities.optionSupport[option] == true}',
-      for (final property in playbackCachePropertyNames)
-        'property_${_safeCapabilityKey(property)}='
-            '${capabilities.propertySupport[property] == true}',
+      'cacheDirectoryVariant=${manifest['cacheDirectoryVariant']}',
+      'cacheDirectoryModernStatus=${manifest['cacheDirectoryModernStatus']}',
+      'cacheDirectoryLegacyStatus=${manifest['cacheDirectoryLegacyStatus']}',
+      'cacheUnlinkVariant=${manifest['cacheUnlinkVariant']}',
+      'cacheUnlinkModernStatus=${manifest['cacheUnlinkModernStatus']}',
+      'cacheUnlinkLegacyStatus=${manifest['cacheUnlinkLegacyStatus']}',
       'diskCache=${capabilities.supportsDiskCache}',
       'cacheDirectory=${capabilities.supportsCacheDirectory}',
       'immediateUnlink=${capabilities.supportsImmediateUnlink}',
@@ -421,8 +422,6 @@ class PlaybackDiagnostics {
     'android' => 'Android',
     _ => 'unsupported',
   };
-
-  static String _safeCapabilityKey(String value) => value.replaceAll('-', '_');
 
   static String _durationBucket(Duration value) => switch (value.inSeconds) {
     <= 0 => 'none',

@@ -207,12 +207,18 @@ class PlaybackCacheCapabilityProbe {
       await access.setString(name, probeValue);
       final actual = await access.getString(name);
       await access.setString(name, reset);
-      if (actual == null) return false;
+      final resetActual = await access.getString(name);
+      if (actual == null || resetActual == null) return false;
       return playbackNativeValueCanonicalizer.equivalent(
-        logicalOption,
-        actual,
-        probeValue,
-      );
+            logicalOption,
+            actual,
+            probeValue,
+          ) &&
+          playbackNativeValueCanonicalizer.equivalent(
+            logicalOption,
+            resetActual,
+            reset,
+          );
     } catch (_) {
       return false;
     }

@@ -151,6 +151,52 @@ void main() {
     expect(access.values['stream-buffer-size'], '${128 << 10}');
   });
 
+  test(
+    'disabled profile writes cache-on-disk=no when that option is available',
+    () async {
+      final access = _FakeNativeAccess();
+      final result = await PlaybackCacheProfileApplier(
+        access: access,
+        capabilities: _capabilities(),
+      ).apply(_profile(PlaybackCacheRuntimeMode.disabled));
+
+      expect(result.actualMode, PlaybackCacheRuntimeMode.disabled);
+      expect(access.values['cache'], 'no');
+      expect(access.values['cache-on-disk'], 'no');
+      expect(result.readBack['cache-on-disk'], 'no');
+    },
+  );
+
+  test(
+    'disabled profile remains usable when cache-on-disk is unavailable',
+    () async {
+      final access = _FakeNativeAccess();
+      final capabilities = _capabilities(
+        optionSupportOverride: {
+          'cache': true,
+          'cache-secs': true,
+          'demuxer-max-bytes': true,
+          'demuxer-max-back-bytes': true,
+        },
+        resetValues: {
+          'cache': 'no',
+          'cache-secs': '0',
+          'demuxer-max-bytes': '0',
+          'demuxer-max-back-bytes': '0',
+        },
+      );
+
+      final result = await PlaybackCacheProfileApplier(
+        access: access,
+        capabilities: capabilities,
+      ).apply(_profile(PlaybackCacheRuntimeMode.disabled));
+
+      expect(result.actualMode, PlaybackCacheRuntimeMode.disabled);
+      expect(access.values['cache'], 'no');
+      expect(access.values.keys, isNot(contains('cache-on-disk')));
+    },
+  );
+
   test('snapshot parser ignores damaged fields and unknown keys', () async {
     final access = _FakeNativeAccess()
       ..values['cache-on-disk'] = 'yes'

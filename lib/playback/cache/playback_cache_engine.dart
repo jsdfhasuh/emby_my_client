@@ -506,9 +506,12 @@ class PlaybackCacheProfileValues {
     ResolvedPlaybackCacheOptionBindings bindings,
   ) => _valuesFor(
     bindings,
-    critical: {PlaybackCacheLogicalOption.cache: 'no'},
+    critical: {
+      PlaybackCacheLogicalOption.cache: 'no',
+      if (bindings.supports(PlaybackCacheLogicalOption.cacheOnDisk))
+        PlaybackCacheLogicalOption.cacheOnDisk: 'no',
+    },
     optional: {
-      PlaybackCacheLogicalOption.cacheOnDisk: 'no',
       PlaybackCacheLogicalOption.cacheSeconds: '0',
       PlaybackCacheLogicalOption.forwardMetadataBytes: '${16 * 1024 * 1024}',
       PlaybackCacheLogicalOption.backwardMetadataBytes: '${8 * 1024 * 1024}',
