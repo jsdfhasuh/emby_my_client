@@ -497,7 +497,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _shutdownLibraryScanService();
     await _shutdownDownloads(stopExecutor: true);
     if (current != null) {
-      await _playbackSettingsRepository.deactivate(current);
+      await _playbackSettingsRepository.deleteAccountSettings(current);
     }
     if (current != null) {
       try {
@@ -589,7 +589,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _shutdownLibraryScanService();
     final expiredSession = _session;
     if (expiredSession != null) {
-      await _playbackSettingsRepository.deactivate(expiredSession);
+      await _playbackSettingsRepository.deleteAccountSettings(expiredSession);
     }
     _session = null;
     _scope = null;

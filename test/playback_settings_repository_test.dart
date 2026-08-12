@@ -102,6 +102,39 @@ void main() {
     );
   });
 
+  test(
+    'delete invalidates a patch already in storage write and prevents resurrection',
+    () async {
+      final storage = _MemoryStorage();
+      final repository = PlaybackSettingsRepository(storage: storage);
+      await repository.patch(
+        _firstSession,
+        const PlaybackSettingsPatch(videoFit: 'fill'),
+      );
+      final writeGate = Completer<void>();
+      storage.blockNextWrite(writeGate.future);
+
+      final patch = repository.patch(
+        _firstSession,
+        const PlaybackSettingsPatch(playbackRate: 2),
+      );
+      await storage.writeStarted.future;
+      final delete = repository.deleteAccountSettings(_firstSession);
+      writeGate.complete();
+
+      await expectLater(
+        patch,
+        throwsA(isA<PlaybackSettingsPatchInvalidated>()),
+      );
+      await delete;
+      expect(storage.values, isEmpty);
+      expect(
+        (await repository.load(_firstSession)).settings,
+        const PlaybackSettings(),
+      );
+    },
+  );
+
   test('load after clear explicitly reactivates the account queue', () async {
     final storage = _MemoryStorage();
     final repository = PlaybackSettingsRepository(storage: storage);
@@ -191,7 +224,9 @@ void main() {
 class _MemoryStorage implements PlaybackSettingsStorage {
   final Map<String, String> values = {};
   Future<void>? _nextReadGate;
+  Future<void>? _nextWriteGate;
   Completer<void> readStarted = Completer<void>();
+  Completer<void> writeStarted = Completer<void>();
   int _activeOperations = 0;
   int maxConcurrentOperations = 0;
 
@@ -202,6 +237,11 @@ class _MemoryStorage implements PlaybackSettingsStorage {
   void blockNextRead(Future<void> gate) {
     _nextReadGate = gate;
     readStarted = Completer<void>();
+  }
+
+  void blockNextWrite(Future<void> gate) {
+    _nextWriteGate = gate;
+    writeStarted = Completer<void>();
   }
 
   @override
@@ -217,6 +257,12 @@ class _MemoryStorage implements PlaybackSettingsStorage {
 
   @override
   Future<void> write(String key, String value) => _track(() async {
+    final gate = _nextWriteGate;
+    if (gate != null) {
+      _nextWriteGate = null;
+      if (!writeStarted.isCompleted) writeStarted.complete();
+      await gate;
+    }
     values[key] = value;
   });
 

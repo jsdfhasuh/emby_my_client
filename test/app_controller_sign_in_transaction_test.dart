@@ -12,6 +12,8 @@ import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/playback_diagnostics_test_overrides.dart';
+import 'package:emby_my_client/playback/playback_settings.dart';
+import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -455,6 +457,7 @@ void main() {
   test('sign out removes the saved session', () async {
     final storage = _FakeSessionStorage()
       ..values['emby_device_id_v1'] = 'existing-device';
+    final playbackStorage = _MemoryPlaybackSettingsStorage();
     final overrides = PlaybackDiagnosticsTestOverridesController()
       ..enable(
         const PlaybackDiagnosticsTestOverrides(streamBufferBytes: 512 << 10),
@@ -464,6 +467,9 @@ void main() {
       clients: _ClientTracker().registry,
       apiFactory: (session, _) => _apiWithSuccessfulRequests(session),
       playbackDiagnosticsTestOverrides: overrides,
+      playbackSettingsRepository: PlaybackSettingsRepository(
+        storage: playbackStorage,
+      ),
     );
     addTearDown(controller.dispose);
     await controller.signIn(
@@ -471,10 +477,19 @@ void main() {
       username: 'user',
       password: 'fixture-password',
     );
+    await controller.playbackSettingsRepository.patch(
+      _session,
+      const PlaybackSettingsPatch(playbackRate: 1.5),
+    );
+    expect(
+      playbackStorage.values,
+      contains('playback_settings_v1_server-1_user-1'),
+    );
 
     await controller.signOut();
 
     expect(storage.values, isNot(contains('emby_session_v1')));
+    expect(playbackStorage.values, isEmpty);
     expect(controller.isSignedIn, isFalse);
     expect(overrides.isActive, isFalse);
   });
@@ -526,6 +541,7 @@ AppController _controller(
   SignInApiFactory? apiFactory,
   DownloadServiceFactory? downloadServiceFactory,
   PlaybackDiagnosticsTestOverridesController? playbackDiagnosticsTestOverrides,
+  PlaybackSettingsRepository? playbackSettingsRepository,
   LocalDatabase? database,
 }) => AppController(
   store: SessionStore(sessionStorage: storage),
@@ -545,6 +561,7 @@ AppController _controller(
   apiFactory: apiFactory ?? _idleApiFactory,
   downloadServiceFactory: downloadServiceFactory,
   playbackDiagnosticsTestOverrides: playbackDiagnosticsTestOverrides,
+  playbackSettingsRepository: playbackSettingsRepository,
 );
 
 EmbyApi _idleApiFactory(EmbySession session, ServerScope scope) =>
@@ -589,6 +606,23 @@ class _ClientTracker {
   );
 
   int disposed = 0;
+}
+
+class _MemoryPlaybackSettingsStorage implements PlaybackSettingsStorage {
+  final Map<String, String> values = <String, String>{};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
 }
 
 class _ThrowingRegisterRegistry extends ClientRegistry<EmbyApi> {
