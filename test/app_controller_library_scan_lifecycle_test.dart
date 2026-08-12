@@ -14,12 +14,16 @@ import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/playback_settings_repository.dart';
+import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('cold start requests best-effort cache residue cleanup', () async {
     final cacheStorage = _TrackingPlaybackCacheStorage();
     final controller = AppController(
@@ -227,14 +231,37 @@ void main() {
   test(
     'a 401 expires the session only after the scan request settles',
     () async {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      addTearDown(() => server.close(force: true));
-      server.listen((request) async {
-        request.response.statusCode = HttpStatus.unauthorized;
-        await request.response.close();
-      });
+      late AppController controller;
+      final dio = Dio()
+        ..interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.uri.path.contains('/Items')) {
+                handler.reject(
+                  DioException(
+                    requestOptions: options,
+                    response: Response<dynamic>(
+                      requestOptions: options,
+                      statusCode: HttpStatus.unauthorized,
+                      data: const <String, dynamic>{},
+                    ),
+                    type: DioExceptionType.badResponse,
+                  ),
+                );
+                return;
+              }
+              handler.resolve(
+                Response<dynamic>(
+                  requestOptions: options,
+                  statusCode: HttpStatus.ok,
+                  data: const <String, dynamic>{},
+                ),
+              );
+            },
+          ),
+        );
       final session = EmbySession(
-        serverUrl: 'http://${server.address.address}:${server.port}',
+        serverUrl: 'https://expiry.example.test',
         serverName: _session.serverName,
         serverId: 'expiry-server',
         userId: _session.userId,
@@ -249,11 +276,14 @@ void main() {
           await api.dispose();
         },
       );
-      final controller = AppController(
+      controller = AppController(
         store: SessionStore(sessionStorage: _MemorySessionStorage()),
         clients: clients,
         capabilities: PlatformCapabilities.ipad,
         libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+        playbackSettingsRepository: PlaybackSettingsRepository(
+          storage: _MemoryPlaybackSettingsStorage(),
+        ),
         authenticator:
             ({
               required serverUrl,
@@ -262,6 +292,12 @@ void main() {
               required deviceId,
               required deviceName,
             }) async => session,
+        apiFactory: (session, scope) => EmbyApi(
+          session,
+          dio: dio,
+          onSessionExpired: () => controller.signOut(),
+          realtimeConnector: (_) async => _LifecycleIdleSocket(),
+        ),
       );
       addTearDown(controller.dispose);
       await controller.signIn(
@@ -307,6 +343,9 @@ class _ControllerFixture {
       clients: clients,
       capabilities: PlatformCapabilities.ipad,
       libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+      playbackSettingsRepository: PlaybackSettingsRepository(
+        storage: _MemoryPlaybackSettingsStorage(),
+      ),
       accountDataCleanup: accountDataCleanup,
       playbackCacheStorage: playbackCacheStorage,
       authenticator:
@@ -333,7 +372,7 @@ class _ControllerFixture {
         return EmbyApi(
           session,
           dio: dio,
-          realtimeConnector: (_) async => throw StateError('realtime disabled'),
+          realtimeConnector: (_) async => _LifecycleIdleSocket(),
         );
       },
       libraryScanServiceFactory:
@@ -413,6 +452,33 @@ class _MemorySessionStorage implements SessionStorage {
 
   @override
   Future<void> write(String key, String value) async => values[key] = value;
+}
+
+class _MemoryPlaybackSettingsStorage implements PlaybackSettingsStorage {
+  final Map<String, String> values = {};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+
+  @override
+  Future<void> delete(String key) async => values.remove(key);
+}
+
+class _LifecycleIdleSocket implements EmbySocket {
+  final StreamController<dynamic> _messages =
+      StreamController<dynamic>.broadcast();
+
+  @override
+  Stream<dynamic> get messages => _messages.stream;
+
+  @override
+  void add(String data) {}
+
+  @override
+  Future<void> close() => _messages.close();
 }
 
 LibraryScanKey _key(ServerScope scope, String libraryId) => LibraryScanKey(

@@ -236,11 +236,11 @@ class PlaybackOperationCoordinator {
     if (_shutdown) return;
     _operationGeneration++;
     _completePending(
-      disposition: SeekDisposition.failed,
+      disposition: SeekDisposition.cancelled,
       failureKind: SeekFailureKind.higherPriorityOperation,
     );
     _completeInFlight(
-      disposition: SeekDisposition.failed,
+      disposition: SeekDisposition.cancelled,
       failureKind: SeekFailureKind.higherPriorityOperation,
     );
     _completeSettleWaiter();
@@ -422,9 +422,7 @@ class PlaybackOperationCoordinator {
     if (!_isCurrent(request)) {
       _complete(
         request,
-        disposition: _shutdown
-            ? SeekDisposition.cancelled
-            : SeekDisposition.failed,
+        disposition: SeekDisposition.cancelled,
         settled: false,
         failureKind: _shutdown
             ? SeekFailureKind.staleSession
@@ -457,9 +455,7 @@ class PlaybackOperationCoordinator {
     if (!_isCurrent(request)) {
       _complete(
         request,
-        disposition: _shutdown
-            ? SeekDisposition.cancelled
-            : SeekDisposition.failed,
+        disposition: SeekDisposition.cancelled,
         settled: false,
         failureKind: _shutdown
             ? SeekFailureKind.staleSession

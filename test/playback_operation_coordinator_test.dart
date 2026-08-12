@@ -217,6 +217,41 @@ void main() {
       nativeGate.complete();
     });
 
+    test(
+      'higher-priority operations cancel pending and in-flight seeks',
+      () async {
+        final nativeGate = Completer<void>();
+        final coordinator = PlaybackOperationCoordinator(
+          sessionId: const PlaybackItemSessionId('priority-seek'),
+          clampTarget: _clamp,
+          seekEngine: (_) => nativeGate.future,
+        );
+
+        final inFlight = coordinator.seekAbsolute(
+          const Duration(minutes: 1),
+          source: SeekSource.progressBar,
+        );
+        await Future<void>.delayed(Duration.zero);
+        final pending = coordinator.seekAbsolute(
+          const Duration(minutes: 2),
+          source: SeekSource.progressBar,
+        );
+
+        coordinator.invalidateForHigherPriorityOperation();
+
+        final results = await Future.wait([inFlight, pending]);
+        expect(
+          results.map((result) => result.disposition),
+          everyElement(SeekDisposition.cancelled),
+        );
+        expect(
+          results.map((result) => result.failureKind),
+          everyElement(SeekFailureKind.higherPriorityOperation),
+        );
+        nativeGate.complete();
+      },
+    );
+
     test('control operations use the frozen priority order', () async {
       final events = <String>[];
       final userStarted = Completer<void>();
