@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_option_bindings.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -171,12 +172,16 @@ void main() {
     ).probe();
 
     expect(result.supportsDiskCache, isTrue);
-    expect(result.diskGatePassed, isFalse);
-    expect(experiment.calls, 0);
+    expect(result.diskGatePassed, isTrue);
+    expect(
+      result.bindings.optionalTuningUnavailable,
+      contains(PlaybackCacheLogicalOption.streamBufferSize),
+    );
+    expect(experiment.calls, 1);
   });
 
   test(
-    'missing reset evidence blocks disk without running experiment',
+    'missing optional reset evidence degrades tuning without blocking disk',
     () async {
       final access = _FakeNativeAccess.complete()
         ..strings.remove('option-info/cache-pause-wait/default-value');
@@ -189,14 +194,18 @@ void main() {
         profileSwitchExperiment: experiment,
       ).probe();
 
-      expect(result.optionSupport.values, everyElement(isTrue));
+      expect(result.optionSupport.keys, contains('cache-pause-wait'));
+      expect(
+        result.bindings.optionalTuningUnavailable,
+        contains(PlaybackCacheLogicalOption.cachePauseWait),
+      );
       expect(result.hasCompleteResetValues, isFalse);
-      expect(result.diskGatePassed, isFalse);
+      expect(result.diskGatePassed, isTrue);
       expect(
         result.profileSwitchStrategy,
-        PlaybackCacheProfileSwitchStrategy.unsupported,
+        PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
       );
-      expect(experiment.calls, 0);
+      expect(experiment.calls, 1);
       expect(result.toSafeDiagnosticManifest()['resetValuesComplete'], isFalse);
     },
   );
@@ -276,9 +285,7 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
         'mpv-version': 'mpv 0.40.0 Copyright build path must not escape',
         'platform': 'darwin',
         for (final option in playbackCacheOptionNames)
-          'option-info/$option/default-value': option == 'demuxer-cache-dir'
-              ? ''
-              : 'auto',
+          'option-info/$option/default-value': _resetValue(option),
       },
       nativeValues = {
         'option-info/demuxer-cache-unlink-files/choices': [
@@ -294,6 +301,22 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   final Map<String, Object> nativeValues;
   final List<List<Object>> commands = [];
   final List<String> profileCacheModes = [];
+
+  static String _resetValue(String option) => switch (option) {
+    'demuxer-cache-dir' => '',
+    'cache' ||
+    'cache-on-disk' ||
+    'demuxer-donate-buffer' ||
+    'cache-pause' => 'no',
+    'demuxer-cache-unlink-files' => 'whendone',
+    'demuxer-seekable-cache' => 'auto',
+    'cache-secs' ||
+    'demuxer-max-bytes' ||
+    'demuxer-max-back-bytes' ||
+    'cache-pause-wait' ||
+    'stream-buffer-size' => '0',
+    _ => '0',
+  };
 
   @override
   Future<String?> getString(String name) async => strings[name];

@@ -4,6 +4,7 @@ import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_option_bindings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -28,6 +29,7 @@ void main() {
       result.readBack.keys,
       unorderedEquals(playbackCacheProfileOptionNames),
     );
+    expect(result.cacheEvidence, PlaybackCacheEvidence.diskConfiguredOnly);
   });
 
   test(
@@ -50,7 +52,7 @@ void main() {
     },
   );
 
-  test('any profile read-back mismatch fails closed', () async {
+  test('optional profile read-back mismatch degrades tuning only', () async {
     final access = _FakeNativeAccess(readMismatchOn: 'stream-buffer-size');
 
     final result = await PlaybackCacheProfileApplier(
@@ -58,26 +60,66 @@ void main() {
       capabilities: _capabilities(),
     ).apply(_profile(PlaybackCacheRuntimeMode.disk));
 
-    expect(result.actualMode, PlaybackCacheRuntimeMode.unconfirmed);
+    expect(result.actualMode, PlaybackCacheRuntimeMode.disk);
+    expect(result.optionalTuningDegraded, isTrue);
     expect(
-      result.fallbackReason,
-      PlaybackCacheFallbackReason.actualModeUnconfirmed,
+      result.optionalTuningUnavailable,
+      contains(PlaybackCacheLogicalOption.streamBufferSize),
     );
   });
 
-  test('missing native directory reset fails closed without writing', () async {
+  test(
+    'missing native directory reset does not block memory core options',
+    () async {
+      final access = _FakeNativeAccess();
+      final result = await PlaybackCacheProfileApplier(
+        access: access,
+        capabilities: _capabilities(resetValues: const {}),
+      ).apply(_profile(PlaybackCacheRuntimeMode.memory));
+
+      expect(result.actualMode, PlaybackCacheRuntimeMode.memory);
+      expect(
+        result.cacheEvidence,
+        PlaybackCacheEvidence.memoryProfileConfirmed,
+      );
+      expect(access.values['cache'], 'yes');
+      expect(access.values['cache-on-disk'], 'no');
+      expect(result.readBack['cache'], 'yes');
+      expect(result.readBack['cache-on-disk'], 'no');
+      expect(access.values.keys, isNot(contains('demuxer-cache-dir')));
+    },
+  );
+
+  test('memory profile confirms without directory or unlink options', () async {
     final access = _FakeNativeAccess();
+    final capabilities = _capabilities(
+      optionSupportOverride: {
+        'cache': true,
+        'cache-on-disk': true,
+        'cache-secs': true,
+        'demuxer-max-bytes': true,
+        'demuxer-max-back-bytes': true,
+      },
+      resetValues: {
+        'cache': 'no',
+        'cache-on-disk': 'no',
+        'cache-secs': '0',
+        'demuxer-max-bytes': '0',
+        'demuxer-max-back-bytes': '0',
+      },
+    );
+
     final result = await PlaybackCacheProfileApplier(
       access: access,
-      capabilities: _capabilities(resetValues: const {}),
+      capabilities: capabilities,
     ).apply(_profile(PlaybackCacheRuntimeMode.memory));
 
-    expect(result.actualMode, PlaybackCacheRuntimeMode.unconfirmed);
-    expect(
-      result.fallbackReason,
-      PlaybackCacheFallbackReason.actualModeUnconfirmed,
-    );
-    expect(access.values, isEmpty);
+    expect(result.actualMode, PlaybackCacheRuntimeMode.memory);
+    expect(result.cacheEvidence, PlaybackCacheEvidence.memoryProfileConfirmed);
+    expect(access.values['cache'], 'yes');
+    expect(access.values['cache-on-disk'], 'no');
+    expect(access.values.keys, isNot(contains('demuxer-cache-dir')));
+    expect(access.values.keys, isNot(contains('demuxer-cache-unlink-files')));
   });
 
   test('disk to memory to disabled fully resets inherited options', () async {
@@ -189,10 +231,13 @@ PlaybackCacheEngineCapabilities _capabilities({
   PlaybackCacheProfileSwitchStrategy strategy =
       PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
   Map<String, String>? resetValues,
+  Map<String, bool>? optionSupportOverride,
 }) => PlaybackCacheEngineCapabilities(
   mpvVersionFingerprint: 'mpv-test',
   platform: 'test',
-  optionSupport: {for (final option in playbackCacheOptionNames) option: true},
+  optionSupport:
+      optionSupportOverride ??
+      {for (final option in playbackCacheOptionNames) option: true},
   propertySupport: {
     for (final property in playbackCachePropertyNames) property: true,
   },

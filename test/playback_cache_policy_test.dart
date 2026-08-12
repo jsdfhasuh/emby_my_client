@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_option_bindings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
@@ -247,19 +248,27 @@ void main() {
       );
       final values = PlaybackCacheProfileValues.fromProfile(
         profile,
-        resetValues: const {'demuxer-cache-dir': ''},
-      ).values;
+        bindings: bindingsFromNativeMaps(
+          optionSupport: {
+            for (final option in playbackCacheOptionNames) option: true,
+          },
+          resetValues: {
+            for (final option in playbackCacheOptionNames)
+              option: option == 'demuxer-cache-dir' ? '' : '0',
+          },
+        ),
+      ).plan;
 
       expect(profile.runtimeMode, PlaybackCacheRuntimeMode.memoryFallback);
       expect(profile.demuxerForwardMetadataBytes, lessThanOrEqualTo(64 << 20));
       expect(profile.demuxerBackwardMetadataBytes, lessThanOrEqualTo(16 << 20));
       expect(profile.totalMetadataBytes, lessThanOrEqualTo(64 << 20));
       expect(
-        values['demuxer-max-bytes'],
+        values.criticalValues[PlaybackCacheLogicalOption.forwardMetadataBytes],
         profile.demuxerForwardMetadataBytes.toString(),
       );
       expect(
-        values['demuxer-max-back-bytes'],
+        values.criticalValues[PlaybackCacheLogicalOption.backwardMetadataBytes],
         profile.demuxerBackwardMetadataBytes.toString(),
       );
     });

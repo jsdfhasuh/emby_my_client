@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'native_playback_property_access.dart';
 import 'playback_cache_capabilities.dart';
+import 'playback_cache_option_bindings.dart';
 import 'playback_cache_policy.dart';
 
 class PlaybackCacheRange {
@@ -31,6 +32,28 @@ class PlaybackCacheEngineSnapshot {
   final bool? cacheOnDisk;
 }
 
+enum PlaybackCacheEvidence {
+  diskDataObserved,
+  diskConfiguredOnly,
+  memoryProfileConfirmed,
+  disabled,
+  unconfirmed,
+}
+
+class PlaybackCacheProfileApplyPlan {
+  const PlaybackCacheProfileApplyPlan({
+    required this.criticalValues,
+    required this.optionalValues,
+    required this.criticalReadBack,
+    required this.optionalReadBack,
+  });
+
+  final Map<PlaybackCacheLogicalOption, String> criticalValues;
+  final Map<PlaybackCacheLogicalOption, String> optionalValues;
+  final Set<PlaybackCacheLogicalOption> criticalReadBack;
+  final Set<PlaybackCacheLogicalOption> optionalReadBack;
+}
+
 class PlaybackCacheApplyResult {
   const PlaybackCacheApplyResult({
     required this.requestedMode,
@@ -38,6 +61,9 @@ class PlaybackCacheApplyResult {
     required this.fallbackReason,
     required this.requiresPlayerRecreation,
     required this.readBack,
+    this.optionalTuningDegraded = false,
+    this.optionalTuningUnavailable = const {},
+    this.cacheEvidence = PlaybackCacheEvidence.unconfirmed,
   });
 
   final PlaybackCacheRuntimeMode requestedMode;
@@ -45,6 +71,9 @@ class PlaybackCacheApplyResult {
   final PlaybackCacheFallbackReason fallbackReason;
   final bool requiresPlayerRecreation;
   final Map<String, String> readBack;
+  final bool optionalTuningDegraded;
+  final Set<PlaybackCacheLogicalOption> optionalTuningUnavailable;
+  final PlaybackCacheEvidence cacheEvidence;
 }
 
 abstract interface class PlaybackCacheEngine {
@@ -142,8 +171,6 @@ class PlaybackCacheProfileApplier {
   final NativePlaybackPropertyAccess access;
   final PlaybackCacheEngineCapabilities capabilities;
 
-  static const _criticalReadBack = <String>[...playbackCacheOptionNames];
-
   Future<PlaybackCacheApplyResult> apply(
     ResolvedPlaybackCacheProfile profile,
   ) async {
@@ -156,23 +183,26 @@ class PlaybackCacheProfileApplier {
       );
     }
 
-    final PlaybackCacheProfileValues values;
+    final PlaybackCacheProfileApplyPlan plan;
     try {
-      values = PlaybackCacheProfileValues.fromProfile(
+      plan = PlaybackCacheProfileValues.fromProfile(
         profile,
-        resetValues: capabilities.resetValues,
-      );
+        bindings: capabilities.bindings,
+      ).plan;
     } catch (_) {
       return _unconfirmed(requestedMode);
     }
-    final readBack = await _writeAndReadBack(values.values);
-    if (readBack != null) {
+    final applied = await _writeAndReadBack(plan);
+    if (applied != null) {
       return PlaybackCacheApplyResult(
         requestedMode: requestedMode,
         actualMode: requestedMode,
         fallbackReason: profile.fallbackReason,
         requiresPlayerRecreation: false,
-        readBack: Map.unmodifiable(readBack),
+        readBack: Map.unmodifiable(applied.readBack),
+        optionalTuningDegraded: applied.optionalTuningDegraded,
+        optionalTuningUnavailable: applied.optionalTuningUnavailable,
+        cacheEvidence: _evidenceFor(requestedMode, applied.readBack),
       );
     }
     if (diskRequested) {
@@ -194,17 +224,17 @@ class PlaybackCacheProfileApplier {
     ResolvedPlaybackCacheProfile original,
     PlaybackCacheFallbackReason reason,
   ) async {
-    final PlaybackCacheProfileValues fallback;
+    final PlaybackCacheProfileApplyPlan fallback;
     try {
       fallback = PlaybackCacheProfileValues.memoryFallback(
         original,
-        resetValues: capabilities.resetValues,
-      );
+        bindings: capabilities.bindings,
+      ).plan;
     } catch (_) {
       return _unconfirmed(original.runtimeMode);
     }
-    final readBack = await _writeAndReadBack(fallback.values);
-    if (readBack == null) {
+    final applied = await _writeAndReadBack(fallback);
+    if (applied == null) {
       return PlaybackCacheApplyResult(
         requestedMode: original.runtimeMode,
         actualMode: PlaybackCacheRuntimeMode.unconfirmed,
@@ -218,7 +248,13 @@ class PlaybackCacheProfileApplier {
       actualMode: PlaybackCacheRuntimeMode.memoryFallback,
       fallbackReason: reason,
       requiresPlayerRecreation: false,
-      readBack: Map.unmodifiable(readBack),
+      readBack: Map.unmodifiable(applied.readBack),
+      optionalTuningDegraded: applied.optionalTuningDegraded,
+      optionalTuningUnavailable: applied.optionalTuningUnavailable,
+      cacheEvidence: _evidenceFor(
+        PlaybackCacheRuntimeMode.memoryFallback,
+        applied.readBack,
+      ),
     );
   }
 
@@ -232,128 +268,271 @@ class PlaybackCacheProfileApplier {
     readBack: const {},
   );
 
-  Future<Map<String, String>?> _writeAndReadBack(
-    Map<String, String> values,
+  Future<_AppliedPlan?> _writeAndReadBack(
+    PlaybackCacheProfileApplyPlan plan,
   ) async {
-    try {
-      for (final entry in values.entries) {
-        if (capabilities.optionSupport[entry.key] != true) continue;
-        await access.setString(entry.key, entry.value);
+    final readBack = <String, String>{};
+    for (final option in plan.criticalValues.keys) {
+      final nativeName = capabilities.bindings.nativeName(option);
+      final expected = plan.criticalValues[option];
+      if (nativeName == null || expected == null) return null;
+      try {
+        await access.setString(nativeName, expected);
+      } catch (_) {
+        return null;
       }
-      final readBack = <String, String>{};
-      for (final name in _criticalReadBack) {
-        if (capabilities.optionSupport[name] != true) return null;
-        final value = await access.getString(name);
-        if (value == null || !_equivalent(value, values[name]!)) return null;
-        readBack[name] = value;
-      }
-      return readBack;
-    } catch (_) {
-      return null;
     }
+    for (final option in plan.criticalReadBack) {
+      final nativeName = capabilities.bindings.nativeName(option);
+      final expected = plan.criticalValues[option];
+      if (nativeName == null || expected == null) return null;
+      try {
+        final value = await access.getString(nativeName);
+        if (value == null || !_equivalent(option, value, expected)) {
+          return null;
+        }
+        readBack[nativeName] = value;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    var optionalTuningDegraded = false;
+    final unavailable = <PlaybackCacheLogicalOption>{
+      ...capabilities.bindings.optionalTuningUnavailable,
+    };
+    for (final option in plan.optionalValues.keys) {
+      final nativeName = capabilities.bindings.nativeName(option);
+      final expected = plan.optionalValues[option];
+      if (nativeName == null || expected == null) {
+        optionalTuningDegraded = true;
+        unavailable.add(option);
+        continue;
+      }
+      try {
+        await access.setString(nativeName, expected);
+      } catch (_) {
+        optionalTuningDegraded = true;
+        unavailable.add(option);
+      }
+    }
+    for (final option in plan.optionalReadBack) {
+      final nativeName = capabilities.bindings.nativeName(option);
+      final expected = plan.optionalValues[option];
+      if (nativeName == null || expected == null) {
+        optionalTuningDegraded = true;
+        unavailable.add(option);
+        continue;
+      }
+      try {
+        final value = await access.getString(nativeName);
+        if (value == null || !_equivalent(option, value, expected)) {
+          optionalTuningDegraded = true;
+          unavailable.add(option);
+          continue;
+        }
+        readBack[nativeName] = value;
+      } catch (_) {
+        optionalTuningDegraded = true;
+        unavailable.add(option);
+      }
+    }
+    return _AppliedPlan(
+      readBack: readBack,
+      optionalTuningDegraded: optionalTuningDegraded,
+      optionalTuningUnavailable: unavailable,
+    );
   }
 
-  static bool _equivalent(String actual, String expected) =>
-      _equivalentNativeValue(actual, expected);
+  bool _equivalent(
+    PlaybackCacheLogicalOption option,
+    String actual,
+    String expected,
+  ) => playbackNativeValueCanonicalizer.equivalent(option, actual, expected);
+
+  static PlaybackCacheEvidence _evidenceFor(
+    PlaybackCacheRuntimeMode mode,
+    Map<String, String> readBack,
+  ) {
+    if (mode == PlaybackCacheRuntimeMode.disabled &&
+        readBack['cache'] != null) {
+      return PlaybackCacheEvidence.disabled;
+    }
+    if ((mode == PlaybackCacheRuntimeMode.memory ||
+            mode == PlaybackCacheRuntimeMode.memoryFallback) &&
+        _isEnabled(readBack['cache']) &&
+        _isDisabled(readBack['cache-on-disk'])) {
+      return PlaybackCacheEvidence.memoryProfileConfirmed;
+    }
+    if (mode == PlaybackCacheRuntimeMode.disk &&
+        _isEnabled(readBack['cache-on-disk'])) {
+      return PlaybackCacheEvidence.diskConfiguredOnly;
+    }
+    return PlaybackCacheEvidence.unconfirmed;
+  }
+
+  static bool _isEnabled(String? value) =>
+      value != null &&
+      const {'yes', 'true', '1'}.contains(value.trim().toLowerCase());
+
+  static bool _isDisabled(String? value) =>
+      value != null &&
+      const {'no', 'false', '0'}.contains(value.trim().toLowerCase());
+}
+
+class _AppliedPlan {
+  const _AppliedPlan({
+    required this.readBack,
+    required this.optionalTuningDegraded,
+    required this.optionalTuningUnavailable,
+  });
+
+  final Map<String, String> readBack;
+  final bool optionalTuningDegraded;
+  final Set<PlaybackCacheLogicalOption> optionalTuningUnavailable;
 }
 
 class PlaybackCacheProfileValues {
-  const PlaybackCacheProfileValues._(this.values);
+  const PlaybackCacheProfileValues._(this.plan);
 
-  final Map<String, String> values;
+  final PlaybackCacheProfileApplyPlan plan;
 
   factory PlaybackCacheProfileValues.fromProfile(
     ResolvedPlaybackCacheProfile profile, {
-    required Map<String, String> resetValues,
+    required ResolvedPlaybackCacheOptionBindings bindings,
   }) {
     return switch (profile.runtimeMode) {
       PlaybackCacheRuntimeMode.disk => PlaybackCacheProfileValues._(
-        _diskValues(profile),
+        _diskValues(profile, bindings),
       ),
       PlaybackCacheRuntimeMode.disabled => PlaybackCacheProfileValues._(
-        _disabledValues(profile, resetValues),
+        _disabledValues(profile, bindings),
       ),
       PlaybackCacheRuntimeMode.memory ||
       PlaybackCacheRuntimeMode.memoryFallback ||
       PlaybackCacheRuntimeMode.unconfirmed =>
-        PlaybackCacheProfileValues.memoryFallback(
-          profile,
-          resetValues: resetValues,
-        ),
+        PlaybackCacheProfileValues.memoryFallback(profile, bindings: bindings),
     };
   }
 
   factory PlaybackCacheProfileValues.memoryFallback(
     ResolvedPlaybackCacheProfile profile, {
-    required Map<String, String> resetValues,
-  }) => PlaybackCacheProfileValues._(_memoryValues(profile, resetValues));
+    required ResolvedPlaybackCacheOptionBindings bindings,
+  }) => PlaybackCacheProfileValues._(_memoryValues(profile, bindings));
 
-  static Map<String, String> _diskValues(
+  static PlaybackCacheProfileApplyPlan _diskValues(
+    ResolvedPlaybackCacheProfile profile,
+    ResolvedPlaybackCacheOptionBindings bindings,
+  ) => _valuesFor(
+    bindings,
+    critical: {
+      PlaybackCacheLogicalOption.cache: 'yes',
+      PlaybackCacheLogicalOption.cacheOnDisk: 'yes',
+      PlaybackCacheLogicalOption.cacheDirectory: profile.sessionDirectory!.path,
+      PlaybackCacheLogicalOption.cacheUnlinkFiles: 'immediate',
+      PlaybackCacheLogicalOption.cacheSeconds: profile.forwardTarget.inSeconds
+          .toString(),
+      PlaybackCacheLogicalOption.forwardMetadataBytes: profile
+          .demuxerForwardMetadataBytes
+          .toString(),
+      PlaybackCacheLogicalOption.backwardMetadataBytes: profile
+          .demuxerBackwardMetadataBytes
+          .toString(),
+    },
+    optional: _optionalValues(profile),
+  );
+
+  static PlaybackCacheProfileApplyPlan _memoryValues(
+    ResolvedPlaybackCacheProfile profile,
+    ResolvedPlaybackCacheOptionBindings bindings,
+  ) => _valuesFor(
+    bindings,
+    critical: {
+      PlaybackCacheLogicalOption.cache: 'yes',
+      PlaybackCacheLogicalOption.cacheOnDisk: 'no',
+      PlaybackCacheLogicalOption.cacheSeconds: profile.forwardTarget.inSeconds
+          .clamp(30, 60)
+          .toString(),
+      PlaybackCacheLogicalOption.forwardMetadataBytes: min(
+        profile.demuxerForwardMetadataBytes,
+        64 * 1024 * 1024,
+      ).toString(),
+      PlaybackCacheLogicalOption.backwardMetadataBytes: min(
+        profile.demuxerBackwardMetadataBytes,
+        16 * 1024 * 1024,
+      ).toString(),
+    },
+    optional: {..._optionalValues(profile), ..._resetOptionalValues(bindings)},
+  );
+
+  static PlaybackCacheProfileApplyPlan _disabledValues(
+    ResolvedPlaybackCacheProfile profile,
+    ResolvedPlaybackCacheOptionBindings bindings,
+  ) => _valuesFor(
+    bindings,
+    critical: {PlaybackCacheLogicalOption.cache: 'no'},
+    optional: {
+      PlaybackCacheLogicalOption.cacheOnDisk: 'no',
+      PlaybackCacheLogicalOption.cacheSeconds: '0',
+      PlaybackCacheLogicalOption.forwardMetadataBytes: '${16 * 1024 * 1024}',
+      PlaybackCacheLogicalOption.backwardMetadataBytes: '${8 * 1024 * 1024}',
+      PlaybackCacheLogicalOption.cachePause: 'no',
+      PlaybackCacheLogicalOption.streamBufferSize: '${128 * 1024}',
+      ..._resetOptionalValues(bindings),
+    },
+  );
+
+  static Map<PlaybackCacheLogicalOption, String> _optionalValues(
     ResolvedPlaybackCacheProfile profile,
   ) => {
-    'cache': 'yes',
-    'cache-on-disk': 'yes',
-    'demuxer-cache-dir': profile.sessionDirectory!.path,
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': profile.forwardTarget.inSeconds.toString(),
-    'demuxer-max-bytes': profile.demuxerForwardMetadataBytes.toString(),
-    'demuxer-max-back-bytes': profile.demuxerBackwardMetadataBytes.toString(),
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'yes',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': profile.streamBufferBytes.toString(),
+    PlaybackCacheLogicalOption.donateBuffer: profile.donateBuffer
+        ? 'yes'
+        : 'no',
+    PlaybackCacheLogicalOption.seekableCache: 'auto',
+    PlaybackCacheLogicalOption.cachePause: 'yes',
+    PlaybackCacheLogicalOption.cachePauseWait: '1',
+    PlaybackCacheLogicalOption.streamBufferSize: profile.streamBufferBytes
+        .toString(),
   };
 
-  static Map<String, String> _memoryValues(
-    ResolvedPlaybackCacheProfile profile,
-    Map<String, String> resetValues,
+  static Map<PlaybackCacheLogicalOption, String> _resetOptionalValues(
+    ResolvedPlaybackCacheOptionBindings bindings,
   ) => {
-    'cache': 'yes',
-    'cache-on-disk': 'no',
-    'demuxer-cache-dir': _requiredResetValue(resetValues, 'demuxer-cache-dir'),
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': profile.forwardTarget.inSeconds.clamp(30, 60).toString(),
-    'demuxer-max-bytes': min(
-      profile.demuxerForwardMetadataBytes,
-      64 * 1024 * 1024,
-    ).toString(),
-    'demuxer-max-back-bytes': min(
-      profile.demuxerBackwardMetadataBytes,
-      16 * 1024 * 1024,
-    ).toString(),
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'yes',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': profile.streamBufferBytes.toString(),
+    if (bindings.resetValue(PlaybackCacheLogicalOption.cacheDirectory) != null)
+      PlaybackCacheLogicalOption.cacheDirectory: bindings.resetValue(
+        PlaybackCacheLogicalOption.cacheDirectory,
+      )!,
+    if (bindings.resetValue(PlaybackCacheLogicalOption.cacheUnlinkFiles) !=
+        null)
+      PlaybackCacheLogicalOption.cacheUnlinkFiles: bindings.resetValue(
+        PlaybackCacheLogicalOption.cacheUnlinkFiles,
+      )!,
   };
 
-  static Map<String, String> _disabledValues(
-    ResolvedPlaybackCacheProfile profile,
-    Map<String, String> resetValues,
-  ) => {
-    'cache': 'no',
-    'cache-on-disk': 'no',
-    'demuxer-cache-dir': _requiredResetValue(resetValues, 'demuxer-cache-dir'),
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': '0',
-    'demuxer-max-bytes': (16 * 1024 * 1024).toString(),
-    'demuxer-max-back-bytes': (8 * 1024 * 1024).toString(),
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'no',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': (128 * 1024).toString(),
-  };
-
-  static String _requiredResetValue(
-    Map<String, String> resetValues,
-    String name,
-  ) {
-    final value = resetValues[name];
-    if (value == null) throw StateError('Missing native reset value');
-    return value;
+  static PlaybackCacheProfileApplyPlan _valuesFor(
+    ResolvedPlaybackCacheOptionBindings bindings, {
+    required Map<PlaybackCacheLogicalOption, String> critical,
+    required Map<PlaybackCacheLogicalOption, String> optional,
+  }) {
+    final availableCritical = <PlaybackCacheLogicalOption, String>{};
+    for (final entry in critical.entries) {
+      if (!bindings.supports(entry.key)) {
+        throw StateError('Missing critical option');
+      }
+      availableCritical[entry.key] = entry.value;
+    }
+    final availableOptional = <PlaybackCacheLogicalOption, String>{};
+    for (final entry in optional.entries) {
+      if (bindings.supports(entry.key)) {
+        availableOptional[entry.key] = entry.value;
+      }
+    }
+    return PlaybackCacheProfileApplyPlan(
+      criticalValues: availableCritical,
+      optionalValues: availableOptional,
+      criticalReadBack: availableCritical.keys.toSet(),
+      optionalReadBack: availableOptional.keys.toSet(),
+    );
   }
 }
 
@@ -368,7 +547,20 @@ class RuntimePlaybackCacheProfileSwitchExperiment
   }) async {
     Directory? root;
     try {
-      if (!playbackCacheProfileOptionNames.every(resetValues.containsKey)) {
+      final nativeNames = <PlaybackCacheLogicalOption, String>{};
+      final logicalResetValues = <PlaybackCacheLogicalOption, String>{};
+      for (final option in playbackCacheLogicalOptions) {
+        for (final candidate in playbackCacheNativeOptionCandidates[option]!) {
+          final reset = resetValues[candidate];
+          if (reset == null) continue;
+          nativeNames[option] = candidate;
+          logicalResetValues[option] = reset;
+          break;
+        }
+      }
+      if (!playbackCacheRequiredDiskLogicalOptions.every(
+        nativeNames.containsKey,
+      )) {
         return PlaybackCacheProfileSwitchStrategy.unsupported;
       }
       root = await Directory.systemTemp.createTemp('emby-mpv-capability-');
@@ -376,7 +568,9 @@ class RuntimePlaybackCacheProfileSwitchExperiment
       await media.writeAsBytes(_waveProbeData, flush: true);
       final profiles = _switchExperimentProfiles(
         cacheDirectory: root,
-        directoryReset: resetValues['demuxer-cache-dir']!,
+        nativeNames: nativeNames,
+        directoryReset:
+            logicalResetValues[PlaybackCacheLogicalOption.cacheDirectory]!,
       );
       for (final profile in profiles) {
         for (final entry in profile.entries) {
@@ -428,51 +622,62 @@ class RuntimePlaybackCacheProfileSwitchExperiment
 
 List<Map<String, String>> _switchExperimentProfiles({
   required Directory cacheDirectory,
+  required Map<PlaybackCacheLogicalOption, String> nativeNames,
   required String directoryReset,
-}) => [
-  {
-    'cache': 'yes',
-    'cache-on-disk': 'yes',
-    'demuxer-cache-dir': cacheDirectory.path,
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': '30',
-    'demuxer-max-bytes': '16777216',
-    'demuxer-max-back-bytes': '8388608',
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'yes',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': '131072',
-  },
-  {
-    'cache': 'yes',
-    'cache-on-disk': 'no',
-    'demuxer-cache-dir': directoryReset,
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': '30',
-    'demuxer-max-bytes': '16777216',
-    'demuxer-max-back-bytes': '8388608',
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'yes',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': '131072',
-  },
-  {
-    'cache': 'no',
-    'cache-on-disk': 'no',
-    'demuxer-cache-dir': directoryReset,
-    'demuxer-cache-unlink-files': 'immediate',
-    'cache-secs': '0',
-    'demuxer-max-bytes': '16777216',
-    'demuxer-max-back-bytes': '8388608',
-    'demuxer-donate-buffer': 'yes',
-    'demuxer-seekable-cache': 'auto',
-    'cache-pause': 'no',
-    'cache-pause-wait': '1',
-    'stream-buffer-size': '131072',
-  },
-];
+}) {
+  final profiles = <Map<PlaybackCacheLogicalOption, String>>[
+    {
+      PlaybackCacheLogicalOption.cache: 'yes',
+      PlaybackCacheLogicalOption.cacheOnDisk: 'yes',
+      PlaybackCacheLogicalOption.cacheDirectory: cacheDirectory.path,
+      PlaybackCacheLogicalOption.cacheUnlinkFiles: 'immediate',
+      PlaybackCacheLogicalOption.cacheSeconds: '30',
+      PlaybackCacheLogicalOption.forwardMetadataBytes: '16777216',
+      PlaybackCacheLogicalOption.backwardMetadataBytes: '8388608',
+      PlaybackCacheLogicalOption.donateBuffer: 'yes',
+      PlaybackCacheLogicalOption.seekableCache: 'auto',
+      PlaybackCacheLogicalOption.cachePause: 'yes',
+      PlaybackCacheLogicalOption.cachePauseWait: '1',
+      PlaybackCacheLogicalOption.streamBufferSize: '131072',
+    },
+    {
+      PlaybackCacheLogicalOption.cache: 'yes',
+      PlaybackCacheLogicalOption.cacheOnDisk: 'no',
+      PlaybackCacheLogicalOption.cacheDirectory: directoryReset,
+      PlaybackCacheLogicalOption.cacheUnlinkFiles: 'immediate',
+      PlaybackCacheLogicalOption.cacheSeconds: '30',
+      PlaybackCacheLogicalOption.forwardMetadataBytes: '16777216',
+      PlaybackCacheLogicalOption.backwardMetadataBytes: '8388608',
+      PlaybackCacheLogicalOption.donateBuffer: 'yes',
+      PlaybackCacheLogicalOption.seekableCache: 'auto',
+      PlaybackCacheLogicalOption.cachePause: 'yes',
+      PlaybackCacheLogicalOption.cachePauseWait: '1',
+      PlaybackCacheLogicalOption.streamBufferSize: '131072',
+    },
+    {
+      PlaybackCacheLogicalOption.cache: 'no',
+      PlaybackCacheLogicalOption.cacheOnDisk: 'no',
+      PlaybackCacheLogicalOption.cacheDirectory: directoryReset,
+      PlaybackCacheLogicalOption.cacheUnlinkFiles: 'immediate',
+      PlaybackCacheLogicalOption.cacheSeconds: '0',
+      PlaybackCacheLogicalOption.forwardMetadataBytes: '16777216',
+      PlaybackCacheLogicalOption.backwardMetadataBytes: '8388608',
+      PlaybackCacheLogicalOption.donateBuffer: 'yes',
+      PlaybackCacheLogicalOption.seekableCache: 'auto',
+      PlaybackCacheLogicalOption.cachePause: 'no',
+      PlaybackCacheLogicalOption.cachePauseWait: '1',
+      PlaybackCacheLogicalOption.streamBufferSize: '131072',
+    },
+  ];
+  return [
+    for (final profile in profiles)
+      {
+        for (final entry in profile.entries)
+          if (nativeNames.containsKey(entry.key))
+            nativeNames[entry.key]!: entry.value,
+      },
+  ];
+}
 
 bool _equivalentNativeValue(String actual, String expected) {
   final normalizedActual = actual.trim().toLowerCase();

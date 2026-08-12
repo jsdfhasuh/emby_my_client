@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'native_playback_property_access.dart';
+import 'playback_cache_option_bindings.dart';
 
 enum PlaybackCacheProfileSwitchStrategy {
   inPlaceAfterMediaStop,
@@ -39,6 +40,7 @@ class PlaybackCacheEngineCapabilities {
     required this.supportsImmediateUnlink,
     required this.profileSwitchStrategy,
     required this.resetValues,
+    this.optionBindings,
   });
 
   factory PlaybackCacheEngineCapabilities.unsupported({
@@ -60,35 +62,45 @@ class PlaybackCacheEngineCapabilities {
   final bool supportsImmediateUnlink;
   final PlaybackCacheProfileSwitchStrategy profileSwitchStrategy;
   final Map<String, String> resetValues;
+  final ResolvedPlaybackCacheOptionBindings? optionBindings;
+
+  ResolvedPlaybackCacheOptionBindings get bindings =>
+      optionBindings ??
+      bindingsFromNativeMaps(
+        optionSupport: optionSupport,
+        resetValues: resetValues,
+      );
 
   bool get supportsDiskCache =>
-      _supportsOption('cache') && _supportsOption('cache-on-disk');
-  bool get supportsCacheDirectory => _supportsOption('demuxer-cache-dir');
+      bindings.supports(PlaybackCacheLogicalOption.cache) &&
+      bindings.supports(PlaybackCacheLogicalOption.cacheOnDisk);
+  bool get supportsCacheDirectory =>
+      bindings.supports(PlaybackCacheLogicalOption.cacheDirectory);
   bool get supportsNativeCacheState => _supportsProperty('demuxer-cache-state');
   bool get supportsSeekableRanges => supportsNativeCacheState;
   bool get supportsFileCacheBytes => supportsNativeCacheState;
   bool get supportsRawInputRate => supportsNativeCacheState;
-  bool get supportsStreamBufferSize => _supportsOption('stream-buffer-size');
-  bool get hasCompleteResetValues =>
-      playbackCacheProfileOptionNames.every(resetValues.containsKey);
+  bool get supportsStreamBufferSize =>
+      bindings.supports(PlaybackCacheLogicalOption.streamBufferSize);
+  bool get hasCompleteResetValues => playbackCacheLogicalOptions.every(
+    (option) =>
+        bindings.supports(option) && bindings.resetValue(option) != null,
+  );
 
   bool get diskGatePassed =>
-      playbackCacheRequiredDiskOptionNames.every(_supportsOption) &&
-      hasCompleteResetValues &&
+      playbackCacheRequiredDiskLogicalOptions.every(bindings.supports) &&
       supportsImmediateUnlink &&
       supportsNativeCacheState &&
       supportsSeekableRanges &&
       supportsFileCacheBytes &&
       profileSwitchStrategy != PlaybackCacheProfileSwitchStrategy.unsupported;
 
-  bool _supportsOption(String name) => optionSupport[name] ?? false;
   bool _supportsProperty(String name) => propertySupport[name] ?? false;
 
   Map<String, Object> toSafeDiagnosticManifest() => {
     'mpvVersionFingerprint': _safeFingerprint(mpvVersionFingerprint),
     'platform': _safePlatform(platform),
-    for (final option in playbackCacheOptionNames)
-      'option_${_safeKey(option)}': optionSupport[option] ?? false,
+    ...bindings.toSafeDiagnosticManifest(),
     for (final property in playbackCachePropertyNames)
       'property_${_safeKey(property)}': propertySupport[property] ?? false,
     'supportsImmediateUnlink': supportsImmediateUnlink,
@@ -116,8 +128,8 @@ class PlaybackCacheCapabilityProbe {
 
   Future<PlaybackCacheEngineCapabilities> probe() async {
     final options = <String, bool>{};
-    for (final name in playbackCacheOptionNames) {
-      options[name] = await access.hasOption(name);
+    for (final name in playbackCacheNativeOptionNames) {
+      if (await access.hasOption(name)) options[name] = true;
     }
 
     final properties = <String, bool>{};
@@ -125,30 +137,49 @@ class PlaybackCacheCapabilityProbe {
       properties[name] = await access.hasProperty(name);
     }
 
-    final choices = await access.getNative(
-      'option-info/demuxer-cache-unlink-files/choices',
-    );
     final resetValues = <String, String>{};
-    for (final name in playbackCacheProfileOptionNames) {
+    for (final name in playbackCacheNativeOptionNames) {
       if (options[name] != true) continue;
       final value = await access.getString('option-info/$name/default-value');
       if (value != null) resetValues[name] = value;
     }
 
-    final requiredOptionsAvailable = playbackCacheRequiredDiskOptionNames.every(
-      (name) => options[name] == true,
+    final choiceAvailability = <String, bool>{};
+    for (final name in [
+      ...playbackCacheNativeOptionCandidates[PlaybackCacheLogicalOption
+          .cacheUnlinkFiles]!,
+    ]) {
+      if (options[name] != true) continue;
+      final choices = await access.getNative('option-info/$name/choices');
+      choiceAvailability[name] = _containsChoice(choices, 'immediate');
+    }
+
+    final writeReadBack = <String, bool>{};
+    for (final name in playbackCacheNativeOptionNames) {
+      final reset = resetValues[name];
+      if (options[name] != true || reset == null) continue;
+      writeReadBack[name] = await _writeAndReadBack(name, reset);
+    }
+
+    final bindings = resolvePlaybackCacheOptionBindings(
+      optionSupport: options,
+      resetValues: resetValues,
+      requiredChoiceAvailable: choiceAvailability,
+      writeReadBackPassed: writeReadBack,
     );
-    final resetValuesComplete = playbackCacheProfileOptionNames.every(
-      resetValues.containsKey,
-    );
+
+    final requiredOptionsAvailable = playbackCacheRequiredDiskLogicalOptions
+        .every(bindings.supports);
     var switchStrategy = PlaybackCacheProfileSwitchStrategy.unsupported;
     if (requiredOptionsAvailable &&
-        resetValuesComplete &&
-        _containsChoice(choices, 'immediate') &&
+        bindings.supports(PlaybackCacheLogicalOption.cacheUnlinkFiles) &&
         profileSwitchExperiment != null) {
       switchStrategy = await profileSwitchExperiment!.run(
         access: access,
-        resetValues: Map.unmodifiable(resetValues),
+        resetValues: Map.unmodifiable({
+          for (final entry in bindings.resetValues.entries)
+            bindings.nativeName(entry.key)!: entry.value,
+        }),
       );
     }
 
@@ -159,10 +190,49 @@ class PlaybackCacheCapabilityProbe {
       platform: _safePlatform(await access.getString('platform')),
       optionSupport: Map.unmodifiable(options),
       propertySupport: Map.unmodifiable(properties),
-      supportsImmediateUnlink: _containsChoice(choices, 'immediate'),
+      supportsImmediateUnlink: bindings.supports(
+        PlaybackCacheLogicalOption.cacheUnlinkFiles,
+      ),
       profileSwitchStrategy: switchStrategy,
       resetValues: Map.unmodifiable(resetValues),
+      optionBindings: bindings,
     );
+  }
+
+  Future<bool> _writeAndReadBack(String name, String reset) async {
+    try {
+      final logicalOption = playbackCacheLogicalOptionForNativeName(name);
+      if (logicalOption == null) return false;
+      final probeValue = _probeValue(logicalOption, reset);
+      await access.setString(name, probeValue);
+      final actual = await access.getString(name);
+      await access.setString(name, reset);
+      if (actual == null) return false;
+      return playbackNativeValueCanonicalizer.equivalent(
+        logicalOption,
+        actual,
+        probeValue,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _probeValue(PlaybackCacheLogicalOption option, String reset) {
+    return switch (option) {
+      PlaybackCacheLogicalOption.cache => 'yes',
+      PlaybackCacheLogicalOption.cacheOnDisk => 'no',
+      PlaybackCacheLogicalOption.cacheDirectory => reset,
+      PlaybackCacheLogicalOption.cacheUnlinkFiles => 'immediate',
+      PlaybackCacheLogicalOption.cacheSeconds => '1',
+      PlaybackCacheLogicalOption.forwardMetadataBytes => '1',
+      PlaybackCacheLogicalOption.backwardMetadataBytes => '1',
+      PlaybackCacheLogicalOption.donateBuffer => 'yes',
+      PlaybackCacheLogicalOption.seekableCache => 'auto',
+      PlaybackCacheLogicalOption.cachePause => 'yes',
+      PlaybackCacheLogicalOption.cachePauseWait => '1',
+      PlaybackCacheLogicalOption.streamBufferSize => '1',
+    };
   }
 }
 
@@ -181,9 +251,25 @@ const playbackCacheOptionNames = <String>[
   'stream-buffer-size',
 ];
 
+const playbackCacheNativeOptionNames = <String>[
+  ...playbackCacheOptionNames,
+  'cache-dir',
+  'cache-unlink-files',
+];
+
 const playbackCacheProfileOptionNames = playbackCacheOptionNames;
 
 const playbackCacheRequiredDiskOptionNames = playbackCacheOptionNames;
+
+const playbackCacheRequiredDiskLogicalOptions = <PlaybackCacheLogicalOption>[
+  PlaybackCacheLogicalOption.cache,
+  PlaybackCacheLogicalOption.cacheOnDisk,
+  PlaybackCacheLogicalOption.cacheDirectory,
+  PlaybackCacheLogicalOption.cacheUnlinkFiles,
+  PlaybackCacheLogicalOption.cacheSeconds,
+  PlaybackCacheLogicalOption.forwardMetadataBytes,
+  PlaybackCacheLogicalOption.backwardMetadataBytes,
+];
 
 const playbackCachePropertyNames = <String>[
   'mpv-version',
