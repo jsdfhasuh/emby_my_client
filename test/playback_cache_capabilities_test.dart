@@ -38,6 +38,10 @@ void main() {
         result.toSafeDiagnosticManifest().keys,
         isNot(contains(anyOf('path', 'url', 'itemId', 'deviceId'))),
       );
+      expect(
+        result.toSafeDiagnosticManifest().keys,
+        isNot(contains('property_demuxer_cache_state')),
+      );
     },
   );
 
@@ -54,6 +58,35 @@ void main() {
       expect(result.supportsCacheDirectory, isFalse);
     },
   );
+
+  test('probe restores reset value after a native read failure', () async {
+    final access = _FakeNativeAccess.complete()
+      ..throwPropertyReadOnce = 'cache';
+
+    final result = await PlaybackCacheCapabilityProbe(access: access).probe();
+
+    expect(access.strings['cache'], 'no');
+    expect(
+      result.bindings.statusFor(PlaybackCacheLogicalOption.cache, 0),
+      PlaybackNativeOptionCandidateStatus.presentButIncomplete,
+    );
+  });
+
+  test('probe rejects an option whose reported name does not match', () async {
+    final access = _FakeNativeAccess.complete()
+      ..strings['option-info/demuxer-cache-dir/name'] = 'cache-dir';
+
+    final result = await PlaybackCacheCapabilityProbe(access: access).probe();
+
+    expect(
+      result.bindings.statusFor(PlaybackCacheLogicalOption.cacheDirectory, 0),
+      PlaybackNativeOptionCandidateStatus.unavailable,
+    );
+    expect(
+      result.bindings.supports(PlaybackCacheLogicalOption.cacheDirectory),
+      isFalse,
+    );
+  });
 
   test(
     'missing immediate choice blocks disk without running experiment',
@@ -283,10 +316,10 @@ class _FakeExperiment implements PlaybackCacheProfileSwitchExperiment {
   @override
   Future<PlaybackCacheProfileSwitchStrategy> run({
     required NativePlaybackPropertyAccess access,
-    required Map<String, String> resetValues,
+    required ResolvedPlaybackCacheOptionBindings bindings,
   }) async {
     calls++;
-    expect(resetValues, contains('cache-on-disk'));
+    expect(bindings.supports(PlaybackCacheLogicalOption.cacheOnDisk), isTrue);
     return result;
   }
 }
@@ -298,6 +331,8 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
       strings = {
         'mpv-version': 'mpv 0.40.0 Copyright build path must not escape',
         'platform': 'darwin',
+        for (final option in playbackCacheOptionNames)
+          'option-info/$option/name': option,
         for (final option in playbackCacheOptionNames)
           'option-info/$option/default-value': _resetValue(option),
       },
@@ -316,6 +351,7 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   final List<List<Object>> commands = [];
   final List<String> profileCacheModes = [];
   bool failResetReadBack = false;
+  String? throwPropertyReadOnce;
 
   static String _resetValue(String option) => switch (option) {
     'demuxer-cache-dir' => '',
@@ -334,7 +370,13 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
   };
 
   @override
-  Future<String?> getString(String name) async => strings[name];
+  Future<String?> getString(String name) async {
+    if (throwPropertyReadOnce == name) {
+      throwPropertyReadOnce = null;
+      throw StateError('fixture native read failure');
+    }
+    return strings[name];
+  }
 
   @override
   Future<Object?> getNative(String name) async =>

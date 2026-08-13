@@ -4,6 +4,7 @@ import 'dart:math';
 import 'playback_cache_engine.dart';
 import 'playback_cache_policy.dart';
 import 'playback_cache_storage.dart';
+import 'playback_cache_telemetry.dart';
 
 enum PlaybackCacheSafetyReason { budget, lowSpace, memoryPressure }
 
@@ -46,7 +47,21 @@ class PlaybackCacheCoordinator {
     this.expectedCloseLatency = const Duration(seconds: 2),
     this.generation = 0,
     this.isGenerationCurrent,
-  });
+    Object? playbackItemSessionIdentity,
+    PlaybackCacheReadIdentityCurrent? isReadIdentityCurrent,
+  }) : _readIdentity = PlaybackCacheReadIdentity(
+         sessionIdentity: playbackItemSessionIdentity ?? session,
+         engineIdentity: engine,
+         operationGeneration: generation,
+       ),
+       _isReadIdentityCurrent =
+           isReadIdentityCurrent ??
+           ((identity) =>
+               identity.sessionIdentity ==
+                   (playbackItemSessionIdentity ?? session) &&
+               identical(identity.engineIdentity, engine) &&
+               (isGenerationCurrent?.call(identity.operationGeneration) ??
+                   true));
 
   static const int _mib = 1024 * 1024;
 
@@ -63,6 +78,8 @@ class PlaybackCacheCoordinator {
   final Duration expectedCloseLatency;
   final int generation;
   final bool Function(int generation)? isGenerationCurrent;
+  final PlaybackCacheReadIdentity _readIdentity;
+  final PlaybackCacheReadIdentityCurrent _isReadIdentityCurrent;
 
   Timer? _stateTimer;
   Timer? _spaceTimer;
@@ -132,19 +149,19 @@ class PlaybackCacheCoordinator {
   Future<void> _refresh(bool checkSpace) async {
     PlaybackCacheEngineSnapshot? snapshot;
     try {
-      final generationReader = engine is PlaybackCacheGenerationSnapshotReader
-          ? engine as PlaybackCacheGenerationSnapshotReader
+      final identityReader = engine is PlaybackCacheIdentitySnapshotReader
+          ? engine as PlaybackCacheIdentitySnapshotReader
           : null;
-      snapshot = generationReader == null
+      snapshot = identityReader == null
           ? await engine.readCacheSnapshot()
-          : await generationReader.readCacheSnapshotForGeneration(
-              generation: generation,
-              isGenerationCurrent: isGenerationCurrent ?? (_) => true,
+          : await identityReader.readCacheSnapshotForIdentity(
+              identity: _readIdentity,
+              isIdentityCurrent: _isReadIdentityCurrent,
             );
     } catch (_) {
       snapshot = null;
     }
-    if (!_active) return;
+    if (!_active || !_isReadIdentityCurrent(_readIdentity)) return;
 
     if (checkSpace) {
       try {
@@ -152,7 +169,7 @@ class PlaybackCacheCoordinator {
       } catch (_) {
         _lastAvailableBytes = null;
       }
-      if (!_active) return;
+      if (!_active || !_isReadIdentityCurrent(_readIdentity)) return;
     }
 
     final rate = _effectiveRate(snapshot?.rawInputRateBytesPerSecond);

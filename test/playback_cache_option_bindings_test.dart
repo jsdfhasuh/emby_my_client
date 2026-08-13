@@ -63,6 +63,58 @@ void main() {
     );
   });
 
+  test('modern unlink candidate without immediate falls through to legacy', () {
+    final bindings = resolvePlaybackCacheOptionBindings(
+      optionSupport: {
+        'demuxer-cache-unlink-files': true,
+        'cache-unlink-files': true,
+      },
+      resetValues: {
+        'demuxer-cache-unlink-files': 'whendone',
+        'cache-unlink-files': 'whendone',
+      },
+      requiredChoiceAvailable: {
+        'demuxer-cache-unlink-files': false,
+        'cache-unlink-files': true,
+      },
+      writeReadBackPassed: {
+        'demuxer-cache-unlink-files': true,
+        'cache-unlink-files': true,
+      },
+    );
+
+    expect(
+      bindings.nativeName(PlaybackCacheLogicalOption.cacheUnlinkFiles),
+      'cache-unlink-files',
+    );
+    expect(
+      bindings.statusFor(PlaybackCacheLogicalOption.cacheUnlinkFiles, 0),
+      PlaybackNativeOptionCandidateStatus.presentButIncomplete,
+    );
+    expect(
+      bindings.statusFor(PlaybackCacheLogicalOption.cacheUnlinkFiles, 1),
+      PlaybackNativeOptionCandidateStatus.usable,
+    );
+  });
+
+  test('a mismatched option-info name is unavailable', () {
+    final bindings = resolvePlaybackCacheOptionBindings(
+      optionSupport: {'demuxer-cache-dir': true, 'cache-dir': true},
+      optionNameMatches: {'demuxer-cache-dir': false, 'cache-dir': true},
+      resetValues: {'demuxer-cache-dir': '', 'cache-dir': ''},
+      writeReadBackPassed: {'demuxer-cache-dir': true, 'cache-dir': true},
+    );
+
+    expect(
+      bindings.nativeName(PlaybackCacheLogicalOption.cacheDirectory),
+      'cache-dir',
+    );
+    expect(
+      bindings.statusFor(PlaybackCacheLogicalOption.cacheDirectory, 0),
+      PlaybackNativeOptionCandidateStatus.unavailable,
+    );
+  });
+
   test('both aliases incomplete are explicitly unavailable', () {
     final bindings = resolvePlaybackCacheOptionBindings(
       optionSupport: {'demuxer-cache-dir': true, 'cache-dir': true},

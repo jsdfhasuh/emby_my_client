@@ -5,6 +5,55 @@ import 'package:emby_my_client/playback/cache/playback_cache_telemetry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('pure node parser accepts only the stable telemetry shape', () {
+    final state = PlaybackCacheNativeNodeParser.parse({
+      'file-cache-bytes': 12,
+      'raw-input-rate': '2048',
+      'seekable-ranges': [
+        {'start': 0, 'end': 10},
+        {'start': 10, 'end': 5},
+      ],
+      'unknown': r'C:\Users\owner\secret',
+    });
+    expect(state?.fileCacheBytes, 12);
+    expect(state?.rawInputRateBytesPerSecond, 2048);
+    expect(state?.seekableRanges, hasLength(1));
+    expect(PlaybackCacheNativeNodeParser.parse({'unknown': 'only'}), isNull);
+    expect(
+      PlaybackCacheNativeNodeParser.parse({'file-cache-bytes': double.nan}),
+      isNull,
+    );
+  });
+
+  test(
+    'structured property-list entries are matched without debug strings',
+    () {
+      const propertyList = [
+        {'name': 'demuxer-cache-state', 'value': 'node'},
+        {'name': 'idle-active'},
+      ];
+
+      expect(
+        nativePropertyListContains(propertyList, 'demuxer-cache-state'),
+        isTrue,
+      );
+      expect(nativePropertyListContains(propertyList, 'missing'), isFalse);
+      expect(
+        nativePropertyListContains([
+          {'value': 'demuxer-cache-state'},
+          {'name': 42},
+        ], 'demuxer-cache-state'),
+        isFalse,
+      );
+      expect(
+        nativePropertyListContains([
+          'demuxer-cache-state',
+        ], 'demuxer-cache-state'),
+        isTrue,
+      );
+    },
+  );
+
   test(
     'parses a valid native cache state and ignores damaged ranges',
     () async {
@@ -134,6 +183,115 @@ void main() {
     expect(await result, isNull);
     coordinator.dispose();
   });
+
+  test('stale engine identity result is discarded', () async {
+    final pending = Completer<PlaybackCacheTelemetryRead>();
+    final coordinator = PlaybackCacheTelemetryReadCoordinator(
+      reader: _Reader([pending.future]),
+    );
+    final session = Object();
+    final firstEngine = Object();
+    var currentEngine = firstEngine;
+    final identity = PlaybackCacheReadIdentity(
+      sessionIdentity: session,
+      engineIdentity: firstEngine,
+      operationGeneration: 1,
+    );
+    final result = coordinator.readForIdentity(
+      identity: identity,
+      isIdentityCurrent: (candidate) =>
+          identical(candidate.sessionIdentity, session) &&
+          identical(candidate.engineIdentity, currentEngine) &&
+          candidate.operationGeneration == 1,
+    );
+
+    currentEngine = Object();
+    pending.complete(
+      const PlaybackCacheTelemetryRead.available(
+        PlaybackCacheNativeState(fileCacheBytes: 5),
+      ),
+    );
+
+    expect(await result, isNull);
+    coordinator.dispose();
+  });
+
+  test('stale pending identity never starts a native read', () async {
+    final first = Completer<PlaybackCacheTelemetryRead>();
+    final reader = _Reader([
+      first.future,
+      Future.value(
+        const PlaybackCacheTelemetryRead.available(
+          PlaybackCacheNativeState(fileCacheBytes: 2),
+        ),
+      ),
+    ]);
+    final coordinator = PlaybackCacheTelemetryReadCoordinator(reader: reader);
+    final session = Object();
+    final engine = Object();
+    var currentGeneration = 1;
+    final firstRead = coordinator.readForIdentity(
+      identity: PlaybackCacheReadIdentity(
+        sessionIdentity: session,
+        engineIdentity: engine,
+        operationGeneration: 1,
+      ),
+      isIdentityCurrent: (identity) =>
+          identity.operationGeneration == currentGeneration,
+    );
+    final pending = coordinator.readForIdentity(
+      identity: PlaybackCacheReadIdentity(
+        sessionIdentity: session,
+        engineIdentity: engine,
+        operationGeneration: 2,
+      ),
+      isIdentityCurrent: (identity) =>
+          identity.operationGeneration == currentGeneration,
+    );
+
+    currentGeneration = 3;
+    first.complete(
+      const PlaybackCacheTelemetryRead.available(
+        PlaybackCacheNativeState(fileCacheBytes: 1),
+      ),
+    );
+
+    expect(await firstRead, isNull);
+    expect(await pending, isNull);
+    expect(reader.calls, 1);
+    coordinator.dispose();
+  });
+
+  test(
+    'dispose releases an active read without waiting for the native future',
+    () async {
+      final pending = Completer<PlaybackCacheTelemetryRead>();
+      final coordinator = PlaybackCacheTelemetryReadCoordinator(
+        reader: _Reader([pending.future]),
+      );
+      final result = coordinator.readForGeneration(
+        generation: 1,
+        isGenerationCurrent: (_) => true,
+      );
+
+      coordinator.dispose();
+
+      expect(await result, isNull);
+      pending.complete(
+        const PlaybackCacheTelemetryRead.available(
+          PlaybackCacheNativeState(fileCacheBytes: 99),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        coordinator.readForGeneration(
+          generation: 2,
+          isGenerationCurrent: (_) => true,
+        ),
+        completion(isNull),
+      );
+    },
+  );
 }
 
 class _Reader implements PlaybackCacheTelemetryReader {

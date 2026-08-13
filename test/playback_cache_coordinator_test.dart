@@ -7,6 +7,7 @@ import 'package:emby_my_client/playback/cache/playback_cache_coordinator.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_telemetry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -129,6 +130,46 @@ void main() {
     expect(engine.reads, 2);
     await coordinator.stop();
   });
+
+  test('stale playback identity cannot publish a cache observation', () async {
+    final gate = Completer<void>();
+    final engine = _IdentityEngine(gate);
+    final sessionIdentity = Object();
+    var current = true;
+    final observations = <PlaybackCacheObservation>[];
+    final coordinator = PlaybackCacheCoordinator(
+      engine: engine,
+      storage: _Storage(freeBytes: 20 << 30),
+      session: _session,
+      profile: _profile,
+      mediaBitrate: 8 * 1000 * 1000,
+      committedPosition: () => Duration.zero,
+      onObservation: observations.add,
+      onSafetyReopen: (_) async {},
+      generation: 4,
+      playbackItemSessionIdentity: sessionIdentity,
+      isReadIdentityCurrent: (identity) =>
+          current &&
+          identical(identity.sessionIdentity, sessionIdentity) &&
+          identical(identity.engineIdentity, engine) &&
+          identity.operationGeneration == 4,
+      statePollInterval: const Duration(hours: 1),
+      spacePollInterval: const Duration(hours: 1),
+    );
+
+    final start = coordinator.start();
+    await Future<void>.delayed(Duration.zero);
+    expect(engine.identity?.sessionIdentity, same(sessionIdentity));
+    expect(engine.identity?.engineIdentity, same(engine));
+    expect(engine.identity?.operationGeneration, 4);
+
+    current = false;
+    gate.complete();
+    await start;
+
+    expect(observations, isEmpty);
+    await coordinator.stop();
+  });
 }
 
 const _profile = ResolvedPlaybackCacheProfile(
@@ -181,6 +222,47 @@ class _Engine implements PlaybackCacheEngine {
     await readGate?.future;
     concurrentReads--;
     return snapshot;
+  }
+}
+
+class _IdentityEngine
+    implements PlaybackCacheEngine, PlaybackCacheIdentitySnapshotReader {
+  _IdentityEngine(this.gate);
+
+  final Completer<void> gate;
+  PlaybackCacheReadIdentity? identity;
+
+  @override
+  Future<PlaybackCacheApplyResult> configureCache(
+    ResolvedPlaybackCacheProfile profile,
+    PlaybackCacheEngineCapabilities capabilities,
+  ) => throw UnimplementedError();
+
+  @override
+  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() =>
+      throw UnimplementedError();
+
+  @override
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
+      throw UnimplementedError();
+
+  @override
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
+    required PlaybackCacheReadIdentity identity,
+    required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
+  }) async {
+    this.identity = identity;
+    await gate.future;
+    return isIdentityCurrent(identity)
+        ? const PlaybackCacheEngineSnapshot(
+            fileCacheBytes: 1,
+            rawInputRateBytesPerSecond: 1,
+            seekableRanges: [],
+            pausedForCache: false,
+            cacheBufferingPercent: 0,
+            cacheOnDisk: true,
+          )
+        : null;
   }
 }
 

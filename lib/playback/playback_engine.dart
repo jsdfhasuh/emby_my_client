@@ -5,6 +5,7 @@ import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
+import 'cache/playback_cache_telemetry.dart';
 import 'playback_diagnostics.dart';
 
 typedef NativePropertyWriter =
@@ -89,7 +90,11 @@ abstract interface class PlaybackEngine {
   Future<void> dispose();
 }
 
-class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
+class MediaKitPlaybackEngine
+    implements
+        PlaybackEngine,
+        PlaybackCacheEngine,
+        PlaybackCacheIdentitySnapshotReader {
   MediaKitPlaybackEngine(
     this.player, {
     this.nativePropertyWriter,
@@ -210,6 +215,17 @@ class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
       _cacheEngine?.readCacheSnapshot() ?? Future.value();
 
   @override
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
+    required PlaybackCacheReadIdentity identity,
+    required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
+  }) =>
+      _cacheEngine?.readCacheSnapshotForIdentity(
+        identity: identity,
+        isIdentityCurrent: isIdentityCurrent,
+      ) ??
+      Future.value();
+
+  @override
   Future<void> play() => player.play();
 
   @override
@@ -303,5 +319,8 @@ class MediaKitPlaybackEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void> stop() => player.stop();
 
   @override
-  Future<void> dispose() => player.dispose();
+  Future<void> dispose() async {
+    _cacheEngine?.dispose();
+    await player.dispose();
+  }
 }

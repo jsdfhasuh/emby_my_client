@@ -101,8 +101,10 @@ class PlaybackCacheEngineCapabilities {
     'mpvVersionFingerprint': _safeFingerprint(mpvVersionFingerprint),
     'platform': _safePlatform(platform),
     ...bindings.toSafeDiagnosticManifest(),
-    for (final property in playbackCachePropertyNames)
-      'property_${_safeKey(property)}': propertySupport[property] ?? false,
+    'cacheStatePropertySupported': supportsNativeCacheState,
+    'seekableRangesSupported': supportsSeekableRanges,
+    'fileCacheBytesSupported': supportsFileCacheBytes,
+    'rawInputRateSupported': supportsRawInputRate,
     'supportsImmediateUnlink': supportsImmediateUnlink,
     'resetValuesComplete': hasCompleteResetValues,
     'profileSwitchStrategy': profileSwitchStrategy.name,
@@ -113,7 +115,7 @@ class PlaybackCacheEngineCapabilities {
 abstract interface class PlaybackCacheProfileSwitchExperiment {
   Future<PlaybackCacheProfileSwitchStrategy> run({
     required NativePlaybackPropertyAccess access,
-    required Map<String, String> resetValues,
+    required ResolvedPlaybackCacheOptionBindings bindings,
   });
 }
 
@@ -128,8 +130,17 @@ class PlaybackCacheCapabilityProbe {
 
   Future<PlaybackCacheEngineCapabilities> probe() async {
     final options = <String, bool>{};
+    final optionNameMatches = <String, bool>{};
     for (final name in playbackCacheNativeOptionNames) {
-      if (await access.hasOption(name)) options[name] = true;
+      final exists = await access.hasOption(name);
+      if (!exists) {
+        optionNameMatches[name] = false;
+        continue;
+      }
+      final reportedName = await access.getString('option-info/$name/name');
+      final matches = reportedName == name;
+      optionNameMatches[name] = matches;
+      if (matches) options[name] = true;
     }
 
     final properties = <String, bool>{};
@@ -164,6 +175,7 @@ class PlaybackCacheCapabilityProbe {
     final bindings = resolvePlaybackCacheOptionBindings(
       optionSupport: options,
       resetValues: resetValues,
+      optionNameMatches: optionNameMatches,
       requiredChoiceAvailable: choiceAvailability,
       writeReadBackPassed: writeReadBack,
     );
@@ -176,10 +188,7 @@ class PlaybackCacheCapabilityProbe {
         profileSwitchExperiment != null) {
       switchStrategy = await profileSwitchExperiment!.run(
         access: access,
-        resetValues: Map.unmodifiable({
-          for (final entry in bindings.resetValues.entries)
-            bindings.nativeName(entry.key)!: entry.value,
-        }),
+        bindings: bindings,
       );
     }
 
@@ -200,28 +209,39 @@ class PlaybackCacheCapabilityProbe {
   }
 
   Future<bool> _writeAndReadBack(String name, String reset) async {
+    final logicalOption = playbackCacheLogicalOptionForNativeName(name);
+    if (logicalOption == null) return false;
+    final probeValue = _probeValue(logicalOption, reset);
+    String? actual;
+    var probeReadCompleted = false;
     try {
-      final logicalOption = playbackCacheLogicalOptionForNativeName(name);
-      if (logicalOption == null) return false;
-      final probeValue = _probeValue(logicalOption, reset);
       await access.setString(name, probeValue);
-      final actual = await access.getString(name);
+      actual = await access.getString(name);
+      probeReadCompleted = true;
+    } catch (_) {
+      // Restoration below is still required after a partial native failure.
+    }
+
+    String? resetActual;
+    try {
       await access.setString(name, reset);
-      final resetActual = await access.getString(name);
-      if (actual == null || resetActual == null) return false;
-      return playbackNativeValueCanonicalizer.equivalent(
-            logicalOption,
-            actual,
-            probeValue,
-          ) &&
-          playbackNativeValueCanonicalizer.equivalent(
-            logicalOption,
-            resetActual,
-            reset,
-          );
+      resetActual = await access.getString(name);
     } catch (_) {
       return false;
     }
+    if (!probeReadCompleted || actual == null || resetActual == null) {
+      return false;
+    }
+    return playbackNativeValueCanonicalizer.equivalent(
+          logicalOption,
+          actual,
+          probeValue,
+        ) &&
+        playbackNativeValueCanonicalizer.equivalent(
+          logicalOption,
+          resetActual,
+          reset,
+        );
   }
 
   String _probeValue(PlaybackCacheLogicalOption option, String reset) {
@@ -331,5 +351,3 @@ String _safePlatform(String? value) {
     _ => 'unsupported',
   };
 }
-
-String _safeKey(String value) => value.replaceAll('-', '_');

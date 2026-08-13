@@ -90,15 +90,15 @@ abstract interface class PlaybackCacheEngine {
   Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot();
 }
 
-abstract interface class PlaybackCacheGenerationSnapshotReader {
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForGeneration({
-    required int generation,
-    required bool Function(int generation) isGenerationCurrent,
+abstract interface class PlaybackCacheIdentitySnapshotReader {
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
+    required PlaybackCacheReadIdentity identity,
+    required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
   });
 }
 
 class NativePlaybackCacheEngine
-    implements PlaybackCacheEngine, PlaybackCacheGenerationSnapshotReader {
+    implements PlaybackCacheEngine, PlaybackCacheIdentitySnapshotReader {
   NativePlaybackCacheEngine({
     required this.access,
     required bool Function() hasOpenedMedia,
@@ -114,20 +114,34 @@ class NativePlaybackCacheEngine
   final bool Function() _hasOpenedMedia;
   final PlaybackCacheTelemetryReadCoordinator _telemetry;
   Future<PlaybackCacheEngineCapabilities>? _capabilities;
+  bool _disposed = false;
 
   @override
-  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() =>
-      _capabilities ??= PlaybackCacheCapabilityProbe(
-        access: access,
-        profileSwitchExperiment:
-            const RuntimePlaybackCacheProfileSwitchExperiment(),
-      ).probe();
+  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() {
+    if (_disposed) {
+      return Future.value(PlaybackCacheEngineCapabilities.unsupported());
+    }
+    return _capabilities ??= PlaybackCacheCapabilityProbe(
+      access: access,
+      profileSwitchExperiment:
+          const RuntimePlaybackCacheProfileSwitchExperiment(),
+    ).probe();
+  }
 
   @override
   Future<PlaybackCacheApplyResult> configureCache(
     ResolvedPlaybackCacheProfile profile,
     PlaybackCacheEngineCapabilities capabilities,
   ) async {
+    if (_disposed) {
+      return PlaybackCacheApplyResult(
+        requestedMode: profile.runtimeMode,
+        actualMode: PlaybackCacheRuntimeMode.unconfirmed,
+        fallbackReason: PlaybackCacheFallbackReason.actualModeUnconfirmed,
+        requiresPlayerRecreation: false,
+        readBack: const {},
+      );
+    }
     if (_hasOpenedMedia() &&
         capabilities.profileSwitchStrategy ==
             PlaybackCacheProfileSwitchStrategy.requiresPlayerRecreation) {
@@ -146,22 +160,35 @@ class NativePlaybackCacheEngine
   }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
-      readCacheSnapshotForGeneration(
-        generation: 0,
-        isGenerationCurrent: (_) => true,
-      );
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() {
+    final identity = PlaybackCacheReadIdentity(
+      sessionIdentity: this,
+      engineIdentity: this,
+      operationGeneration: 0,
+    );
+    return readCacheSnapshotForIdentity(
+      identity: identity,
+      isIdentityCurrent: (candidate) =>
+          !_disposed &&
+          identical(candidate.sessionIdentity, this) &&
+          identical(candidate.engineIdentity, this) &&
+          candidate.operationGeneration == 0,
+    );
+  }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForGeneration({
-    required int generation,
-    required bool Function(int generation) isGenerationCurrent,
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
+    required PlaybackCacheReadIdentity identity,
+    required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
   }) async {
-    final telemetry = await _telemetry.readForGeneration(
-      generation: generation,
-      isGenerationCurrent: isGenerationCurrent,
+    if (_disposed || !isIdentityCurrent(identity)) return null;
+    final telemetry = await _telemetry.readForIdentity(
+      identity: identity,
+      isIdentityCurrent: isIdentityCurrent,
     );
-    if (telemetry == null) return null;
+    if (_disposed || telemetry == null || !isIdentityCurrent(identity)) {
+      return null;
+    }
     try {
       final cacheOnDisk = _parseBoolean(
         await access.getString('cache-on-disk'),
@@ -170,7 +197,7 @@ class NativePlaybackCacheEngine
       final buffering = _parseInteger(
         await access.getString('cache-buffering-state'),
       );
-      if (!isGenerationCurrent(generation)) return null;
+      if (_disposed || !isIdentityCurrent(identity)) return null;
       final state = telemetry.state;
       return PlaybackCacheEngineSnapshot(
         fileCacheBytes: state?.fileCacheBytes,
@@ -185,6 +212,7 @@ class NativePlaybackCacheEngine
         telemetryStatus: telemetry.status,
       );
     } catch (_) {
+      if (_disposed || !isIdentityCurrent(identity)) return null;
       return PlaybackCacheEngineSnapshot(
         fileCacheBytes: null,
         rawInputRateBytesPerSecond: null,
@@ -195,6 +223,12 @@ class NativePlaybackCacheEngine
         telemetryStatus: PlaybackCacheTelemetryStatus.readFailed,
       );
     }
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _telemetry.dispose();
   }
 }
 
@@ -241,12 +275,7 @@ class PlaybackCacheProfileApplier {
         cacheEvidence: _evidenceFor(requestedMode, applied.readBack),
       );
     }
-    if (diskRequested) {
-      return _applyMemoryFallback(
-        profile,
-        PlaybackCacheFallbackReason.engineCapabilityUnavailable,
-      );
-    }
+    if (diskRequested) return _unconfirmed(requestedMode);
     return PlaybackCacheApplyResult(
       requestedMode: requestedMode,
       actualMode: PlaybackCacheRuntimeMode.unconfirmed,
@@ -391,7 +420,9 @@ class PlaybackCacheProfileApplier {
     Map<String, String> readBack,
   ) {
     if (mode == PlaybackCacheRuntimeMode.disabled &&
-        readBack['cache'] != null) {
+        readBack['cache'] != null &&
+        (!readBack.containsKey('cache-on-disk') ||
+            _isDisabled(readBack['cache-on-disk']))) {
       return PlaybackCacheEvidence.disabled;
     }
     if ((mode == PlaybackCacheRuntimeMode.memory ||
@@ -582,24 +613,11 @@ class RuntimePlaybackCacheProfileSwitchExperiment
   @override
   Future<PlaybackCacheProfileSwitchStrategy> run({
     required NativePlaybackPropertyAccess access,
-    required Map<String, String> resetValues,
+    required ResolvedPlaybackCacheOptionBindings bindings,
   }) async {
     Directory? root;
     try {
-      final nativeNames = <PlaybackCacheLogicalOption, String>{};
-      final logicalResetValues = <PlaybackCacheLogicalOption, String>{};
-      for (final option in playbackCacheLogicalOptions) {
-        for (final candidate in playbackCacheNativeOptionCandidates[option]!) {
-          final reset = resetValues[candidate];
-          if (reset == null) continue;
-          nativeNames[option] = candidate;
-          logicalResetValues[option] = reset;
-          break;
-        }
-      }
-      if (!playbackCacheRequiredDiskLogicalOptions.every(
-        nativeNames.containsKey,
-      )) {
+      if (!playbackCacheRequiredDiskLogicalOptions.every(bindings.supports)) {
         return PlaybackCacheProfileSwitchStrategy.unsupported;
       }
       root = await Directory.systemTemp.createTemp('emby-mpv-capability-');
@@ -607,9 +625,10 @@ class RuntimePlaybackCacheProfileSwitchExperiment
       await media.writeAsBytes(_waveProbeData, flush: true);
       final profiles = _switchExperimentProfiles(
         cacheDirectory: root,
-        nativeNames: nativeNames,
-        directoryReset:
-            logicalResetValues[PlaybackCacheLogicalOption.cacheDirectory]!,
+        nativeNames: bindings.nativeNames,
+        directoryReset: bindings.resetValue(
+          PlaybackCacheLogicalOption.cacheDirectory,
+        )!,
       );
       for (final profile in profiles) {
         for (final entry in profile.entries) {
@@ -618,7 +637,11 @@ class RuntimePlaybackCacheProfileSwitchExperiment
         for (final entry in profile.entries) {
           final readBack = await access.getString(entry.key);
           if (readBack == null ||
-              !_equivalentNativeValue(readBack, entry.value)) {
+              !_equivalentNativeValue(
+                readBack,
+                entry.value,
+                logicalOption: _logicalOptionForNativeName(entry.key, bindings),
+              )) {
             return PlaybackCacheProfileSwitchStrategy.unsupported;
           }
         }
@@ -643,6 +666,16 @@ class RuntimePlaybackCacheProfileSwitchExperiment
         }
       }
     }
+  }
+
+  static PlaybackCacheLogicalOption _logicalOptionForNativeName(
+    String nativeName,
+    ResolvedPlaybackCacheOptionBindings bindings,
+  ) {
+    for (final entry in bindings.nativeNames.entries) {
+      if (entry.value == nativeName) return entry.key;
+    }
+    throw StateError('Unresolved playback cache option');
   }
 
   static Future<bool> _waitForIdle(
@@ -718,16 +751,15 @@ List<Map<String, String>> _switchExperimentProfiles({
   ];
 }
 
-bool _equivalentNativeValue(String actual, String expected) {
-  final normalizedActual = actual.trim().toLowerCase();
-  final normalizedExpected = expected.trim().toLowerCase();
-  if (normalizedActual == normalizedExpected) return true;
-  final actualNumber = num.tryParse(normalizedActual);
-  final expectedNumber = num.tryParse(normalizedExpected);
-  return actualNumber != null &&
-      expectedNumber != null &&
-      actualNumber == expectedNumber;
-}
+bool _equivalentNativeValue(
+  String actual,
+  String expected, {
+  required PlaybackCacheLogicalOption logicalOption,
+}) => playbackNativeValueCanonicalizer.equivalent(
+  logicalOption,
+  actual,
+  expected,
+);
 
 const _waveProbeData = <int>[
   0x52,

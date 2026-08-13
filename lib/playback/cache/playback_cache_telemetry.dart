@@ -51,63 +51,30 @@ class PlaybackCacheTelemetryRead {
   final PlaybackCacheNativeState? state;
 }
 
-abstract interface class PlaybackCacheTelemetryReader {
-  Future<PlaybackCacheTelemetryRead> readDemuxerCacheState();
-}
-
-class NativePlaybackCacheTelemetryReader
-    implements PlaybackCacheTelemetryReader {
-  NativePlaybackCacheTelemetryReader({
-    required this.access,
-    this.timeout = const Duration(seconds: 1),
-    this.timeoutReporter,
+class PlaybackCacheReadIdentity {
+  const PlaybackCacheReadIdentity({
+    required this.sessionIdentity,
+    required this.engineIdentity,
+    required this.operationGeneration,
   });
 
-  final NativePlaybackPropertyAccess access;
-  final Duration timeout;
-  final NativePlaybackTimeoutReporter? timeoutReporter;
+  final Object sessionIdentity;
+  final Object engineIdentity;
+  final int operationGeneration;
+}
 
-  @override
-  Future<PlaybackCacheTelemetryRead> readDemuxerCacheState() async {
-    Object? raw;
-    try {
-      raw = await withNativePlaybackTimeout(
-        access.getNative('demuxer-cache-state'),
-        operation: NativePlaybackOperationKind.propertyRead,
-        timeout: timeout,
-        onTimeout: timeoutReporter,
-      );
-    } catch (_) {
-      return const PlaybackCacheTelemetryRead.readFailed();
-    }
+typedef PlaybackCacheReadIdentityCurrent =
+    bool Function(PlaybackCacheReadIdentity identity);
 
-    if (raw == null) {
-      try {
-        final supported = await withNativePlaybackTimeout(
-          access.hasProperty('demuxer-cache-state'),
-          operation: NativePlaybackOperationKind.propertyRead,
-          timeout: timeout,
-          onTimeout: timeoutReporter,
-        );
-        return supported
-            ? const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent()
-            : const PlaybackCacheTelemetryRead.unsupported();
-      } catch (_) {
-        return const PlaybackCacheTelemetryRead.readFailed();
-      }
-    }
+/// Converts the copied MPV_FORMAT_NODE map into the small, stable model used
+/// by playback diagnostics. Native readers may include additional fields; the
+/// parser deliberately ignores them and never exposes the raw node.
+class PlaybackCacheNativeNodeParser {
+  const PlaybackCacheNativeNodeParser._();
 
-    if (raw is! Map) {
-      return const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent();
-    }
-    final state = _parseState(raw);
-    if (state == null) {
-      return const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent();
-    }
-    return PlaybackCacheTelemetryRead.available(state);
-  }
-
-  static PlaybackCacheNativeState? _parseState(Map<Object?, Object?> raw) {
+  static PlaybackCacheNativeState? parse(Object? value) {
+    if (value is! Map) return null;
+    final raw = <Object?, Object?>{...value};
     final fileCacheBytes = _parseNonNegativeInt(raw['file-cache-bytes']);
     final inputRate = _parseNonNegativeInt(raw['raw-input-rate']);
     final ranges = _parseRanges(raw['seekable-ranges']);
@@ -178,6 +145,73 @@ class NativePlaybackCacheTelemetryReader
   }
 }
 
+abstract interface class PlaybackCacheTelemetryReader {
+  Future<PlaybackCacheTelemetryRead> readDemuxerCacheState();
+}
+
+class NativePlaybackCacheTelemetryReader
+    implements PlaybackCacheTelemetryReader {
+  NativePlaybackCacheTelemetryReader({
+    required this.access,
+    this.timeout = const Duration(seconds: 1),
+    this.timeoutReporter,
+  });
+
+  final NativePlaybackPropertyAccess access;
+  final Duration timeout;
+  final NativePlaybackTimeoutReporter? timeoutReporter;
+
+  @override
+  Future<PlaybackCacheTelemetryRead> readDemuxerCacheState() async {
+    Object? raw;
+    try {
+      if (access is NativePlaybackNodeAccess) {
+        final nodeAccess = access as NativePlaybackNodeAccess;
+        raw = await withNativePlaybackTimeout(
+          nodeAccess.getNativeNode('demuxer-cache-state'),
+          operation: NativePlaybackOperationKind.propertyRead,
+          timeout: timeout,
+          onTimeout: timeoutReporter,
+        );
+      } else {
+        raw = await withNativePlaybackTimeout(
+          access.getNative('demuxer-cache-state'),
+          operation: NativePlaybackOperationKind.propertyRead,
+          timeout: timeout,
+          onTimeout: timeoutReporter,
+        );
+      }
+    } catch (_) {
+      return const PlaybackCacheTelemetryRead.readFailed();
+    }
+
+    if (raw == null) {
+      try {
+        final supported = await withNativePlaybackTimeout(
+          access.hasProperty('demuxer-cache-state'),
+          operation: NativePlaybackOperationKind.propertyRead,
+          timeout: timeout,
+          onTimeout: timeoutReporter,
+        );
+        return supported
+            ? const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent()
+            : const PlaybackCacheTelemetryRead.unsupported();
+      } catch (_) {
+        return const PlaybackCacheTelemetryRead.readFailed();
+      }
+    }
+
+    if (raw is! Map) {
+      return const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent();
+    }
+    final state = PlaybackCacheNativeNodeParser.parse(raw);
+    if (state == null) {
+      return const PlaybackCacheTelemetryRead.fieldTemporarilyAbsent();
+    }
+    return PlaybackCacheTelemetryRead.available(state);
+  }
+}
+
 class PlaybackCacheTelemetryReadCoordinator {
   PlaybackCacheTelemetryReadCoordinator({required this.reader});
 
@@ -186,14 +220,14 @@ class PlaybackCacheTelemetryReadCoordinator {
   _TelemetryReadOperation? _pending;
   bool _disposed = false;
 
-  Future<PlaybackCacheTelemetryRead?> readForGeneration({
-    required int generation,
-    required bool Function(int generation) isGenerationCurrent,
+  Future<PlaybackCacheTelemetryRead?> readForIdentity({
+    required PlaybackCacheReadIdentity identity,
+    required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
   }) {
-    if (_disposed) return Future.value();
+    if (_disposed || !isIdentityCurrent(identity)) return Future.value();
     final operation = _TelemetryReadOperation(
-      generation: generation,
-      isGenerationCurrent: isGenerationCurrent,
+      identity: identity,
+      isIdentityCurrent: isIdentityCurrent,
     );
     if (_active != null) {
       _pending?.complete(null);
@@ -202,6 +236,24 @@ class PlaybackCacheTelemetryReadCoordinator {
     }
     _start(operation);
     return operation.future;
+  }
+
+  Future<PlaybackCacheTelemetryRead?> readForGeneration({
+    required int generation,
+    required bool Function(int generation) isGenerationCurrent,
+  }) {
+    final identity = PlaybackCacheReadIdentity(
+      sessionIdentity: this,
+      engineIdentity: reader,
+      operationGeneration: generation,
+    );
+    return readForIdentity(
+      identity: identity,
+      isIdentityCurrent: (candidate) =>
+          identical(candidate.sessionIdentity, this) &&
+          identical(candidate.engineIdentity, reader) &&
+          isGenerationCurrent(candidate.operationGeneration),
+    );
   }
 
   Future<PlaybackCacheTelemetryRead> readDemuxerCacheState() async {
@@ -215,6 +267,9 @@ class PlaybackCacheTelemetryReadCoordinator {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    final active = _active;
+    _active = null;
+    active?.complete(null);
     _pending?.complete(null);
     _pending = null;
   }
@@ -238,24 +293,30 @@ class PlaybackCacheTelemetryReadCoordinator {
   ) {
     if (!identical(_active, operation)) return;
     _active = null;
-    final effective = operation.isGenerationCurrent(operation.generation)
+    final effective =
+        !_disposed && operation.isIdentityCurrent(operation.identity)
         ? result
         : null;
     operation.complete(effective);
     final pending = _pending;
     _pending = null;
-    if (!_disposed && pending != null) _start(pending);
+    if (_disposed || pending == null) return;
+    if (!pending.isIdentityCurrent(pending.identity)) {
+      pending.complete(null);
+      return;
+    }
+    _start(pending);
   }
 }
 
 class _TelemetryReadOperation {
   _TelemetryReadOperation({
-    required this.generation,
-    required this.isGenerationCurrent,
+    required this.identity,
+    required this.isIdentityCurrent,
   });
 
-  final int generation;
-  final bool Function(int generation) isGenerationCurrent;
+  final PlaybackCacheReadIdentity identity;
+  final PlaybackCacheReadIdentityCurrent isIdentityCurrent;
   final Completer<PlaybackCacheTelemetryRead?> _completer = Completer();
 
   Future<PlaybackCacheTelemetryRead?> get future => _completer.future;

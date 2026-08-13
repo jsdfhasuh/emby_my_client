@@ -27,6 +27,7 @@ class PlaybackNativeOptionCandidateEvidence {
   const PlaybackNativeOptionCandidateEvidence({
     required this.nativeName,
     required this.status,
+    required this.optionNameMatches,
     required this.optionExists,
     required this.resetAvailable,
     required this.requiredChoiceAvailable,
@@ -35,6 +36,7 @@ class PlaybackNativeOptionCandidateEvidence {
 
   final String nativeName;
   final PlaybackNativeOptionCandidateStatus status;
+  final bool optionNameMatches;
   final bool optionExists;
   final bool resetAvailable;
   final bool requiredChoiceAvailable;
@@ -226,9 +228,24 @@ const _booleanValues = <String, String>{
   '0': 'false',
 };
 
-final class PlaybackNativeValueCanonicalizer {
-  const PlaybackNativeValueCanonicalizer();
+abstract interface class PlaybackNativeValueCanonicalizer {
+  const factory PlaybackNativeValueCanonicalizer() =
+      DefaultPlaybackNativeValueCanonicalizer;
 
+  String? canonicalize(PlaybackCacheLogicalOption option, String raw);
+
+  bool equivalent(
+    PlaybackCacheLogicalOption option,
+    String actual,
+    String expected,
+  );
+}
+
+final class DefaultPlaybackNativeValueCanonicalizer
+    implements PlaybackNativeValueCanonicalizer {
+  const DefaultPlaybackNativeValueCanonicalizer();
+
+  @override
   String? canonicalize(PlaybackCacheLogicalOption option, String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty &&
@@ -249,6 +266,7 @@ final class PlaybackNativeValueCanonicalizer {
     };
   }
 
+  @override
   bool equivalent(
     PlaybackCacheLogicalOption option,
     String actual,
@@ -314,12 +332,15 @@ String? _canonicalPath(String raw) {
 
 PlaybackNativeOptionCandidateStatus _candidateStatus({
   required PlaybackCacheLogicalOption option,
+  required bool optionNameMatches,
   required bool optionExists,
   required bool resetAvailable,
   required bool requiredChoiceAvailable,
   required bool writeReadBackPassed,
 }) {
-  if (!optionExists) return PlaybackNativeOptionCandidateStatus.unavailable;
+  if (!optionExists || !optionNameMatches) {
+    return PlaybackNativeOptionCandidateStatus.unavailable;
+  }
   final resetRequired =
       option == PlaybackCacheLogicalOption.cacheDirectory ||
       option == PlaybackCacheLogicalOption.cacheUnlinkFiles;
@@ -335,6 +356,7 @@ PlaybackNativeOptionCandidateStatus _candidateStatus({
 ResolvedPlaybackCacheOptionBindings resolvePlaybackCacheOptionBindings({
   required Map<String, bool> optionSupport,
   required Map<String, String> resetValues,
+  Map<String, bool> optionNameMatches = const {},
   Map<String, bool> requiredChoiceAvailable = const {},
   Map<String, bool> writeReadBackPassed = const {},
 }) {
@@ -353,24 +375,33 @@ ResolvedPlaybackCacheOptionBindings resolvePlaybackCacheOptionBindings({
     final evidence = <PlaybackNativeOptionCandidateEvidence>[];
     for (final candidate in candidates) {
       final exists = optionSupport[candidate] == true;
-      final hasReset = resetValues.containsKey(candidate);
-      final choice = requiredChoiceAvailable[candidate] ?? true;
+      final nameMatches = optionNameMatches[candidate] ?? exists;
+      final rawReset = resetValues[candidate];
+      final hasReset =
+          rawReset != null &&
+          playbackNativeValueCanonicalizer.canonicalize(option, rawReset) !=
+              null;
+      final choice =
+          requiredChoiceAvailable[candidate] ??
+          option != PlaybackCacheLogicalOption.cacheUnlinkFiles;
       final resetRequired =
           option == PlaybackCacheLogicalOption.cacheDirectory ||
           option == PlaybackCacheLogicalOption.cacheUnlinkFiles;
       final readBack =
           writeReadBackPassed[candidate] ??
-          (exists && (!resetRequired || hasReset));
+          (resetRequired ? false : exists && (!resetRequired || hasReset));
       evidence.add(
         PlaybackNativeOptionCandidateEvidence(
           nativeName: candidate,
           status: _candidateStatus(
             option: option,
+            optionNameMatches: nameMatches,
             optionExists: exists,
             resetAvailable: hasReset,
             requiredChoiceAvailable: choice,
             writeReadBackPassed: readBack,
           ),
+          optionNameMatches: nameMatches,
           optionExists: exists,
           resetAvailable: hasReset,
           requiredChoiceAvailable: choice,

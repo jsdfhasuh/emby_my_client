@@ -250,12 +250,9 @@ void main() {
         profile,
         bindings: bindingsFromNativeMaps(
           optionSupport: {
-            for (final option in playbackCacheOptionNames) option: true,
+            for (final option in playbackCacheNativeOptionNames) option: true,
           },
-          resetValues: {
-            for (final option in playbackCacheOptionNames)
-              option: option == 'demuxer-cache-dir' ? '' : '0',
-          },
+          resetValues: _completeResetValues(''),
         ),
       ).plan;
 
@@ -313,7 +310,7 @@ PlaybackCacheEngineCapabilities _capabilities({bool passed = true}) =>
       mpvVersionFingerprint: 'mpv-test',
       platform: 'test',
       optionSupport: {
-        for (final option in playbackCacheOptionNames) option: passed,
+        for (final option in playbackCacheNativeOptionNames) option: passed,
       },
       propertySupport: {
         for (final property in playbackCachePropertyNames) property: passed,
@@ -322,13 +319,38 @@ PlaybackCacheEngineCapabilities _capabilities({bool passed = true}) =>
       profileSwitchStrategy: passed
           ? PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop
           : PlaybackCacheProfileSwitchStrategy.unsupported,
-      resetValues: passed
-          ? {
-              for (final option in playbackCacheProfileOptionNames)
-                option: option == 'demuxer-cache-dir' ? '' : 'auto',
-            }
-          : const {},
+      resetValues: passed ? _completeResetValues('') : const {},
+      optionBindings: resolvePlaybackCacheOptionBindings(
+        optionSupport: {
+          for (final option in playbackCacheNativeOptionNames) option: passed,
+        },
+        resetValues: passed ? _completeResetValues('') : const {},
+        requiredChoiceAvailable: {
+          'demuxer-cache-unlink-files': passed,
+          'cache-unlink-files': passed,
+        },
+        writeReadBackPassed: {
+          'demuxer-cache-dir': passed,
+          'cache-dir': passed,
+          'demuxer-cache-unlink-files': passed,
+          'cache-unlink-files': passed,
+        },
+      ),
     );
+
+Map<String, String> _completeResetValues(String directory) => {
+  for (final option in playbackCacheProfileOptionNames)
+    option: switch (option) {
+      'demuxer-cache-dir' => directory,
+      'cache' ||
+      'cache-on-disk' ||
+      'demuxer-donate-buffer' ||
+      'cache-pause' => 'no',
+      'demuxer-cache-unlink-files' => 'whendone',
+      'demuxer-seekable-cache' => 'auto',
+      _ => '0',
+    },
+};
 
 PlaybackCacheStorageSnapshot _storage(int freeBytes) =>
     PlaybackCacheStorageSnapshot.available(
