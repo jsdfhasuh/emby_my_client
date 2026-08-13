@@ -49,15 +49,18 @@ required_symbols=(
   mpv_terminate_destroy
 )
 
-required_capability_strings=(
+required_common_strings=(
+  cache
   cache-on-disk
-  demuxer-cache-dir
-  demuxer-cache-unlink-files
+  cache-secs
   demuxer-cache-state
+  demuxer-max-bytes
   demuxer-max-back-bytes
-  stream-buffer-size
   immediate
 )
+
+directory_aliases=(demuxer-cache-dir cache-dir)
+unlink_aliases=(demuxer-cache-unlink-files cache-unlink-files)
 
 for apk_path in "$@"; do
   if [[ ! -f "$apk_path" ]]; then
@@ -88,12 +91,28 @@ for apk_path in "$@"; do
     done
 
     binary_strings="$("$strings_command" -a "$output")"
-    for capability in "${required_capability_strings[@]}"; do
+    for capability in "${required_common_strings[@]}"; do
       if ! grep -Fqx "$capability" <<<"$binary_strings"; then
         echo "Missing libmpv capability string $capability in $apk_path ($abi)" >&2
         exit 65
       fi
     done
-    echo "android_mpv_capability_smoke=$apk_path:$abi"
+    directory_found=''
+    for capability in "${directory_aliases[@]}"; do
+      if grep -Fqx "$capability" <<<"$binary_strings"; then
+        directory_found='1'
+      fi
+    done
+    unlink_found=''
+    for capability in "${unlink_aliases[@]}"; do
+      if grep -Fqx "$capability" <<<"$binary_strings"; then
+        unlink_found='1'
+      fi
+    done
+    if [[ "$directory_found" != '1' || "$unlink_found" != '1' ]]; then
+      echo "Missing compatible cache directory/unlink alias in $apk_path ($abi)" >&2
+      exit 65
+    fi
+    echo "android_mpv_static_capability_smoke=$apk_path:$abi"
   done
 done

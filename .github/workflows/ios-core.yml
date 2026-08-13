@@ -37,7 +37,7 @@ env:
   COCOAPODS_VERSION: 1.16.2
   LDID_VERSION: 2.1.5
   ANDROID_NDK_VERSION: 28.2.13676358
-  IMPLEMENTATION_START_HEAD: 61e124660c51dfee6fe91b778f46d39bd78a447a
+  IMPLEMENTATION_START_HEAD: 7f985810656b07e40bef746140e64af7b558e043
 
 jobs:
   quality-and-android:
@@ -124,6 +124,12 @@ jobs:
       - name: Test
         run: flutter test
 
+      - name: Verify playback cache event safety
+        run: >-
+          flutter test
+          test/playback_cache_evidence_test.dart
+          test/playback_diagnostics_test.dart
+
       - name: Build Android debug APKs
         shell: bash
         run: |
@@ -200,14 +206,48 @@ jobs:
           fi
           ANDROID_NDK_HOME="$android_sdk_root/ndk/$ANDROID_NDK_VERSION" \
             bash scripts/android/run_mpv_startability_probe.sh \
-              build/app/outputs/flutter-apk/app-x86_64-debug.apk
+              build/app/outputs/flutter-apk/app-x86_64-debug.apk \
+              build/android/artifacts/android-mpv-capability-manifest.json
+
+      - name: Verify Android mpv semantic evidence safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence='build/android/artifacts/android-mpv-capability-manifest.json'
+          test -s "$evidence"
+          python3 - "$evidence" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+          value = Path(sys.argv[1]).read_text(encoding='utf-8')
+          manifest = json.loads(value)
+          forbidden = re.compile(
+              r'https?%3a|https?://|authorization|bearer|basic|token|password|'
+              r'username|device[_-]?id|item[_-]?id|/data/|/private/|/users/|'
+              r'[a-z]:\\|(?:^|[^0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:[^0-9]|$)',
+              re.IGNORECASE,
+          )
+          assert forbidden.search(value) is None
+          assert manifest['activeContextGate'] == 'NOT_RUN'
+          assert manifest['diskTelemetryEvidenceGate'] == 'NOT_RUN'
+          assert manifest['optionBindingGate'] == 'PASSED'
+          assert manifest['memoryProfileGate'] == 'PASSED'
+          assert manifest['disabledProfileGate'] == 'PASSED'
+          print('STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED')
+          print('STOP_GATE_MEMORY_CACHE_PROFILE=PASSED')
+          print('ANDROID_ACTIVE_CONTEXT_GATE=NOT_RUN')
+          print('ANDROID_DISK_TELEMETRY_EVIDENCE_GATE=NOT_RUN')
+          PY
 
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
           name: android-debug-apk-${{ github.run_number }}
           if-no-files-found: error
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            build/android/artifacts/android-mpv-capability-manifest.json
 
       - name: Upload Android split-per-ABI APKs
         uses: actions/upload-artifact@v4
@@ -340,17 +380,33 @@ jobs:
           set -euo pipefail
           result_bundle="$RUNNER_TEMP/runner-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.xcresult"
           attachment_dir="$RUNNER_TEMP/runner-test-attachments-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          xctest_log="$RUNNER_TEMP/runner-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          mkdir -p ../build/ios/artifacts
           xcodebuild test \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
             -resultBundlePath "$result_bundle" \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$xctest_log"
+          if grep -Eq 'STOP_GATE_CACHE_OPTION_ALIAS|STOP_GATE_CACHE_TELEMETRY=' "$xctest_log"; then
+            echo 'Deprecated cache Gate name was emitted' >&2
+            exit 1
+          fi
+          gate_lines="$(
+            grep -Eo \
+              'STOP_GATE_(CACHE_OPTION_BINDING_IMPLEMENTATION|MEMORY_CACHE_PROFILE|ACTIVE_CONTEXT_TELEMETRY_READER|DISK_CACHE_CAPABILITY|DISK_TELEMETRY_EVIDENCE)=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)' \
+              "$xctest_log" | sort -u
+          )"
+          grep -Fx 'STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED' <<<"$gate_lines"
+          grep -Fx 'STOP_GATE_MEMORY_CACHE_PROFILE=PASSED' <<<"$gate_lines"
+          grep -Fx 'STOP_GATE_ACTIVE_CONTEXT_TELEMETRY_READER=PASSED' <<<"$gate_lines"
+          grep -Eq '^STOP_GATE_DISK_CACHE_CAPABILITY=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)$' <<<"$gate_lines"
+          grep -Eq '^STOP_GATE_DISK_TELEMETRY_EVIDENCE=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)$' <<<"$gate_lines"
+          printf '%s\n' "$gate_lines" >../build/ios/artifacts/mpv-native-gates.txt
           xcrun xcresulttool export attachments \
             --path "$result_bundle" \
             --output-path "$attachment_dir"
-          mkdir -p ../build/ios/artifacts
           ATTACHMENT_DIR="$attachment_dir" \
             CAPABILITY_OUTPUT='../build/ios/artifacts/mpv-capability-manifest.json' \
             python3 - <<'PY'
@@ -378,13 +434,50 @@ jobs:
                   output.write_bytes(candidate.read_bytes())
                   break
           assert manifest is not None
+          expected_top = {
+              'schema', 'mpvVersionFingerprint', 'platform', 'options',
+              'properties', 'unlinkChoices', 'resetValues',
+              'resetValuesComplete', 'missingResetValues', 'resolvedOptions',
+              'candidateEvidence', 'cacheDirectoryVariant',
+              'cacheDirectoryModernStatus', 'cacheDirectoryLegacyStatus',
+              'cacheUnlinkVariant', 'cacheUnlinkModernStatus',
+              'cacheUnlinkLegacyStatus', 'diskProfileReadBack',
+              'memoryProfileReadBack', 'disabledProfileReadBack',
+              'profileSwitchStrategy', 'diskCapabilityPassed',
+          }
+          assert set(manifest) == expected_top
           assert manifest['schema'] == 'emby-mpv-capabilities/v1'
+          assert manifest['platform'] == 'iPadOS'
+          assert isinstance(manifest['mpvVersionFingerprint'], str)
+          assert manifest['mpvVersionFingerprint'].startswith('mpv-')
           expected_options = {
               'cache', 'cache-on-disk', 'demuxer-cache-dir',
-              'demuxer-cache-unlink-files', 'cache-secs',
+              'cache-dir', 'demuxer-cache-unlink-files',
+              'cache-unlink-files', 'cache-secs',
               'demuxer-max-bytes', 'demuxer-max-back-bytes',
               'demuxer-donate-buffer', 'demuxer-seekable-cache',
               'cache-pause', 'cache-pause-wait', 'stream-buffer-size',
+          }
+          expected_candidates = {
+              'cache': ['cache'],
+              'cacheOnDisk': ['cache-on-disk'],
+              'cacheDirectory': ['demuxer-cache-dir', 'cache-dir'],
+              'cacheUnlinkFiles': [
+                  'demuxer-cache-unlink-files', 'cache-unlink-files'
+              ],
+              'cacheSeconds': ['cache-secs'],
+              'forwardMetadataBytes': ['demuxer-max-bytes'],
+              'backwardMetadataBytes': ['demuxer-max-back-bytes'],
+              'donateBuffer': ['demuxer-donate-buffer'],
+              'seekableCache': ['demuxer-seekable-cache'],
+              'cachePause': ['cache-pause'],
+              'cachePauseWait': ['cache-pause-wait'],
+              'streamBufferSize': ['stream-buffer-size'],
+          }
+          candidate_keys = {
+              'nativeName', 'status', 'optionNameMatches', 'optionExists',
+              'resetAvailable', 'requiredChoiceAvailable',
+              'writeReadBackPassed',
           }
           expected_properties = {
               'mpv-version', 'platform', 'property-list', 'demuxer-cache-state'
@@ -396,23 +489,91 @@ jobs:
           reset_values = manifest['resetValues']
           assert set(reset_values).issubset(expected_options)
           assert all(isinstance(value, str) for value in reset_values.values())
+          resolved = manifest['resolvedOptions']
+          assert set(resolved).issubset(expected_candidates)
+          assert all(
+              value in expected_candidates[key]
+              for key, value in resolved.items()
+          )
+          evidence = manifest['candidateEvidence']
+          assert set(evidence) == set(expected_candidates)
+          for logical, names in expected_candidates.items():
+              records = evidence[logical]
+              assert [record['nativeName'] for record in records] == names
+              for record in records:
+                  assert set(record) == candidate_keys
+                  assert record['status'] in {'unavailable', 'incomplete', 'usable'}
+                  assert all(
+                      type(record[key]) is bool
+                      for key in candidate_keys - {'nativeName', 'status'}
+                  )
+                  complete = (
+                      record['optionNameMatches']
+                      and record['optionExists']
+                      and record['resetAvailable']
+                      and record['requiredChoiceAvailable']
+                      and record['writeReadBackPassed']
+                  )
+                  expected_status = (
+                      'usable' if complete else
+                      'unavailable' if not record['optionExists'] else
+                      'incomplete'
+                  )
+                  assert record['status'] == expected_status
+              selected = next(
+                  (record['nativeName'] for record in records
+                   if record['status'] == 'usable'),
+                  None,
+              )
+              assert resolved.get(logical) == selected
           missing_resets = manifest['missingResetValues']
-          assert set(missing_resets) == expected_options - set(reset_values)
+          assert set(missing_resets) == set(resolved.values()) - set(reset_values)
           resets_complete = not missing_resets
           assert manifest['resetValuesComplete'] is resets_complete
+          for logical in ('cacheDirectory', 'cacheUnlinkFiles'):
+              variant_key = (
+                  'cacheDirectoryVariant' if logical == 'cacheDirectory'
+                  else 'cacheUnlinkVariant'
+              )
+              selected = resolved.get(logical)
+              expected_variant = (
+                  'unavailable' if selected is None
+                  else 'modern' if selected == expected_candidates[logical][0]
+                  else 'legacy'
+              )
+              assert manifest[variant_key] == expected_variant
+          assert manifest['cacheDirectoryModernStatus'] == evidence['cacheDirectory'][0]['status']
+          assert manifest['cacheDirectoryLegacyStatus'] == evidence['cacheDirectory'][1]['status']
+          assert manifest['cacheUnlinkModernStatus'] == evidence['cacheUnlinkFiles'][0]['status']
+          assert manifest['cacheUnlinkLegacyStatus'] == evidence['cacheUnlinkFiles'][1]['status']
+          assert type(manifest['diskProfileReadBack']) is bool
+          assert type(manifest['memoryProfileReadBack']) is bool
+          assert type(manifest['disabledProfileReadBack']) is bool
+          assert manifest['memoryProfileReadBack'] is True
+          assert manifest['disabledProfileReadBack'] is True
           approved_strategy = manifest['profileSwitchStrategy'] in {
               'inPlaceAfterMediaStop', 'requiresPlayerRecreation'
           }
+          required_logical = {
+              'cache', 'cacheOnDisk', 'cacheDirectory', 'cacheUnlinkFiles',
+              'cacheSeconds', 'forwardMetadataBytes',
+              'backwardMetadataBytes',
+          }
           calculated_gate = (
-              all(manifest['options'].values())
+              required_logical.issubset(resolved)
               and resets_complete
               and 'immediate' in manifest['unlinkChoices']
               and manifest['properties']['demuxer-cache-state']
+              and manifest['diskProfileReadBack']
               and approved_strategy
           )
           assert manifest['diskCapabilityPassed'] is calculated_gate
-          gate = 'PASSED' if calculated_gate else 'BLOCKED'
-          print(f'STOP_GATE_DISK_CACHE_CAPABILITY={gate}')
+          print('STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED')
+          print('STOP_GATE_MEMORY_CACHE_PROFILE=PASSED')
+          disk_gate = (
+              'PASSED' if calculated_gate else 'BLOCKED_BY_BUNDLED_LIBMPV'
+          )
+          print(f'STOP_GATE_DISK_CACHE_CAPABILITY={disk_gate}')
           print(json.dumps(manifest, sort_keys=True, separators=(',', ':')))
           PY
 
