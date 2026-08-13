@@ -534,8 +534,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? PlayerOrientationPolicy.systemDefault
       : PlayerOrientationPolicy.androidPortraitDefault;
 
-  Future<void> _closePlayer(PlayerExitReason reason) =>
-      _closeCoordinator.close(reason);
+  Future<void> _closePlayer(PlayerExitReason reason) {
+    _invalidateUiSeek();
+    return _closeCoordinator.close(reason);
+  }
 
   Future<void> _stopPlaybackForClose() =>
       _playerSessionCoordinator.shutdown(_releasePlaybackResources);
@@ -655,7 +657,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
     }
 
-    if (!mounted || !_uiSeekRequestGate.isCurrent(generation)) {
+    if (!mounted ||
+        !_uiSeekRequestGate.isCurrent(generation) ||
+        !identical(_playbackController, controller) ||
+        _switchingItem) {
       return result;
     }
     final completion = _uiSeekRequestGate.completionFor(
@@ -691,7 +696,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     ScaffoldMessenger.maybeOf(
       context,
-    )?.showSnackBar(const SnackBar(content: Text('跳转失败，请稍后重试')));
+    )?.showSnackBar(const SnackBar(content: Text(uiSeekFailureMessage)));
   }
 
   Future<void> _handleRemotePlaystate(EmbyPlaystateCommand message) async {
@@ -869,6 +874,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _uiSeekRequestGate.invalidate();
+    _uiSeekPending = false;
     _logPlayerEvent(
       PlayerDiagnosticEvent.playerRouteDispose,
       exitReason: PlayerExitReason.routeDisposed,

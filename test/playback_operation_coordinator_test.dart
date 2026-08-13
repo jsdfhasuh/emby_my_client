@@ -314,6 +314,32 @@ void main() {
       await Future.wait([active, pending]);
       expect(pendingRan, isFalse);
     });
+
+    test(
+      'late seek result is rejected when the session identity is stale',
+      () async {
+        final nativeGate = Completer<void>();
+        var sessionCurrent = true;
+        final coordinator = PlaybackOperationCoordinator(
+          sessionId: const PlaybackItemSessionId('identity'),
+          isSessionCurrent: (_) => sessionCurrent,
+          clampTarget: _clamp,
+          seekEngine: (_) => nativeGate.future,
+        );
+
+        final result = coordinator.seekAbsolute(
+          const Duration(minutes: 1),
+          source: SeekSource.remote,
+        );
+        await Future<void>.delayed(Duration.zero);
+        sessionCurrent = false;
+        nativeGate.complete();
+
+        final settled = await result;
+        expect(settled.disposition, SeekDisposition.cancelled);
+        expect(settled.failureKind, SeekFailureKind.staleSession);
+      },
+    );
   });
 
   test('automatic open reasons are one-shot and bounded', () {

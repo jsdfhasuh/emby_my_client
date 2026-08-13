@@ -11,6 +11,7 @@ import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
+import 'cache/playback_cache_telemetry.dart';
 import 'emby_stream_resolver.dart';
 import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
@@ -18,6 +19,7 @@ import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_recovery_policy.dart';
 import 'playback_session_reporter.dart';
+import 'playback_seek_statistics.dart';
 import 'playback_state.dart';
 import 'track_mapper.dart';
 
@@ -128,10 +130,19 @@ class PlaybackController extends ChangeNotifier {
   bool _testSeekFailurePending = false;
   bool _testCacheFailureObservationPending = false;
   bool _cacheSnapshotUnavailableLogged = false;
+  PlaybackSeekStatisticsSnapshot? _frozenSeekStatistics;
+  final Set<Future<void>> _activeSeekBookkeeping = {};
+  PlaybackCacheEvidence? _lastNativeCacheEvidence;
+  PlaybackCacheRuntimeMode? _lastNativeConfirmedMode;
   int _cacheFailureObservationGeneration = 0;
   final Set<PlaybackCacheSafetyReason> _cacheSafetyDiagnosticsWritten = {};
   late final PlaybackCacheEvidenceAccumulator _cacheEvidence =
-      PlaybackCacheEvidenceAccumulator(sessionId: session.id, clock: _clock);
+      PlaybackCacheEvidenceAccumulator(
+        sessionId: session.id,
+        clock: _clock,
+        settingsMode: cacheSettings.mode,
+        onObservationApplied: _onCacheObservationApplied,
+      );
 
   PlaybackState get state => _state;
   PlaybackEngine get engine => _engine;
@@ -361,11 +372,17 @@ class PlaybackController extends ChangeNotifier {
           );
           _generation++;
         }
+        _shuttingDown = true;
+        _operationCoordinator.shutdown();
+        await _waitForSeekBookkeeping();
+        _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
         await _cancelSubscriptions();
         await _stopCacheCoordinator();
         if (plan != null) await _stopReporterSafely();
         await _stopEngine();
+        await _disposeEngine();
         await _cleanupCacheSessionSafely();
+        _writeTerminalSummaries();
         return;
       }
     }
@@ -467,6 +484,7 @@ class PlaybackController extends ChangeNotifier {
       }
     }
     _diagnostics.cacheProfileResolved(profile);
+    _cacheEvidence.recordProfileResolved(profile.runtimeMode);
     PlaybackCacheApplyResult applyResult;
     if (cacheEngine == null) {
       applyResult = PlaybackCacheApplyResult(
@@ -490,6 +508,10 @@ class PlaybackController extends ChangeNotifier {
       return _prepareCacheForPlan(plan, token);
     }
     _diagnostics.cacheApplyResult(applyResult);
+    if (applyResult.cacheEvidence != PlaybackCacheEvidence.unconfirmed) {
+      _lastNativeCacheEvidence = applyResult.cacheEvidence;
+      _lastNativeConfirmedMode = applyResult.actualMode;
+    }
     final cacheCreateResult = _cacheCreateResult(applyResult);
     if (cacheCreateResult != null) {
       _cacheEvidence.recordCacheCreate(cacheCreateResult);
@@ -500,9 +522,11 @@ class PlaybackController extends ChangeNotifier {
         requestedMode: applyResult.requestedMode,
         confirmedMode: applyResult.actualMode,
         fallbackReason: applyResult.fallbackReason,
+        settingsMode: cacheSettings.mode,
         optionalTuningDegraded: applyResult.optionalTuningDegraded,
         optionalTuningUnavailableCount:
             applyResult.optionalTuningUnavailable.length,
+        optionalTuningUnavailable: applyResult.optionalTuningUnavailable,
         cacheCreateResult: cacheCreateResult,
         cacheEnabled:
             applyResult.actualMode != PlaybackCacheRuntimeMode.disabled,
@@ -570,6 +594,21 @@ class PlaybackController extends ChangeNotifier {
   Future<SeekResult> seekAbsolute(
     Duration position, {
     required SeekSource source,
+  }) {
+    if (_shuttingDown || _disposed) {
+      return Future.value(_cancelledSeekResult(position));
+    }
+    final bookkeeping = Completer<void>();
+    return _trackSeekOperation(
+      _seekAbsolute(position, source: source, bookkeeping: bookkeeping),
+      bookkeeping,
+    );
+  }
+
+  Future<SeekResult> _seekAbsolute(
+    Duration position, {
+    required SeekSource source,
+    required Completer<void> bookkeeping,
   }) async {
     _diagnostics.seekRequested();
     _cacheEvidence.recordSeekRequested();
@@ -581,10 +620,12 @@ class PlaybackController extends ChangeNotifier {
       );
     } catch (_) {
       _cacheEvidence.recordSeekCompleted(SeekDisposition.failed);
+      _completeSeekBookkeeping(bookkeeping);
       rethrow;
     }
     _cacheEvidence.recordSeekCompleted(result.disposition);
     _diagnostics.seekCompleted(result);
+    _completeSeekBookkeeping(bookkeeping);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
       _injectApprovedSeekFailureIfPending();
@@ -597,6 +638,23 @@ class PlaybackController extends ChangeNotifier {
   Future<SeekResult> seekRelative(
     Duration offset, {
     required SeekSource source,
+  }) {
+    if (_shuttingDown || _disposed) {
+      return Future.value(
+        _cancelledSeekResult(_state.displayPosition + offset),
+      );
+    }
+    final bookkeeping = Completer<void>();
+    return _trackSeekOperation(
+      _seekRelative(offset, source: source, bookkeeping: bookkeeping),
+      bookkeeping,
+    );
+  }
+
+  Future<SeekResult> _seekRelative(
+    Duration offset, {
+    required SeekSource source,
+    required Completer<void> bookkeeping,
   }) async {
     _diagnostics.seekRequested();
     _cacheEvidence.recordSeekRequested();
@@ -605,10 +663,12 @@ class PlaybackController extends ChangeNotifier {
       result = await _operationCoordinator.seekRelative(offset, source: source);
     } catch (_) {
       _cacheEvidence.recordSeekCompleted(SeekDisposition.failed);
+      _completeSeekBookkeeping(bookkeeping);
       rethrow;
     }
     _cacheEvidence.recordSeekCompleted(result.disposition);
     _diagnostics.seekCompleted(result);
+    _completeSeekBookkeeping(bookkeeping);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
       _injectApprovedSeekFailureIfPending();
@@ -813,8 +873,10 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _shutdown() async {
     _generation++;
     _pendingRecoveryFingerprint = null;
+    await _waitForSeekBookkeeping();
+    _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
     _progressTimer?.cancel();
-    await _stopCacheCoordinator();
+    await _stopCacheCoordinator(flushEvidence: false);
     _setState(_state.copyWith(phase: PlaybackPhase.stopping));
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
@@ -823,15 +885,11 @@ class PlaybackController extends ChangeNotifier {
     await _cancelSubscriptions();
 
     DiagnosticLog.instance.info('player', 'event=playback_closing');
-    final cleanup = _stopReporterSafely();
-    final release = () async {
-      await _stopEngine();
-      await _disposeEngine();
-      await _cleanupCacheSessionSafely();
-    }();
-    await Future.wait([cleanup, release]);
-    _diagnostics.flushSeekSummary();
-    _diagnostics.cacheSessionSummary(_cacheEvidence.finalize());
+    await _stopEngine();
+    await _stopReporterSafely();
+    await _disposeEngine();
+    await _cleanupCacheSessionSafely();
+    _writeTerminalSummaries();
     _setState(
       _state.copyWith(
         phase: PlaybackPhase.idle,
@@ -1049,6 +1107,11 @@ class PlaybackController extends ChangeNotifier {
       committedPosition: () => _state.position,
       generation: token,
       isGenerationCurrent: _isCurrent,
+      playbackItemSessionIdentity: session.id,
+      isReadIdentityCurrent: (identity) =>
+          identity.sessionIdentity == session.id &&
+          identical(identity.engineIdentity, engine) &&
+          _isCurrent(identity.operationGeneration),
       onObservation: (observation) {
         if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
         if (observation.engineSnapshot == null &&
@@ -1065,9 +1128,7 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         final evidenceObservation = _cacheEvidenceObservation(observation);
-        if (_cacheEvidence.observe(evidenceObservation)) {
-          _diagnostics.cacheObservation(evidenceObservation);
-        }
+        _cacheEvidence.observe(evidenceObservation);
       },
       onSafetyReopen: _handleCacheSafetyReopen,
       statePollInterval: cacheStatePollInterval,
@@ -1109,11 +1170,11 @@ class PlaybackController extends ChangeNotifier {
     _throwIfStale(token);
   }
 
-  Future<void> _stopCacheCoordinator() async {
+  Future<void> _stopCacheCoordinator({bool flushEvidence = true}) async {
     final coordinator = _cacheCoordinator;
     _cacheCoordinator = null;
     if (coordinator == null) {
-      _flushCacheEvidenceObservation();
+      if (flushEvidence) _flushCacheEvidenceObservation();
       return;
     }
     try {
@@ -1129,7 +1190,7 @@ class PlaybackController extends ChangeNotifier {
             'errorType=${error.runtimeType}',
       );
     } finally {
-      _flushCacheEvidenceObservation();
+      if (flushEvidence) _flushCacheEvidenceObservation();
     }
   }
 
@@ -1400,6 +1461,7 @@ class PlaybackController extends ChangeNotifier {
         _shuttingDown ||
         _lifecycleSuspended ||
         !lease.isCurrent) {
+      _recordRuntimeRecoveryCancelled();
       return;
     }
     _pendingRecoveryFingerprint = null;
@@ -1430,9 +1492,13 @@ class PlaybackController extends ChangeNotifier {
       fingerprint: fingerprint,
     );
     await _stopForControlledRestart(position);
-    if (!lease.isCurrent || _disposed || _shuttingDown) return;
+    if (!lease.isCurrent || _disposed || _shuttingDown) {
+      _recordRuntimeRecoveryCancelled();
+      return;
+    }
     await _cleanupCacheSessionSafely();
     if (_disposed || _shuttingDown || _lifecycleSuspended || !lease.isCurrent) {
+      _recordRuntimeRecoveryCancelled();
       return;
     }
     await _startPlayback(
@@ -1443,11 +1509,17 @@ class PlaybackController extends ChangeNotifier {
           AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
       openingStatusMessage: '正在恢复播放…',
     );
-    if (_disposed || _shuttingDown || !lease.isCurrent) return;
+    if (_disposed || _shuttingDown || !lease.isCurrent) {
+      _recordRuntimeRecoveryCancelled();
+      return;
+    }
     if (_state.phase == PlaybackPhase.ready) {
       _diagnostics.seekRecovery(
         PlaybackRecoveryDiagnosticEvent.succeeded,
         fingerprint: fingerprint,
+      );
+      _cacheEvidence.recordRuntimeRecovery(
+        PlaybackCacheRuntimeRecovery.succeeded,
       );
       return;
     }
@@ -1467,6 +1539,14 @@ class PlaybackController extends ChangeNotifier {
     _diagnostics.seekRecovery(
       PlaybackRecoveryDiagnosticEvent.failed,
       fingerprint: fingerprint,
+    );
+    _cacheEvidence.recordRuntimeRecovery(PlaybackCacheRuntimeRecovery.failed);
+  }
+
+  void _recordRuntimeRecoveryCancelled() {
+    if (_cacheEvidence.isFinalized) return;
+    _cacheEvidence.recordRuntimeRecovery(
+      PlaybackCacheRuntimeRecovery.cancelled,
     );
   }
 
@@ -1497,6 +1577,8 @@ class PlaybackController extends ChangeNotifier {
       clampTarget: _clampToDuration,
       onRequestedPositionChanged: _handleRequestedPositionChanged,
       onControlOperationInvalidated: _invalidateCurrentControllerOperation,
+      isSessionCurrent: (candidate) =>
+          identical(candidate, session.id) && !_disposed && !_shuttingDown,
       seekCallTimeout: seekCallTimeout,
       seekSettleTimeout: resumeVerificationTimeout,
     );
@@ -1736,7 +1818,9 @@ class PlaybackController extends ChangeNotifier {
     final cacheSession = _cacheSession;
     _cacheSession = null;
     if (cacheSession == null) {
-      _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.notApplicable);
+      if (!_cacheEvidence.isFinalized) {
+        _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.notApplicable);
+      }
       return;
     }
     try {
@@ -1745,14 +1829,18 @@ class PlaybackController extends ChangeNotifier {
         cacheCleanupTimeout,
         PlaybackOperationTimeoutKind.cacheCleanup,
       );
-      _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.succeeded);
+      if (!_cacheEvidence.isFinalized) {
+        _cacheEvidence.recordCleanup(PlaybackCacheCleanupResult.succeeded);
+      }
       _diagnostics.cacheSessionCleaned();
     } catch (error) {
-      _cacheEvidence.recordCleanup(
-        error is _PlaybackOperationTimedOut
-            ? PlaybackCacheCleanupResult.timedOut
-            : PlaybackCacheCleanupResult.failed,
-      );
+      if (!_cacheEvidence.isFinalized) {
+        _cacheEvidence.recordCleanup(
+          error is _PlaybackOperationTimedOut
+              ? PlaybackCacheCleanupResult.timedOut
+              : PlaybackCacheCleanupResult.failed,
+        );
+      }
       DiagnosticLog.instance.warning(
         'playback-cache',
         'Cache session cleanup failed',
@@ -1800,18 +1888,34 @@ class PlaybackController extends ChangeNotifier {
     final snapshot = observation.engineSnapshot;
     final runtimeMode = _state.cacheRuntimeMode;
     final evidence =
-        snapshot?.fileCacheBytes != null &&
-            snapshot!.fileCacheBytes! > 0 &&
-            snapshot.cacheOnDisk == true
+        playbackCacheHasObservedDiskData(
+          telemetryStatus: snapshot?.telemetryStatus,
+          fileCacheBytes: snapshot?.fileCacheBytes,
+          cacheOnDisk: snapshot?.cacheOnDisk,
+        )
         ? PlaybackCacheEvidence.diskDataObserved
-        : runtimeMode == PlaybackCacheRuntimeMode.disk
+        : snapshot?.cacheOnDisk == true &&
+              runtimeMode == PlaybackCacheRuntimeMode.disk
         ? PlaybackCacheEvidence.diskConfiguredOnly
-        : runtimeMode == PlaybackCacheRuntimeMode.disabled
-        ? PlaybackCacheEvidence.disabled
-        : runtimeMode == PlaybackCacheRuntimeMode.memory ||
-              runtimeMode == PlaybackCacheRuntimeMode.memoryFallback
+        : snapshot?.cacheOnDisk == false &&
+              snapshot?.telemetryStatus !=
+                  PlaybackCacheTelemetryStatus.readFailed &&
+              (runtimeMode == PlaybackCacheRuntimeMode.memory ||
+                  runtimeMode == PlaybackCacheRuntimeMode.memoryFallback)
         ? PlaybackCacheEvidence.memoryProfileConfirmed
+        : _lastNativeCacheEvidence == PlaybackCacheEvidence.disabled
+        ? PlaybackCacheEvidence.disabled
         : PlaybackCacheEvidence.unconfirmed;
+    final confirmedMode = switch (evidence) {
+      PlaybackCacheEvidence.diskDataObserved ||
+      PlaybackCacheEvidence.diskConfiguredOnly => _lastNativeConfirmedMode,
+      PlaybackCacheEvidence.memoryProfileConfirmed =>
+        _lastNativeConfirmedMode == PlaybackCacheRuntimeMode.memoryFallback
+            ? PlaybackCacheRuntimeMode.memoryFallback
+            : PlaybackCacheRuntimeMode.memory,
+      PlaybackCacheEvidence.disabled => PlaybackCacheRuntimeMode.disabled,
+      PlaybackCacheEvidence.unconfirmed => null,
+    };
     return PlaybackCacheEvidenceObservation(
       cacheEvidence: evidence,
       telemetryStatus: snapshot?.telemetryStatus,
@@ -1821,9 +1925,11 @@ class PlaybackController extends ChangeNotifier {
       cacheSnapshotResult: snapshot == null
           ? PlaybackCacheSnapshotResult.unavailable
           : PlaybackCacheSnapshotResult.available,
+      snapshotUnavailableAlreadyRecorded: snapshot == null,
       requestedMode: _state.cacheProfile?.runtimeMode,
-      confirmedMode: runtimeMode,
+      confirmedMode: confirmedMode,
       fallbackReason: _state.cacheFallbackReason,
+      settingsMode: cacheSettings.mode,
       cacheEnabled: runtimeMode != PlaybackCacheRuntimeMode.disabled,
       cacheOnDisk: snapshot?.cacheOnDisk,
       testOverrideActive: testOverrides?.isActive ?? false,
@@ -1845,10 +1951,75 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _flushCacheEvidenceObservation() {
-    if (!_cacheEvidence.flush()) return;
-    final observation = _cacheEvidence.lastAppliedObservation;
-    if (observation != null) _diagnostics.cacheObservation(observation);
+    _cacheEvidence.flush();
   }
+
+  void _onCacheObservationApplied(
+    PlaybackCacheEvidenceObservation observation,
+  ) {
+    _diagnostics.cacheObservation(observation);
+  }
+
+  Future<SeekResult> _trackSeekOperation(
+    Future<SeekResult> operation,
+    Completer<void> bookkeeping,
+  ) {
+    final bookkeepingFuture = bookkeeping.future;
+    _activeSeekBookkeeping.add(bookkeepingFuture);
+    unawaited(
+      operation.then<void>(
+        (_) => _completeSeekBookkeeping(bookkeeping),
+        onError: (Object _, StackTrace _) =>
+            _completeSeekBookkeeping(bookkeeping),
+      ),
+    );
+    unawaited(
+      bookkeepingFuture.then<void>(
+        (_) => _activeSeekBookkeeping.remove(bookkeepingFuture),
+        onError: (Object _, StackTrace _) {
+          _activeSeekBookkeeping.remove(bookkeepingFuture);
+        },
+      ),
+    );
+    return operation;
+  }
+
+  Future<void> _waitForSeekBookkeeping() async {
+    while (_activeSeekBookkeeping.isNotEmpty) {
+      final operations = List<Future<void>>.of(_activeSeekBookkeeping);
+      await Future.wait<void>(
+        operations.map(
+          (bookkeeping) => bookkeeping.then<void>(
+            (_) {},
+            onError: (Object _, StackTrace _) {},
+          ),
+        ),
+      );
+    }
+  }
+
+  static void _completeSeekBookkeeping(Completer<void> bookkeeping) {
+    if (!bookkeeping.isCompleted) bookkeeping.complete();
+  }
+
+  void _writeTerminalSummaries() {
+    final seekStatistics = _frozenSeekStatistics;
+    if (seekStatistics == null || _cacheEvidence.summaryWritten) return;
+    final summary = _cacheEvidence.claimSummaryForWrite(
+      seekStatistics: seekStatistics,
+    );
+    if (summary == null) return;
+    _diagnostics.cacheSessionSummary(summary);
+    _diagnostics.flushSeekSummary(snapshot: seekStatistics);
+  }
+
+  SeekResult _cancelledSeekResult(Duration target) => SeekResult(
+    disposition: SeekDisposition.cancelled,
+    requestedTarget: _clampToDuration(target),
+    settled: false,
+    committedPosition: _state.position,
+    failureKind: SeekFailureKind.staleSession,
+  );
 
   static PlaybackCacheReopenReason _reopenReason(
     PlaybackCacheSafetyReason reason,

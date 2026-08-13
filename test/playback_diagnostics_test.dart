@@ -7,11 +7,13 @@ import 'package:emby_my_client/playback/cache/playback_cache_coordinator.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_evidence.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_option_bindings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_telemetry.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
+import 'package:emby_my_client/playback/playback_seek_statistics.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -40,6 +42,17 @@ void main() {
         'demuxer-cache-dir':
             r'C:\Users\owner\Library\password-token-media-title',
       },
+      optionBindings: resolvePlaybackCacheOptionBindings(
+        optionSupport: {
+          for (final option in playbackCacheOptionNames) option: true,
+        },
+        resetValues: const {
+          'demuxer-cache-dir':
+              r'C:\Users\owner\Library\password-token-media-title',
+        },
+        requiredChoiceAvailable: const {'demuxer-cache-unlink-files': true},
+        writeReadBackPassed: const {'demuxer-cache-dir': true},
+      ),
     );
     final capabilities = capabilitiesWith(
       'https://media.example.test/file?X-Emby-Token=secret',
@@ -226,7 +239,12 @@ void main() {
     final output = lines.join('\n');
     expect(output, contains('event=playback_cache_session_summary'));
     expect(output, contains('cacheEvidence=diskDataObserved'));
-    expect(output, contains('peakFileCacheBytes=lte64MiB'));
+    expect(output, contains('peakFileCacheBytes=lte16MiB'));
+    expect(output, contains('seekRequestedCount=0'));
+    expect(output, contains('seekExecutedCount=0'));
+    expect(output, contains('seekSupersededCount=0'));
+    expect(output, contains('seekFailedCount=0'));
+    expect(output, contains('seekCancelledCount=0'));
     expect(output, contains('testOverrideUsed=true'));
     expect(output, isNot(contains('private-session-id')));
     expect(output, isNot(contains('10')));
@@ -284,5 +302,55 @@ void main() {
       lines.where((line) => line.contains('kind=engine_stop')),
       hasLength(1),
     );
+  });
+
+  test('cache diagnostic fields distinguish unavailable from zero', () {
+    final lines = <String>[];
+    final diagnostics = PlaybackDiagnostics(
+      writer: (_, _, message) => lines.add(message),
+    );
+    final accumulator = PlaybackCacheEvidenceAccumulator(
+      sessionId: const PlaybackItemSessionId('diagnostic-missing'),
+    );
+    diagnostics.cacheSessionSummary(accumulator.finalize());
+    expect(lines.single, contains('peakFileCacheBytes=unavailable'));
+    expect(lines.single, contains('maxActualForward=unavailable'));
+    expect(lines.single, contains('maxActualBackward=unavailable'));
+  });
+
+  test('cache and seek summaries use the same frozen exact counts', () {
+    final lines = <String>[];
+    final diagnostics = PlaybackDiagnostics(
+      writer: (_, _, message) => lines.add(message),
+    );
+    final accumulator = PlaybackCacheEvidenceAccumulator(
+      sessionId: const PlaybackItemSessionId('frozen-counts'),
+    );
+    final snapshot = const PlaybackSeekStatisticsSnapshot(
+      requested: 101,
+      executed: 2,
+      superseded: 97,
+      failed: 1,
+      cancelled: 1,
+    );
+
+    diagnostics.cacheSessionSummary(
+      accumulator.finalize(seekStatistics: snapshot),
+    );
+    diagnostics.flushSeekSummary(snapshot: snapshot);
+
+    final summary = lines.singleWhere(
+      (line) => line.contains('event=playback_cache_session_summary'),
+    );
+    expect(summary, contains('seekRequestedCount=101'));
+    expect(summary, contains('seekExecutedCount=2'));
+    expect(summary, contains('seekSupersededCount=97'));
+    expect(summary, contains('seekFailedCount=1'));
+    expect(summary, contains('seekCancelledCount=1'));
+    expect(lines, contains('event=playback_seek_requested count=101'));
+    expect(lines, contains('event=playback_seek_coalesced count=97'));
+    expect(lines, contains('event=playback_seek_executed count=2'));
+    expect(lines, contains('event=playback_seek_failed count=1'));
+    expect(lines, contains('event=playback_seek_cancelled count=1'));
   });
 }

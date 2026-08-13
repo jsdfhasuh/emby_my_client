@@ -2,6 +2,8 @@ import 'playback_operation_coordinator.dart';
 
 enum UiSeekCompletion { ignored, committed, cancelled, failed }
 
+const uiSeekFailureMessage = '跳转失败，请重试';
+
 class UiSeekRequestGate {
   int _generation = 0;
 

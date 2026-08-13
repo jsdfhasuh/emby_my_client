@@ -5,6 +5,7 @@ import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_capabilities.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_option_bindings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
@@ -1094,7 +1095,7 @@ void main() {
       diagnostics.where(
         (line) =>
             line.contains('event=playback_cache_session_summary') &&
-            line.contains('cleanupResult=timedOut'),
+            line.contains('cleanupResult=timeout'),
       ),
       hasLength(1),
     );
@@ -1475,11 +1476,38 @@ PlaybackCacheEngineCapabilities _capabilities() =>
       supportsImmediateUnlink: true,
       profileSwitchStrategy:
           PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop,
-      resetValues: {
-        for (final option in playbackCacheProfileOptionNames)
-          option: option == 'demuxer-cache-dir' ? '' : 'auto',
-      },
+      resetValues: _completeResetValues(''),
+      optionBindings: resolvePlaybackCacheOptionBindings(
+        optionSupport: {
+          for (final option in playbackCacheNativeOptionNames) option: true,
+        },
+        resetValues: _completeResetValues(''),
+        requiredChoiceAvailable: {
+          'demuxer-cache-unlink-files': true,
+          'cache-unlink-files': true,
+        },
+        writeReadBackPassed: {
+          'demuxer-cache-dir': true,
+          'cache-dir': true,
+          'demuxer-cache-unlink-files': true,
+          'cache-unlink-files': true,
+        },
+      ),
     );
+
+Map<String, String> _completeResetValues(String directory) => {
+  for (final option in playbackCacheProfileOptionNames)
+    option: switch (option) {
+      'demuxer-cache-dir' => directory,
+      'cache' ||
+      'cache-on-disk' ||
+      'demuxer-donate-buffer' ||
+      'cache-pause' => 'no',
+      'demuxer-cache-unlink-files' => 'whendone',
+      'demuxer-seekable-cache' => 'auto',
+      _ => '0',
+    },
+};
 
 const _item = EmbyItem(
   id: 'private-item-id',

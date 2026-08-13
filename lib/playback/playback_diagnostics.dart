@@ -6,11 +6,12 @@ import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
 import 'cache/playback_cache_evidence.dart';
 import 'cache/playback_cache_engine.dart';
+import 'cache/playback_cache_option_bindings.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
-import 'cache/playback_cache_telemetry.dart';
 import 'playback_operation_coordinator.dart';
+import 'playback_seek_statistics.dart';
 
 enum PlaybackDiagnosticLevel { info, warning }
 
@@ -111,6 +112,11 @@ class PlaybackDiagnostics {
   int _seekExecuted = 0;
   int _seekFailed = 0;
   int _seekCancelled = 0;
+  int _sessionSeekRequested = 0;
+  int _sessionSeekCoalesced = 0;
+  int _sessionSeekExecuted = 0;
+  int _sessionSeekFailed = 0;
+  int _sessionSeekCancelled = 0;
   final Map<PlaybackOperationTimeoutKind, DateTime> _timeoutLastWritten = {};
 
   void cacheCapabilitiesResolved(PlaybackCacheEngineCapabilities capabilities) {
@@ -246,28 +252,30 @@ class PlaybackDiagnostics {
 
   void cacheSessionSummary(PlaybackCacheEvidenceSummary summary) {
     _emit(PlaybackDiagnosticEvent.cacheSessionSummary, [
-      'requestedMode=${summary.requestedMode?.name ?? 'unknown'}',
-      'finalConfirmedMode=${summary.finalConfirmedMode?.name ?? 'unknown'}',
+      'eventSchemaVersion=1',
+      'settingsMode=${summary.settingsMode.name}',
+      'requestedMode=${playbackCacheRequestedModeName(summary.requestedMode)}',
+      'finalConfirmedMode=${playbackCacheConfirmedModeName(summary.finalConfirmedMode)}',
       'cacheEvidence=${summary.cacheEvidence.name}',
-      'telemetryStatus=${_telemetryStatusSet(summary.telemetryStatuses)}',
-      'telemetryAvailableEver=${summary.telemetryStatuses.contains(PlaybackCacheTelemetryStatus.available)}',
+      'telemetryStatusEver=${summary.telemetryStatusEver.name}',
+      'cacheCreateFailedObserved=${summary.cacheCreateFailedObserved}',
+      'cacheSnapshotUnavailableObserved=${summary.cacheSnapshotUnavailableObserved}',
       'observedNonZeroFileCache=${summary.observedNonzeroBytes}',
       'peakFileCacheBytes=${_bytesBucket(summary.peakBytes)}',
-      'maxActualForward=${_durationBucket(summary.maxActualForward ?? Duration.zero)}',
-      'maxActualBackward=${_durationBucket(summary.maxActualBackward ?? Duration.zero)}',
-      'cacheCreateResult=${_enumSet(summary.cacheCreateResults)}',
-      'cacheSnapshotUnavailable=${_countBucket(summary.snapshotUnavailableCount)}',
-      'safetyReopenReason=${_reopenReasonSet(summary.reopenReasons)}',
-      'cleanupResult=${summary.cleanupResult?.name ?? 'notApplicable'}',
-      'observationCount=${_countBucket(summary.observationCount)}',
+      'maxActualForward=${_durationBucket(summary.maxActualForward)}',
+      'maxActualBackward=${_durationBucket(summary.maxActualBackward)}',
+      'safetyReopenReason=${summary.safetyReopenReason.name}',
+      'runtimeRecovery=${summary.runtimeRecovery.name}',
+      'cleanupResult=${_cleanupResultName(summary.cleanupResult)}',
+      'cleanupAttemptCountBucket=${_cleanupAttemptBucket(summary.cleanupAttemptCount)}',
+      'seekRequestedCount=${summary.seekRequested}',
+      'seekExecutedCount=${summary.seekExecuted}',
+      'seekSupersededCount=${summary.seekSuperseded}',
+      'seekFailedCount=${summary.seekFailed}',
+      'seekCancelledCount=${summary.seekCancelled}',
       'optionalTuningDegraded=${summary.optionalTuningDegraded}',
-      'optionalTuningUnavailable=${_countBucket(summary.optionalTuningUnavailableCount)}',
+      'optionalTuningUnavailable=${_optionalTuningName(summary.optionalTuningUnavailable)}',
       'testOverrideUsed=${summary.testOverrideUsed}',
-      'seekRequested=${_countBucket(summary.seekRequested)}',
-      'seekExecuted=${_countBucket(summary.seekExecuted)}',
-      'seekSuperseded=${_countBucket(summary.seekSuperseded)}',
-      'seekFailed=${_countBucket(summary.seekFailed)}',
-      'seekCancelled=${_countBucket(summary.seekCancelled)}',
     ]);
   }
 
@@ -310,6 +318,7 @@ class PlaybackDiagnostics {
 
   void seekRequested() {
     _seekRequested++;
+    _sessionSeekRequested++;
     _scheduleSeekFlush();
   }
 
@@ -317,12 +326,16 @@ class PlaybackDiagnostics {
     switch (result.disposition) {
       case SeekDisposition.executed:
         _seekExecuted++;
+        _sessionSeekExecuted++;
       case SeekDisposition.superseded:
         _seekCoalesced++;
+        _sessionSeekCoalesced++;
       case SeekDisposition.cancelled:
         _seekCancelled++;
+        _sessionSeekCancelled++;
       case SeekDisposition.failed:
         _seekFailed++;
+        _sessionSeekFailed++;
         switch (result.failureKind) {
           case SeekFailureKind.callTimeout:
             operationTimeout(PlaybackOperationTimeoutKind.seekCall);
@@ -361,19 +374,44 @@ class PlaybackDiagnostics {
     );
   }
 
-  void flushSeekSummary() {
+  PlaybackSeekStatisticsSnapshot snapshotSeekStatistics() =>
+      PlaybackSeekStatisticsSnapshot(
+        requested: _sessionSeekRequested,
+        executed: _sessionSeekExecuted,
+        superseded: _sessionSeekCoalesced,
+        failed: _sessionSeekFailed,
+        cancelled: _sessionSeekCancelled,
+      );
+
+  void flushSeekSummary({PlaybackSeekStatisticsSnapshot? snapshot}) {
     _seekFlushTimer?.cancel();
     _seekFlushTimer = null;
-    _emitSeekCount(PlaybackDiagnosticEvent.seekRequested, _seekRequested);
-    _emitSeekCount(PlaybackDiagnosticEvent.seekCoalesced, _seekCoalesced);
-    _emitSeekCount(PlaybackDiagnosticEvent.seekExecuted, _seekExecuted);
-    _emitSeekCount(PlaybackDiagnosticEvent.seekFailed, _seekFailed);
-    _emitSeekCount(PlaybackDiagnosticEvent.seekCancelled, _seekCancelled);
+    final counts =
+        snapshot ??
+        PlaybackSeekStatisticsSnapshot(
+          requested: _seekRequested,
+          executed: _seekExecuted,
+          superseded: _seekCoalesced,
+          failed: _seekFailed,
+          cancelled: _seekCancelled,
+        );
+    _emitSeekCount(PlaybackDiagnosticEvent.seekRequested, counts.requested);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekCoalesced, counts.superseded);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekExecuted, counts.executed);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekFailed, counts.failed);
+    _emitSeekCount(PlaybackDiagnosticEvent.seekCancelled, counts.cancelled);
     _seekRequested = 0;
     _seekCoalesced = 0;
     _seekExecuted = 0;
     _seekFailed = 0;
     _seekCancelled = 0;
+    if (snapshot != null) {
+      _sessionSeekRequested = 0;
+      _sessionSeekCoalesced = 0;
+      _sessionSeekExecuted = 0;
+      _sessionSeekFailed = 0;
+      _sessionSeekCancelled = 0;
+    }
   }
 
   void _scheduleSeekFlush() {
@@ -423,17 +461,21 @@ class PlaybackDiagnostics {
     _ => 'unsupported',
   };
 
-  static String _durationBucket(Duration value) => switch (value.inSeconds) {
-    <= 0 => 'none',
+  static String _durationBucket(Duration? value) => switch (value?.inSeconds) {
+    null => 'unavailable',
+    <= 0 => 'zero',
     <= 30 => 'lte30s',
     <= 60 => 'lte60s',
+    <= 120 => 'lte120s',
     <= 180 => 'lte180s',
     <= 300 => 'lte300s',
     _ => 'gt300s',
   };
 
-  static String _bytesBucket(int value) => switch (value) {
-    <= 0 => 'none',
+  static String _bytesBucket(int? value) => switch (value) {
+    null => 'unavailable',
+    <= 0 => 'zero',
+    <= 16 * 1024 * 1024 => 'lte16MiB',
     <= 64 * 1024 * 1024 => 'lte64MiB',
     <= 256 * 1024 * 1024 => 'lte256MiB',
     <= 512 * 1024 * 1024 => 'lte512MiB',
@@ -452,38 +494,64 @@ class PlaybackDiagnostics {
   static List<String> _cacheObservationFields(
     PlaybackCacheEvidenceObservation observation,
   ) => [
-    'requestedMode=${observation.requestedMode?.name ?? 'unknown'}',
-    'confirmedMode=${observation.confirmedMode?.name ?? 'unknown'}',
+    'eventSchemaVersion=1',
+    'settingsMode=${observation.settingsMode.name}',
+    'requestedMode=${playbackCacheRequestedModeName(observation.requestedMode)}',
+    'confirmedMode=${playbackCacheConfirmedModeName(observation.confirmedMode)}',
     'cacheEvidence=${observation.cacheEvidence.name}',
-    'telemetryStatus=${observation.telemetryStatus?.name ?? 'unknown'}',
-    'fileCacheBytes=${_bytesBucket(observation.fileCacheBytes ?? 0)}',
-    'actualForward=${_durationBucket(observation.actualForward ?? Duration.zero)}',
-    'actualBackward=${_durationBucket(observation.actualBackward ?? Duration.zero)}',
+    'telemetryStatus=${observation.telemetryStatus?.name ?? 'fieldTemporarilyAbsent'}',
+    'cacheOnDisk=${observation.cacheOnDisk?.toString() ?? 'unknown'}',
+    'fileCacheBytes=${_bytesBucket(observation.fileCacheBytes)}',
+    'actualForward=${_durationBucket(observation.actualForward)}',
+    'actualBackward=${_durationBucket(observation.actualBackward)}',
     'fallbackReason=${observation.fallbackReason?.name ?? 'none'}',
     'optionalTuningDegraded=${observation.optionalTuningDegraded}',
-    'optionalTuningUnavailable=${_countBucket(observation.optionalTuningUnavailableCount)}',
+    'optionalTuningUnavailable=${_optionalTuningName(observation.optionalTuningUnavailable)}',
     'testOverrideActive=${observation.testOverrideActive}',
   ];
 
-  static String _telemetryStatusSet(Set<PlaybackCacheTelemetryStatus> values) =>
-      _enumSet(values);
-
-  static String _reopenReasonSet(Set<PlaybackCacheReopenReason> values) {
-    if (values.isEmpty) return 'none';
-    if (values.length > 1) return 'multiple';
-    return values.single.name;
+  static String _optionalTuningName(Set<PlaybackCacheLogicalOption> values) {
+    final names = <String>{};
+    var hasUnrepresentableOption = false;
+    for (final value in values) {
+      switch (value) {
+        case PlaybackCacheLogicalOption.streamBufferSize:
+          names.add('streamBufferSize');
+        case PlaybackCacheLogicalOption.cachePause:
+          names.add('cachePause');
+        case PlaybackCacheLogicalOption.cachePauseWait:
+          names.add('cachePauseWait');
+        case PlaybackCacheLogicalOption.donateBuffer:
+        case PlaybackCacheLogicalOption.seekableCache:
+          hasUnrepresentableOption = true;
+        case PlaybackCacheLogicalOption.cache:
+        case PlaybackCacheLogicalOption.cacheOnDisk:
+        case PlaybackCacheLogicalOption.cacheDirectory:
+        case PlaybackCacheLogicalOption.cacheUnlinkFiles:
+        case PlaybackCacheLogicalOption.cacheSeconds:
+        case PlaybackCacheLogicalOption.forwardMetadataBytes:
+        case PlaybackCacheLogicalOption.backwardMetadataBytes:
+          break;
+      }
+    }
+    if (hasUnrepresentableOption) return 'multiple';
+    if (names.isEmpty) return 'none';
+    if (names.length > 1) return 'multiple';
+    return names.single;
   }
 
-  static String _enumSet(Iterable<Enum> values) {
-    final names = values.map((value) => value.name).toList()..sort();
-    return names.isEmpty ? 'none' : names.join(',');
-  }
-
-  static String _countBucket(int value) => switch (value) {
-    <= 0 => '0',
-    <= 2 => '1_2',
-    <= 10 => '3_10',
-    <= 100 => '11_100',
-    _ => 'gt100',
+  static String _cleanupAttemptBucket(int count) => switch (count) {
+    <= 0 => 'zero',
+    1 => 'one',
+    2 => 'two',
+    _ => 'threeOrMore',
   };
+
+  static String _cleanupResultName(PlaybackCacheCleanupResult? value) =>
+      switch (value) {
+        null || PlaybackCacheCleanupResult.notApplicable => 'notApplicable',
+        PlaybackCacheCleanupResult.succeeded => 'success',
+        PlaybackCacheCleanupResult.failed => 'failed',
+        PlaybackCacheCleanupResult.timedOut => 'timeout',
+      };
 }

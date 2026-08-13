@@ -124,6 +124,7 @@ void main() {
     expect(controller.state.phase, PlaybackPhase.failed);
     expect(engine.openPlayValues, hasLength(2));
     expect(engine.stopCalls, 2);
+    expect(engine.disposeCalls, 1);
     expect(reporter.stopCalls, 2);
     expect(
       diagnostics,
@@ -294,12 +295,14 @@ void main() {
   test('shutdown is idempotent and invalidates late startup work', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
+    final diagnostics = <String>[];
     final engine = _FakeEngine();
     final controller = _controller(
       api: api,
       engine: engine,
       item: _plainItem,
       readyTimeout: const Duration(seconds: 1),
+      diagnostics: _diagnostics(diagnostics),
     );
 
     final startup = controller.start();
@@ -313,6 +316,12 @@ void main() {
           .where((request) => request.path == '/Sessions/Playing/Stopped')
           .length,
       lessThanOrEqualTo(1),
+    );
+    expect(
+      diagnostics.where(
+        (line) => line.contains('event=playback_cache_session_summary'),
+      ),
+      hasLength(1),
     );
   });
 
@@ -532,10 +541,59 @@ void main() {
 
     expect(result.disposition, SeekDisposition.cancelled);
     expect(diagnostics, contains('event=playback_seek_cancelled count=1'));
+    expect(
+      diagnostics,
+      contains(
+        allOf(
+          contains('event=playback_cache_session_summary'),
+          contains('seekRequestedCount=1'),
+          contains('seekCancelledCount=1'),
+        ),
+      ),
+    );
     seekGate.complete();
     await Future<void>.delayed(Duration.zero);
     expect(controller.state.phase, PlaybackPhase.idle);
   });
+
+  test(
+    'final startup failure writes one terminal summary before shutdown',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final diagnostics = <String>[];
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engineLater(() => engine.errorController.add('codec decoder failed'));
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        diagnostics: _diagnostics(diagnostics),
+        readyTimeout: const Duration(milliseconds: 100),
+      );
+
+      await controller.start();
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(engine.disposeCalls, 1);
+      expect(
+        diagnostics.where(
+          (line) => line.contains('event=playback_cache_session_summary'),
+        ),
+        hasLength(1),
+      );
+
+      await controller.shutdown();
+      expect(engine.disposeCalls, 1);
+      expect(
+        diagnostics.where(
+          (line) => line.contains('event=playback_cache_session_summary'),
+        ),
+        hasLength(1),
+      );
+    },
+  );
 }
 
 PlaybackController _controller({

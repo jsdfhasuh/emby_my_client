@@ -121,6 +121,7 @@ class PlaybackItemSession {
 typedef PlaybackEngineSeek = Future<void> Function(Duration target);
 typedef PlaybackTargetClamp = Duration Function(Duration target);
 typedef RequestedPositionListener = void Function(Duration? position);
+typedef PlaybackSessionCurrent = bool Function(PlaybackItemSessionId sessionId);
 
 class PlaybackOperationCoordinator {
   PlaybackOperationCoordinator({
@@ -129,19 +130,22 @@ class PlaybackOperationCoordinator {
     required PlaybackTargetClamp clampTarget,
     RequestedPositionListener? onRequestedPositionChanged,
     void Function()? onControlOperationInvalidated,
+    PlaybackSessionCurrent? isSessionCurrent,
     this.seekCallTimeout = const Duration(seconds: 8),
     this.seekSettleTimeout = const Duration(seconds: 2),
     this.seekTolerance = const Duration(seconds: 2),
   }) : _seekEngine = seekEngine,
        _clampTarget = clampTarget,
        _onRequestedPositionChanged = onRequestedPositionChanged,
-       _onControlOperationInvalidated = onControlOperationInvalidated;
+       _onControlOperationInvalidated = onControlOperationInvalidated,
+       _isSessionCurrent = isSessionCurrent;
 
   final PlaybackItemSessionId sessionId;
   PlaybackEngineSeek _seekEngine;
   final PlaybackTargetClamp _clampTarget;
   final RequestedPositionListener? _onRequestedPositionChanged;
   final void Function()? _onControlOperationInvalidated;
+  final PlaybackSessionCurrent? _isSessionCurrent;
   final Duration seekCallTimeout;
   final Duration seekSettleTimeout;
   final Duration seekTolerance;
@@ -155,6 +159,7 @@ class PlaybackOperationCoordinator {
   bool _nativeSeekOutstanding = false;
   bool _shutdown = false;
   int _operationGeneration = 0;
+  int _engineGeneration = 0;
   final List<_ControlOperationRequest> _controlPending = [];
   _ControlOperationRequest? _controlActive;
   bool _controlDraining = false;
@@ -205,6 +210,7 @@ class PlaybackOperationCoordinator {
 
   void replaceSeekEngine(PlaybackEngineSeek seekEngine) {
     invalidateForHigherPriorityOperation();
+    _engineGeneration++;
     _seekEngine = seekEngine;
   }
 
@@ -339,6 +345,8 @@ class PlaybackOperationCoordinator {
       target: target,
       source: source,
       generation: _operationGeneration,
+      engineGeneration: _engineGeneration,
+      sessionId: sessionId,
     );
     final previous = _pending;
     if (previous != null) {
@@ -424,9 +432,7 @@ class PlaybackOperationCoordinator {
         request,
         disposition: SeekDisposition.cancelled,
         settled: false,
-        failureKind: _shutdown
-            ? SeekFailureKind.staleSession
-            : SeekFailureKind.higherPriorityOperation,
+        failureKind: _staleFailureKind(request),
       );
       return;
     }
@@ -457,9 +463,7 @@ class PlaybackOperationCoordinator {
         request,
         disposition: SeekDisposition.cancelled,
         settled: false,
-        failureKind: _shutdown
-            ? SeekFailureKind.staleSession
-            : SeekFailureKind.higherPriorityOperation,
+        failureKind: _staleFailureKind(request),
       );
       return;
     }
@@ -472,7 +476,21 @@ class PlaybackOperationCoordinator {
   }
 
   bool _isCurrent(_SeekRequest request) =>
-      !_shutdown && request.generation == _operationGeneration;
+      !_shutdown &&
+      request.sessionId == sessionId &&
+      request.generation == _operationGeneration &&
+      request.engineGeneration == _engineGeneration &&
+      (_isSessionCurrent?.call(request.sessionId) ?? true);
+
+  SeekFailureKind _staleFailureKind(_SeekRequest request) {
+    final sessionIsCurrent = _isSessionCurrent?.call(request.sessionId) ?? true;
+    return _shutdown ||
+            request.sessionId != sessionId ||
+            request.engineGeneration != _engineGeneration ||
+            !sessionIsCurrent
+        ? SeekFailureKind.staleSession
+        : SeekFailureKind.higherPriorityOperation;
+  }
 
   void _completePending({
     required SeekDisposition disposition,
@@ -547,11 +565,15 @@ class _SeekRequest {
     required this.target,
     required this.source,
     required this.generation,
+    required this.engineGeneration,
+    required this.sessionId,
   });
 
   final Duration target;
   final SeekSource source;
   final int generation;
+  final int engineGeneration;
+  final PlaybackItemSessionId sessionId;
   final Completer<SeekResult> completer = Completer<SeekResult>();
 }
 
