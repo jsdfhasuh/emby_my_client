@@ -393,35 +393,33 @@ jobs:
             echo 'Deprecated cache Gate name was emitted' >&2
             exit 1
           fi
-          gate_lines="$(
-            grep -Eo \
-              'STOP_GATE_(CACHE_OPTION_BINDING_IMPLEMENTATION|MEMORY_CACHE_PROFILE|ACTIVE_CONTEXT_TELEMETRY_READER|DISK_CACHE_CAPABILITY|DISK_TELEMETRY_EVIDENCE)=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)' \
-              "$xctest_log" | sort -u
-          )"
-          grep -Fx 'STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED' <<<"$gate_lines"
-          grep -Fx 'STOP_GATE_MEMORY_CACHE_PROFILE=PASSED' <<<"$gate_lines"
-          grep -Fx 'STOP_GATE_ACTIVE_CONTEXT_TELEMETRY_READER=PASSED' <<<"$gate_lines"
-          grep -Eq '^STOP_GATE_DISK_CACHE_CAPABILITY=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)$' <<<"$gate_lines"
-          grep -Eq '^STOP_GATE_DISK_TELEMETRY_EVIDENCE=(PASSED|BLOCKED_BY_BUNDLED_LIBMPV)$' <<<"$gate_lines"
-          printf '%s\n' "$gate_lines" >../build/ios/artifacts/mpv-native-gates.txt
           xcrun xcresulttool export attachments \
             --path "$result_bundle" \
             --output-path "$attachment_dir"
           ATTACHMENT_DIR="$attachment_dir" \
             CAPABILITY_OUTPUT='../build/ios/artifacts/mpv-capability-manifest.json' \
+            GATE_OUTPUT='../build/ios/artifacts/mpv-native-gates.txt' \
             python3 - <<'PY'
           import json
           import os
           from pathlib import Path
           source_root = Path(os.environ['ATTACHMENT_DIR'])
           output = Path(os.environ['CAPABILITY_OUTPUT'])
+          gate_output = Path(os.environ['GATE_OUTPUT'])
           def is_capability_manifest(value):
               return (
                   isinstance(value, dict)
                   and value.get('schema') == 'emby-mpv-capabilities/v1'
               )
+          def is_gate_manifest(value):
+              return (
+                  isinstance(value, dict)
+                  and value.get('schema') == 'emby-mpv-native-gates/v1'
+              )
           assert not is_capability_manifest([])
-          manifest = None
+          assert not is_gate_manifest([])
+          capability_matches = []
+          gate_matches = []
           for candidate in source_root.rglob('*'):
               if not candidate.is_file():
                   continue
@@ -430,10 +428,14 @@ jobs:
               except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                   continue
               if is_capability_manifest(decoded):
-                  manifest = decoded
-                  output.write_bytes(candidate.read_bytes())
-                  break
-          assert manifest is not None
+                  capability_matches.append((decoded, candidate.read_bytes()))
+              if is_gate_manifest(decoded):
+                  gate_matches.append(decoded)
+          assert len(capability_matches) == 1
+          assert len(gate_matches) == 1
+          manifest, manifest_bytes = capability_matches[0]
+          gates = gate_matches[0]
+          output.write_bytes(manifest_bytes)
           expected_top = {
               'schema', 'mpvVersionFingerprint', 'platform', 'options',
               'properties', 'unlinkChoices', 'resetValues',
@@ -568,12 +570,30 @@ jobs:
               and approved_strategy
           )
           assert manifest['diskCapabilityPassed'] is calculated_gate
-          print('STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED')
-          print('STOP_GATE_MEMORY_CACHE_PROFILE=PASSED')
-          disk_gate = (
+          expected_disk_gate = (
               'PASSED' if calculated_gate else 'BLOCKED_BY_BUNDLED_LIBMPV'
           )
-          print(f'STOP_GATE_DISK_CACHE_CAPABILITY={disk_gate}')
+          expected_gate_keys = {
+              'schema', 'cacheOptionBindingImplementation',
+              'memoryCacheProfile', 'activeContextTelemetryReader',
+              'diskCacheCapability', 'diskTelemetryEvidence',
+          }
+          assert set(gates) == expected_gate_keys
+          assert gates['schema'] == 'emby-mpv-native-gates/v1'
+          assert gates['cacheOptionBindingImplementation'] == 'PASSED'
+          assert gates['memoryCacheProfile'] == 'PASSED'
+          assert gates['activeContextTelemetryReader'] == 'PASSED'
+          assert gates['diskCacheCapability'] == expected_disk_gate
+          assert gates['diskTelemetryEvidence'] == expected_disk_gate
+          gate_lines = [
+              'STOP_GATE_CACHE_OPTION_BINDING_IMPLEMENTATION=PASSED',
+              'STOP_GATE_MEMORY_CACHE_PROFILE=PASSED',
+              'STOP_GATE_ACTIVE_CONTEXT_TELEMETRY_READER=PASSED',
+              f'STOP_GATE_DISK_CACHE_CAPABILITY={expected_disk_gate}',
+              f'STOP_GATE_DISK_TELEMETRY_EVIDENCE={expected_disk_gate}',
+          ]
+          gate_output.write_text('\n'.join(gate_lines) + '\n', encoding='utf-8')
+          print('\n'.join(gate_lines))
           print(json.dumps(manifest, sort_keys=True, separators=(',', ':')))
           PY
 

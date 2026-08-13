@@ -5,6 +5,34 @@ import UIKit
 import XCTest
 
 final class RunnerTests: XCTestCase {
+  func testNativeGateEvidenceUsesExactSchemaAndStatuses() throws {
+    let evidence = PlaybackCacheNativeGateEvidence(
+      diskCacheCapability: .blockedByBundledLibmpv,
+      diskTelemetryEvidence: .blockedByBundledLibmpv
+    )
+    let decoded = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: evidence.safeData()) as? [String: String]
+    )
+
+    XCTAssertEqual(
+      Set(decoded.keys),
+      [
+        "schema",
+        "cacheOptionBindingImplementation",
+        "memoryCacheProfile",
+        "activeContextTelemetryReader",
+        "diskCacheCapability",
+        "diskTelemetryEvidence",
+      ]
+    )
+    XCTAssertEqual(decoded["schema"], "emby-mpv-native-gates/v1")
+    XCTAssertEqual(decoded["cacheOptionBindingImplementation"], "PASSED")
+    XCTAssertEqual(decoded["memoryCacheProfile"], "PASSED")
+    XCTAssertEqual(decoded["activeContextTelemetryReader"], "PASSED")
+    XCTAssertEqual(decoded["diskCacheCapability"], "BLOCKED_BY_BUNDLED_LIBMPV")
+    XCTAssertEqual(decoded["diskTelemetryEvidence"], "BLOCKED_BY_BUNDLED_LIBMPV")
+  }
+
   func testNativeCacheOptionResolverUsesFirstCompleteCandidate() {
     let usable = PlaybackCacheNativeOptionFacts(
       optionNameMatches: true,
@@ -440,6 +468,10 @@ final class RunnerTests: XCTestCase {
     print("STOP_GATE_ACTIVE_CONTEXT_TELEMETRY_READER=PASSED")
 
     guard snapshot.diskCapabilityPassed else {
+      try attachNativeGateEvidence(
+        diskCacheCapability: .blockedByBundledLibmpv,
+        diskTelemetryEvidence: .blockedByBundledLibmpv
+      )
       print("STOP_GATE_DISK_CACHE_CAPABILITY=BLOCKED_BY_BUNDLED_LIBMPV")
       print("STOP_GATE_DISK_TELEMETRY_EVIDENCE=BLOCKED_BY_BUNDLED_LIBMPV")
       return
@@ -484,6 +516,10 @@ final class RunnerTests: XCTestCase {
       XCTFail("Disk cache-on-disk read-back failed")
       return
     }
+    try attachNativeGateEvidence(
+      diskCacheCapability: .passed,
+      diskTelemetryEvidence: .passed
+    )
     print("STOP_GATE_DISK_CACHE_CAPABILITY=PASSED")
     print("STOP_GATE_DISK_TELEMETRY_EVIDENCE=PASSED")
   }
@@ -1388,6 +1424,20 @@ final class RunnerTests: XCTestCase {
     return latest
   }
 
+  private func attachNativeGateEvidence(
+    diskCacheCapability: PlaybackCacheNativeGateStatus,
+    diskTelemetryEvidence: PlaybackCacheNativeGateStatus
+  ) throws {
+    let evidence = PlaybackCacheNativeGateEvidence(
+      diskCacheCapability: diskCacheCapability,
+      diskTelemetryEvidence: diskTelemetryEvidence
+    )
+    let attachment = XCTAttachment(data: try evidence.safeData())
+    attachment.name = "mpv-native-gates.json"
+    attachment.lifetime = .keepAlways
+    add(attachment)
+  }
+
   private func performLoopbackRequest(
     _ request: URLRequest
   ) throws -> (HTTPURLResponse, Data) {
@@ -1433,6 +1483,26 @@ final class RunnerTests: XCTestCase {
     } catch {
       XCTFail("fixture could not be encoded: \(error)", file: file, line: line)
     }
+  }
+}
+
+private enum PlaybackCacheNativeGateStatus: String, Encodable {
+  case passed = "PASSED"
+  case blockedByBundledLibmpv = "BLOCKED_BY_BUNDLED_LIBMPV"
+}
+
+private struct PlaybackCacheNativeGateEvidence: Encodable {
+  let schema = "emby-mpv-native-gates/v1"
+  let cacheOptionBindingImplementation = PlaybackCacheNativeGateStatus.passed
+  let memoryCacheProfile = PlaybackCacheNativeGateStatus.passed
+  let activeContextTelemetryReader = PlaybackCacheNativeGateStatus.passed
+  let diskCacheCapability: PlaybackCacheNativeGateStatus
+  let diskTelemetryEvidence: PlaybackCacheNativeGateStatus
+
+  func safeData() throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return try encoder.encode(self)
   }
 }
 
