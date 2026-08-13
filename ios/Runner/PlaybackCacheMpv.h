@@ -21,6 +21,10 @@ typedef enum mpv_format {
   MPV_FORMAT_BYTE_ARRAY = 9,
 } mpv_format;
 
+// Named libmpv errors used by the active-context telemetry reader.
+#define MPV_ERROR_PROPERTY_NOT_FOUND (-8)
+#define MPV_ERROR_PROPERTY_UNAVAILABLE (-10)
+
 typedef union mpv_node_union {
   char *string;
   int flag;

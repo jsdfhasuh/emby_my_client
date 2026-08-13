@@ -1,5 +1,409 @@
 import Foundation
 
+enum PlaybackCacheNativeOptionCandidateStatus: String {
+  case unavailable
+  case incomplete
+  case usable
+}
+
+struct PlaybackCacheNativeOptionCandidateEvidence {
+  let nativeName: String
+  let status: PlaybackCacheNativeOptionCandidateStatus
+  let optionNameMatches: Bool
+  let optionExists: Bool
+  let resetAvailable: Bool
+  let requiredChoiceAvailable: Bool
+  let writeReadBackPassed: Bool
+}
+
+struct PlaybackCacheNativeOptionFacts {
+  let optionNameMatches: Bool
+  let optionExists: Bool
+  let resetAvailable: Bool
+  let requiredChoiceAvailable: Bool
+  let writeReadBackPassed: Bool
+}
+
+enum PlaybackCacheNativeValueKind {
+  case boolean
+  case booleanOrAuto
+  case integer
+  case enumeration(Set<String>)
+  case path
+}
+
+enum PlaybackCacheNativeValueCanonicalizer {
+  static func canonicalize(
+    _ raw: String,
+    kind: PlaybackCacheNativeValueKind
+  ) -> String? {
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
+      return nil
+    }
+    switch kind {
+    case .boolean:
+      switch value.lowercased() {
+      case "yes", "true", "1": return "true"
+      case "no", "false", "0": return "false"
+      default: return nil
+      }
+    case .booleanOrAuto:
+      if value.lowercased() == "auto" { return "auto" }
+      return canonicalize(value, kind: .boolean)
+    case .integer:
+      guard value.range(
+        of: #"^[+-]?[0-9]+(?:\.0+)?$"#,
+        options: .regularExpression
+      ) != nil else {
+        return nil
+      }
+      let integer = value.split(separator: ".", omittingEmptySubsequences: false)[0]
+      guard let number = Int64(integer) else { return nil }
+      return String(number)
+    case let .enumeration(allowed):
+      let normalized = value.lowercased()
+      return allowed.contains(normalized) ? normalized : nil
+    case .path:
+      return normalizePath(value)
+    }
+  }
+
+  static func equivalent(
+    _ actual: String?,
+    _ expected: String?,
+    kind: PlaybackCacheNativeValueKind
+  ) -> Bool {
+    guard let actual, let expected,
+          let left = canonicalize(actual, kind: kind),
+          let right = canonicalize(expected, kind: kind)
+    else { return false }
+    return left == right
+  }
+
+  private static func normalizePath(_ value: String) -> String {
+    guard !value.isEmpty else { return "" }
+    let unified = value.replacingOccurrences(of: "\\", with: "/")
+    let absolute = unified.hasPrefix("/")
+    var parts: [String] = []
+    for part in unified.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+      if part == "." { continue }
+      if part == ".." {
+        if let last = parts.last, last != ".." {
+          parts.removeLast()
+        } else if !absolute {
+          parts.append(part)
+        }
+      } else {
+        parts.append(part)
+      }
+    }
+    let result = parts.joined(separator: "/")
+    if absolute { return result.isEmpty ? "/" : "/" + result }
+    return result
+  }
+}
+
+enum PlaybackCacheNativeOptionResolver {
+  static let candidates: [String: [String]] = [
+    "cache": ["cache"],
+    "cacheOnDisk": ["cache-on-disk"],
+    "cacheDirectory": ["demuxer-cache-dir", "cache-dir"],
+    "cacheUnlinkFiles": ["demuxer-cache-unlink-files", "cache-unlink-files"],
+    "cacheSeconds": ["cache-secs"],
+    "forwardMetadataBytes": ["demuxer-max-bytes"],
+    "backwardMetadataBytes": ["demuxer-max-back-bytes"],
+    "donateBuffer": ["demuxer-donate-buffer"],
+    "seekableCache": ["demuxer-seekable-cache"],
+    "cachePause": ["cache-pause"],
+    "cachePauseWait": ["cache-pause-wait"],
+    "streamBufferSize": ["stream-buffer-size"],
+  ]
+
+  static let criticalLogicalOptions: Set<String> = [
+    "cache", "cacheOnDisk", "cacheDirectory", "cacheUnlinkFiles",
+    "cacheSeconds", "forwardMetadataBytes", "backwardMetadataBytes",
+  ]
+
+  static let optionalLogicalOptions: Set<String> = [
+    "donateBuffer", "seekableCache", "cachePause", "cachePauseWait",
+    "streamBufferSize",
+  ]
+
+  static func valueKind(for logicalName: String) -> PlaybackCacheNativeValueKind {
+    switch logicalName {
+    case "cache":
+      return .booleanOrAuto
+    case "seekableCache":
+      return .enumeration(["auto", "yes", "no"])
+    case "cacheOnDisk", "donateBuffer", "cachePause":
+      return .boolean
+    case "cacheDirectory":
+      return .path
+    case "cacheUnlinkFiles":
+      return .enumeration(["no", "whendone", "immediate"])
+    default:
+      return .integer
+    }
+  }
+
+  static func makeProfileApplyPlan(
+    profile: String,
+    resolvedOptions: [String: String],
+    resetValues: [String: String],
+    cacheDirectory: String
+  ) -> PlaybackCacheNativeProfileApplyPlan {
+    func add(_ target: inout [String: String], _ logical: String, _ value: String) {
+      if let native = resolvedOptions[logical] { target[native] = value }
+    }
+    func reset(_ logical: String) -> String? {
+      guard let native = resolvedOptions[logical] else { return nil }
+      return resetValues[native]
+    }
+    var critical: [String: String] = [:]
+    var optional: [String: String] = [:]
+    switch profile {
+    case "disk":
+      add(&critical, "cache", "yes")
+      add(&critical, "cacheOnDisk", "yes")
+      add(&critical, "cacheDirectory", cacheDirectory)
+      add(&critical, "cacheUnlinkFiles", "immediate")
+      add(&critical, "cacheSeconds", "30")
+      add(&critical, "forwardMetadataBytes", "16777216")
+      add(&critical, "backwardMetadataBytes", "8388608")
+    case "memory":
+      add(&critical, "cache", "yes")
+      add(&critical, "cacheOnDisk", "no")
+      add(&critical, "cacheSeconds", "30")
+      add(&critical, "forwardMetadataBytes", "16777216")
+      add(&critical, "backwardMetadataBytes", "8388608")
+      if let value = reset("cacheDirectory") { add(&optional, "cacheDirectory", value) }
+      if let value = reset("cacheUnlinkFiles") { add(&optional, "cacheUnlinkFiles", value) }
+    default:
+      add(&critical, "cache", "no")
+      add(&critical, "cacheOnDisk", "no")
+    }
+    add(&optional, "donateBuffer", "yes")
+    add(&optional, "seekableCache", "auto")
+    add(&optional, "cachePause", profile == "disabled" ? "no" : "yes")
+    add(&optional, "cachePauseWait", "1")
+    add(&optional, "streamBufferSize", "131072")
+    let selectedLogical = Set(resolvedOptions.keys)
+    let degraded = !PlaybackCacheNativeOptionResolver.optionalLogicalOptions
+      .isSubset(of: selectedLogical)
+    return PlaybackCacheNativeProfileApplyPlan(
+      criticalValues: critical,
+      optionalValues: optional,
+      criticalReadBack: Set(critical.keys),
+      optionalReadBack: Set(optional.keys),
+      optionalTuningDegraded: degraded
+    )
+  }
+
+  static func resolve(
+    logicalName: String,
+    facts: [String: PlaybackCacheNativeOptionFacts]
+  ) -> (selected: String?, evidence: [PlaybackCacheNativeOptionCandidateEvidence]) {
+    let names = candidates[logicalName] ?? []
+    var selected: String?
+    var evidence: [PlaybackCacheNativeOptionCandidateEvidence] = []
+    for name in names {
+      let fact = facts[name] ?? PlaybackCacheNativeOptionFacts(
+        optionNameMatches: false,
+        optionExists: false,
+        resetAvailable: false,
+        requiredChoiceAvailable: false,
+        writeReadBackPassed: false
+      )
+      let status: PlaybackCacheNativeOptionCandidateStatus
+      if !fact.optionExists || !fact.optionNameMatches {
+        status = .unavailable
+      } else if (logicalName == "cacheDirectory" || logicalName == "cacheUnlinkFiles") && !fact.resetAvailable {
+        status = .incomplete
+      } else if logicalName == "cacheUnlinkFiles" && !fact.requiredChoiceAvailable {
+        status = .incomplete
+      } else if !fact.writeReadBackPassed {
+        status = .incomplete
+      } else {
+        status = .usable
+      }
+      evidence.append(
+        PlaybackCacheNativeOptionCandidateEvidence(
+          nativeName: name,
+          status: status,
+          optionNameMatches: fact.optionNameMatches,
+          optionExists: fact.optionExists,
+          resetAvailable: fact.resetAvailable,
+          requiredChoiceAvailable: fact.requiredChoiceAvailable,
+          writeReadBackPassed: fact.writeReadBackPassed
+        )
+      )
+      if selected == nil && status == .usable { selected = name }
+    }
+    return (selected, evidence)
+  }
+}
+
+struct PlaybackCacheNativeProfileApplyPlan {
+  let criticalValues: [String: String]
+  let optionalValues: [String: String]
+  let criticalReadBack: Set<String>
+  let optionalReadBack: Set<String>
+  let optionalTuningDegraded: Bool
+}
+
+struct PlaybackCacheNativeTelemetryState: Equatable {
+  let fileCacheBytes: Int64?
+  let rawInputRate: Double?
+  let cacheDuration: Double?
+  let readerPts: Double?
+  let seekableRangeCount: Int
+}
+
+enum PlaybackCacheNativeNodeParser {
+  static let allowedKeys: Set<String> = [
+    "file-cache-bytes", "raw-input-rate", "seekable-ranges",
+    "cache-duration", "reader-pts",
+  ]
+
+  static func parse(_ value: Any) -> PlaybackCacheNativeTelemetryState? {
+    guard let map = value as? [String: Any] else { return nil }
+    let recognizedKeys = Set(map.keys).intersection(allowedKeys)
+    guard !recognizedKeys.isEmpty else { return nil }
+    let bytes: Int64?
+    if let value = map["file-cache-bytes"] {
+      guard let parsed = nonnegativeInt64(value) else { return nil }
+      bytes = parsed
+    } else {
+      bytes = nil
+    }
+    let rawRate: Double?
+    if let value = map["raw-input-rate"] {
+      guard let parsed = finiteDouble(value) else { return nil }
+      guard parsed >= 0 else { return nil }
+      rawRate = parsed
+    } else {
+      rawRate = nil
+    }
+    let duration: Double?
+    if let value = map["cache-duration"] {
+      guard let parsed = finiteDouble(value) else { return nil }
+      guard parsed >= 0 else { return nil }
+      duration = parsed
+    } else {
+      duration = nil
+    }
+    let pts: Double?
+    if let value = map["reader-pts"] {
+      guard let parsed = finiteDouble(value) else { return nil }
+      pts = parsed
+    } else {
+      pts = nil
+    }
+    let rangeCount: Int
+    if let rawRanges = map["seekable-ranges"] {
+      guard let ranges = rawRanges as? [Any] else { return nil }
+      var validRanges = 0
+      for value in ranges {
+        guard let range = value as? [String: Any],
+              Set(range.keys) == ["start", "end"],
+              let start = finiteDouble(range["start"]),
+              let end = finiteDouble(range["end"]),
+              start >= 0, end > start else { continue }
+        validRanges += 1
+      }
+      if validRanges != ranges.count { return nil }
+      rangeCount = validRanges
+    } else {
+      rangeCount = 0
+    }
+    return PlaybackCacheNativeTelemetryState(
+      fileCacheBytes: bytes,
+      rawInputRate: rawRate,
+      cacheDuration: duration,
+      readerPts: pts,
+      seekableRangeCount: rangeCount
+    )
+  }
+
+  private static func finiteDouble(_ value: Any?) -> Double? {
+    guard let value else { return nil }
+    let number: Double?
+    if let value = value as? Double { number = value }
+    else if let value = value as? Int { number = Double(value) }
+    else if let value = value as? Int64 { number = Double(value) }
+    else { number = nil }
+    guard let number, number.isFinite else { return nil }
+    return number
+  }
+
+  private static func nonnegativeInt64(_ value: Any) -> Int64? {
+    if let value = value as? Int64 { return value >= 0 ? value : nil }
+    if let value = value as? Int { return value >= 0 ? Int64(value) : nil }
+    return nil
+  }
+}
+
+enum PlaybackCacheNativeTelemetryReadStatus: String {
+  case available
+  case fieldTemporarilyAbsent
+  case unsupported
+  case readFailed
+}
+
+struct PlaybackCacheNativeTelemetryReadResult: Equatable {
+  let status: PlaybackCacheNativeTelemetryReadStatus
+  let state: PlaybackCacheNativeTelemetryState?
+}
+
+enum PlaybackCacheNativeActiveContextReader {
+  static let propertyNotFoundErrorCode = Int32(MPV_ERROR_PROPERTY_NOT_FOUND)
+  static let propertyUnavailableErrorCode = Int32(MPV_ERROR_PROPERTY_UNAVAILABLE)
+
+  static func read(_ context: OpaquePointer) -> PlaybackCacheNativeTelemetryReadResult {
+    read(
+      getProperty: { node in
+        "demuxer-cache-state".withCString { property in
+          mpv_get_property(context, property, MPV_FORMAT_NODE, node)
+        }
+      },
+      copyNode: PlaybackCacheNativeProbe.nodeValueForTesting,
+      freeNode: mpv_free_node_contents
+    )
+  }
+
+  static func read(
+    getProperty: (UnsafeMutablePointer<mpv_node>) -> Int32,
+    copyNode: (mpv_node) -> Any?,
+    freeNode: (UnsafeMutablePointer<mpv_node>) -> Void
+  ) -> PlaybackCacheNativeTelemetryReadResult {
+    var node = mpv_node()
+    defer { freeNode(&node) }
+    let status = getProperty(&node)
+    guard status >= 0 else {
+      let readStatus: PlaybackCacheNativeTelemetryReadStatus
+      switch status {
+      case propertyNotFoundErrorCode:
+        readStatus = .unsupported
+      case propertyUnavailableErrorCode:
+        readStatus = .fieldTemporarilyAbsent
+      default:
+        readStatus = .readFailed
+      }
+      return PlaybackCacheNativeTelemetryReadResult(
+        status: readStatus,
+        state: nil
+      )
+    }
+    guard let value = copyNode(node),
+          let state = PlaybackCacheNativeNodeParser.parse(value)
+    else {
+      return PlaybackCacheNativeTelemetryReadResult(status: .readFailed, state: nil)
+    }
+    return PlaybackCacheNativeTelemetryReadResult(status: .available, state: state)
+  }
+}
+
 enum PlaybackCacheNativeProfileSwitchStrategy: String {
   case inPlaceAfterMediaStop
   case requiresPlayerRecreation
@@ -14,17 +418,49 @@ struct PlaybackCacheNativeCapabilitySnapshot {
   let unlinkChoices: Set<String>
   let resetValues: [String: String]
   let profileSwitchStrategy: PlaybackCacheNativeProfileSwitchStrategy
+  let resolvedOptions: [String: String]
+  let candidateEvidence: [String: [PlaybackCacheNativeOptionCandidateEvidence]]
+  let profileReadBack: [String: Bool]
+
+  init(
+    mpvVersion: String,
+    platform: String,
+    supportedOptions: Set<String>,
+    properties: Set<String>,
+    unlinkChoices: Set<String>,
+    resetValues: [String: String],
+    profileSwitchStrategy: PlaybackCacheNativeProfileSwitchStrategy,
+    resolvedOptions: [String: String] = [:],
+    candidateEvidence: [String: [PlaybackCacheNativeOptionCandidateEvidence]] = [:],
+    profileReadBack: [String: Bool] = [:]
+  ) {
+    self.mpvVersion = mpvVersion
+    self.platform = platform
+    self.supportedOptions = supportedOptions
+    self.properties = properties
+    self.unlinkChoices = unlinkChoices
+    self.resetValues = resetValues
+    self.profileSwitchStrategy = profileSwitchStrategy
+    self.resolvedOptions = resolvedOptions
+    self.candidateEvidence = candidateEvidence
+    self.profileReadBack = profileReadBack
+  }
 
   var hasCompleteResetValues: Bool {
-    Set(resetValues.keys) == Set(PlaybackCacheNativeProbe.optionNames)
+    let expected = Set(resolvedOptions.values)
+    return expected.isSubset(of: Set(resetValues.keys))
   }
 
   var diskCapabilityPassed: Bool {
-    let requiredOptions = Set(PlaybackCacheNativeProbe.optionNames)
-    return requiredOptions.isSubset(of: supportedOptions)
-      && hasCompleteResetValues
+    let requiredLogicalOptions = PlaybackCacheNativeOptionResolver.criticalLogicalOptions
+    return requiredLogicalOptions.isSubset(of: Set(resolvedOptions.keys))
+      && requiredLogicalOptions.allSatisfy {
+        guard let nativeName = resolvedOptions[$0] else { return false }
+        return resetValues[nativeName] != nil
+      }
       && unlinkChoices.contains("immediate")
       && properties.contains("demuxer-cache-state")
+      && profileReadBack["disk"] == true
       && profileSwitchStrategy != .unsupported
   }
 }
@@ -41,7 +477,9 @@ enum PlaybackCacheNativeProbe {
     "cache",
     "cache-on-disk",
     "demuxer-cache-dir",
+    "cache-dir",
     "demuxer-cache-unlink-files",
+    "cache-unlink-files",
     "cache-secs",
     "demuxer-max-bytes",
     "demuxer-max-back-bytes",
@@ -59,19 +497,126 @@ enum PlaybackCacheNativeProbe {
     "demuxer-cache-state",
   ]
 
+  static func makeTestContext() throws -> OpaquePointer {
+    try makeContext()
+  }
+
+  static func configureProfileForTesting(
+    _ profileName: String,
+    context: OpaquePointer,
+    cacheDirectory: URL,
+    snapshot: PlaybackCacheNativeCapabilitySnapshot
+  ) -> Bool {
+    let profile: Profile
+    switch profileName {
+    case "disk": profile = .disk
+    case "memory": profile = .memory
+    case "disabled": profile = .disabled
+    default: return false
+    }
+    return apply(
+      profile,
+      context: context,
+      cacheDirectory: cacheDirectory,
+      resetValues: snapshot.resetValues,
+      resolvedOptions: snapshot.resolvedOptions
+    )
+  }
+
+  static func setStringForTesting(
+    _ context: OpaquePointer,
+    name: String,
+    value: String
+  ) -> Bool {
+    setString(context, name, value)
+  }
+
+  static func stringPropertyForTesting(
+    _ context: OpaquePointer,
+    name: String
+  ) -> String? {
+    stringProperty(context, name)
+  }
+
+  static func loadForTesting(_ context: OpaquePointer, url: URL) -> Bool {
+    guard command(context, ["loadfile", url.absoluteString, "replace"]) else {
+      return false
+    }
+    return waitForIdle(context, expected: false, timeout: 10)
+  }
+
+  static func stopForTesting(_ context: OpaquePointer) {
+    _ = command(context, ["stop"])
+    _ = waitForIdle(context, expected: true, timeout: 2)
+  }
+
+  static func nodeValueForTesting(_ node: mpv_node) -> Any? {
+    nodeValue(node)
+  }
+
   static func probe() throws -> PlaybackCacheNativeCapabilitySnapshot {
     let context = try makeContext()
     defer { mpv_terminate_destroy(context) }
+    let probeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "emby-mpv-option-probe-\(UUID().uuidString)", isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: probeRoot, withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: probeRoot) }
 
     let supportedOptions = Set(optionNames.filter {
       stringProperty(context, "option-info/\($0)/name") == $0
     })
-    let properties = Set((nodeProperty(context, "property-list") as? [Any] ?? [])
-      .compactMap { $0 as? String })
-    let choices = Set((nodeProperty(
-      context,
-      "option-info/demuxer-cache-unlink-files/choices"
-    ) as? [Any] ?? []).compactMap { $0 as? String })
+    let properties = propertyNames(nodeProperty(context, "property-list"))
+    var choices = Set<String>()
+    var resolvedOptions: [String: String] = [:]
+    var candidateEvidence: [String: [PlaybackCacheNativeOptionCandidateEvidence]] = [:]
+    for (logicalName, candidates) in PlaybackCacheNativeOptionResolver.candidates {
+      var facts: [String: PlaybackCacheNativeOptionFacts] = [:]
+      for candidate in candidates {
+        let optionName = stringProperty(context, "option-info/\(candidate)/name")
+        let reset = nodeProperty(context, "option-info/\(candidate)/default-value")
+          .map(nativeString)
+        let candidateChoices = Set((nodeProperty(
+          context,
+          "option-info/\(candidate)/choices"
+        ) as? [Any] ?? []).compactMap { $0 as? String })
+        if logicalName == "cacheUnlinkFiles" { choices.formUnion(candidateChoices) }
+        let valueKind = PlaybackCacheNativeOptionResolver.valueKind(for: logicalName)
+        let resetAvailable = reset != nil &&
+          PlaybackCacheNativeValueCanonicalizer.canonicalize(
+            reset!, kind: valueKind
+          ) != nil
+        let readBack = resetAvailable && candidateWriteReadBack(
+          context: context,
+          logicalName: logicalName,
+          nativeName: candidate,
+          resetValue: reset,
+          probeDirectory: probeRoot,
+          valueKind: valueKind
+        )
+        facts[candidate] = PlaybackCacheNativeOptionFacts(
+          optionNameMatches: optionName == candidate,
+          optionExists: optionName == candidate,
+          resetAvailable: resetAvailable,
+          requiredChoiceAvailable: logicalName != "cacheUnlinkFiles" || candidateChoices.contains("immediate"),
+          writeReadBackPassed: readBack
+        )
+      }
+      let resolution = PlaybackCacheNativeOptionResolver.resolve(
+        logicalName: logicalName, facts: facts
+      )
+      candidateEvidence[logicalName] = resolution.evidence
+      if let selected = resolution.selected { resolvedOptions[logicalName] = selected }
+    }
+    for candidate in ["demuxer-cache-unlink-files", "cache-unlink-files"] {
+      if let candidateChoices = nodeProperty(
+        context, "option-info/\(candidate)/choices"
+      ) as? [Any] {
+        choices.formUnion(candidateChoices.compactMap { $0 as? String })
+      }
+    }
     var resetValues: [String: String] = [:]
     for option in supportedOptions {
       if let value = nodeProperty(context, "option-info/\(option)/default-value") {
@@ -79,13 +624,33 @@ enum PlaybackCacheNativeProbe {
       }
     }
 
-    let requiredOptions = Set(optionNames)
+    let requiredLogicalOptions = PlaybackCacheNativeOptionResolver.criticalLogicalOptions
+    let memoryLogicalOptions: Set<String> = [
+      "cache", "cacheOnDisk", "cacheSeconds", "forwardMetadataBytes",
+      "backwardMetadataBytes",
+    ]
+    let diskReadBack = requiredLogicalOptions.isSubset(of: Set(resolvedOptions.keys))
+      && probeProfileReadBack(
+        .disk, resetValues: resetValues, resolvedOptions: resolvedOptions
+      )
+    let memoryReadBack = memoryLogicalOptions.isSubset(of: Set(resolvedOptions.keys))
+      && probeProfileReadBack(
+        .memory, resetValues: resetValues, resolvedOptions: resolvedOptions
+      )
+    let disabledReadBack = resolvedOptions["cache"] != nil
+      && probeProfileReadBack(
+        .disabled, resetValues: resetValues, resolvedOptions: resolvedOptions
+      )
     let strategy: PlaybackCacheNativeProfileSwitchStrategy
-    if requiredOptions.isSubset(of: supportedOptions)
-      && Set(resetValues.keys) == requiredOptions
-      && choices.contains("immediate")
+    let criticalResolved = requiredLogicalOptions.allSatisfy {
+      guard let nativeName = resolvedOptions[$0] else { return false }
+      return resetValues[nativeName] != nil
+    }
+    if criticalResolved && choices.contains("immediate") && diskReadBack
     {
-      strategy = try profileSwitchStrategy(resetValues: resetValues)
+      strategy = try profileSwitchStrategy(
+        resetValues: resetValues, resolvedOptions: resolvedOptions
+      )
     } else {
       strategy = .unsupported
     }
@@ -96,12 +661,89 @@ enum PlaybackCacheNativeProbe {
       properties: properties,
       unlinkChoices: choices,
       resetValues: resetValues,
-      profileSwitchStrategy: strategy
+      profileSwitchStrategy: strategy,
+      resolvedOptions: resolvedOptions,
+      candidateEvidence: candidateEvidence,
+      profileReadBack: [
+        "disk": diskReadBack,
+        "memory": memoryReadBack,
+        "disabled": disabledReadBack,
+      ]
     )
   }
 
+  private static func candidateWriteReadBack(
+    context: OpaquePointer,
+    logicalName: String,
+    nativeName: String,
+    resetValue: String?,
+    probeDirectory: URL,
+    valueKind: PlaybackCacheNativeValueKind
+  ) -> Bool {
+    let expected: String
+    switch logicalName {
+    case "cache":
+      expected = "yes"
+    case "cacheOnDisk":
+      expected = "no"
+    case "cacheDirectory":
+      expected = probeDirectory.path
+    case "cacheUnlinkFiles":
+      expected = "immediate"
+    case "cacheSeconds", "forwardMetadataBytes", "backwardMetadataBytes",
+         "cachePauseWait", "streamBufferSize":
+      expected = "1"
+    case "donateBuffer", "cachePause":
+      expected = "yes"
+    case "seekableCache":
+      expected = "auto"
+    default:
+      guard let resetValue else { return false }
+      expected = resetValue
+    }
+    guard let resetValue, setString(context, nativeName, expected) else {
+      return false
+    }
+    let probePassed = PlaybackCacheNativeValueCanonicalizer.equivalent(
+      stringProperty(context, nativeName), expected, kind: valueKind
+    )
+    let resetPassed = setString(context, nativeName, resetValue)
+      && PlaybackCacheNativeValueCanonicalizer.equivalent(
+        stringProperty(context, nativeName), resetValue, kind: valueKind
+      )
+    return probePassed && resetPassed
+  }
+
+  private static func probeProfileReadBack(
+    _ profile: Profile,
+    resetValues: [String: String],
+    resolvedOptions: [String: String]
+  ) -> Bool {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "emby-mpv-profile-readback-\(UUID().uuidString)", isDirectory: true
+    )
+    do {
+      try FileManager.default.createDirectory(
+        at: root, withIntermediateDirectories: true
+      )
+      defer { try? FileManager.default.removeItem(at: root) }
+      let context = try makeContext()
+      defer { mpv_terminate_destroy(context) }
+      return apply(
+        profile,
+        context: context,
+        cacheDirectory: root,
+        resetValues: resetValues,
+        resolvedOptions: resolvedOptions
+      )
+    } catch {
+      return false
+    }
+  }
+
   private static func profileSwitchStrategy(
-    resetValues: [String: String]
+    resetValues: [String: String],
+    resolvedOptions: [String: String]
   ) throws -> PlaybackCacheNativeProfileSwitchStrategy {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "emby-mpv-capability-\(UUID().uuidString)",
@@ -118,14 +760,16 @@ enum PlaybackCacheNativeProbe {
     if try runSequence(
       media: media,
       cacheDirectory: root,
-      resetValues: resetValues
+      resetValues: resetValues,
+      resolvedOptions: resolvedOptions
     ) {
       return .inPlaceAfterMediaStop
     }
     if try runRecreatedProfiles(
       media: media,
       cacheDirectory: root,
-      resetValues: resetValues
+      resetValues: resetValues,
+      resolvedOptions: resolvedOptions
     ) {
       return .requiresPlayerRecreation
     }
@@ -135,7 +779,8 @@ enum PlaybackCacheNativeProbe {
   private static func runSequence(
     media: URL,
     cacheDirectory: URL,
-    resetValues: [String: String]
+    resetValues: [String: String],
+    resolvedOptions: [String: String]
   ) throws -> Bool {
     let context = try makeContext()
     defer { mpv_terminate_destroy(context) }
@@ -144,7 +789,8 @@ enum PlaybackCacheNativeProbe {
         profile,
         context: context,
         cacheDirectory: cacheDirectory,
-        resetValues: resetValues
+        resetValues: resetValues,
+        resolvedOptions: resolvedOptions
       ), openAndStop(context, media: media) else {
         return false
       }
@@ -155,7 +801,8 @@ enum PlaybackCacheNativeProbe {
   private static func runRecreatedProfiles(
     media: URL,
     cacheDirectory: URL,
-    resetValues: [String: String]
+    resetValues: [String: String],
+    resolvedOptions: [String: String]
   ) throws -> Bool {
     for profile in Profile.allCases {
       let context = try makeContext()
@@ -163,7 +810,8 @@ enum PlaybackCacheNativeProbe {
         profile,
         context: context,
         cacheDirectory: cacheDirectory,
-        resetValues: resetValues
+        resetValues: resetValues,
+        resolvedOptions: resolvedOptions
       ) && openAndStop(context, media: media)
       mpv_terminate_destroy(context)
       if !passed { return false }
@@ -181,64 +829,50 @@ enum PlaybackCacheNativeProbe {
     _ profile: Profile,
     context: OpaquePointer,
     cacheDirectory: URL,
-    resetValues: [String: String]
+    resetValues: [String: String],
+    resolvedOptions: [String: String]
   ) -> Bool {
-    guard let directoryReset = resetValues["demuxer-cache-dir"] else {
-      return false
+    func name(_ logical: String) -> String? { resolvedOptions[logical] }
+    func reset(_ logical: String) -> String? {
+      guard let native = name(logical) else { return nil }
+      return resetValues[native]
     }
-    let values: [String: String]
+    var values: [String: String] = [:]
+    func add(_ logical: String, _ value: String) -> Bool {
+      guard let native = name(logical) else { return false }
+      values[native] = value
+      return true
+    }
     switch profile {
     case .disk:
-      values = [
-        "cache": "yes",
-        "cache-on-disk": "yes",
-        "demuxer-cache-dir": cacheDirectory.path,
-        "demuxer-cache-unlink-files": "immediate",
-        "cache-secs": "30",
-        "demuxer-max-bytes": "16777216",
-        "demuxer-max-back-bytes": "8388608",
-        "demuxer-donate-buffer": "yes",
-        "demuxer-seekable-cache": "auto",
-        "cache-pause": "yes",
-        "cache-pause-wait": "1",
-        "stream-buffer-size": "131072",
-      ]
+      guard add("cache", "yes"), add("cacheOnDisk", "yes"),
+            add("cacheDirectory", cacheDirectory.path),
+            add("cacheUnlinkFiles", "immediate"),
+            add("cacheSeconds", "30"), add("forwardMetadataBytes", "16777216"),
+            add("backwardMetadataBytes", "8388608") else { return false }
     case .memory:
-      values = [
-        "cache": "yes",
-        "cache-on-disk": "no",
-        "demuxer-cache-dir": directoryReset,
-        "demuxer-cache-unlink-files": "immediate",
-        "cache-secs": "30",
-        "demuxer-max-bytes": "16777216",
-        "demuxer-max-back-bytes": "8388608",
-        "demuxer-donate-buffer": "yes",
-        "demuxer-seekable-cache": "auto",
-        "cache-pause": "yes",
-        "cache-pause-wait": "1",
-        "stream-buffer-size": "131072",
-      ]
+      guard add("cache", "yes"), add("cacheOnDisk", "no"),
+            add("cacheSeconds", "30"), add("forwardMetadataBytes", "16777216"),
+            add("backwardMetadataBytes", "8388608") else { return false }
+      if let directory = reset("cacheDirectory"), let native = name("cacheDirectory") {
+        values[native] = directory
+      }
+      if let unlink = reset("cacheUnlinkFiles"), let native = name("cacheUnlinkFiles") {
+        values[native] = unlink
+      }
     case .disabled:
-      values = [
-        "cache": "no",
-        "cache-on-disk": "no",
-        "demuxer-cache-dir": directoryReset,
-        "demuxer-cache-unlink-files": "immediate",
-        "cache-secs": "0",
-        "demuxer-max-bytes": "16777216",
-        "demuxer-max-back-bytes": "8388608",
-        "demuxer-donate-buffer": "yes",
-        "demuxer-seekable-cache": "auto",
-        "cache-pause": "no",
-        "cache-pause-wait": "1",
-        "stream-buffer-size": "131072",
-      ]
+      guard add("cache", "no") else { return false }
+      if name("cacheOnDisk") != nil && !add("cacheOnDisk", "no") { return false }
     }
     for (name, value) in values {
       guard setString(context, name, value) else { return false }
     }
-    for name in optionNames {
-      guard equivalent(stringProperty(context, name), values[name]) else {
+    for (nativeName, expected) in values {
+      let logicalName = resolvedOptions.first(where: { $0.value == nativeName })?.key ?? ""
+      let kind = PlaybackCacheNativeOptionResolver.valueKind(for: logicalName)
+      guard PlaybackCacheNativeValueCanonicalizer.equivalent(
+        stringProperty(context, nativeName), expected, kind: kind
+      ) else {
         return false
       }
     }
@@ -328,11 +962,11 @@ enum PlaybackCacheNativeProbe {
     _ name: String
   ) -> Any? {
     var node = mpv_node()
+    defer { mpv_free_node_contents(&node) }
     let status = name.withCString { pointer in
       mpv_get_property(context, pointer, MPV_FORMAT_NODE, &node)
     }
     guard status >= 0 else { return nil }
-    defer { mpv_free_node_contents(&node) }
     return nodeValue(node)
   }
 
@@ -349,21 +983,43 @@ enum PlaybackCacheNativeProbe {
       return node.u.double_
     case MPV_FORMAT_NODE_ARRAY:
       guard let list = node.u.list else { return [] }
-      return (0..<Int(list.pointee.num)).map {
-        nodeValue(list.pointee.values[$0]) as Any
+      guard list.pointee.num >= 0 else { return nil }
+      if list.pointee.num == 0 { return [Any]() }
+      guard let values = list.pointee.values else { return nil }
+      var result: [Any] = []
+      for index in 0..<Int(list.pointee.num) {
+        guard let value = nodeValue(values[index]) else { return nil }
+        result.append(value)
       }
+      return result
     case MPV_FORMAT_NODE_MAP:
       guard let list = node.u.list else { return [String: Any]() }
+      guard list.pointee.num >= 0 else { return nil }
+      if list.pointee.num == 0 { return [String: Any]() }
+      guard let keys = list.pointee.keys,
+            let values = list.pointee.values else { return nil }
       var result: [String: Any] = [:]
       for index in 0..<Int(list.pointee.num) {
-        guard let keyPointer = list.pointee.keys?[index] else { continue }
+        guard let keyPointer = keys[index],
+              let value = nodeValue(values[index]) else { return nil }
         let key = String(cString: keyPointer)
-        result[key] = nodeValue(list.pointee.values[index])
+        result[key] = value
       }
       return result
     default:
       return nil
     }
+  }
+
+  private static func propertyNames(_ value: Any?) -> Set<String> {
+    guard let entries = value as? [Any] else { return [] }
+    return Set(entries.compactMap { entry in
+      if let name = entry as? String { return name }
+      if let map = entry as? [String: Any], let name = map["name"] as? String {
+        return name
+      }
+      return nil
+    })
   }
 
   private static func command(_ context: OpaquePointer, _ args: [String]) -> Bool {
@@ -440,15 +1096,44 @@ extension PlaybackCacheNativeCapabilitySnapshot {
     else {
       throw PlaybackCacheNativeProbeError.unsafeManifest
     }
-    var safeResets: [String: String] = [:]
+    let expectedResetOptions = Set(resolvedOptions.values)
+    let missingResetValues = expectedResetOptions.filter {
+      resetValues[$0] == nil
+    }.sorted()
+    var safeResetValues: [String: String] = [:]
     for (option, value) in resetValues {
+      if PlaybackCacheNativeOptionResolver.candidates["cacheDirectory"]?
+        .contains(option) == true {
+        safeResetValues[option] = "available"
+        continue
+      }
       guard Self.isSafeValue(value) else {
         throw PlaybackCacheNativeProbeError.unsafeManifest
       }
-      safeResets[option] = value
+      safeResetValues[option] = value
     }
-    let missingResetValues = PlaybackCacheNativeProbe.optionNames.filter {
-      resetValues[$0] == nil
+    let safeCandidateEvidence = Dictionary(uniqueKeysWithValues: candidateEvidence.map {
+      logical, evidence in
+      (logical, evidence.map { candidate in
+        [
+          "nativeName": candidate.nativeName,
+          "status": candidate.status.rawValue,
+          "optionNameMatches": candidate.optionNameMatches,
+          "optionExists": candidate.optionExists,
+          "resetAvailable": candidate.resetAvailable,
+          "requiredChoiceAvailable": candidate.requiredChoiceAvailable,
+          "writeReadBackPassed": candidate.writeReadBackPassed,
+        ] as [String: Any]
+      })
+    })
+    func variant(_ logical: String) -> String {
+      guard let selected = resolvedOptions[logical],
+            let candidates = PlaybackCacheNativeOptionResolver.candidates[logical],
+            let index = candidates.firstIndex(of: selected) else { return "unavailable" }
+      return index == 0 ? "modern" : "legacy"
+    }
+    func status(_ logical: String, _ index: Int) -> String {
+      candidateEvidence[logical]?[safe: index]?.status.rawValue ?? "unavailable"
     }
     let manifest: [String: Any] = [
       "schema": "emby-mpv-capabilities/v1",
@@ -464,10 +1149,23 @@ extension PlaybackCacheNativeCapabilitySnapshot {
           ($0, properties.contains($0))
         }
       ),
-      "unlinkChoices": unlinkChoices.sorted(),
-      "resetValues": safeResets,
+      "unlinkChoices": unlinkChoices.filter {
+        ["no", "whendone", "immediate"].contains($0)
+      }.sorted(),
+      "resetValues": safeResetValues,
       "resetValuesComplete": hasCompleteResetValues,
       "missingResetValues": missingResetValues,
+      "resolvedOptions": resolvedOptions,
+      "candidateEvidence": safeCandidateEvidence,
+      "cacheDirectoryVariant": variant("cacheDirectory"),
+      "cacheDirectoryModernStatus": status("cacheDirectory", 0),
+      "cacheDirectoryLegacyStatus": status("cacheDirectory", 1),
+      "cacheUnlinkVariant": variant("cacheUnlinkFiles"),
+      "cacheUnlinkModernStatus": status("cacheUnlinkFiles", 0),
+      "cacheUnlinkLegacyStatus": status("cacheUnlinkFiles", 1),
+      "diskProfileReadBack": profileReadBack["disk"] ?? false,
+      "memoryProfileReadBack": profileReadBack["memory"] ?? false,
+      "disabledProfileReadBack": profileReadBack["disabled"] ?? false,
       "profileSwitchStrategy": profileSwitchStrategy.rawValue,
       "diskCapabilityPassed": diskCapabilityPassed,
     ]
@@ -511,5 +1209,11 @@ extension PlaybackCacheNativeCapabilitySnapshot {
 
   private static func isSafeValue(_ value: String) -> Bool {
     value.range(of: "^[A-Za-z0-9._+\\-]*$", options: .regularExpression) != nil
+  }
+}
+
+private extension Array {
+  subscript(safe index: Int) -> Element? {
+    indices.contains(index) ? self[index] : nil
   }
 }
