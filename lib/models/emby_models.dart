@@ -555,6 +555,7 @@ class PlaybackMediaSource {
     this.container,
     this.bitrate,
     this.size,
+    this.runTimeTicks,
     this.directStreamUrl,
     this.transcodingUrl,
     this.liveStreamId,
@@ -572,6 +573,7 @@ class PlaybackMediaSource {
   final String? container;
   final int? bitrate;
   final int? size;
+  final int? runTimeTicks;
   final String? directStreamUrl;
   final String? transcodingUrl;
   final String? liveStreamId;
@@ -592,6 +594,7 @@ class PlaybackMediaSource {
         container: json['Container']?.toString(),
         bitrate: _asInt(json['Bitrate']),
         size: _asInt(json['Size']),
+        runTimeTicks: _asInt(json['RunTimeTicks']),
         directStreamUrl: json['DirectStreamUrl']?.toString(),
         transcodingUrl: json['TranscodingUrl']?.toString(),
         liveStreamId: json['LiveStreamId']?.toString(),

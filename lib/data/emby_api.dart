@@ -1100,7 +1100,7 @@ class EmbyApi {
       method: method,
       usesServerAuthentication: _usesServerAuthentication(uri),
     );
-    final duration = Duration(microseconds: (item.runTimeTicks ?? 0) ~/ 10);
+    final duration = _playbackDuration(item: item, source: source);
     return PlaybackPlan(
       uri: uri,
       mediaSourceId: source.id,
@@ -1123,11 +1123,26 @@ class EmbyApi {
         container: source.container,
         liveStreamId: source.liveStreamId,
         duration: duration,
+        sourceUri: Uri.tryParse(source.path ?? ''),
       ),
       mediaStreams: source.mediaStreams,
       transcodingReasons: source.transcodingReasons,
       availableMediaSources: sources,
     );
+  }
+
+  Duration _playbackDuration({
+    required EmbyItem item,
+    required PlaybackMediaSource source,
+  }) {
+    final itemTicks = item.runTimeTicks;
+    final sourceTicks = source.runTimeTicks;
+    final ticks = itemTicks != null && itemTicks > 0
+        ? itemTicks
+        : sourceTicks != null && sourceTicks > 0
+        ? sourceTicks
+        : 0;
+    return Duration(microseconds: ticks ~/ 10);
   }
 
   Uri resolveMediaUrl(String rawUrl) => _streamUri(rawUrl);

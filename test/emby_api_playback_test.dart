@@ -223,6 +223,87 @@ void main() {
     );
 
     test(
+      'uses finite media-source duration to enable progressive STRM caching',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'finite-strm',
+                  path: 'https://upstream.example.test/video.mp4',
+                  protocol: 'Http',
+                  container: 'strm',
+                  runTimeTicks: 900000000,
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_itemWithoutRuntime);
+
+        expect(plan.duration, const Duration(seconds: 90));
+        expect(plan.transportKind, PlaybackTransportKind.progressiveHttp);
+      },
+    );
+
+    test(
+      'keeps unknown-length and explicitly live STRM out of disk cache',
+      () async {
+        var requestCount = 0;
+        final api = _api((options, handler) {
+          requestCount++;
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: requestCount == 1 ? 'unknown-strm' : 'live-strm',
+                  path: 'https://upstream.example.test/video.mp4',
+                  protocol: 'Http',
+                  container: 'strm',
+                  runTimeTicks: requestCount == 1 ? null : 900000000,
+                  liveStreamId: requestCount == 1 ? null : 'live-session',
+                ),
+              ],
+            }),
+          );
+        });
+
+        final unknown = await api.getPlaybackPlan(_itemWithoutRuntime);
+        final live = await api.getPlaybackPlan(_itemWithoutRuntime);
+
+        expect(unknown.duration, Duration.zero);
+        expect(unknown.transportKind, PlaybackTransportKind.live);
+        expect(live.duration, const Duration(seconds: 90));
+        expect(live.transportKind, PlaybackTransportKind.live);
+      },
+    );
+
+    test('keeps finite HLS STRM classified as segmented', () async {
+      final api = _api((options, handler) {
+        handler.resolve(
+          _response(options, {
+            'MediaSources': [
+              _source(
+                id: 'hls-strm',
+                path: 'https://upstream.example.test/master.m3u8',
+                protocol: 'Http',
+                container: 'strm',
+                runTimeTicks: 900000000,
+              ),
+            ],
+          }),
+        );
+      });
+
+      final plan = await api.getPlaybackPlan(_itemWithoutRuntime);
+
+      expect(plan.duration, const Duration(seconds: 90));
+      expect(plan.transportKind, PlaybackTransportKind.segmentedHttp);
+    });
+
+    test(
       'forced retry bypasses remote strm and uses server transcode',
       () async {
         final api = _api((options, handler) {
@@ -595,6 +676,8 @@ Map<String, dynamic> _source({
   String container = 'mkv',
   String? directStreamUrl,
   String? transcodingUrl,
+  int? runTimeTicks,
+  String? liveStreamId,
 }) => {
   'Id': id,
   'Name': id,
@@ -602,6 +685,8 @@ Map<String, dynamic> _source({
   'Protocol': ?protocol,
   'Container': container,
   'Bitrate': 8000000,
+  'RunTimeTicks': ?runTimeTicks,
+  'LiveStreamId': ?liveStreamId,
   'SupportsDirectPlay': directPlay,
   'SupportsDirectStream': directStream,
   'SupportsTranscoding': transcode,
@@ -652,6 +737,17 @@ const _item = EmbyItem(
   type: 'Movie',
   mediaType: 'Video',
   runTimeTicks: 36000000000,
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _itemWithoutRuntime = EmbyItem(
+  id: 'item-1',
+  name: 'Movie',
+  type: 'Movie',
+  mediaType: 'Video',
   imageTags: {},
   backdropImageTags: [],
   genres: [],

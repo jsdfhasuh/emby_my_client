@@ -95,7 +95,10 @@ class MediaKitNativePlaybackPropertyAccess
 
   @override
   Future<Object?> getNative(String name) async {
-    final value = await getString(name);
+    return _decodeNativeString(await getString(name));
+  }
+
+  static Object? _decodeNativeString(String? value) {
     if (value == null || value.isEmpty) return value;
     try {
       return jsonDecode(value);
@@ -193,8 +196,16 @@ class MediaKitNativePlaybackPropertyAccess
 
   @override
   Future<bool> hasProperty(String name) async {
-    final value = await getNative('property-list');
-    return nativePropertyListContains(value, name);
+    return nativePropertyAvailableFromPropertyList(
+      propertyName: name,
+      readStructured: () => getNativeNode('property-list'),
+      readFallback: () => _withActivePlayer(
+        () async =>
+            _decodeNativeString(await player.getProperty('property-list')),
+      ),
+      timeout: timeout,
+      timeoutReporter: timeoutReporter,
+    );
   }
 
   @override
@@ -221,4 +232,64 @@ bool nativePropertyListContains(Object? value, String name) {
     }
   }
   return false;
+}
+
+typedef NativePropertyListReader = Future<Object?> Function();
+
+Future<bool> nativePropertyAvailableFromPropertyList({
+  required String propertyName,
+  required NativePropertyListReader readStructured,
+  required NativePropertyListReader readFallback,
+  Duration timeout = const Duration(seconds: 1),
+  NativePlaybackTimeoutReporter? timeoutReporter,
+}) async {
+  Object? structured;
+  try {
+    structured = await withNativePlaybackTimeout(
+      readStructured(),
+      operation: NativePlaybackOperationKind.propertyRead,
+      timeout: timeout,
+      onTimeout: timeoutReporter,
+    );
+  } on NativePlaybackOperationTimeout {
+    // The timed-out read can still own NativePlayer.lock. A second native read
+    // here could queue behind it indefinitely, so capability probing fails shut.
+    return false;
+  } catch (_) {
+    return _nativePropertyListFallback(
+      propertyName: propertyName,
+      readFallback: readFallback,
+      timeout: timeout,
+      timeoutReporter: timeoutReporter,
+    );
+  }
+
+  if (structured != null) {
+    return nativePropertyListContains(structured, propertyName);
+  }
+  return _nativePropertyListFallback(
+    propertyName: propertyName,
+    readFallback: readFallback,
+    timeout: timeout,
+    timeoutReporter: timeoutReporter,
+  );
+}
+
+Future<bool> _nativePropertyListFallback({
+  required String propertyName,
+  required NativePropertyListReader readFallback,
+  required Duration timeout,
+  required NativePlaybackTimeoutReporter? timeoutReporter,
+}) async {
+  try {
+    final value = await withNativePlaybackTimeout(
+      readFallback(),
+      operation: NativePlaybackOperationKind.propertyRead,
+      timeout: timeout,
+      onTimeout: timeoutReporter,
+    );
+    return nativePropertyListContains(value, propertyName);
+  } catch (_) {
+    return false;
+  }
 }

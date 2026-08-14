@@ -309,6 +309,16 @@ void main() {
     expect(regular.isStrm, isFalse);
   });
 
+  test('parses media source runtime ticks for playback planning', () {
+    final source = PlaybackMediaSource.fromJson(const {
+      'Id': 'source-1',
+      'SupportsDirectPlay': true,
+      'RunTimeTicks': 900000000,
+    });
+
+    expect(source.runTimeTicks, 900000000);
+  });
+
   test('diagnostic logs redact network URLs and Emby credentials', () {
     const token = 'c608e7499c5e4df19de4f0951ef6fce9';
     final redacted = DiagnosticLog.redact(

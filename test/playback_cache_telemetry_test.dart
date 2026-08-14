@@ -54,6 +54,84 @@ void main() {
     },
   );
 
+  test('property support prefers the structured active-handle node', () async {
+    var fallbackReads = 0;
+
+    final supported = await nativePropertyAvailableFromPropertyList(
+      propertyName: 'demuxer-cache-state',
+      readStructured: () async => const ['idle-active', 'demuxer-cache-state'],
+      readFallback: () async {
+        fallbackReads++;
+        return const [];
+      },
+    );
+
+    expect(supported, isTrue);
+    expect(fallbackReads, 0);
+  });
+
+  test(
+    'property support safely uses the string fallback for a null node',
+    () async {
+      var fallbackReads = 0;
+
+      final supported = await nativePropertyAvailableFromPropertyList(
+        propertyName: 'demuxer-cache-state',
+        readStructured: () async => null,
+        readFallback: () async {
+          fallbackReads++;
+          return const ['demuxer-cache-state'];
+        },
+      );
+
+      expect(supported, isTrue);
+      expect(fallbackReads, 1);
+    },
+  );
+
+  test(
+    'property node timeout fails closed without a second native read',
+    () async {
+      final pending = Completer<Object?>();
+      var fallbackReads = 0;
+      final timeouts = <NativePlaybackOperationKind>[];
+
+      final supported = await nativePropertyAvailableFromPropertyList(
+        propertyName: 'demuxer-cache-state',
+        readStructured: () => pending.future,
+        readFallback: () async {
+          fallbackReads++;
+          return const ['demuxer-cache-state'];
+        },
+        timeout: const Duration(milliseconds: 1),
+        timeoutReporter: timeouts.add,
+      );
+
+      expect(supported, isFalse);
+      expect(fallbackReads, 0);
+      expect(timeouts, [NativePlaybackOperationKind.propertyRead]);
+    },
+  );
+
+  test(
+    'property string fallback is bounded by the same read timeout',
+    () async {
+      final pending = Completer<Object?>();
+      final timeouts = <NativePlaybackOperationKind>[];
+
+      final supported = await nativePropertyAvailableFromPropertyList(
+        propertyName: 'demuxer-cache-state',
+        readStructured: () async => null,
+        readFallback: () => pending.future,
+        timeout: const Duration(milliseconds: 1),
+        timeoutReporter: timeouts.add,
+      );
+
+      expect(supported, isFalse);
+      expect(timeouts, [NativePlaybackOperationKind.propertyRead]);
+    },
+  );
+
   test(
     'parses a valid native cache state and ignores damaged ranges',
     () async {

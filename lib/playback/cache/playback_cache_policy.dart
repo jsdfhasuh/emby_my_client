@@ -126,6 +126,7 @@ PlaybackTransportKind classifyPlaybackTransport({
   required String? container,
   required String? liveStreamId,
   required Duration duration,
+  Uri? sourceUri,
 }) {
   final scheme = uri.scheme.toLowerCase();
   if (scheme == 'file') return PlaybackTransportKind.offlineLocal;
@@ -137,21 +138,17 @@ PlaybackTransportKind classifyPlaybackTransport({
   }
 
   final normalizedContainer = container?.trim().toLowerCase() ?? '';
-  final rawUri = uri.toString().toLowerCase();
-  String decodedUri;
-  try {
-    decodedUri = Uri.decodeFull(rawUri);
-  } catch (_) {
-    decodedUri = rawUri;
-  }
+  final uriEvidence = [uri, ?sourceUri].map(_decodedLowercaseUri);
   final segmented =
       method == PlayMethod.transcode ||
       normalizedContainer == 'm3u8' ||
       normalizedContainer == 'hls' ||
       normalizedContainer == 'dash' ||
       normalizedContainer == 'mpd' ||
-      decodedUri.contains('.m3u8') ||
-      decodedUri.contains('.mpd');
+      uriEvidence.any(
+        (candidate) =>
+            candidate.contains('.m3u8') || candidate.contains('.mpd'),
+      );
   if (segmented) return PlaybackTransportKind.segmentedHttp;
 
   final protocol = sourceProtocol?.trim().toLowerCase();
@@ -163,6 +160,15 @@ PlaybackTransportKind classifyPlaybackTransport({
     return PlaybackTransportKind.progressiveHttp;
   }
   return PlaybackTransportKind.unknown;
+}
+
+String _decodedLowercaseUri(Uri uri) {
+  final raw = uri.toString().toLowerCase();
+  try {
+    return Uri.decodeFull(raw);
+  } catch (_) {
+    return raw;
+  }
 }
 
 class PlaybackCacheProfileResolver {
