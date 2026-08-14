@@ -33,6 +33,7 @@ import '../playback/playback_settings_scope.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
+import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'widgets/trickplay_preview.dart';
@@ -2078,6 +2079,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildControls() {
+    final playback = _playbackController?.state;
     final maxMs = _duration.inMilliseconds
         .toDouble()
         .clamp(1.0, double.infinity)
@@ -2232,11 +2234,13 @@ class _PlayerScreenState extends State<PlayerScreen>
               bottom: 8,
               child: Column(
                 children: [
-                  Slider(
-                    min: 0,
+                  PlaybackTimeline(
+                    duration: _duration,
                     max: maxMs,
                     value: positionMs,
                     secondaryTrackValue: bufferMs,
+                    cacheRuntimeMode: playback?.cacheRuntimeMode,
+                    cacheSnapshot: playback?.cacheSnapshot,
                     onChangeStart: (_) {
                       _invalidateUiSeek();
                       setState(() {
