@@ -620,6 +620,9 @@ lib/ui/library_screen.dart
 
 ## 20. 真实服务器与设备验收
 
+执行步骤、结果口径和证据要求见
+[`../acceptance/2026-08-android-people-library-acceptance.md`](../acceptance/2026-08-android-people-library-acceptance.md)。
+
 至少使用一个包含 1000 个以上电影/电视剧条目的真实媒体库，记录：
 
 - 电影详情演员姓名、角色、头像和点击行为。
