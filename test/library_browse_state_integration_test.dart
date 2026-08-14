@@ -153,6 +153,55 @@ void main() {
     },
   );
 
+  testWidgets('play count sort survives favorites and local scan filters', (
+    tester,
+  ) async {
+    final api = _StateRecordingApi();
+    final scanService = _scanService(api);
+    await tester.pumpWidget(
+      _rootApp(
+        api,
+        categorySettings: _allCategorySettings,
+        scanService: scanService,
+        initialState: const LibraryBrowseState(
+          sortBy: LibrarySortBy.playCount,
+          sortOrder: LibrarySortOrder.descending,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(api.requests.first.sortBy, LibrarySortBy.playCount);
+    expect(api.requests.first.sortOrder, LibrarySortOrder.descending);
+
+    await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
+    await tester.pumpAndSettle();
+    expect(api.requests.last.favorites, isTrue);
+
+    await openLibraryFilter(tester);
+    await selectLibraryMediaType(tester, 'movie');
+    await applyLibraryFilter(tester);
+    await openLibraryFilter(tester);
+    await selectLibraryLocalFilter(tester, 'strm');
+    await applyLibraryFilter(tester);
+
+    expect(api.requests.last.favorites, isTrue);
+    expect(api.requests.last.mediaType, LibraryMediaType.movie);
+    expect(api.requests.last.startIndex, 0);
+    expect(
+      api.requests.every(
+        (request) =>
+            request.sortBy == LibrarySortBy.playCount &&
+            request.sortOrder == LibrarySortOrder.descending,
+      ),
+      isTrue,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await scanService.cancelAll();
+    scanService.dispose();
+    await api.dispose();
+  });
+
   testWidgets('local scan failure retains matches and retries its raw cursor', (
     tester,
   ) async {
@@ -323,6 +372,7 @@ Widget _rootApp(
   EmbyApi api, {
   LibraryCategorySettings categorySettings = const LibraryCategorySettings(),
   LibraryLocalMediaScanService? scanService,
+  LibraryBrowseState initialState = const LibraryBrowseState(),
 }) => MaterialApp(
   theme: ThemeData.dark(useMaterial3: true),
   home: LibraryBrowseScreen.root(
@@ -330,6 +380,7 @@ Widget _rootApp(
     view: _library,
     categorySettings: categorySettings,
     libraryScanService: scanService,
+    initialState: initialState,
   ),
 );
 
@@ -433,12 +484,16 @@ class _RecordedLibraryRequest {
     required this.mediaType,
     required this.playedFilter,
     required this.favorites,
+    required this.sortBy,
+    required this.sortOrder,
   });
 
   final int startIndex;
   final LibraryMediaType mediaType;
   final LibraryPlayedFilter playedFilter;
   final bool favorites;
+  final LibrarySortBy sortBy;
+  final LibrarySortOrder sortOrder;
 }
 
 class _StateRecordingApi extends EmbyApi {
@@ -466,6 +521,8 @@ class _StateRecordingApi extends EmbyApi {
       mediaType: mediaType,
       playedFilter: playedFilter,
       favorites: favorites,
+      sortBy: sortBy,
+      sortOrder: sortOrder,
     );
   }
 
@@ -488,6 +545,8 @@ class _StateRecordingApi extends EmbyApi {
       mediaType: mediaType,
       playedFilter: playedFilter,
       favorites: favorites,
+      sortBy: sortBy,
+      sortOrder: sortOrder,
     );
   }
 
@@ -496,6 +555,8 @@ class _StateRecordingApi extends EmbyApi {
     required LibraryMediaType mediaType,
     required LibraryPlayedFilter playedFilter,
     required bool favorites,
+    required LibrarySortBy sortBy,
+    required LibrarySortOrder sortOrder,
   }) {
     requests.add(
       _RecordedLibraryRequest(
@@ -503,6 +564,8 @@ class _StateRecordingApi extends EmbyApi {
         mediaType: mediaType,
         playedFilter: playedFilter,
         favorites: favorites,
+        sortBy: sortBy,
+        sortOrder: sortOrder,
       ),
     );
     return _page([_item('state-${requests.length}', isStrm: true)]);
