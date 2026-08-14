@@ -2338,6 +2338,7 @@ String _sortLabel(LibrarySortBy sortBy) => switch (sortBy) {
   LibrarySortBy.productionYear => '年份',
   LibrarySortBy.communityRating => '评分',
   LibrarySortBy.runtime => '时长',
+  LibrarySortBy.playCount => '播放次数',
 };
 
 class _FixedLibraryErrorState extends StatelessWidget {

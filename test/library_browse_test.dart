@@ -219,6 +219,78 @@ void main() {
     expect(requests.last.queryParameters, isNot(contains('IsFavorite')));
   });
 
+  testWidgets(
+    'play count sorting preserves direction and restores alphabet navigation',
+    (tester) async {
+      final requests = <RequestOptions>[];
+      final api = _api((options, handler) {
+        requests.add(options);
+        handler.resolve(_libraryResponse(options));
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: LibraryBrowseScreen.root(
+            api: api,
+            view: _library,
+            categorySettings: _allCategorySettings,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('library-alphabet-navigation')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('library-sort-direction-button')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('library-alphabet-navigation')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('library-sort-button')));
+      await tester.pumpAndSettle();
+      expect(find.text('播放次数'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('library-sort-playCount')));
+      await tester.pumpAndSettle();
+
+      expect(requests.last.queryParameters['SortBy'], 'PlayCount');
+      expect(requests.last.queryParameters['SortOrder'], 'Descending');
+      expect(requests.last.queryParameters['EnableUserData'], isTrue);
+      expect(
+        find.byKey(const ValueKey('library-alphabet-navigation')),
+        findsNothing,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('library-sort-direction-button')),
+      );
+      await tester.pumpAndSettle();
+      expect(requests.last.queryParameters['SortBy'], 'PlayCount');
+      expect(requests.last.queryParameters['SortOrder'], 'Ascending');
+      expect(
+        find.byKey(const ValueKey('library-alphabet-navigation')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('library-sort-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('library-sort-name')));
+      await tester.pumpAndSettle();
+      expect(requests.last.queryParameters['SortBy'], 'SortName');
+      expect(requests.last.queryParameters['SortOrder'], 'Ascending');
+      expect(
+        find.byKey(const ValueKey('library-alphabet-navigation')),
+        findsOneWidget,
+      );
+    },
+  );
+
   testWidgets('library defaults hide optional media type categories', (
     tester,
   ) async {
