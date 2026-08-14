@@ -53,6 +53,7 @@ class EmbyUserData {
     this.isPlayed = false,
     this.isFavorite = false,
     this.unplayedItemCount = 0,
+    this.playCount = 0,
   });
 
   final int playbackPositionTicks;
@@ -60,6 +61,7 @@ class EmbyUserData {
   final bool isPlayed;
   final bool isFavorite;
   final int unplayedItemCount;
+  final int playCount;
 
   factory EmbyUserData.fromJson(Map<String, dynamic> json) => EmbyUserData(
     playbackPositionTicks: _asInt(json['PlaybackPositionTicks']) ?? 0,
@@ -67,6 +69,7 @@ class EmbyUserData {
     isPlayed: json['Played'] as bool? ?? false,
     isFavorite: json['IsFavorite'] as bool? ?? false,
     unplayedItemCount: _asInt(json['UnplayedItemCount']) ?? 0,
+    playCount: _asInt(json['PlayCount']) ?? 0,
   );
 
   EmbyUserData copyWith({
@@ -75,12 +78,14 @@ class EmbyUserData {
     bool? isPlayed,
     bool? isFavorite,
     int? unplayedItemCount,
+    int? playCount,
   }) => EmbyUserData(
     playbackPositionTicks: playbackPositionTicks ?? this.playbackPositionTicks,
     playedPercentage: playedPercentage ?? this.playedPercentage,
     isPlayed: isPlayed ?? this.isPlayed,
     isFavorite: isFavorite ?? this.isFavorite,
     unplayedItemCount: unplayedItemCount ?? this.unplayedItemCount,
+    playCount: playCount ?? this.playCount,
   );
 }
 

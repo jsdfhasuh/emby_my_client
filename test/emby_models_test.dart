@@ -59,6 +59,27 @@ void main() {
     expect(item.tags, ['高码率']);
   });
 
+  test('parses and copies UserData PlayCount without regressing other fields', () {
+    final parsed = EmbyUserData.fromJson(const {
+      'PlayCount': '7',
+      'PlaybackPositionTicks': 900,
+      'PlayedPercentage': 25,
+      'Played': true,
+      'IsFavorite': true,
+      'UnplayedItemCount': 3,
+    });
+
+    expect(const EmbyUserData().playCount, 0);
+    expect(parsed.playCount, 7);
+    expect(parsed.playbackPositionTicks, 900);
+    expect(parsed.playedPercentage, 25);
+    expect(parsed.isPlayed, isTrue);
+    expect(parsed.isFavorite, isTrue);
+    expect(parsed.unplayedItemCount, 3);
+    expect(parsed.copyWith().playCount, 7);
+    expect(parsed.copyWith(playCount: 11).playCount, 11);
+  });
+
   group('people parsing', () {
     test('parses cast fields, preserves order, and deduplicates people', () {
       final item = EmbyItem.fromJson({

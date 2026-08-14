@@ -181,6 +181,36 @@ void main() {
     );
   });
 
+  test('play count sorting keeps direction and disables alphabet navigation', () {
+    final descending = LibraryBrowseState(
+      sortOrder: LibrarySortOrder.descending,
+      alphabetFilter: LetterItems('z'),
+    );
+    final playCount = reduceLibraryBrowseState(
+      descending,
+      const LibrarySortChanged(
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+    );
+
+    expect(playCount.sortBy, LibrarySortBy.playCount);
+    expect(playCount.sortOrder, LibrarySortOrder.descending);
+    expect(playCount.alphabetFilter.isAll, isTrue);
+    expect(playCount.alphabetEnabled, isFalse);
+
+    final restored = reduceLibraryBrowseState(
+      playCount,
+      const LibrarySortChanged(
+        sortBy: LibrarySortBy.name,
+        sortOrder: LibrarySortOrder.ascending,
+      ),
+    );
+    expect(restored.sortBy, LibrarySortBy.name);
+    expect(restored.sortOrder, LibrarySortOrder.ascending);
+    expect(restored.alphabetEnabled, isTrue);
+  });
+
   test('same selections are identity-preserving no-ops', () {
     const state = LibraryBrowseState();
 
