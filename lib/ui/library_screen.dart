@@ -1018,6 +1018,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _hasMore = true;
   bool _loadFailed = false;
   bool _pendingRealtimeLibraryRefresh = false;
+  bool _pendingRealtimeUserDataRefreshAll = false;
   final Set<String> _pendingRealtimeUserDataIds = {};
   int _nextStartIndex = 0;
   int? _totalCount;
@@ -1205,11 +1206,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         }
         if (event is EmbyUserDataChanged &&
             event.userId == widget.api.session.userId) {
-          _pendingRealtimeUserDataIds.addAll(
-            event.itemIds.isEmpty
-                ? _items.map((item) => item.id)
-                : event.itemIds,
-          );
+          if (event.itemIds.isEmpty) {
+            _pendingRealtimeUserDataRefreshAll = true;
+          } else {
+            _pendingRealtimeUserDataIds.addAll(event.itemIds);
+          }
           return true;
         }
         return false;
@@ -1603,14 +1604,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Future<void> _refreshRealtime() async {
     final reloadLibrary = _pendingRealtimeLibraryRefresh;
+    final refreshAll = _pendingRealtimeUserDataRefreshAll;
     final userDataIds = Set<String>.of(_pendingRealtimeUserDataIds);
     _pendingRealtimeLibraryRefresh = false;
+    _pendingRealtimeUserDataRefreshAll = false;
     _pendingRealtimeUserDataIds.clear();
     try {
       if (reloadLibrary) {
         await _refreshPreservingPosition();
       } else {
-        await _refreshUserData(userDataIds);
+        await _refreshUserData(userDataIds, refreshAll: refreshAll);
       }
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
@@ -1622,14 +1625,25 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
-  Future<void> _refreshUserData(Iterable<String> itemIds) async {
+  Future<void> _refreshUserData(
+    Iterable<String> itemIds, {
+    bool refreshAll = false,
+  }) async {
     final generation = _generation;
     final state = _state;
-    final requestedIds = itemIds.where((id) => id.isNotEmpty).toSet();
+    if (refreshAll && state.sortBy == LibrarySortBy.playCount) {
+      await _refreshPreservingPosition();
+      return;
+    }
+    final requestedIds = (refreshAll ? _items.map((item) => item.id) : itemIds)
+        .where((id) => id.isNotEmpty)
+        .toSet();
     if (requestedIds.isEmpty) return;
     final loadedItems = {for (final item in _items) item.id: item};
     final hasUnknownId = requestedIds.any((id) => !loadedItems.containsKey(id));
-    if (hasUnknownId && libraryBrowseHasServerMembershipCondition(state)) {
+    if (hasUnknownId &&
+        (state.sortBy == LibrarySortBy.playCount ||
+            libraryBrowseHasServerMembershipCondition(state))) {
       await _refreshPreservingPosition();
       return;
     }
@@ -1639,6 +1653,17 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     if (loadedRequestedIds.isEmpty) return;
     final userData = await widget.api.getUserDataForItems(loadedRequestedIds);
     if (!mounted || generation != _generation || userData.isEmpty) return;
+    final playCountChanged =
+        state.sortBy == LibrarySortBy.playCount &&
+        userData.entries.any((entry) {
+          final item = loadedItems[entry.key];
+          return item != null &&
+              item.userData.playCount != entry.value.playCount;
+        });
+    if (playCountChanged) {
+      await _refreshPreservingPosition();
+      return;
+    }
     final membershipChanged = userData.entries.any((entry) {
       final item = loadedItems[entry.key];
       return item != null &&

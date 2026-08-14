@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
@@ -104,6 +106,192 @@ void main() {
     expect(api.userDataCalls, 1);
     expect(api.mediaCalls, 1);
     await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('progress-only changes in play count sort do not reload', (
+    tester,
+  ) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [_item('target', userData: const EmbyUserData(playCount: 4))],
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+    );
+
+    api.updateUserData(
+      'target',
+      const EmbyUserData(
+        playCount: 4,
+        playbackPositionTicks: 900,
+        playedPercentage: 25,
+      ),
+    );
+    socket.emitUserData(['target']);
+    await _pumpRealtime(tester);
+
+    final card = tester.widget<MediaPosterCard>(_itemFinder('target'));
+    expect(card.item.userData.playCount, 4);
+    expect(card.item.userData.playbackPositionTicks, 900);
+    expect(api.userDataCalls, 1);
+    expect(api.mediaCalls, 1);
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('play count changes trigger one server reorder', (tester) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        _item('first', userData: const EmbyUserData(playCount: 1)),
+        _item('second', userData: const EmbyUserData(playCount: 2)),
+      ],
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+    );
+    expect(_visibleItemIds(tester), ['first', 'second']);
+
+    api.updateUserData('first', const EmbyUserData(playCount: 3));
+    socket.emitUserData(['first']);
+    await _pumpRealtime(tester);
+
+    expect(_visibleItemIds(tester), ['second', 'first']);
+    expect(api.userDataCalls, 1);
+    expect(api.mediaCalls, 2);
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('unknown play count item triggers a preserving reorder', (
+    tester,
+  ) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [_item('loaded', userData: const EmbyUserData(playCount: 1))],
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+    );
+
+    socket.emitUserData(['not-loaded']);
+    await _pumpRealtime(tester);
+
+    expect(api.userDataCalls, 0);
+    expect(api.mediaCalls, 2);
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('empty UserDataChanged IDs trigger a play count reorder', (
+    tester,
+  ) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [_item('loaded', userData: const EmbyUserData(playCount: 1))],
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+    );
+
+    socket.emitUserData(const []);
+    await _pumpRealtime(tester);
+
+    expect(api.userDataCalls, 0);
+    expect(api.mediaCalls, 2);
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('a play count batch performs one reorder', (tester) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        _item('first', userData: const EmbyUserData(playCount: 1)),
+        _item('second', userData: const EmbyUserData(playCount: 2)),
+      ],
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+    );
+
+    api
+      ..updateUserData('first', const EmbyUserData(playCount: 4))
+      ..updateUserData('second', const EmbyUserData(playCount: 3));
+    socket
+      ..emitUserData(['first'])
+      ..emitUserData(['second']);
+    await _pumpRealtime(tester);
+
+    expect(_visibleItemIds(tester), ['second', 'first']);
+    expect(api.userDataCalls, 1);
+    expect(api.mediaCalls, 2);
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('play count changes restart the current local scan query', (
+    tester,
+  ) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        _item(
+          'first',
+          userData: const EmbyUserData(playCount: 1),
+          isStrm: true,
+        ),
+        _item(
+          'second',
+          userData: const EmbyUserData(playCount: 2),
+          isStrm: true,
+        ),
+      ],
+    );
+    final scanService = LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(
+        mediaType: LibraryMediaType.movie,
+        localFilter: LibraryLocalMediaFilter.strm,
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.descending,
+      ),
+      scanService: scanService,
+    );
+    expect(_visibleItemIds(tester), ['second', 'first']);
+
+    api.updateUserData('first', const EmbyUserData(playCount: 3));
+    socket.emitUserData(['first']);
+    await _pumpRealtime(tester);
+
+    expect(_visibleItemIds(tester), ['first', 'second']);
+    expect(api.localScanCalls, 2);
+    expect(
+      api.localCalls.every(
+        (call) =>
+            call.sortBy == LibrarySortBy.playCount &&
+            call.sortOrder == LibrarySortOrder.descending,
+      ),
+      isTrue,
+    );
+    await _disposeLibrary(tester, api, scanService: scanService);
   });
 
   for (final entry in const [
@@ -282,9 +470,15 @@ class _MembershipTransition {
 }
 
 class _MediaCall {
-  const _MediaCall({required this.startIndex});
+  const _MediaCall({
+    required this.startIndex,
+    required this.sortBy,
+    required this.sortOrder,
+  });
 
   final int startIndex;
+  final LibrarySortBy sortBy;
+  final LibrarySortOrder sortOrder;
 }
 
 class _MembershipApi extends EmbyApi {
@@ -296,7 +490,9 @@ class _MembershipApi extends EmbyApi {
 
   final List<EmbyItem> _items;
   final List<_MediaCall> calls = [];
+  final List<_MediaCall> localCalls = [];
   int userDataCalls = 0;
+  int localScanCalls = 0;
   bool failNextMediaPage = false;
   Completer<Map<String, EmbyUserData>>? deferredUserData;
 
@@ -326,26 +522,75 @@ class _MembershipApi extends EmbyApi {
   }) async {
     if (failNextMediaPage) {
       failNextMediaPage = false;
-      calls.add(_MediaCall(startIndex: startIndex));
+      calls.add(
+        _MediaCall(
+          startIndex: startIndex,
+          sortBy: sortBy,
+          sortOrder: sortOrder,
+        ),
+      );
       throw StateError('private membership fixture');
     }
-    final filtered = _items
-        .where((item) {
-          if (favorites && !item.userData.isFavorite) return false;
-          return switch (playedFilter) {
-            LibraryPlayedFilter.all => true,
-            LibraryPlayedFilter.played => item.userData.isPlayed,
-            LibraryPlayedFilter.unplayed => !item.userData.isPlayed,
-          };
-        })
-        .toList(growable: false);
-    calls.add(_MediaCall(startIndex: startIndex));
+    final filtered = _items.where((item) {
+      if (favorites && !item.userData.isFavorite) return false;
+      return switch (playedFilter) {
+        LibraryPlayedFilter.all => true,
+        LibraryPlayedFilter.played => item.userData.isPlayed,
+        LibraryPlayedFilter.unplayed => !item.userData.isPlayed,
+      };
+    }).toList();
+    _sortForQuery(filtered, sortBy, sortOrder);
+    calls.add(
+      _MediaCall(startIndex: startIndex, sortBy: sortBy, sortOrder: sortOrder),
+    );
     final pageItems = filtered.skip(startIndex).take(limit).toList();
     return EmbyItemPage(
       items: pageItems,
       totalRecordCount: filtered.length,
       rawItemCount: pageItems.length,
     );
+  }
+
+  @override
+  Future<EmbyItemPage> getLocalMediaScanCandidates({
+    required String parentId,
+    int startIndex = 0,
+    int limit = 60,
+    LibraryMediaType mediaType = LibraryMediaType.all,
+    LibraryPlayedFilter playedFilter = LibraryPlayedFilter.all,
+    bool favorites = false,
+    LibrarySortBy sortBy = LibrarySortBy.name,
+    LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
+    LibraryAlphabetFilter alphabetFilter = const AllItems(),
+    String? genreId,
+    String? tagId,
+  }) async {
+    localScanCalls++;
+    final candidates = List<EmbyItem>.of(_items);
+    _sortForQuery(candidates, sortBy, sortOrder);
+    localCalls.add(
+      _MediaCall(startIndex: startIndex, sortBy: sortBy, sortOrder: sortOrder),
+    );
+    final pageItems = candidates.skip(startIndex).take(limit).toList();
+    return EmbyItemPage(
+      items: pageItems,
+      totalRecordCount: candidates.length,
+      rawItemCount: pageItems.length,
+    );
+  }
+
+  void _sortForQuery(
+    List<EmbyItem> items,
+    LibrarySortBy sortBy,
+    LibrarySortOrder sortOrder,
+  ) {
+    if (sortBy != LibrarySortBy.playCount) return;
+    items.sort((left, right) {
+      final comparison = left.userData.playCount.compareTo(
+        right.userData.playCount,
+      );
+      return sortOrder == LibrarySortOrder.ascending ? comparison : -comparison;
+    });
   }
 
   @override
@@ -402,8 +647,9 @@ class _FakeEmbySocket implements EmbySocket {
 Future<void> _pumpLibrary(
   WidgetTester tester,
   _MembershipApi api,
-  LibraryBrowseState initialState,
-) async {
+  LibraryBrowseState initialState, {
+  LibraryLocalMediaScanService? scanService,
+}) async {
   await api.realtime.start();
   await tester.pumpWidget(
     MaterialApp(
@@ -413,6 +659,7 @@ Future<void> _pumpLibrary(
         view: _library,
         categorySettings: _allCategorySettings,
         initialState: initialState,
+        libraryScanService: scanService,
       ),
     ),
   );
@@ -430,10 +677,18 @@ Future<void> _pumpRealtime(WidgetTester tester, {bool settle = true}) async {
   }
 }
 
-Future<void> _disposeLibrary(WidgetTester tester, _MembershipApi api) async {
+Future<void> _disposeLibrary(
+  WidgetTester tester,
+  _MembershipApi api, {
+  LibraryLocalMediaScanService? scanService,
+}) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
   await tester.runAsync(api.dispose);
+  if (scanService != null) {
+    await scanService.cancelAll();
+    scanService.dispose();
+  }
 }
 
 void _setCompactView(WidgetTester tester) {
@@ -460,7 +715,11 @@ Dio _testDio() => Dio()
     ),
   );
 
-EmbyItem _item(String id, {required EmbyUserData userData}) => EmbyItem(
+EmbyItem _item(
+  String id, {
+  required EmbyUserData userData,
+  bool isStrm = false,
+}) => EmbyItem(
   id: id,
   name: id,
   type: 'Movie',
@@ -469,7 +728,14 @@ EmbyItem _item(String id, {required EmbyUserData userData}) => EmbyItem(
   backdropImageTags: const [],
   genres: const [],
   userData: userData,
+  path: isStrm ? '/media/$id.strm' : null,
+  container: isStrm ? 'strm' : null,
 );
+
+List<String> _visibleItemIds(WidgetTester tester) => tester
+    .widgetList<MediaPosterCard>(find.byType(MediaPosterCard))
+    .map((card) => card.item.id)
+    .toList(growable: false);
 
 const _session = EmbySession(
   serverUrl: 'https://emby.example.test',
