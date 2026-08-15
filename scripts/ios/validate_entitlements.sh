@@ -76,19 +76,33 @@ require_key_type() {
   local key="$2"
   local expected_type="$3"
   local actual_type
-  local value
-  value="$(plist_entry "$file" "$key")"
-  case "$value" in
-    \"*\") actual_type='string' ;;
-    \[*|\(* ) actual_type='array' ;;
-    \{*) actual_type='dictionary' ;;
-    true|false) actual_type='boolean' ;;
+  actual_type="$(plutil -type "$key" "$file" 2>/dev/null || printf '%s' unknown)"
+  actual_type="$(printf '%s' "$actual_type" | tr '[:upper:]' '[:lower:]')"
+  case "$actual_type" in
+    bool|boolean) actual_type='boolean' ;;
+    dict|dictionary) actual_type='dictionary' ;;
+    array|string) ;;
     *) actual_type='unknown' ;;
   esac
   if [[ "$actual_type" != "$expected_type" ]]; then
     echo "$file: $key must be $expected_type, got $actual_type" >&2
     exit 1
   fi
+}
+
+plist_boolean() {
+  local file="$1"
+  local key="$2"
+  local value
+  value="$(plist_entry "$file" "$key")"
+  case "$value" in
+    true|1) printf '%s\n' true ;;
+    false|0) printf '%s\n' false ;;
+    *)
+      echo "$file: $key must be a boolean" >&2
+      return 1
+      ;;
+  esac
 }
 
 validate_xcode_file() {
@@ -101,7 +115,7 @@ validate_xcode_file() {
   require_key_type "$file" com.apple.developer.networking.multicast boolean
   require_key_type "$file" keychain-access-groups array
   local multicast groups
-  multicast="$(plist_entry "$file" com.apple.developer.networking.multicast)"
+  multicast="$(plist_boolean "$file" com.apple.developer.networking.multicast)"
   groups="$(plutil -extract keychain-access-groups json -o - "$file" | tr -d '[:space:]')"
   if [[ "$multicast" != 'true' ]]; then
     echo "Xcode Runner multicast entitlement must be true: $file" >&2
@@ -129,7 +143,7 @@ validate_trollstore_file() {
 
   local application_identifier multicast team_identifier groups
   application_identifier="$(plist_scalar "$file" application-identifier)"
-  multicast="$(plist_entry "$file" com.apple.developer.networking.multicast)"
+  multicast="$(plist_boolean "$file" com.apple.developer.networking.multicast)"
   team_identifier="$(plist_scalar "$file" com.apple.developer.team-identifier)"
   groups="$(plutil -extract keychain-access-groups json -o - "$file" | tr -d '[:space:]')"
   if [[ "$application_identifier" != "$EXPECTED_APPLICATION_IDENTIFIER" ]]; then
