@@ -2,7 +2,6 @@ import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/downloads/foreground_download_executor.dart';
 import 'package:emby_my_client/downloads/download_executor.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/picture_in_picture.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -128,8 +127,10 @@ class _SpyDiscovery extends EmbyServerDiscovery {
   int calls = 0;
 
   @override
-  Future<List<DiscoveredServer>> discover() async {
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async {
     calls++;
-    return const <DiscoveredServer>[];
+    return const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
   }
 }

@@ -668,21 +668,28 @@ class _FakeLoginController extends AppController {
 
 class _FakeDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [
-    DiscoveredServer(
-      id: 'living-room',
-      name: 'Living Room Emby',
-      address: 'http://192.0.2.10:8096',
-    ),
-    DiscoveredServer(
-      id: 'guest-room',
-      name: 'Guest Room Emby',
-      address: 'http://192.0.2.11:8096',
-    ),
-  ];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(
+    status: EmbyDiscoveryStatus.found,
+    servers: [
+      DiscoveredServer(
+        id: 'living-room',
+        name: 'Living Room Emby',
+        address: 'http://192.0.2.10:8096',
+      ),
+      DiscoveredServer(
+        id: 'guest-room',
+        name: 'Guest Room Emby',
+        address: 'http://192.0.2.11:8096',
+      ),
+    ],
+  );
 }
 
 class _EmptyDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
 }

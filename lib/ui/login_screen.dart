@@ -190,10 +190,10 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
       _isDiscovering = true;
       _discoveredServers = const [];
     });
-    final servers = await _discovery.discover();
+    final result = await _discovery.discover();
     if (!mounted || generation != _discoveryGeneration) return;
     setState(() {
-      _discoveredServers = servers;
+      _discoveredServers = result.servers;
       _isDiscovering = false;
     });
   }

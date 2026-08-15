@@ -39,11 +39,16 @@ void main() {
 
 class _FakeDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [
-    DiscoveredServer(
-      id: 'server-1',
-      name: 'Living Room Emby',
-      address: 'http://192.168.1.20:8096',
-    ),
-  ];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(
+    status: EmbyDiscoveryStatus.found,
+    servers: [
+      DiscoveredServer(
+        id: 'server-1',
+        name: 'Living Room Emby',
+        address: 'http://192.168.1.20:8096',
+      ),
+    ],
+  );
 }

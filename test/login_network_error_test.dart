@@ -1,6 +1,5 @@
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:emby_my_client/ui/login_screen.dart';
@@ -109,7 +108,9 @@ Future<void> _submit(
 
 class _EmptyDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
 }
 
 class _FailingController extends AppController {

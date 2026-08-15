@@ -22,6 +22,37 @@ typedef EmbyDiscoveryTransportFactory =
     Future<EmbyDiscoveryTransport> Function();
 typedef EmbyBroadcastAddressProvider = Future<List<InternetAddress>> Function();
 
+enum EmbyDiscoveryStatus { found, notFound, unavailable, cancelled }
+
+enum EmbyDiscoveryFailureKind { transport, broadcast, receive, unknown }
+
+class EmbyDiscoveryResult {
+  const EmbyDiscoveryResult({
+    required this.status,
+    this.servers = const [],
+    this.failureKind,
+  });
+
+  final EmbyDiscoveryStatus status;
+  final List<DiscoveredServer> servers;
+  final EmbyDiscoveryFailureKind? failureKind;
+}
+
+class EmbyDiscoveryCancellation {
+  final Completer<void> _cancelled = Completer<void>();
+  bool _isCancelled = false;
+
+  bool get isCancelled => _isCancelled;
+
+  Future<void> get whenCancelled => _cancelled.future;
+
+  void cancel() {
+    if (_isCancelled) return;
+    _isCancelled = true;
+    _cancelled.complete();
+  }
+}
+
 class EmbyServerDiscovery {
   EmbyServerDiscovery({
     EmbyDiscoveryTransportFactory? transportFactory,
@@ -40,50 +71,174 @@ class EmbyServerDiscovery {
   final Duration listenDuration;
   final Duration rebroadcastInterval;
 
-  Future<List<DiscoveredServer>> discover() async {
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async {
+    final operationCancellation = cancellation ?? EmbyDiscoveryCancellation();
     EmbyDiscoveryTransport? transport;
     StreamSubscription<EmbyDiscoveryPacket>? subscription;
     Timer? rebroadcastTimer;
     final found = <DiscoveredServer>[];
     final seenIds = <String>{};
     final seenAddresses = <String>{};
+    final streamFailureSignal = Completer<void>();
+    EmbyDiscoveryResult? result;
+    var receiveFailed = false;
+    var attemptedBroadcastCount = 0;
+    var successfulBroadcastCount = 0;
+
     try {
-      transport = await _transportFactory();
-      final addresses = await _broadcastAddressProvider();
-      final payload = utf8.encode(discoveryMessage);
-
-      subscription = transport.packets.listen((packet) {
-        final server = parseResponse(
-          packet.data,
-          sourceAddress: packet.address,
+      if (operationCancellation.isCancelled) {
+        result = const EmbyDiscoveryResult(
+          status: EmbyDiscoveryStatus.cancelled,
         );
-        if (server == null) return;
-        final id = server.id.toLowerCase();
-        final address = server.address.toLowerCase();
-        if (seenIds.contains(id) || seenAddresses.contains(address)) return;
-        seenIds.add(id);
-        seenAddresses.add(address);
-        found.add(server);
-      });
+      } else {
+        try {
+          transport = await _transportFactory();
+        } catch (error, stackTrace) {
+          DiagnosticLog.instance.error(
+            'discovery',
+            'Local Emby discovery transport could not start',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          result = operationCancellation.isCancelled
+              ? const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.cancelled)
+              : const EmbyDiscoveryResult(
+                  status: EmbyDiscoveryStatus.unavailable,
+                  failureKind: EmbyDiscoveryFailureKind.transport,
+                );
+        }
 
-      void broadcast() {
-        for (final address in addresses) {
+        List<InternetAddress>? addresses;
+        if (result == null && operationCancellation.isCancelled) {
+          result = const EmbyDiscoveryResult(
+            status: EmbyDiscoveryStatus.cancelled,
+          );
+        }
+        if (result == null) {
           try {
-            transport?.send(payload, address, discoveryPort);
-          } catch (_) {
-            // A failed interface broadcast must not stop other interfaces.
+            addresses = await _broadcastAddressProvider();
+          } catch (error, stackTrace) {
+            DiagnosticLog.instance.error(
+              'discovery',
+              'Local Emby discovery broadcast targets could not be listed',
+              error: error,
+              stackTrace: stackTrace,
+            );
+            result = operationCancellation.isCancelled
+                ? const EmbyDiscoveryResult(
+                    status: EmbyDiscoveryStatus.cancelled,
+                  )
+                : const EmbyDiscoveryResult(
+                    status: EmbyDiscoveryStatus.unavailable,
+                    failureKind: EmbyDiscoveryFailureKind.unknown,
+                  );
+          }
+        }
+
+        if (result == null && operationCancellation.isCancelled) {
+          result = const EmbyDiscoveryResult(
+            status: EmbyDiscoveryStatus.cancelled,
+          );
+        }
+
+        if (result == null) {
+          final payload = utf8.encode(discoveryMessage);
+          subscription = transport!.packets.listen(
+            (packet) {
+              if (operationCancellation.isCancelled) return;
+              final server = parseResponse(
+                packet.data,
+                sourceAddress: packet.address,
+              );
+              if (server == null) return;
+              final id = server.id.toLowerCase();
+              final address = server.address.toLowerCase();
+              if (seenIds.contains(id) || seenAddresses.contains(address)) {
+                return;
+              }
+              seenIds.add(id);
+              seenAddresses.add(address);
+              found.add(server);
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              receiveFailed = true;
+              DiagnosticLog.instance.error(
+                'discovery',
+                'Local Emby discovery receive stream failed',
+                error: error,
+                stackTrace: stackTrace,
+              );
+              if (!streamFailureSignal.isCompleted) {
+                streamFailureSignal.complete();
+              }
+            },
+          );
+
+          void broadcast() {
+            if (operationCancellation.isCancelled) return;
+            for (final address in addresses!) {
+              if (operationCancellation.isCancelled) return;
+              attemptedBroadcastCount++;
+              try {
+                transport!.send(payload, address, discoveryPort);
+                successfulBroadcastCount++;
+              } catch (error, stackTrace) {
+                DiagnosticLog.instance.error(
+                  'discovery',
+                  'Local Emby discovery broadcast target failed',
+                  error: error,
+                  stackTrace: stackTrace,
+                );
+              }
+            }
+          }
+
+          broadcast();
+          if (operationCancellation.isCancelled) {
+            result = const EmbyDiscoveryResult(
+              status: EmbyDiscoveryStatus.cancelled,
+            );
+          } else if (successfulBroadcastCount == 0) {
+            result = const EmbyDiscoveryResult(
+              status: EmbyDiscoveryStatus.unavailable,
+              failureKind: EmbyDiscoveryFailureKind.broadcast,
+            );
+          } else {
+            if (rebroadcastInterval > Duration.zero) {
+              rebroadcastTimer = Timer.periodic(
+                rebroadcastInterval,
+                (_) => broadcast(),
+              );
+            }
+            await Future.any<void>([
+              Future<void>.delayed(listenDuration),
+              operationCancellation.whenCancelled,
+              streamFailureSignal.future,
+            ]);
+
+            if (operationCancellation.isCancelled) {
+              result = const EmbyDiscoveryResult(
+                status: EmbyDiscoveryStatus.cancelled,
+              );
+            } else if (receiveFailed && found.isEmpty) {
+              result = const EmbyDiscoveryResult(
+                status: EmbyDiscoveryStatus.unavailable,
+                failureKind: EmbyDiscoveryFailureKind.receive,
+              );
+            } else {
+              final results = _sortedServers(found);
+              result = EmbyDiscoveryResult(
+                status: results.isEmpty
+                    ? EmbyDiscoveryStatus.notFound
+                    : EmbyDiscoveryStatus.found,
+                servers: results,
+              );
+            }
           }
         }
       }
-
-      broadcast();
-      if (rebroadcastInterval > Duration.zero) {
-        rebroadcastTimer = Timer.periodic(
-          rebroadcastInterval,
-          (_) => broadcast(),
-        );
-      }
-      await Future<void>.delayed(listenDuration);
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'discovery',
@@ -91,19 +246,61 @@ class EmbyServerDiscovery {
         error: error,
         stackTrace: stackTrace,
       );
+      result = operationCancellation.isCancelled
+          ? const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.cancelled)
+          : found.isEmpty
+          ? const EmbyDiscoveryResult(
+              status: EmbyDiscoveryStatus.unavailable,
+              failureKind: EmbyDiscoveryFailureKind.unknown,
+            )
+          : EmbyDiscoveryResult(
+              status: EmbyDiscoveryStatus.found,
+              servers: _sortedServers(found),
+            );
     } finally {
       rebroadcastTimer?.cancel();
-      await subscription?.cancel();
-      await transport?.close();
+      try {
+        await subscription?.cancel();
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'discovery',
+          'Local Emby discovery subscription cleanup failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+      try {
+        await transport?.close();
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'discovery',
+          'Local Emby discovery transport cleanup failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
     }
 
-    final results = found
-      ..sort((left, right) => left.name.compareTo(right.name));
+    final finalResult = result;
     DiagnosticLog.instance.info(
       'discovery',
-      'Local discovery found ${results.length} Emby server(s)',
+      'Local discovery completed status=${finalResult.status.name} '
+          'servers=${finalResult.servers.length} '
+          'attempted=$attemptedBroadcastCount successful=$successfulBroadcastCount',
     );
-    return results;
+    return finalResult;
+  }
+
+  static List<DiscoveredServer> _sortedServers(List<DiscoveredServer> servers) {
+    final results = List<DiscoveredServer>.of(servers);
+    results.sort((left, right) {
+      final name = left.name.toLowerCase().compareTo(right.name.toLowerCase());
+      if (name != 0) return name;
+      final id = left.id.toLowerCase().compareTo(right.id.toLowerCase());
+      if (id != 0) return id;
+      return left.address.toLowerCase().compareTo(right.address.toLowerCase());
+    });
+    return List<DiscoveredServer>.unmodifiable(results);
   }
 
   static DiscoveredServer? parseResponse(
