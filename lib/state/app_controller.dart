@@ -27,6 +27,7 @@ import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
+import '../settings/library_sort_preferences.dart';
 
 typedef SignInAuthenticator =
     Future<EmbySession> Function({
@@ -63,6 +64,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     LocalDatabase? database,
     ClientRegistry<EmbyApi>? clients,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
+    LibrarySortPreferenceStore? librarySortPreferenceStore,
     PlaybackCacheStorage? playbackCacheStorage,
     PlaybackDiagnosticsTestOverridesController?
     playbackDiagnosticsTestOverrides,
@@ -76,6 +78,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
+       _librarySortPreferenceStore = librarySortPreferenceStore,
        _playbackCacheStorage =
            playbackCacheStorage ?? PlatformPlaybackCacheStorage(),
        _playbackDiagnosticsTestOverrides =
@@ -109,6 +112,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final PlaybackSettingsRepository _playbackSettingsRepository;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
+  LibrarySortPreferenceStore? _librarySortPreferenceStore;
   AccountDataCleanup? _accountDataCleanup;
   late final ServerCapabilitiesRepository _capabilitiesRepository;
   late final DownloadRepository _downloadRepository;
@@ -138,6 +142,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   LibraryLocalMediaScanService? get libraryScanService => _libraryScanService;
   LibraryCategorySettings get libraryCategorySettings =>
       _libraryCategorySettings;
+  LibrarySortPreferenceStore get librarySortPreferenceStore =>
+      _librarySortPreferenceStore ??=
+          SharedPreferencesLibrarySortPreferenceStore();
   bool get isInitializing => _isInitializing;
   bool get isSignedIn => _session != null;
   bool get localDatabaseAvailable => _localDatabaseAvailable;
@@ -673,6 +680,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       _accountDataCleanup ??= AccountDataCleanup(
         database: _database,
         libraryCategorySettingsStore: _categorySettingsStore,
+        librarySortPreferenceStore: librarySortPreferenceStore,
         playbackSettingsRepository: _playbackSettingsRepository,
       );
 

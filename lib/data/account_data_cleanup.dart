@@ -9,6 +9,7 @@ import '../models/emby_models.dart';
 import '../playback/playback_settings_repository.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
+import '../settings/library_sort_preferences.dart';
 import 'local_database.dart';
 
 class AccountDataCleanup {
@@ -17,6 +18,7 @@ class AccountDataCleanup {
     Future<Directory> Function(ServerScope scope)? directoryResolver,
     DownloadSettingsStore? downloadSettingsStore,
     LibraryCategorySettingsStore? libraryCategorySettingsStore,
+    LibrarySortPreferenceStore? librarySortPreferenceStore,
     SearchHistoryStore? searchHistoryStore,
     PlaybackSettingsRepository? playbackSettingsRepository,
   }) : _database = database,
@@ -26,6 +28,9 @@ class AccountDataCleanup {
        _libraryCategorySettingsStore =
            libraryCategorySettingsStore ??
            SharedPreferencesLibraryCategorySettingsStore(),
+       _librarySortPreferenceStore =
+           librarySortPreferenceStore ??
+           SharedPreferencesLibrarySortPreferenceStore(),
        _searchHistoryStore =
            searchHistoryStore ?? SharedPreferencesSearchHistoryStore(),
        _playbackSettingsRepository =
@@ -35,6 +40,7 @@ class AccountDataCleanup {
   final Future<Directory> Function(ServerScope scope) _directoryResolver;
   final DownloadSettingsStore _downloadSettingsStore;
   final LibraryCategorySettingsStore _libraryCategorySettingsStore;
+  final LibrarySortPreferenceStore _librarySortPreferenceStore;
   final SearchHistoryStore _searchHistoryStore;
   final PlaybackSettingsRepository _playbackSettingsRepository;
 
@@ -71,6 +77,7 @@ class AccountDataCleanup {
     await Future.wait([
       _downloadSettingsStore.clear(scope),
       _libraryCategorySettingsStore.clear(scope),
+      _librarySortPreferenceStore.clear(scope),
       _searchHistoryStore.clear(scope),
       _playbackSettingsRepository.deleteAccountSettings(session),
     ]);
