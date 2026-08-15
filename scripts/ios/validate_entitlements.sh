@@ -86,8 +86,8 @@ require_key_type() {
   xml="$(plutil -extract "$keypath" xml1 -o - "$file" 2>/dev/null || printf '%s' unknown)"
   case "$xml" in
     *'<true'*|*'<false'*) actual_type='boolean' ;;
-    *'<dict>'*) actual_type='dictionary' ;;
-    *'<array>'*) actual_type='array' ;;
+    *'<dict'*) actual_type='dictionary' ;;
+    *'<array'*) actual_type='array' ;;
     *'<string>'*) actual_type='string' ;;
     *) actual_type='unknown' ;;
   esac
