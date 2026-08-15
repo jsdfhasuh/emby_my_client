@@ -55,6 +55,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   bool _isSubmitting = false;
   bool _isDiscovering = false;
   int _discoveryGeneration = 0;
+  EmbyDiscoveryCancellation? _discoveryCancellation;
   bool _ensureVisibleScheduled = false;
   Duration _scheduledEnsureVisibleDuration = Duration.zero;
   String? _error;
@@ -72,6 +73,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _discoveryCancellation?.cancel();
+    _discoveryCancellation = null;
     _discoveryGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     _serverFocusNode.removeListener(_handleFieldFocusChanged);
@@ -184,18 +187,29 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _startDiscovery() async {
-    if (_isDiscovering) return;
+    _discoveryCancellation?.cancel();
+    final cancellation = EmbyDiscoveryCancellation();
+    _discoveryCancellation = cancellation;
     final generation = ++_discoveryGeneration;
     setState(() {
       _isDiscovering = true;
       _discoveredServers = const [];
     });
-    final result = await _discovery.discover();
-    if (!mounted || generation != _discoveryGeneration) return;
-    setState(() {
-      _discoveredServers = result.servers;
-      _isDiscovering = false;
-    });
+    try {
+      final result = await _discovery.discover(cancellation: cancellation);
+      if (!mounted || generation != _discoveryGeneration) return;
+      setState(() {
+        _discoveredServers = result.servers;
+        _isDiscovering = false;
+      });
+    } finally {
+      if (identical(_discoveryCancellation, cancellation)) {
+        _discoveryCancellation = null;
+        if (mounted && _isDiscovering) {
+          setState(() => _isDiscovering = false);
+        }
+      }
+    }
   }
 
   void _selectDiscoveredServer(DiscoveredServer server) {

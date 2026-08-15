@@ -198,6 +198,78 @@ void main() {
 
     expect(cancellation.isCancelled, isTrue);
   });
+
+  test('cancellation before bind completes prevents sending', () async {
+    final bind = Completer<EmbyDiscoveryTransport>();
+    final transport = _FakeTransport();
+    final cancellation = EmbyDiscoveryCancellation();
+    final future = EmbyServerDiscovery(
+      transportFactory: () => bind.future,
+      broadcastAddressProvider: () async => [
+        InternetAddress('255.255.255.255'),
+      ],
+      listenDuration: const Duration(seconds: 1),
+    ).discover(cancellation: cancellation);
+
+    cancellation.cancel();
+    bind.complete(transport);
+
+    final result = await future;
+    expect(result.status, EmbyDiscoveryStatus.cancelled);
+    expect(transport.sendAttempts, 0);
+    expect(transport.closeCount, 1);
+  });
+
+  test(
+    'cancellation after bind promptly closes transport and stops timer',
+    () async {
+      final transport = _FakeTransport();
+      final cancellation = EmbyDiscoveryCancellation();
+      final future = EmbyServerDiscovery(
+        transportFactory: () async => transport,
+        broadcastAddressProvider: () async => [
+          InternetAddress('255.255.255.255'),
+        ],
+        listenDuration: const Duration(seconds: 1),
+        rebroadcastInterval: const Duration(milliseconds: 1),
+      ).discover(cancellation: cancellation);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      cancellation.cancel();
+
+      final result = await future;
+      final sendsAfterCancellation = transport.sendAttempts;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(result.status, EmbyDiscoveryStatus.cancelled);
+      expect(transport.sendAttempts, sendsAfterCancellation);
+      expect(transport.closeCount, 1);
+    },
+  );
+
+  test('cancellation ignores late packets and returns empty servers', () async {
+    final transport = _FakeTransport();
+    final cancellation = EmbyDiscoveryCancellation();
+    final future = EmbyServerDiscovery(
+      transportFactory: () async => transport,
+      broadcastAddressProvider: () async => [
+        InternetAddress('255.255.255.255'),
+      ],
+      listenDuration: const Duration(seconds: 1),
+      rebroadcastInterval: Duration.zero,
+    ).discover(cancellation: cancellation);
+    await Future<void>.delayed(Duration.zero);
+    cancellation.cancel();
+    transport.emit({
+      'Id': 'late-server',
+      'Name': 'Late Server',
+      'Address': 'http://192.168.1.20:8096',
+    });
+
+    final result = await future;
+    expect(result.status, EmbyDiscoveryStatus.cancelled);
+    expect(result.servers, isEmpty);
+    expect(transport.closeCount, 1);
+  });
 }
 
 class _SentPacket {

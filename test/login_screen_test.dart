@@ -35,6 +35,28 @@ void main() {
     expect(serverField.controller?.text, 'http://192.168.1.20:8096');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('disposing the login page cancels discovery', (tester) async {
+    final discovery = _CancellableDiscovery();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LoginScreen(
+          controller: AppController(),
+          discovery: discovery,
+          capabilities: PlatformCapabilities.android,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(discovery.cancellation?.isCancelled, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+
+    expect(discovery.cancellation?.isCancelled, isTrue);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _FakeDiscovery extends EmbyServerDiscovery {
@@ -51,4 +73,17 @@ class _FakeDiscovery extends EmbyServerDiscovery {
       ),
     ],
   );
+}
+
+class _CancellableDiscovery extends EmbyServerDiscovery {
+  EmbyDiscoveryCancellation? cancellation;
+
+  @override
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async {
+    this.cancellation = cancellation;
+    await cancellation?.whenCancelled;
+    return const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.cancelled);
+  }
 }
