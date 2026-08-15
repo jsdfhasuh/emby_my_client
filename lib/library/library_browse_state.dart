@@ -52,7 +52,8 @@ enum LibrarySortBy {
   premiereDate('PremiereDate'),
   productionYear('ProductionYear'),
   communityRating('CommunityRating'),
-  runtime('Runtime');
+  runtime('Runtime'),
+  playCount('PlayCount');
 
   const LibrarySortBy(this.apiValue);
 

@@ -57,6 +57,109 @@ void main() {
     await api.dispose();
   });
 
+  for (final sortOrder in LibrarySortOrder.values) {
+    test(
+      'play count queue keeps ${sortOrder.name} across lazy pages',
+      () async {
+        final api = _api();
+        final state = LibraryBrowseState(
+          sortBy: LibrarySortBy.playCount,
+          sortOrder: sortOrder,
+        );
+        final query = LibraryPlaybackQuerySnapshot(
+          libraryId: 'library-1',
+          state: state,
+          profile: LibraryContentProfile.mixed,
+          fingerprint: 'play-count-${sortOrder.name}',
+        );
+        final starts = <int>[];
+        final queue = await LazyLibraryPlaybackQueue.prepare(
+          api: api,
+          query: query,
+          initialItems: [_video('video-0')],
+          initialRawCursor: 1,
+          totalCount: 3,
+          pageSize: 1,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            return EmbyItemPage(
+              items: [_video('video-$startIndex')],
+              rawItemCount: 1,
+              totalRecordCount: 3,
+            );
+          },
+        );
+
+        expect(queue, isNotNull);
+        expect(queue!.query.state, state);
+        var current = queue.items.first;
+        while (queue.canPotentiallyAdvance(current)) {
+          final next = await queue.next(current);
+          if (next == null) break;
+          current = next;
+        }
+        expect(starts, [1, 2]);
+        expect(queue.items.map((item) => item.id), [
+          'video-0',
+          'video-1',
+          'video-2',
+        ]);
+        await api.dispose();
+      },
+    );
+  }
+
+  test(
+    'play count shuffle keeps its query snapshot while shuffling chunks',
+    () async {
+      final api = _api();
+      final state = const LibraryBrowseState(
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.descending,
+      );
+      final query = LibraryPlaybackQuerySnapshot(
+        libraryId: 'library-1',
+        state: state,
+        profile: LibraryContentProfile.mixed,
+        fingerprint: 'play-count-shuffle',
+      );
+      final queue = await LazyLibraryPlaybackQueue.prepare(
+        api: api,
+        query: query,
+        initialItems: [_video('video-0'), _video('video-1')],
+        initialRawCursor: 2,
+        totalCount: 4,
+        pageSize: 2,
+        shuffle: true,
+        random: _ZeroRandom(),
+        loadPage: ({required startIndex, required limit}) async => EmbyItemPage(
+          items: [
+            _video('video-$startIndex'),
+            _video('video-${startIndex + 1}'),
+          ],
+          rawItemCount: 2,
+          totalRecordCount: 4,
+        ),
+      );
+
+      expect(queue, isNotNull);
+      expect(queue!.query.state, state);
+      var current = queue.items.first;
+      while (queue.canPotentiallyAdvance(current)) {
+        final next = await queue.next(current);
+        if (next == null) break;
+        current = next;
+      }
+      expect(queue.items.map((item) => item.id).toSet(), {
+        'video-0',
+        'video-1',
+        'video-2',
+        'video-3',
+      });
+      await api.dispose();
+    },
+  );
+
   test(
     'shuffle starts outside the initially loaded raw page and stays lazy',
     () async {

@@ -43,6 +43,7 @@ void main() {
     expect(query['SortBy'], 'SortName');
     expect(query['SortOrder'], 'Ascending');
     expect(query['Fields'], allOf(contains('Path'), contains('MediaSources')));
+    expect(query['EnableUserData'], isTrue);
     expect(page.rawItemCount, 1);
   });
 
@@ -64,7 +65,7 @@ void main() {
         mediaType: LibraryMediaType.movie,
         playedFilter: LibraryPlayedFilter.unplayed,
         favorites: true,
-        sortBy: LibrarySortBy.dateAdded,
+        sortBy: LibrarySortBy.playCount,
         sortOrder: LibrarySortOrder.descending,
         alphabetFilter: LetterItems('m'),
         genreId: 'genre-1',
@@ -72,7 +73,13 @@ void main() {
       await api.getLibraryMediaItems(
         parentId: 'library-1',
         profile: LibraryContentProfile.mixed,
+        startIndex: 60,
+        limit: 30,
+        mediaType: LibraryMediaType.movie,
+        playedFilter: LibraryPlayedFilter.played,
         tagId: 'tag-1',
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.ascending,
         alphabetFilter: const SymbolsItems(),
       );
 
@@ -82,15 +89,22 @@ void main() {
       expect(genre['IncludeItemTypes'], 'Movie');
       expect(genre['Filters'], 'IsFavorite,IsUnplayed');
       expect(genre, isNot(contains('IsFavorite')));
-      expect(genre['SortBy'], 'DateCreated');
+      expect(genre['SortBy'], 'PlayCount');
       expect(genre['SortOrder'], 'Descending');
+      expect(genre['EnableUserData'], isTrue);
       expect(genre['NameStartsWith'], 'M');
       expect(genre, isNot(contains('NameLessThan')));
       expect(genre['GenreIds'], 'genre-1');
       expect(genre, isNot(contains('TagIds')));
 
       final tag = requests.last.queryParameters;
+      expect(tag['StartIndex'], 60);
+      expect(tag['Limit'], 30);
+      expect(tag['Filters'], 'IsPlayed');
       expect(tag['TagIds'], 'tag-1');
+      expect(tag['SortBy'], 'PlayCount');
+      expect(tag['SortOrder'], 'Ascending');
+      expect(tag['EnableUserData'], isTrue);
       expect(tag['NameLessThan'], 'A');
       expect(tag, isNot(contains('GenreIds')));
       expect(tag, isNot(contains('NameStartsWith')));
@@ -120,8 +134,8 @@ void main() {
       parentId: 'folder-1',
       startIndex: 12,
       limit: 24,
-      sortBy: LibrarySortBy.productionYear,
-      sortOrder: LibrarySortOrder.descending,
+      sortBy: LibrarySortBy.playCount,
+      sortOrder: LibrarySortOrder.ascending,
     );
     final query = captured!.queryParameters;
 
@@ -146,6 +160,9 @@ void main() {
       query['IncludeItemTypes'],
       'Folder,CollectionFolder,PhotoAlbum,Movie,Series,Episode,Video,Photo',
     );
+    expect(query['SortBy'], 'PlayCount');
+    expect(query['SortOrder'], 'Ascending');
+    expect(query['EnableUserData'], isTrue);
     for (final forbidden in [
       'Filters',
       'IsFavorite',
@@ -158,6 +175,41 @@ void main() {
     ]) {
       expect(query, isNot(contains(forbidden)));
     }
+  });
+
+  test('local source scan carries play count in both directions', () async {
+    final requests = <RequestOptions>[];
+    final api = _api((options, handler) {
+      requests.add(options);
+      handler.resolve(_response(options));
+    });
+    addTearDown(api.dispose);
+
+    await api.getLocalMediaScanCandidates(
+      parentId: 'library-1',
+      sortBy: LibrarySortBy.playCount,
+      sortOrder: LibrarySortOrder.ascending,
+    );
+    await api.getLocalMediaScanCandidates(
+      parentId: 'library-1',
+      sortBy: LibrarySortBy.playCount,
+      sortOrder: LibrarySortOrder.descending,
+    );
+
+    expect(requests.map((request) => request.queryParameters['SortBy']), [
+      'PlayCount',
+      'PlayCount',
+    ]);
+    expect(requests.map((request) => request.queryParameters['SortOrder']), [
+      'Ascending',
+      'Descending',
+    ]);
+    expect(
+      requests.every(
+        (request) => request.queryParameters['EnableUserData'] == true,
+      ),
+      isTrue,
+    );
   });
 
   test('local source scan query uses only source-bearing candidates', () async {
@@ -184,7 +236,7 @@ void main() {
         limit: 30,
         favorites: true,
         playedFilter: LibraryPlayedFilter.unplayed,
-        sortBy: LibrarySortBy.dateAdded,
+        sortBy: LibrarySortBy.playCount,
         sortOrder: LibrarySortOrder.descending,
         alphabetFilter: LetterItems('m'),
         genreId: 'genre-1',
@@ -201,7 +253,7 @@ void main() {
       expect(query['IncludeItemTypes'], isNot(contains('Photo')));
       expect(query['IncludeItemTypes'], isNot(contains('Series')));
       expect(query['Filters'], 'IsFavorite,IsUnplayed');
-      expect(query['SortBy'], 'DateCreated');
+      expect(query['SortBy'], 'PlayCount');
       expect(query['SortOrder'], 'Descending');
       expect(query['NameStartsWith'], 'M');
       expect(query['GenreIds'], 'genre-1');
@@ -209,6 +261,7 @@ void main() {
       expect(query['Fields'], contains('Container'));
       expect(query['Fields'], contains('MediaSources'));
       expect(query['EnableTotalRecordCount'], isTrue);
+      expect(query['EnableUserData'], isTrue);
     }
   });
 

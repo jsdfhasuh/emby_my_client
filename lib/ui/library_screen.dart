@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 import '../core/diagnostic_log.dart';
+import '../core/server_scope.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
@@ -26,6 +27,7 @@ import '../playback/playback_queue.dart';
 import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
+import '../settings/library_sort_preferences.dart';
 import 'item_detail_screen.dart';
 import 'home_shell_navigation.dart';
 import 'photos/photo_viewer_screen.dart';
@@ -43,6 +45,7 @@ class LibraryScreen extends StatefulWidget {
     required this.api,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.sortPreferenceStore,
     this.libraryScanService,
     this.navigationActions,
     this.platformCapabilities,
@@ -51,6 +54,7 @@ class LibraryScreen extends StatefulWidget {
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
@@ -62,6 +66,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   late Future<List<EmbyItem>> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  bool _openingView = false;
 
   @override
   void initState() {
@@ -101,20 +106,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await future;
   }
 
-  Future<void> _openView(EmbyItem view) {
-    return Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LibraryBrowseScreen.root(
-          api: widget.api,
-          view: view,
-          downloads: widget.downloads,
-          categorySettings: widget.categorySettings,
-          libraryScanService: widget.libraryScanService,
-          navigationActions: widget.navigationActions,
-          platformCapabilities: widget.platformCapabilities,
+  Future<void> _openView(EmbyItem view) async {
+    if (_openingView) return;
+    _openingView = true;
+    try {
+      final initialState = await restoreLibraryRootSortState(
+        api: widget.api,
+        libraryId: view.id,
+        store: widget.sortPreferenceStore,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => LibraryBrowseScreen.root(
+            api: widget.api,
+            view: view,
+            downloads: widget.downloads,
+            categorySettings: widget.categorySettings,
+            sortPreferenceStore: widget.sortPreferenceStore,
+            libraryScanService: widget.libraryScanService,
+            navigationActions: widget.navigationActions,
+            platformCapabilities: widget.platformCapabilities,
+            initialState: initialState,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _openingView = false;
+    }
   }
 
   @override
@@ -265,6 +284,34 @@ Future<EmbyItemPage> _loadLocalMediaScanPage({
   tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
 );
 
+Future<LibraryBrowseState> restoreLibraryRootSortState({
+  required EmbyApi api,
+  required String libraryId,
+  required LibrarySortPreferenceStore? store,
+}) async {
+  const defaults = LibraryBrowseState();
+  if (store == null || libraryId.trim().isEmpty) return defaults;
+  try {
+    final preference = await store.load(
+      ServerScope.fromSession(api.session),
+      libraryId,
+    );
+    if (preference == null) return defaults;
+    return defaults.copyWith(
+      sortBy: preference.sortBy,
+      sortOrder: preference.sortOrder,
+    );
+  } catch (error, stackTrace) {
+    DiagnosticLog.instance.error(
+      'library',
+      'Failed to restore library sort preference',
+      error: error,
+      stackTrace: stackTrace,
+    );
+    return defaults;
+  }
+}
+
 class LibraryBrowseScreen extends StatefulWidget {
   LibraryBrowseScreen.root({
     super.key,
@@ -275,6 +322,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.libraryScanService,
     this.navigationActions,
     this.platformCapabilities,
+    this.sortPreferenceStore,
     this.initialState = const LibraryBrowseState(),
     LibraryContentProfile? profile,
   }) : profile =
@@ -293,7 +341,8 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.platformCapabilities,
     this.initialState = const LibraryBrowseState.directory(),
     LibraryContentProfile? profile,
-  }) : assert(initialState.scope == LibraryBrowseScope.directory),
+  }) : sortPreferenceStore = null,
+       assert(initialState.scope == LibraryBrowseScope.directory),
        profile =
            profile ??
            LibraryContentProfile.fromCollectionType(view.collectionType),
@@ -311,7 +360,8 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.platformCapabilities,
     LibraryBrowseState? initialState,
     LibraryContentProfile? profile,
-  }) : initialState = initialState ?? LibraryBrowseState.facet(facet),
+  }) : sortPreferenceStore = null,
+       initialState = initialState ?? LibraryBrowseState.facet(facet),
        profile =
            profile ??
            LibraryContentProfile.fromCollectionType(view.collectionType),
@@ -328,6 +378,7 @@ class LibraryBrowseScreen extends StatefulWidget {
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
+  final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryBrowseState initialState;
   final _LibraryBrowsePageKind _pageKind;
 
@@ -1018,6 +1069,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _hasMore = true;
   bool _loadFailed = false;
   bool _pendingRealtimeLibraryRefresh = false;
+  bool _pendingRealtimeUserDataRefreshAll = false;
   final Set<String> _pendingRealtimeUserDataIds = {};
   int _nextStartIndex = 0;
   int? _totalCount;
@@ -1031,6 +1083,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _preparingPlaybackQueue = false;
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
+
+  bool get _canPersistRootSort =>
+      _isRoot &&
+      switch (_state.scope) {
+        LibraryBrowseScope.media || LibraryBrowseScope.favorites => true,
+        _ => false,
+      };
 
   Set<LibraryBrowseScope> get _visibleScopes =>
       widget.profile.visibleScopes(widget.categorySettings);
@@ -1205,11 +1264,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         }
         if (event is EmbyUserDataChanged &&
             event.userId == widget.api.session.userId) {
-          _pendingRealtimeUserDataIds.addAll(
-            event.itemIds.isEmpty
-                ? _items.map((item) => item.id)
-                : event.itemIds,
-          );
+          if (event.itemIds.isEmpty) {
+            _pendingRealtimeUserDataRefreshAll = true;
+          } else {
+            _pendingRealtimeUserDataIds.addAll(event.itemIds);
+          }
           return true;
         }
         return false;
@@ -1603,14 +1662,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Future<void> _refreshRealtime() async {
     final reloadLibrary = _pendingRealtimeLibraryRefresh;
+    final refreshAll = _pendingRealtimeUserDataRefreshAll;
     final userDataIds = Set<String>.of(_pendingRealtimeUserDataIds);
     _pendingRealtimeLibraryRefresh = false;
+    _pendingRealtimeUserDataRefreshAll = false;
     _pendingRealtimeUserDataIds.clear();
     try {
       if (reloadLibrary) {
         await _refreshPreservingPosition();
       } else {
-        await _refreshUserData(userDataIds);
+        await _refreshUserData(userDataIds, refreshAll: refreshAll);
       }
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
@@ -1622,14 +1683,27 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
-  Future<void> _refreshUserData(Iterable<String> itemIds) async {
+  Future<void> _refreshUserData(
+    Iterable<String> itemIds, {
+    bool refreshAll = false,
+  }) async {
     final generation = _generation;
     final state = _state;
-    final requestedIds = itemIds.where((id) => id.isNotEmpty).toSet();
+    if (refreshAll && state.sortBy == LibrarySortBy.playCount) {
+      await _refreshPreservingPosition();
+      return;
+    }
+    final requestedIds = <String>{
+      ...itemIds.where((id) => id.isNotEmpty),
+      if (refreshAll)
+        ..._items.map((item) => item.id).where((id) => id.isNotEmpty),
+    };
     if (requestedIds.isEmpty) return;
     final loadedItems = {for (final item in _items) item.id: item};
     final hasUnknownId = requestedIds.any((id) => !loadedItems.containsKey(id));
-    if (hasUnknownId && libraryBrowseHasServerMembershipCondition(state)) {
+    if (hasUnknownId &&
+        (state.sortBy == LibrarySortBy.playCount ||
+            libraryBrowseHasServerMembershipCondition(state))) {
       await _refreshPreservingPosition();
       return;
     }
@@ -1639,6 +1713,17 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     if (loadedRequestedIds.isEmpty) return;
     final userData = await widget.api.getUserDataForItems(loadedRequestedIds);
     if (!mounted || generation != _generation || userData.isEmpty) return;
+    final playCountChanged =
+        state.sortBy == LibrarySortBy.playCount &&
+        userData.entries.any((entry) {
+          final item = loadedItems[entry.key];
+          return item != null &&
+              item.userData.playCount != entry.value.playCount;
+        });
+    if (playCountChanged) {
+      await _refreshPreservingPosition();
+      return;
+    }
     final membershipChanged = userData.entries.any((entry) {
       final item = loadedItems[entry.key];
       return item != null &&
@@ -1786,8 +1871,51 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  Future<void> _saveRootSortPreference(LibraryBrowseState state) async {
+    final store = widget.sortPreferenceStore;
+    final libraryId = widget.view.id.trim();
+    if (!_canPersistRootSort || store == null || libraryId.isEmpty) return;
+    try {
+      await store.save(
+        ServerScope.fromSession(widget.api.session),
+        libraryId,
+        LibrarySortPreference(sortBy: state.sortBy, sortOrder: state.sortOrder),
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library',
+        'Failed to save library sort preference',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _clearRootSortPreference() async {
+    final store = widget.sortPreferenceStore;
+    final libraryId = widget.view.id.trim();
+    if (!_isRoot || store == null || libraryId.isEmpty) return;
+    try {
+      await store.clearLibrary(
+        ServerScope.fromSession(widget.api.session),
+        libraryId,
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library',
+        'Failed to clear library sort preference',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   void _dispatch(LibraryBrowseEvent event) {
+    final shouldSaveSort = _canPersistRootSort && event is LibrarySortChanged;
+    final shouldClearSort = _isRoot && event is LibraryBrowseReset;
     final next = reduceLibraryBrowseState(_state, event);
+    if (shouldSaveSort) unawaited(_saveRootSortPreference(next));
+    if (shouldClearSort) unawaited(_clearRootSortPreference());
     if (identical(next, _state) || next == _state) return;
     _generation++;
     _reloadGeneration = null;
@@ -2338,6 +2466,7 @@ String _sortLabel(LibrarySortBy sortBy) => switch (sortBy) {
   LibrarySortBy.productionYear => '年份',
   LibrarySortBy.communityRating => '评分',
   LibrarySortBy.runtime => '时长',
+  LibrarySortBy.playCount => '播放次数',
 };
 
 class _FixedLibraryErrorState extends StatelessWidget {

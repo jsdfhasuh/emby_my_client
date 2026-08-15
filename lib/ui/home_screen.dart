@@ -13,6 +13,7 @@ import '../models/emby_models.dart';
 import '../photos/photo_sequence_source.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
+import '../settings/library_sort_preferences.dart';
 import 'item_detail_screen.dart';
 import 'home_shell_navigation.dart';
 import 'library_screen.dart';
@@ -26,6 +27,7 @@ class HomeScreen extends StatefulWidget {
     required this.api,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.sortPreferenceStore,
     this.libraryScanService,
     this.navigationActions,
   });
@@ -33,6 +35,7 @@ class HomeScreen extends StatefulWidget {
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
 
@@ -45,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late final RealtimeRefreshBinding _realtimeRefresh;
   final Map<String, HomeLatestSection> _latestSections = {};
   int _loadGeneration = 0;
+  bool _openingLibrary = false;
 
   @override
   void initState() {
@@ -177,19 +181,33 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openLibrary(EmbyItem library) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LibraryBrowseScreen.root(
-          api: widget.api,
-          view: library,
-          downloads: widget.downloads,
-          categorySettings: widget.categorySettings,
-          libraryScanService: widget.libraryScanService,
-          navigationActions: widget.navigationActions,
+    if (_openingLibrary) return;
+    _openingLibrary = true;
+    try {
+      final initialState = await restoreLibraryRootSortState(
+        api: widget.api,
+        libraryId: library.id,
+        store: widget.sortPreferenceStore,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => LibraryBrowseScreen.root(
+            api: widget.api,
+            view: library,
+            downloads: widget.downloads,
+            categorySettings: widget.categorySettings,
+            sortPreferenceStore: widget.sortPreferenceStore,
+            libraryScanService: widget.libraryScanService,
+            navigationActions: widget.navigationActions,
+            initialState: initialState,
+          ),
         ),
-      ),
-    );
-    if (mounted) await _refresh();
+      );
+      if (mounted) await _refresh();
+    } finally {
+      _openingLibrary = false;
+    }
   }
 
   Future<void> _play(EmbyItem item) async {

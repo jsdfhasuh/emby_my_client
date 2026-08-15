@@ -5,11 +5,13 @@ import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/account_data_cleanup.dart';
 import 'package:emby_my_client/data/local_database.dart';
 import 'package:emby_my_client/downloads/download_settings.dart';
+import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
 import 'package:emby_my_client/search/search_history_store.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
+import 'package:emby_my_client/settings/library_sort_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
@@ -53,6 +55,7 @@ void main() {
 
       final downloadSettings = MemoryDownloadSettingsStore();
       final librarySettings = MemoryLibraryCategorySettingsStore();
+      final sortPreferences = MemoryLibrarySortPreferenceStore();
       final searchHistory = MemorySearchHistoryStore();
       final playbackSettings = PlaybackSettingsRepository();
       await downloadSettings.save(
@@ -71,6 +74,22 @@ void main() {
         _secondScope,
         const LibraryCategorySettings(showSeries: true),
       );
+      await sortPreferences.save(
+        _firstScope,
+        'library-a',
+        const LibrarySortPreference(
+          sortBy: LibrarySortBy.playCount,
+          sortOrder: LibrarySortOrder.descending,
+        ),
+      );
+      await sortPreferences.save(
+        _secondScope,
+        'library-a',
+        const LibrarySortPreference(
+          sortBy: LibrarySortBy.dateAdded,
+          sortOrder: LibrarySortOrder.ascending,
+        ),
+      );
       await searchHistory.add(_firstScope, 'first query');
       await searchHistory.add(_secondScope, 'second query');
       await playbackSettings.patch(
@@ -88,6 +107,7 @@ void main() {
             Directory(path.join(root.path, scope.databaseKey)),
         downloadSettingsStore: downloadSettings,
         libraryCategorySettingsStore: librarySettings,
+        librarySortPreferenceStore: sortPreferences,
         searchHistoryStore: searchHistory,
         playbackSettingsRepository: playbackSettings,
       );
@@ -112,6 +132,14 @@ void main() {
         const LibraryCategorySettings(),
       );
       expect((await librarySettings.load(_secondScope)).showSeries, isTrue);
+      expect(await sortPreferences.load(_firstScope, 'library-a'), isNull);
+      expect(
+        await sortPreferences.load(_secondScope, 'library-a'),
+        const LibrarySortPreference(
+          sortBy: LibrarySortBy.dateAdded,
+          sortOrder: LibrarySortOrder.ascending,
+        ),
+      );
       expect(await searchHistory.load(_firstScope), isEmpty);
       expect(await searchHistory.load(_secondScope), ['second query']);
       expect(
@@ -151,6 +179,7 @@ void main() {
         directoryResolver: (_) async => root,
         downloadSettingsStore: MemoryDownloadSettingsStore(),
         libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+        librarySortPreferenceStore: MemoryLibrarySortPreferenceStore(),
         searchHistoryStore: MemorySearchHistoryStore(),
       );
 
@@ -187,6 +216,7 @@ void main() {
         directoryResolver: (_) async => Directory(scopePath),
         downloadSettingsStore: MemoryDownloadSettingsStore(),
         libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+        librarySortPreferenceStore: MemoryLibrarySortPreferenceStore(),
         searchHistoryStore: MemorySearchHistoryStore(),
       );
 
