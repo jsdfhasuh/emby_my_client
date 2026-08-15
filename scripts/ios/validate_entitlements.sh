@@ -76,12 +76,13 @@ require_key_type() {
   local key="$2"
   local expected_type="$3"
   local actual_type
-  actual_type="$(plutil -type "$key" "$file" 2>/dev/null || printf '%s' unknown)"
-  actual_type="$(printf '%s' "$actual_type" | tr '[:upper:]' '[:lower:]')"
-  case "$actual_type" in
-    bool|boolean) actual_type='boolean' ;;
-    dict|dictionary) actual_type='dictionary' ;;
-    array|string) ;;
+  local xml
+  xml="$(plutil -extract "$key" xml1 -o - "$file" 2>/dev/null || printf '%s' unknown)"
+  case "$xml" in
+    *'<true'*|*'<false'*) actual_type='boolean' ;;
+    *'<dict>'*) actual_type='dictionary' ;;
+    *'<array>'*) actual_type='array' ;;
+    *'<string>'*) actual_type='string' ;;
     *) actual_type='unknown' ;;
   esac
   if [[ "$actual_type" != "$expected_type" ]]; then
@@ -93,11 +94,11 @@ require_key_type() {
 plist_boolean() {
   local file="$1"
   local key="$2"
-  local value
-  value="$(plist_entry "$file" "$key")"
-  case "$value" in
-    true|1) printf '%s\n' true ;;
-    false|0) printf '%s\n' false ;;
+  local xml
+  xml="$(plutil -extract "$key" xml1 -o - "$file" 2>/dev/null || true)"
+  case "$xml" in
+    *'<true'*) printf '%s\n' true ;;
+    *'<false'*) printf '%s\n' false ;;
     *)
       echo "$file: $key must be a boolean" >&2
       return 1
