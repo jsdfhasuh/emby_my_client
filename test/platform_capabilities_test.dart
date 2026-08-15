@@ -49,8 +49,9 @@ void main() {
     expect(PlatformCapabilities.android.deviceIdPrefix, 'emby-android-');
   });
 
-  test('iPadOS uses its own Emby device display name', () {
+  test('iPadOS uses its own Emby device display name and UDP capability', () {
     expect(PlatformCapabilities.ipad.embyDeviceName, 'iPadOS');
+    expect(PlatformCapabilities.ipad.supportsLanUdpDiscovery, isTrue);
     expect(
       PlatformCapabilities.ipad.supportsLocalNetworkPermissionRecovery,
       isTrue,
@@ -86,7 +87,7 @@ void main() {
     controller.dispose();
   });
 
-  testWidgets('iPad login does not start UDP discovery', (tester) async {
+  testWidgets('iPad login starts UDP discovery', (tester) async {
     final discovery = _SpyDiscovery();
     await tester.pumpWidget(
       MaterialApp(
@@ -100,8 +101,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(discovery.calls, 0);
-    expect(find.text('局域网服务器'), findsNothing);
+    expect(discovery.calls, 1);
+    expect(find.text('局域网服务器'), findsOneWidget);
     expect(find.text('服务器地址'), findsOneWidget);
   });
 }

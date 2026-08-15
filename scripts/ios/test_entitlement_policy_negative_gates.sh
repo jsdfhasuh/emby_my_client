@@ -40,14 +40,22 @@ assert_fails "$SYNC" "$TEMP_DIR/ambiguous.plist"
 
 write_plist "$TEMP_DIR/xcode-nonempty.plist" '<dict><key>keychain-access-groups</key><array><string>unexpected</string></array></dict>'
 write_plist "$TEMP_DIR/xcode-missing.plist" '<dict/>'
+write_plist "$TEMP_DIR/xcode-missing-multicast.plist" '<dict><key>keychain-access-groups</key><array/></dict>'
 write_plist "$TEMP_DIR/xcode-wrong-type.plist" '<dict><key>keychain-access-groups</key><string>empty</string></dict>'
 write_plist "$TEMP_DIR/xcode-extra-key.plist" '<dict><key>keychain-access-groups</key><array/><key>get-task-allow</key><true/></dict>'
+write_plist "$TEMP_DIR/xcode-multicast-false.plist" '<dict><key>com.apple.developer.networking.multicast</key><false/><key>keychain-access-groups</key><array/></dict>'
+write_plist "$TEMP_DIR/xcode-multicast-string.plist" '<dict><key>com.apple.developer.networking.multicast</key><string>true</string><key>keychain-access-groups</key><array/></dict>'
+write_plist "$TEMP_DIR/xcode-multicast-number.plist" '<dict><key>com.apple.developer.networking.multicast</key><integer>1</integer><key>keychain-access-groups</key><array/></dict>'
 assert_fails "$VALIDATE" --xcode "$ROOT_DIR/scripts/ios/runner-entitlements.plist" "$TEMP_DIR/xcode-nonempty.plist"
 assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-missing.plist"
+assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-missing-multicast.plist"
 assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-wrong-type.plist"
 assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-extra-key.plist"
+assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-multicast-false.plist"
+assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-multicast-string.plist"
+assert_fails "$VALIDATE" --xcode "$TEMP_DIR/xcode-multicast-number.plist"
 
-write_plist "$TEMP_DIR/trollstore-valid.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
+write_plist "$TEMP_DIR/trollstore-valid.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.networking.multicast</key><true/><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
 resolved="$TEMP_DIR/resolved-entitlements.plist"
 assert_passes "$SYNC" --trollstore "$resolved"
 assert_passes "$VALIDATE" --trollstore \
@@ -63,6 +71,10 @@ write_plist "$TEMP_DIR/trollstore-token.plist" '<dict><key>application-identifie
 write_plist "$TEMP_DIR/trollstore-get-task.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array><key>get-task-allow</key><true/></dict>'
 write_plist "$TEMP_DIR/trollstore-group-string.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></dict>'
 write_plist "$TEMP_DIR/trollstore-two-groups.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><string>extra</string></array></dict>'
+write_plist "$TEMP_DIR/trollstore-missing-multicast.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
+write_plist "$TEMP_DIR/trollstore-multicast-false.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.networking.multicast</key><false/><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
+write_plist "$TEMP_DIR/trollstore-multicast-string.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.networking.multicast</key><string>true</string><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
+write_plist "$TEMP_DIR/trollstore-multicast-number.plist" '<dict><key>application-identifier</key><string>TROLLTROLL.com.jsdfhasuh.embyclient</string><key>com.apple.developer.networking.multicast</key><integer>1</integer><key>com.apple.developer.team-identifier</key><string>TROLLTROLL</string><key>keychain-access-groups</key><array><string>TROLLTROLL.com.jsdfhasuh.embyclient</string></array></dict>'
 for invalid in \
   "$TEMP_DIR/trollstore-empty-group.plist" \
   "$TEMP_DIR/trollstore-missing-app.plist" \
@@ -72,7 +84,11 @@ for invalid in \
   "$TEMP_DIR/trollstore-token.plist" \
   "$TEMP_DIR/trollstore-get-task.plist" \
   "$TEMP_DIR/trollstore-group-string.plist" \
-  "$TEMP_DIR/trollstore-two-groups.plist"; do
+  "$TEMP_DIR/trollstore-two-groups.plist" \
+  "$TEMP_DIR/trollstore-missing-multicast.plist" \
+  "$TEMP_DIR/trollstore-multicast-false.plist" \
+  "$TEMP_DIR/trollstore-multicast-string.plist" \
+  "$TEMP_DIR/trollstore-multicast-number.plist"; do
   assert_fails "$VALIDATE" --trollstore "$invalid" "$resolved"
   assert_fails "$VALIDATE" --trollstore-dump "$invalid"
 done

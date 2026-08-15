@@ -94,13 +94,19 @@ require_key_type() {
 validate_xcode_file() {
   local file="$1"
   require_file "$file"
-  if [[ "$(plist_keys "$file")" != 'keychain-access-groups' ]]; then
+  if [[ "$(plist_keys "$file")" != $'com.apple.developer.networking.multicast\nkeychain-access-groups' ]]; then
     echo "Xcode entitlement has an unapproved key set: $file" >&2
     exit 1
   fi
+  require_key_type "$file" com.apple.developer.networking.multicast boolean
   require_key_type "$file" keychain-access-groups array
-  local groups
+  local multicast groups
+  multicast="$(plist_entry "$file" com.apple.developer.networking.multicast)"
   groups="$(plutil -extract keychain-access-groups json -o - "$file" | tr -d '[:space:]')"
+  if [[ "$multicast" != 'true' ]]; then
+    echo "Xcode Runner multicast entitlement must be true: $file" >&2
+    exit 1
+  fi
   if [[ "$groups" != '[]' ]]; then
     echo "Xcode Runner entitlement must contain an empty keychain group array: $file" >&2
     exit 1
@@ -112,20 +118,26 @@ validate_trollstore_file() {
   require_file "$file"
   local keys
   keys="$(plist_keys "$file")"
-  if [[ "$keys" != $'application-identifier\ncom.apple.developer.team-identifier\nkeychain-access-groups' ]]; then
+  if [[ "$keys" != $'application-identifier\ncom.apple.developer.networking.multicast\ncom.apple.developer.team-identifier\nkeychain-access-groups' ]]; then
     echo "TrollStore entitlement has an unapproved key set: $file ($keys)" >&2
     exit 1
   fi
   require_key_type "$file" application-identifier string
+  require_key_type "$file" com.apple.developer.networking.multicast boolean
   require_key_type "$file" com.apple.developer.team-identifier string
   require_key_type "$file" keychain-access-groups array
 
-  local application_identifier team_identifier groups
+  local application_identifier multicast team_identifier groups
   application_identifier="$(plist_scalar "$file" application-identifier)"
+  multicast="$(plist_entry "$file" com.apple.developer.networking.multicast)"
   team_identifier="$(plist_scalar "$file" com.apple.developer.team-identifier)"
   groups="$(plutil -extract keychain-access-groups json -o - "$file" | tr -d '[:space:]')"
   if [[ "$application_identifier" != "$EXPECTED_APPLICATION_IDENTIFIER" ]]; then
     echo "Unexpected application-identifier in $file" >&2
+    exit 1
+  fi
+  if [[ "$multicast" != 'true' ]]; then
+    echo "TrollStore multicast entitlement must be true: $file" >&2
     exit 1
   fi
   if [[ "$team_identifier" != "$EXPECTED_TEAM_IDENTIFIER" ]]; then
@@ -144,6 +156,15 @@ validate_candidates_against_source() {
   shift 2
   local candidate
 
+  compare_plist_values() {
+    local expected="$1"
+    local actual="$2"
+    if [[ "$(plutil -p "$expected")" != "$(plutil -p "$actual")" ]]; then
+      echo "Entitlement values differ between source and candidate: $expected $actual" >&2
+      exit 1
+    fi
+  }
+
   if [[ "$mode" == 'xcode' ]]; then
     validate_xcode_file "$source"
   else
@@ -156,6 +177,7 @@ validate_candidates_against_source() {
     else
       validate_trollstore_file "$candidate"
     fi
+    compare_plist_values "$source" "$candidate"
     echo "${mode}_entitlement_match=$candidate"
   done
 
