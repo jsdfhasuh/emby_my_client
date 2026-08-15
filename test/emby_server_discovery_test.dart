@@ -144,34 +144,50 @@ void main() {
     'receive failure without a server is unavailable with receive reason',
     () async {
       final transport = _FakeTransport();
-      final future = EmbyServerDiscovery(
-        transportFactory: () async => transport,
-        broadcastAddressProvider: () async => [
-          InternetAddress('255.255.255.255'),
-        ],
-        listenDuration: const Duration(seconds: 1),
-        rebroadcastInterval: Duration.zero,
-      ).discover();
+      var completed = false;
+      final future =
+          EmbyServerDiscovery(
+            transportFactory: () async => transport,
+            broadcastAddressProvider: () async => [
+              InternetAddress('255.255.255.255'),
+            ],
+            listenDuration: const Duration(milliseconds: 40),
+            rebroadcastInterval: Duration.zero,
+          ).discover().then((result) {
+            completed = true;
+            return result;
+          });
       await Future<void>.delayed(Duration.zero);
       transport.emitError(StateError('receive failed'));
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(completed, isFalse);
 
       final result = await future;
+      expect(completed, isTrue);
       expect(result.status, EmbyDiscoveryStatus.unavailable);
       expect(result.failureKind, EmbyDiscoveryFailureKind.receive);
     },
   );
 
-  test('a server found before receive failure remains found', () async {
+  test('socket error followed by a valid packet returns found', () async {
     final transport = _FakeTransport();
-    final future = EmbyServerDiscovery(
-      transportFactory: () async => transport,
-      broadcastAddressProvider: () async => [
-        InternetAddress('255.255.255.255'),
-      ],
-      listenDuration: const Duration(seconds: 1),
-      rebroadcastInterval: Duration.zero,
-    ).discover();
+    var completed = false;
+    final future =
+        EmbyServerDiscovery(
+          transportFactory: () async => transport,
+          broadcastAddressProvider: () async => [
+            InternetAddress('255.255.255.255'),
+          ],
+          listenDuration: const Duration(milliseconds: 50),
+          rebroadcastInterval: Duration.zero,
+        ).discover().then((result) {
+          completed = true;
+          return result;
+        });
     await Future<void>.delayed(Duration.zero);
+    transport.emitError(StateError('receive failed'));
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    expect(completed, isFalse);
     transport.emit({
       'Id': 'server-1',
       'Name': 'Zeta',
@@ -182,13 +198,43 @@ void main() {
       'Name': 'alpha',
       'Address': 'http://192.168.1.21:8096',
     });
-    transport.emitError(StateError('late receive failure'));
 
     final result = await future;
     expect(result.status, EmbyDiscoveryStatus.found);
     expect(result.failureKind, isNull);
     expect(result.servers.map((server) => server.name), ['alpha', 'Zeta']);
   });
+
+  test(
+    'socket error does not stop later broadcasts or packet processing',
+    () async {
+      final transport = _FakeTransport();
+      final future = EmbyServerDiscovery(
+        transportFactory: () async => transport,
+        broadcastAddressProvider: () async => [
+          InternetAddress('255.255.255.255'),
+        ],
+        listenDuration: const Duration(milliseconds: 50),
+        rebroadcastInterval: const Duration(milliseconds: 5),
+      ).discover();
+      await Future<void>.delayed(Duration.zero);
+      final initialSendAttempts = transport.sendAttempts;
+      transport.emitError(StateError('receive failed'));
+      await Future<void>.delayed(const Duration(milliseconds: 15));
+
+      expect(transport.sendAttempts, greaterThan(initialSendAttempts));
+      transport.emit({
+        'Id': 'server-1',
+        'Name': 'Emby Home',
+        'Address': 'http://192.168.1.20:8096',
+      });
+
+      final result = await future;
+      expect(result.status, EmbyDiscoveryStatus.found);
+      expect(result.servers, hasLength(1));
+      expect(transport.closeCount, 1);
+    },
+  );
 
   test('cancellation is idempotent', () {
     final cancellation = EmbyDiscoveryCancellation();
@@ -301,8 +347,8 @@ class _FakeTransport implements EmbyDiscoveryTransport {
     );
   }
 
-  void emitError(Object error) {
-    _packets.addError(error);
+  void emitError(Object error, [StackTrace? stackTrace]) {
+    _packets.addError(error, stackTrace ?? StackTrace.current);
   }
 
   @override

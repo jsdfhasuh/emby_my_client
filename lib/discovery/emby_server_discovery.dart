@@ -81,7 +81,6 @@ class EmbyServerDiscovery {
     final found = <DiscoveredServer>[];
     final seenIds = <String>{};
     final seenAddresses = <String>{};
-    final streamFailureSignal = Completer<void>();
     EmbyDiscoveryResult? result;
     var receiveFailed = false;
     var attemptedBroadcastCount = 0;
@@ -163,6 +162,7 @@ class EmbyServerDiscovery {
               found.add(server);
             },
             onError: (Object error, StackTrace stackTrace) {
+              if (receiveFailed) return;
               receiveFailed = true;
               DiagnosticLog.instance.error(
                 'discovery',
@@ -170,9 +170,6 @@ class EmbyServerDiscovery {
                 error: error,
                 stackTrace: stackTrace,
               );
-              if (!streamFailureSignal.isCompleted) {
-                streamFailureSignal.complete();
-              }
             },
           );
 
@@ -215,7 +212,6 @@ class EmbyServerDiscovery {
             await Future.any<void>([
               Future<void>.delayed(listenDuration),
               operationCancellation.whenCancelled,
-              streamFailureSignal.future,
             ]);
 
             if (operationCancellation.isCancelled) {
