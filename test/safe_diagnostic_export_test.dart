@@ -9,7 +9,6 @@ import 'package:emby_my_client/core/sign_in_diagnostics.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:emby_my_client/ui/login_screen.dart';
@@ -787,6 +786,11 @@ void main() {
     );
     FocusManager.instance.primaryFocus?.unfocus();
     await tester.pump();
+    await tester.drag(
+      find.byKey(const ValueKey<String>('login-scroll-view')),
+      const Offset(0, 320),
+    );
+    await tester.pump();
     await tester.tap(
       find.byKey(const ValueKey<String>('login-safe-diagnostics-button')),
     );
@@ -938,5 +942,7 @@ class _CountingLoginController extends AppController {
 
 class _EmptyDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
 }

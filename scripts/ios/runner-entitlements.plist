@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
 	<!-- Keep this as the only manually maintained Xcode Runner entitlement source. -->
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
 	<key>keychain-access-groups</key>
 	<array/>
 </dict>

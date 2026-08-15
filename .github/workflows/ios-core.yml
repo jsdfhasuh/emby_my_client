@@ -59,9 +59,6 @@ jobs:
             ios/Podfile \
             ios/Podfile.lock \
             ios/Runner/Info.plist \
-            ':(glob)ios/**/*.entitlements' \
-            scripts/ios/runner-entitlements.plist \
-            scripts/ios/trollstore-entitlements.plist \
             Gemfile \
             Gemfile.lock
 
@@ -276,9 +273,6 @@ jobs:
             ios/Podfile \
             ios/Podfile.lock \
             ios/Runner/Info.plist \
-            ':(glob)ios/**/*.entitlements' \
-            scripts/ios/runner-entitlements.plist \
-            scripts/ios/trollstore-entitlements.plist \
             Gemfile \
             Gemfile.lock
 

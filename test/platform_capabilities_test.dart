@@ -2,7 +2,6 @@ import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/downloads/foreground_download_executor.dart';
 import 'package:emby_my_client/downloads/download_executor.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/picture_in_picture.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -50,8 +49,9 @@ void main() {
     expect(PlatformCapabilities.android.deviceIdPrefix, 'emby-android-');
   });
 
-  test('iPadOS uses its own Emby device display name', () {
+  test('iPadOS uses its own Emby device display name and UDP capability', () {
     expect(PlatformCapabilities.ipad.embyDeviceName, 'iPadOS');
+    expect(PlatformCapabilities.ipad.supportsLanUdpDiscovery, isTrue);
     expect(
       PlatformCapabilities.ipad.supportsLocalNetworkPermissionRecovery,
       isTrue,
@@ -87,7 +87,7 @@ void main() {
     controller.dispose();
   });
 
-  testWidgets('iPad login does not start UDP discovery', (tester) async {
+  testWidgets('iPad login starts UDP discovery', (tester) async {
     final discovery = _SpyDiscovery();
     await tester.pumpWidget(
       MaterialApp(
@@ -101,8 +101,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(discovery.calls, 0);
-    expect(find.text('局域网服务器'), findsNothing);
+    expect(discovery.calls, 1);
+    expect(find.text('局域网服务器'), findsOneWidget);
     expect(find.text('服务器地址'), findsOneWidget);
   });
 }
@@ -128,8 +128,10 @@ class _SpyDiscovery extends EmbyServerDiscovery {
   int calls = 0;
 
   @override
-  Future<List<DiscoveredServer>> discover() async {
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async {
     calls++;
-    return const <DiscoveredServer>[];
+    return const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
   }
 }

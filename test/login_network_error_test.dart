@@ -1,6 +1,5 @@
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:emby_my_client/ui/login_screen.dart';
@@ -32,7 +31,14 @@ void main() {
     );
     expect(controller.calls, 1);
 
-    await tester.tap(find.text('登录'));
+    await tester.drag(
+      find.byKey(const ValueKey<String>('login-scroll-view')),
+      const Offset(0, -240),
+    );
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const ValueKey<String>('login-submit-button')).first,
+    );
     await tester.pumpAndSettle();
     expect(controller.calls, 2);
   });
@@ -56,7 +62,10 @@ void main() {
     );
 
     expect(find.text('无法连接 Emby 服务器，请检查地址和网络'), findsOneWidget);
-    expect(find.textContaining('本地网络'), findsNothing);
+    expect(
+      find.text('无法访问局域网服务器。请确认已在“设置 → 隐私与安全性 → 本地网络”中允许本应用，然后重试。'),
+      findsNothing,
+    );
   });
 
   testWidgets('public iPadOS connection failure is not a local hint', (
@@ -78,7 +87,10 @@ void main() {
     );
 
     expect(find.text('无法连接 Emby 服务器，请检查地址和网络'), findsOneWidget);
-    expect(find.textContaining('本地网络'), findsNothing);
+    expect(
+      find.text('无法访问局域网服务器。请确认已在“设置 → 隐私与安全性 → 本地网络”中允许本应用，然后重试。'),
+      findsNothing,
+    );
   });
 }
 
@@ -103,13 +115,22 @@ Future<void> _submit(
   await tester.enterText(fields.at(0), server);
   await tester.enterText(fields.at(1), 'tester');
   await tester.enterText(fields.at(2), 'password');
-  await tester.tap(find.text('登录'));
+  await tester.drag(
+    find.byKey(const ValueKey<String>('login-scroll-view')),
+    const Offset(0, -240),
+  );
+  await tester.pump();
+  await tester.tap(
+    find.byKey(const ValueKey<String>('login-submit-button')).first,
+  );
   await tester.pumpAndSettle();
 }
 
 class _EmptyDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
 }
 
 class _FailingController extends AppController {

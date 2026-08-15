@@ -5,7 +5,6 @@ import 'package:emby_my_client/core/sign_in_diagnostics.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/data/session_store.dart';
 import 'package:emby_my_client/discovery/emby_server_discovery.dart';
-import 'package:emby_my_client/models/discovered_server.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -669,7 +668,15 @@ Future<void> _submit(
   await tester.enterText(fields.at(0), '192.168.1.20:8096');
   await tester.enterText(fields.at(1), 'user');
   await tester.enterText(fields.at(2), 'password');
-  await tester.tap(find.text('登录'));
+  final submitButton = find.byKey(
+    const ValueKey<String>('login-submit-button'),
+  );
+  await tester.drag(
+    find.byKey(const ValueKey<String>('login-scroll-view')),
+    const Offset(0, -240),
+  );
+  await tester.pump();
+  await tester.tap(submitButton.first);
   await tester.pumpAndSettle();
 }
 
@@ -755,5 +762,7 @@ class _UiRawFailureController extends AppController {
 
 class _EmptyDiscovery extends EmbyServerDiscovery {
   @override
-  Future<List<DiscoveredServer>> discover() async => const [];
+  Future<EmbyDiscoveryResult> discover({
+    EmbyDiscoveryCancellation? cancellation,
+  }) async => const EmbyDiscoveryResult(status: EmbyDiscoveryStatus.notFound);
 }

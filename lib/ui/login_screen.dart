@@ -55,6 +55,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   bool _isSubmitting = false;
   bool _isDiscovering = false;
   int _discoveryGeneration = 0;
+  EmbyDiscoveryCancellation? _discoveryCancellation;
+  EmbyDiscoveryStatus? _discoveryStatus;
   bool _ensureVisibleScheduled = false;
   Duration _scheduledEnsureVisibleDuration = Duration.zero;
   String? _error;
@@ -72,6 +74,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _discoveryCancellation?.cancel();
+    _discoveryCancellation = null;
     _discoveryGeneration++;
     WidgetsBinding.instance.removeObserver(this);
     _serverFocusNode.removeListener(_handleFieldFocusChanged);
@@ -184,18 +188,44 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _startDiscovery() async {
-    if (_isDiscovering) return;
+    _discoveryCancellation?.cancel();
+    final cancellation = EmbyDiscoveryCancellation();
+    _discoveryCancellation = cancellation;
     final generation = ++_discoveryGeneration;
     setState(() {
       _isDiscovering = true;
-      _discoveredServers = const [];
+      _discoveryStatus = null;
     });
-    final servers = await _discovery.discover();
-    if (!mounted || generation != _discoveryGeneration) return;
-    setState(() {
-      _discoveredServers = servers;
-      _isDiscovering = false;
-    });
+    try {
+      final result = await _discovery.discover(cancellation: cancellation);
+      if (!mounted || generation != _discoveryGeneration) return;
+      setState(() {
+        switch (result.status) {
+          case EmbyDiscoveryStatus.found:
+            _discoveredServers = result.servers;
+          case EmbyDiscoveryStatus.notFound:
+            _discoveredServers = const [];
+          case EmbyDiscoveryStatus.unavailable:
+          case EmbyDiscoveryStatus.cancelled:
+            break;
+        }
+        _discoveryStatus = result.status;
+        _isDiscovering = false;
+      });
+    } catch (_) {
+      if (!mounted || generation != _discoveryGeneration) return;
+      setState(() {
+        _discoveryStatus = EmbyDiscoveryStatus.unavailable;
+        _isDiscovering = false;
+      });
+    } finally {
+      if (identical(_discoveryCancellation, cancellation)) {
+        _discoveryCancellation = null;
+        if (mounted && _isDiscovering) {
+          setState(() => _isDiscovering = false);
+        }
+      }
+    }
   }
 
   void _selectDiscoveredServer(DiscoveredServer server) {
@@ -553,37 +583,53 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
             ),
           ],
         ),
-        if (_isDiscovering && _discoveredServers.isEmpty)
-          const LinearProgressIndicator(minHeight: 2)
-        else if (_discoveredServers.isEmpty)
+        if (_isDiscovering) ...[
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
             child: Text(
-              '未发现局域网服务器',
-              style: TextStyle(color: Color(0xFF8F989B), fontSize: 13),
+              '正在搜索局域网中的 Emby 服务器…',
+              style: TextStyle(color: Color(0xFFADB5B7), fontSize: 13),
             ),
-          )
-        else
-          for (var index = 0; index < _discoveredServers.length; index++) ...[
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              minTileHeight: 54,
-              leading: const Icon(Icons.dns_outlined),
-              title: Text(
-                _discoveredServers[index].name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+          ),
+          const LinearProgressIndicator(minHeight: 2),
+        ] else ...[
+          if (_discoveryStatus == EmbyDiscoveryStatus.notFound)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '未发现局域网服务器。请确认设备与服务器位于同一网络；若首次使用或曾拒绝权限，请检查系统的“本地网络”设置。',
+                style: TextStyle(color: Color(0xFF8F989B), fontSize: 13),
               ),
-              subtitle: Text(
-                _discoveredServers[index].address,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => _selectDiscoveredServer(_discoveredServers[index]),
             ),
-            if (index < _discoveredServers.length - 1) const Divider(height: 1),
-          ],
+          if (_discoveryStatus == EmbyDiscoveryStatus.unavailable)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '无法启动局域网扫描，仍可手动输入服务器地址。',
+                style: TextStyle(color: Color(0xFFFFC56E), fontSize: 13),
+              ),
+            ),
+        ],
+        for (var index = 0; index < _discoveredServers.length; index++) ...[
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            minTileHeight: 54,
+            leading: const Icon(Icons.dns_outlined),
+            title: Text(
+              _discoveredServers[index].name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              _discoveredServers[index].address,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _selectDiscoveredServer(_discoveredServers[index]),
+          ),
+          if (index < _discoveredServers.length - 1) const Divider(height: 1),
+        ],
       ],
     );
   }
