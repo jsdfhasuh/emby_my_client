@@ -786,6 +786,11 @@ void main() {
     );
     FocusManager.instance.primaryFocus?.unfocus();
     await tester.pump();
+    await tester.drag(
+      find.byKey(const ValueKey<String>('login-scroll-view')),
+      const Offset(0, 320),
+    );
+    await tester.pump();
     await tester.tap(
       find.byKey(const ValueKey<String>('login-safe-diagnostics-button')),
     );
