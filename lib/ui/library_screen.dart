@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 import '../core/diagnostic_log.dart';
+import '../core/server_scope.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
@@ -26,6 +27,7 @@ import '../playback/playback_queue.dart';
 import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../settings/library_category_settings.dart';
+import '../settings/library_sort_preferences.dart';
 import 'item_detail_screen.dart';
 import 'home_shell_navigation.dart';
 import 'photos/photo_viewer_screen.dart';
@@ -43,6 +45,7 @@ class LibraryScreen extends StatefulWidget {
     required this.api,
     this.downloads,
     this.categorySettings = const LibraryCategorySettings(),
+    this.sortPreferenceStore,
     this.libraryScanService,
     this.navigationActions,
     this.platformCapabilities,
@@ -51,6 +54,7 @@ class LibraryScreen extends StatefulWidget {
   final EmbyApi api;
   final DownloadService? downloads;
   final LibraryCategorySettings categorySettings;
+  final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
@@ -101,17 +105,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await future;
   }
 
-  Future<void> _openView(EmbyItem view) {
-    return Navigator.of(context).push(
+  Future<void> _openView(EmbyItem view) async {
+    final initialState = await restoreLibraryRootSortState(
+      api: widget.api,
+      libraryId: view.id,
+      store: widget.sortPreferenceStore,
+    );
+    if (!mounted) return;
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => LibraryBrowseScreen.root(
           api: widget.api,
           view: view,
           downloads: widget.downloads,
           categorySettings: widget.categorySettings,
+          sortPreferenceStore: widget.sortPreferenceStore,
           libraryScanService: widget.libraryScanService,
           navigationActions: widget.navigationActions,
           platformCapabilities: widget.platformCapabilities,
+          initialState: initialState,
         ),
       ),
     );
@@ -265,6 +277,34 @@ Future<EmbyItemPage> _loadLocalMediaScanPage({
   tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
 );
 
+Future<LibraryBrowseState> restoreLibraryRootSortState({
+  required EmbyApi api,
+  required String libraryId,
+  required LibrarySortPreferenceStore? store,
+}) async {
+  const defaults = LibraryBrowseState();
+  if (store == null || libraryId.trim().isEmpty) return defaults;
+  try {
+    final preference = await store.load(
+      ServerScope.fromSession(api.session),
+      libraryId,
+    );
+    if (preference == null) return defaults;
+    return defaults.copyWith(
+      sortBy: preference.sortBy,
+      sortOrder: preference.sortOrder,
+    );
+  } catch (error, stackTrace) {
+    DiagnosticLog.instance.error(
+      'library',
+      'Failed to restore library sort preference',
+      error: error,
+      stackTrace: stackTrace,
+    );
+    return defaults;
+  }
+}
+
 class LibraryBrowseScreen extends StatefulWidget {
   LibraryBrowseScreen.root({
     super.key,
@@ -275,6 +315,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.libraryScanService,
     this.navigationActions,
     this.platformCapabilities,
+    this.sortPreferenceStore,
     this.initialState = const LibraryBrowseState(),
     LibraryContentProfile? profile,
   }) : profile =
@@ -293,7 +334,8 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.platformCapabilities,
     this.initialState = const LibraryBrowseState.directory(),
     LibraryContentProfile? profile,
-  }) : assert(initialState.scope == LibraryBrowseScope.directory),
+  }) : sortPreferenceStore = null,
+       assert(initialState.scope == LibraryBrowseScope.directory),
        profile =
            profile ??
            LibraryContentProfile.fromCollectionType(view.collectionType),
@@ -311,7 +353,8 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.platformCapabilities,
     LibraryBrowseState? initialState,
     LibraryContentProfile? profile,
-  }) : initialState = initialState ?? LibraryBrowseState.facet(facet),
+  }) : sortPreferenceStore = null,
+       initialState = initialState ?? LibraryBrowseState.facet(facet),
        profile =
            profile ??
            LibraryContentProfile.fromCollectionType(view.collectionType),
@@ -328,6 +371,7 @@ class LibraryBrowseScreen extends StatefulWidget {
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
+  final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryBrowseState initialState;
   final _LibraryBrowsePageKind _pageKind;
 
@@ -1813,8 +1857,51 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  Future<void> _saveRootSortPreference(LibraryBrowseState state) async {
+    final store = widget.sortPreferenceStore;
+    final libraryId = widget.view.id.trim();
+    if (!_isRoot || store == null || libraryId.isEmpty) return;
+    try {
+      await store.save(
+        ServerScope.fromSession(widget.api.session),
+        libraryId,
+        LibrarySortPreference(sortBy: state.sortBy, sortOrder: state.sortOrder),
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library',
+        'Failed to save library sort preference',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _clearRootSortPreference() async {
+    final store = widget.sortPreferenceStore;
+    final libraryId = widget.view.id.trim();
+    if (!_isRoot || store == null || libraryId.isEmpty) return;
+    try {
+      await store.clearLibrary(
+        ServerScope.fromSession(widget.api.session),
+        libraryId,
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library',
+        'Failed to clear library sort preference',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   void _dispatch(LibraryBrowseEvent event) {
+    final shouldSaveSort = _isRoot && event is LibrarySortChanged;
+    final shouldClearSort = _isRoot && event is LibraryBrowseReset;
     final next = reduceLibraryBrowseState(_state, event);
+    if (shouldSaveSort) unawaited(_saveRootSortPreference(next));
+    if (shouldClearSort) unawaited(_clearRootSortPreference());
     if (identical(next, _state) || next == _state) return;
     _generation++;
     _reloadGeneration = null;
