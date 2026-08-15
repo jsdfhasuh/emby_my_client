@@ -345,15 +345,24 @@ class EmbyServerDiscovery {
 
 class _IoDiscoveryTransport implements EmbyDiscoveryTransport {
   _IoDiscoveryTransport(this._socket) {
-    _subscription = _socket.listen((event) {
-      if (event != RawSocketEvent.read) return;
-      Datagram? datagram;
-      while ((datagram = _socket.receive()) != null) {
-        _packets.add(
-          EmbyDiscoveryPacket(data: datagram!.data, address: datagram.address),
-        );
-      }
-    });
+    _subscription = _socket.listen(
+      (event) {
+        if (event != RawSocketEvent.read) return;
+        Datagram? datagram;
+        while ((datagram = _socket.receive()) != null) {
+          _packets.add(
+            EmbyDiscoveryPacket(
+              data: datagram!.data,
+              address: datagram.address,
+            ),
+          );
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (_closed) return;
+        _packets.addError(error, stackTrace);
+      },
+    );
   }
 
   final RawDatagramSocket _socket;
