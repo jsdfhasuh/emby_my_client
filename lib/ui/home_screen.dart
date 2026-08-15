@@ -48,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late final RealtimeRefreshBinding _realtimeRefresh;
   final Map<String, HomeLatestSection> _latestSections = {};
   int _loadGeneration = 0;
+  bool _openingLibrary = false;
 
   @override
   void initState() {
@@ -180,27 +181,33 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openLibrary(EmbyItem library) async {
-    final initialState = await restoreLibraryRootSortState(
-      api: widget.api,
-      libraryId: library.id,
-      store: widget.sortPreferenceStore,
-    );
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LibraryBrowseScreen.root(
-          api: widget.api,
-          view: library,
-          downloads: widget.downloads,
-          categorySettings: widget.categorySettings,
-          sortPreferenceStore: widget.sortPreferenceStore,
-          libraryScanService: widget.libraryScanService,
-          navigationActions: widget.navigationActions,
-          initialState: initialState,
+    if (_openingLibrary) return;
+    _openingLibrary = true;
+    try {
+      final initialState = await restoreLibraryRootSortState(
+        api: widget.api,
+        libraryId: library.id,
+        store: widget.sortPreferenceStore,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => LibraryBrowseScreen.root(
+            api: widget.api,
+            view: library,
+            downloads: widget.downloads,
+            categorySettings: widget.categorySettings,
+            sortPreferenceStore: widget.sortPreferenceStore,
+            libraryScanService: widget.libraryScanService,
+            navigationActions: widget.navigationActions,
+            initialState: initialState,
+          ),
         ),
-      ),
-    );
-    if (mounted) await _refresh();
+      );
+      if (mounted) await _refresh();
+    } finally {
+      _openingLibrary = false;
+    }
   }
 
   Future<void> _play(EmbyItem item) async {

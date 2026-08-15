@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
@@ -110,6 +112,61 @@ void main() {
     },
   );
 
+  testWidgets('root favorites sorting persists in the favorites scope', (
+    tester,
+  ) async {
+    final store = MemoryLibrarySortPreferenceStore();
+    final api = _SortApi();
+
+    await tester.pumpWidget(_rootApp(api, store));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
+    await tester.pumpAndSettle();
+    await _selectSort(tester, 'playCount');
+
+    expect(
+      await store.load(_scope, _library.id),
+      const LibrarySortPreference(
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.ascending,
+      ),
+    );
+  });
+
+  testWidgets(
+    'root directory sorting does not overwrite the stored media sort',
+    (tester) async {
+      final store = MemoryLibrarySortPreferenceStore();
+      final api = _SortApi();
+      await store.save(_scope, _library.id, _playCountDescending);
+
+      await tester.pumpWidget(
+        _rootApp(
+          api,
+          store,
+          initialState: const LibraryBrowseState(
+            sortBy: LibrarySortBy.playCount,
+            sortOrder: LibrarySortOrder.descending,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('library-section-directories')),
+      );
+      await tester.pumpAndSettle();
+      await _selectSort(tester, 'dateAdded');
+      await tester.tap(
+        find.byKey(const ValueKey('library-sort-direction-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(await store.load(_scope, _library.id), _playCountDescending);
+    },
+  );
+
   testWidgets('reset clears an existing sort preference', (tester) async {
     final store = MemoryLibrarySortPreferenceStore();
     final api = _SortApi();
@@ -186,8 +243,143 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('library-section-bar')), findsNothing);
+    await _selectSort(tester, 'dateAdded');
+    await tester.tap(
+      find.byKey(const ValueKey('library-sort-direction-button')),
+    );
+    await tester.pumpAndSettle();
     expect(await store.load(_scope, _library.id), isNull);
   });
+
+  testWidgets('facet pages do not persist temporary sorting', (tester) async {
+    final store = MemoryLibrarySortPreferenceStore();
+    final api = _SortApi();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.facet(
+          api: api,
+          view: _library,
+          facet: const LibraryFacet(
+            id: 'genre-1',
+            name: 'Action',
+            kind: LibraryFacetKind.genre,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _selectSort(tester, 'dateAdded');
+    await tester.tap(
+      find.byKey(const ValueKey('library-sort-direction-button')),
+    );
+    await tester.pumpAndSettle();
+    expect(await store.load(_scope, _library.id), isNull);
+  });
+
+  testWidgets(
+    'HomeScreen allows only one library open and releases its navigation lock',
+    (tester) async {
+      final store = _DelayedSortPreferenceStore();
+      final api = _SortApi();
+      final observer = _CountingNavigatorObserver();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          navigatorObservers: [observer],
+          home: Scaffold(
+            body: HomeScreen(
+              api: api,
+              categorySettings: _allCategories,
+              sortPreferenceStore: store,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 1);
+
+      store.completeNext();
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 1);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 2);
+      store.failNext(StateError('fixture'));
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 2);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 3);
+      store.completeNext();
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 3);
+    },
+  );
+
+  testWidgets(
+    'LibraryScreen allows only one library open and releases its navigation lock',
+    (tester) async {
+      final store = _DelayedSortPreferenceStore();
+      final api = _SortApi();
+      final observer = _CountingNavigatorObserver();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          navigatorObservers: [observer],
+          home: LibraryScreen(
+            api: api,
+            categorySettings: _allCategories,
+            sortPreferenceStore: store,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 1);
+
+      store.completeNext();
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 1);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 2);
+      store.failNext(StateError('fixture'));
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 2);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_library.name));
+      await tester.pump();
+      expect(store.loadCalls, 3);
+      store.completeNext();
+      await tester.pumpAndSettle();
+      expect(observer.pushedRoutes, 3);
+    },
+  );
 }
 
 MaterialApp _rootApp(
@@ -238,6 +430,51 @@ class _FailingSortPreferenceStore implements LibrarySortPreferenceStore {
   @override
   Future<void> clear(ServerScope scope) =>
       Future<void>.error(StateError('fixture'));
+}
+
+class _DelayedSortPreferenceStore implements LibrarySortPreferenceStore {
+  final List<Completer<LibrarySortPreference?>> _pendingLoads = [];
+  int loadCalls = 0;
+
+  @override
+  Future<LibrarySortPreference?> load(ServerScope scope, String libraryId) {
+    loadCalls++;
+    final completer = Completer<LibrarySortPreference?>();
+    _pendingLoads.add(completer);
+    return completer.future;
+  }
+
+  void completeNext([LibrarySortPreference? preference]) {
+    _pendingLoads.removeAt(0).complete(preference);
+  }
+
+  void failNext(Object error) {
+    _pendingLoads.removeAt(0).completeError(error);
+  }
+
+  @override
+  Future<void> save(
+    ServerScope scope,
+    String libraryId,
+    LibrarySortPreference preference,
+  ) => Future<void>.value();
+
+  @override
+  Future<void> clearLibrary(ServerScope scope, String libraryId) =>
+      Future<void>.value();
+
+  @override
+  Future<void> clear(ServerScope scope) => Future<void>.value();
+}
+
+class _CountingNavigatorObserver extends NavigatorObserver {
+  int pushedRoutes = 0;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute != null) pushedRoutes++;
+    super.didPush(route, previousRoute);
+  }
 }
 
 class _SortApi extends EmbyApi {

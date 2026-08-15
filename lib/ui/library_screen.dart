@@ -66,6 +66,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   late Future<List<EmbyItem>> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  bool _openingView = false;
 
   @override
   void initState() {
@@ -106,27 +107,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _openView(EmbyItem view) async {
-    final initialState = await restoreLibraryRootSortState(
-      api: widget.api,
-      libraryId: view.id,
-      store: widget.sortPreferenceStore,
-    );
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LibraryBrowseScreen.root(
-          api: widget.api,
-          view: view,
-          downloads: widget.downloads,
-          categorySettings: widget.categorySettings,
-          sortPreferenceStore: widget.sortPreferenceStore,
-          libraryScanService: widget.libraryScanService,
-          navigationActions: widget.navigationActions,
-          platformCapabilities: widget.platformCapabilities,
-          initialState: initialState,
+    if (_openingView) return;
+    _openingView = true;
+    try {
+      final initialState = await restoreLibraryRootSortState(
+        api: widget.api,
+        libraryId: view.id,
+        store: widget.sortPreferenceStore,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => LibraryBrowseScreen.root(
+            api: widget.api,
+            view: view,
+            downloads: widget.downloads,
+            categorySettings: widget.categorySettings,
+            sortPreferenceStore: widget.sortPreferenceStore,
+            libraryScanService: widget.libraryScanService,
+            navigationActions: widget.navigationActions,
+            platformCapabilities: widget.platformCapabilities,
+            initialState: initialState,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      _openingView = false;
+    }
   }
 
   @override
@@ -1077,6 +1084,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
+  bool get _canPersistRootSort =>
+      _isRoot &&
+      switch (_state.scope) {
+        LibraryBrowseScope.media || LibraryBrowseScope.favorites => true,
+        _ => false,
+      };
+
   Set<LibraryBrowseScope> get _visibleScopes =>
       widget.profile.visibleScopes(widget.categorySettings);
 
@@ -1860,7 +1874,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   Future<void> _saveRootSortPreference(LibraryBrowseState state) async {
     final store = widget.sortPreferenceStore;
     final libraryId = widget.view.id.trim();
-    if (!_isRoot || store == null || libraryId.isEmpty) return;
+    if (!_canPersistRootSort || store == null || libraryId.isEmpty) return;
     try {
       await store.save(
         ServerScope.fromSession(widget.api.session),
@@ -1897,7 +1911,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _dispatch(LibraryBrowseEvent event) {
-    final shouldSaveSort = _isRoot && event is LibrarySortChanged;
+    final shouldSaveSort = _canPersistRootSort && event is LibrarySortChanged;
     final shouldClearSort = _isRoot && event is LibraryBrowseReset;
     final next = reduceLibraryBrowseState(_state, event);
     if (shouldSaveSort) unawaited(_saveRootSortPreference(next));
