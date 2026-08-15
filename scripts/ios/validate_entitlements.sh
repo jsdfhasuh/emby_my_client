@@ -62,6 +62,11 @@ plist_scalar() {
   esac
 }
 
+plist_keypath() {
+  local key="$1"
+  printf '%s' "$key" | sed 's/\./\\./g'
+}
+
 require_file() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
@@ -76,8 +81,9 @@ require_key_type() {
   local key="$2"
   local expected_type="$3"
   local actual_type
-  local xml
-  xml="$(plutil -extract "$key" xml1 -o - "$file" 2>/dev/null || printf '%s' unknown)"
+  local keypath xml
+  keypath="$(plist_keypath "$key")"
+  xml="$(plutil -extract "$keypath" xml1 -o - "$file" 2>/dev/null || printf '%s' unknown)"
   case "$xml" in
     *'<true'*|*'<false'*) actual_type='boolean' ;;
     *'<dict>'*) actual_type='dictionary' ;;
@@ -94,8 +100,9 @@ require_key_type() {
 plist_boolean() {
   local file="$1"
   local key="$2"
-  local xml
-  xml="$(plutil -extract "$key" xml1 -o - "$file" 2>/dev/null || true)"
+  local keypath xml
+  keypath="$(plist_keypath "$key")"
+  xml="$(plutil -extract "$keypath" xml1 -o - "$file" 2>/dev/null || true)"
   case "$xml" in
     *'<true'*) printf '%s\n' true ;;
     *'<false'*) printf '%s\n' false ;;
