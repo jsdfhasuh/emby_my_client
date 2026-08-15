@@ -668,7 +668,15 @@ Future<void> _submit(
   await tester.enterText(fields.at(0), '192.168.1.20:8096');
   await tester.enterText(fields.at(1), 'user');
   await tester.enterText(fields.at(2), 'password');
-  await tester.tap(find.text('登录'));
+  final submitButton = find.byKey(
+    const ValueKey<String>('login-submit-button'),
+  );
+  await tester.drag(
+    find.byKey(const ValueKey<String>('login-scroll-view')),
+    const Offset(0, -240),
+  );
+  await tester.pump();
+  await tester.tap(submitButton.first);
   await tester.pumpAndSettle();
 }
 
