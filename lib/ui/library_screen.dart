@@ -1635,9 +1635,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       await _refreshPreservingPosition();
       return;
     }
-    final requestedIds = (refreshAll ? _items.map((item) => item.id) : itemIds)
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    final requestedIds = <String>{
+      ...itemIds.where((id) => id.isNotEmpty),
+      if (refreshAll)
+        ..._items.map((item) => item.id).where((id) => id.isNotEmpty),
+    };
     if (requestedIds.isEmpty) return;
     final loadedItems = {for (final item in _items) item.id: item};
     final hasUnknownId = requestedIds.any((id) => !loadedItems.containsKey(id));

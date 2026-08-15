@@ -430,6 +430,32 @@ void main() {
     await _disposeLibrary(tester, api);
   });
 
+  testWidgets('refresh-all batch preserves explicit unknown membership ids', (
+    tester,
+  ) async {
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        _item('A', userData: const EmbyUserData(isFavorite: true)),
+        _item('B', userData: const EmbyUserData()),
+      ],
+    );
+    await _pumpLibrary(tester, api, const LibraryBrowseState.favorites());
+    expect(_visibleItemIds(tester), ['A']);
+
+    api.updateUserData('B', const EmbyUserData(isFavorite: true));
+    socket
+      ..emitUserData(const [])
+      ..emitUserData(['B']);
+    await _pumpRealtime(tester);
+
+    expect(_visibleItemIds(tester), ['A', 'B']);
+    expect(api.mediaCalls, 2);
+    expect(api.userDataCalls, 0);
+    await _disposeLibrary(tester, api);
+  });
+
   testWidgets('failed preserving refresh restores the list and fixed message', (
     tester,
   ) async {
