@@ -211,6 +211,24 @@ bool isFullReadAheadEligible(PlaybackPlan plan) =>
     plan.transportKind == PlaybackTransportKind.progressiveHttp &&
     (plan.duration ?? Duration.zero) > Duration.zero;
 
+int fullReadAheadLowSpaceGuardBytes({
+  required int? mediaBitrate,
+  int? rawInputRateBytesPerSecond,
+  required Duration pollInterval,
+  required Duration expectedCloseLatency,
+}) {
+  const mib = 1024 * 1024;
+  final derivedRate = max(((mediaBitrate ?? 0) / 8 * 2).round(), 8 * mib);
+  final rate =
+      rawInputRateBytesPerSecond != null && rawInputRateBytesPerSecond > 0
+      ? rawInputRateBytesPerSecond
+      : derivedRate;
+  final elapsedSeconds =
+      max(0, (pollInterval + expectedCloseLatency).inMilliseconds) / 1000;
+  final rawGuard = (rate * elapsedSeconds).ceil();
+  return rawGuard.clamp(64 * mib, 512 * mib).toInt();
+}
+
 class _PlaybackCacheSizeEvidence {
   const _PlaybackCacheSizeEvidence(this.confidence, this.bytes);
 
@@ -234,6 +252,9 @@ class PlaybackCacheProfileResolver {
     required PlaybackCacheStorageSnapshot storage,
     bool memoryPressure = false,
     Duration readAheadAnchor = Duration.zero,
+    int? rawInputRateBytesPerSecond,
+    Duration spacePollInterval = const Duration(seconds: 10),
+    Duration expectedCloseLatency = const Duration(seconds: 2),
   }) {
     final preset = _preset(settings, storage.freeBytes);
     final anchor = _normalizedAnchor(plan.duration, readAheadAnchor);
@@ -317,6 +338,148 @@ class PlaybackCacheProfileResolver {
       );
     }
 
+    final fullReadAhead =
+        settings.mode == PlaybackCacheMode.fullReadAhead &&
+        isFullReadAheadEligible(plan);
+    if (fullReadAhead) {
+      return _resolveFullReadAhead(
+        plan: plan,
+        settings: settings,
+        storage: storage,
+        preset: preset,
+        anchor: anchor,
+        sizeEvidence: sizeEvidence,
+        rawInputRateBytesPerSecond: rawInputRateBytesPerSecond,
+        spacePollInterval: spacePollInterval,
+        expectedCloseLatency: expectedCloseLatency,
+      );
+    }
+    return _resolveBounded(
+      plan: plan,
+      settings: settings,
+      storage: storage,
+      preset: preset,
+      anchor: anchor,
+      sizeEvidence: sizeEvidence,
+    );
+  }
+
+  ResolvedPlaybackCacheProfile _resolveFullReadAhead({
+    required PlaybackPlan plan,
+    required PlaybackCacheSettings settings,
+    required PlaybackCacheStorageSnapshot storage,
+    required _CachePreset preset,
+    required Duration anchor,
+    required _PlaybackCacheSizeEvidence sizeEvidence,
+    required int? rawInputRateBytesPerSecond,
+    required Duration spacePollInterval,
+    required Duration expectedCloseLatency,
+  }) {
+    final safeSpendable = max(
+      0,
+      storage.freeBytes! -
+          settings.reservedFreeBytes -
+          fullReadAheadLowSpaceGuardBytes(
+            mediaBitrate: plan.bitrate,
+            rawInputRateBytesPerSecond: rawInputRateBytesPerSecond,
+            pollInterval: spacePollInterval,
+            expectedCloseLatency: expectedCloseLatency,
+          ),
+    );
+    final requiredBytes = _requiredReadAheadBytes(
+      plan: plan,
+      anchor: anchor,
+      sizeEvidence: sizeEvidence,
+    );
+    if (requiredBytes != null && requiredBytes <= safeSpendable) {
+      return _fullDiskProfile(
+        plan: plan,
+        settings: settings,
+        storage: storage,
+        sessionTargetBytes: requiredBytes,
+        anchor: anchor,
+        sizeEvidence: sizeEvidence,
+      );
+    }
+    if (requiredBytes == null && safeSpendable >= 512 * _mib) {
+      return _fullDiskProfile(
+        plan: plan,
+        settings: settings,
+        storage: storage,
+        sessionTargetBytes: safeSpendable,
+        anchor: anchor,
+        sizeEvidence: sizeEvidence,
+      );
+    }
+    return _resolveBounded(
+      plan: plan,
+      settings: settings,
+      storage: storage,
+      preset: preset,
+      anchor: anchor,
+      sizeEvidence: sizeEvidence,
+      fallbackReasonOverride:
+          PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace,
+    );
+  }
+
+  ResolvedPlaybackCacheProfile _fullDiskProfile({
+    required PlaybackPlan plan,
+    required PlaybackCacheSettings settings,
+    required PlaybackCacheStorageSnapshot storage,
+    required int sessionTargetBytes,
+    required Duration anchor,
+    required _PlaybackCacheSizeEvidence sizeEvidence,
+  }) {
+    final duration = plan.duration!;
+    final metadata = _metadataBudget(
+      forwardSeconds: max(1, duration.inSeconds),
+      backwardSeconds: 0,
+      sessionTargetBytes: sessionTargetBytes,
+    );
+    if (metadata == null) {
+      return _resolveBounded(
+        plan: plan,
+        settings: settings,
+        storage: storage,
+        preset: _preset(settings, storage.freeBytes),
+        anchor: anchor,
+        sizeEvidence: sizeEvidence,
+        fallbackReasonOverride:
+            PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace,
+      );
+    }
+    return ResolvedPlaybackCacheProfile(
+      runtimeMode: PlaybackCacheRuntimeMode.disk,
+      transportKind: plan.transportKind,
+      fallbackReason: PlaybackCacheFallbackReason.none,
+      forwardTarget: duration,
+      backwardTarget: Duration.zero,
+      sessionTargetBytes: sessionTargetBytes,
+      reservedFreeBytes: settings.reservedFreeBytes,
+      demuxerForwardMetadataBytes: metadata.forwardBytes,
+      demuxerBackwardMetadataBytes: metadata.backwardBytes,
+      metadataBudgetCapBytes: metadata.capBytes,
+      streamBufferBytes: defaultStreamBufferBytes,
+      donateBuffer: true,
+      sessionDirectory: storage.session!.directory,
+      readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+      budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+      sizeConfidence: sizeEvidence.confidence,
+      readAheadAnchor: anchor,
+      estimatedSourceBytes: sizeEvidence.bytes,
+    );
+  }
+
+  ResolvedPlaybackCacheProfile _resolveBounded({
+    required PlaybackPlan plan,
+    required PlaybackCacheSettings settings,
+    required PlaybackCacheStorageSnapshot storage,
+    required _CachePreset preset,
+    required Duration anchor,
+    required _PlaybackCacheSizeEvidence sizeEvidence,
+    PlaybackCacheFallbackReason? fallbackReasonOverride,
+  }) {
     final availableBytes = storage.freeBytes!;
     final safeSpendable = max(0, availableBytes - settings.reservedFreeBytes);
     final effectiveTarget = min(
@@ -329,7 +492,11 @@ class PlaybackCacheProfileResolver {
         preset: preset,
         runtimeMode: PlaybackCacheRuntimeMode.memoryFallback,
         reason: PlaybackCacheFallbackReason.insufficientSpace,
+        fallbackReasonOverride: fallbackReasonOverride,
         settings: settings,
+        readAheadAnchor: anchor,
+        sizeConfidence: sizeEvidence.confidence,
+        estimatedSourceBytes: sizeEvidence.bytes,
       );
     }
 
@@ -347,7 +514,11 @@ class PlaybackCacheProfileResolver {
         preset: preset,
         runtimeMode: PlaybackCacheRuntimeMode.memoryFallback,
         reason: PlaybackCacheFallbackReason.targetTooSmallForMinimumWindow,
+        fallbackReasonOverride: fallbackReasonOverride,
         settings: settings,
+        readAheadAnchor: anchor,
+        sizeConfidence: sizeEvidence.confidence,
+        estimatedSourceBytes: sizeEvidence.bytes,
       );
     }
 
@@ -382,13 +553,18 @@ class PlaybackCacheProfileResolver {
         preset: preset,
         runtimeMode: PlaybackCacheRuntimeMode.memoryFallback,
         reason: PlaybackCacheFallbackReason.metadataBudgetLimited,
+        fallbackReasonOverride: fallbackReasonOverride,
         settings: settings,
+        readAheadAnchor: anchor,
+        sizeConfidence: sizeEvidence.confidence,
+        estimatedSourceBytes: sizeEvidence.bytes,
       );
     }
     return ResolvedPlaybackCacheProfile(
       runtimeMode: PlaybackCacheRuntimeMode.disk,
       transportKind: plan.transportKind,
-      fallbackReason: PlaybackCacheFallbackReason.none,
+      fallbackReason:
+          fallbackReasonOverride ?? PlaybackCacheFallbackReason.none,
       forwardTarget: Duration(seconds: forwardSeconds),
       backwardTarget: Duration(seconds: backwardSeconds),
       sessionTargetBytes: effectiveTarget,
@@ -399,16 +575,8 @@ class PlaybackCacheProfileResolver {
       streamBufferBytes: defaultStreamBufferBytes,
       donateBuffer: true,
       sessionDirectory: storage.session!.directory,
-      readAheadStrategy:
-          settings.mode == PlaybackCacheMode.fullReadAhead &&
-              isFullReadAheadEligible(plan)
-          ? PlaybackCacheReadAheadStrategy.mediaEnd
-          : PlaybackCacheReadAheadStrategy.boundedWindow,
-      budgetPolicy:
-          settings.mode == PlaybackCacheMode.fullReadAhead &&
-              isFullReadAheadEligible(plan)
-          ? PlaybackCacheBudgetPolicy.lowSpaceOnly
-          : PlaybackCacheBudgetPolicy.boundedReopen,
+      readAheadStrategy: PlaybackCacheReadAheadStrategy.boundedWindow,
+      budgetPolicy: PlaybackCacheBudgetPolicy.boundedReopen,
       sizeConfidence: sizeEvidence.confidence,
       readAheadAnchor: anchor,
       estimatedSourceBytes: sizeEvidence.bytes,
@@ -422,6 +590,11 @@ class PlaybackCacheProfileResolver {
     required PlaybackCacheFallbackReason reason,
     required PlaybackCacheSettings settings,
     int maximumMetadataBytes = 64 * _mib,
+    PlaybackCacheFallbackReason? fallbackReasonOverride,
+    Duration readAheadAnchor = Duration.zero,
+    PlaybackCacheSizeConfidence sizeConfidence =
+        PlaybackCacheSizeConfidence.unknown,
+    int? estimatedSourceBytes,
   }) {
     final metadata = _metadataBudget(
       forwardSeconds: preset.forwardSeconds,
@@ -443,7 +616,7 @@ class PlaybackCacheProfileResolver {
     return ResolvedPlaybackCacheProfile(
       runtimeMode: runtimeMode,
       transportKind: transportKind,
-      fallbackReason: reason,
+      fallbackReason: fallbackReasonOverride ?? reason,
       forwardTarget: Duration(seconds: preset.forwardSeconds),
       backwardTarget: Duration(seconds: preset.backwardSeconds),
       sessionTargetBytes: 0,
@@ -457,6 +630,9 @@ class PlaybackCacheProfileResolver {
       streamBufferBytes: defaultStreamBufferBytes,
       donateBuffer: true,
       sessionDirectory: null,
+      readAheadAnchor: readAheadAnchor,
+      sizeConfidence: sizeConfidence,
+      estimatedSourceBytes: estimatedSourceBytes,
     );
   }
 
@@ -514,6 +690,44 @@ class PlaybackCacheProfileResolver {
     final nonnegative = anchor < Duration.zero ? Duration.zero : anchor;
     if (duration == null || duration <= Duration.zero) return nonnegative;
     return nonnegative > duration ? duration : nonnegative;
+  }
+
+  int? _requiredReadAheadBytes({
+    required PlaybackPlan plan,
+    required Duration anchor,
+    required _PlaybackCacheSizeEvidence sizeEvidence,
+  }) {
+    final sourceBytes = sizeEvidence.bytes;
+    final duration = plan.duration;
+    if (sourceBytes == null || duration == null || duration <= Duration.zero) {
+      return null;
+    }
+    final durationMicros = duration.inMicroseconds;
+    final remainingMicros = max(0, durationMicros - anchor.inMicroseconds);
+    final remainingBytes = remainingMicros == 0
+        ? 0
+        : _saturatingAdd(
+            _saturatingMultiply(sourceBytes ~/ durationMicros, remainingMicros),
+            ((sourceBytes % durationMicros).toDouble() *
+                    remainingMicros /
+                    durationMicros)
+                .ceil(),
+          );
+    final margin = ((remainingBytes ~/ 10) + (remainingBytes % 10 == 0 ? 0 : 1))
+        .clamp(64 * _mib, _gib)
+        .toInt();
+    return _saturatingAdd(remainingBytes, margin);
+  }
+
+  int _saturatingAdd(int left, int right) {
+    if (left >= _maxInt - right) return _maxInt;
+    return left + right;
+  }
+
+  int _saturatingMultiply(int left, int right) {
+    if (left == 0 || right == 0) return 0;
+    if (left > _maxInt ~/ right) return _maxInt;
+    return left * right;
   }
 
   _CachePreset _automaticPreset(int? availableBytes) {

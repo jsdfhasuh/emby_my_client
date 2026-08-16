@@ -268,6 +268,35 @@ void main() {
   });
 
   test(
+    'resume anchor is resolved before cache setup and reused for seek',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        item: _item.copyWith(
+          userData: const EmbyUserData(playbackPositionTicks: 3000000000),
+        ),
+        cacheSettings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+      );
+
+      await controller.start();
+
+      expect(engine.lastProfile?.readAheadAnchor, const Duration(minutes: 5));
+      expect(engine.seekCalls, 1);
+      expect(controller.state.position, const Duration(minutes: 5));
+      expect(
+        engine.lastProfile?.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      await controller.shutdown();
+    },
+  );
+
+  test(
     'executed seek enforces the cache budget with one memory reopen',
     () async {
       final events = <String>[];
@@ -1105,6 +1134,12 @@ void main() {
 PlaybackController _controller({
   required _CacheEngine engine,
   required _CacheStorage storage,
+  EmbyItem item = _item,
+  PlaybackStreamResolver resolver = const _Resolver(),
+  PlaybackCacheSettings cacheSettings = const PlaybackCacheSettings(
+    mode: PlaybackCacheMode.balanced,
+    reservedFreeBytes: 2 << 30,
+  ),
   PlaybackItemSession? session,
   PlaybackEngineRecreator? engineRecreator,
   PlaybackRecoveryPolicy recoveryPolicy = const PlaybackRecoveryPolicy(),
@@ -1115,18 +1150,15 @@ PlaybackController _controller({
   Duration cacheCleanupTimeout = const Duration(seconds: 3),
   PlaybackClock? clock,
 }) => PlaybackController(
-  item: _item,
+  item: item,
   engine: engine,
-  resolver: const _Resolver(),
+  resolver: resolver,
   reporter: reporter ?? _Reporter(),
   playbackHeaders: const {},
   session: session,
   engineRecreator: engineRecreator,
   cacheStorage: storage,
-  cacheSettings: const PlaybackCacheSettings(
-    mode: PlaybackCacheMode.balanced,
-    reservedFreeBytes: 2 << 30,
-  ),
+  cacheSettings: cacheSettings,
   testOverrides: testOverrides,
   diagnostics: diagnostics,
   readyTimeout: readyTimeout,

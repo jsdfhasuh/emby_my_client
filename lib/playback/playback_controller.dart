@@ -206,8 +206,9 @@ class PlaybackController extends ChangeNotifier {
           return;
         }
 
+        final resume = _resumePositionForPlan(plan, resumePosition);
         reporter.activate(plan);
-        await _prepareCacheForPlan(plan, token);
+        await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
         _throwIfStale(token);
         _setState(
           _state.copyWith(
@@ -219,11 +220,6 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         _prepareReadyWait();
-        final resume =
-            resumePosition ??
-            (item.resumePosition > const Duration(seconds: 10)
-                ? item.resumePosition
-                : Duration.zero);
         try {
           await _withDeadline(
             engine.open(
@@ -257,7 +253,9 @@ class PlaybackController extends ChangeNotifier {
         await _restoreEnginePresentation(token);
 
         if (resume > Duration.zero) {
-          final target = _clampToDuration(resume);
+          final target = plan.duration == null
+              ? _clampToDuration(resume)
+              : resume;
           _setState(_state.copyWith(phase: PlaybackPhase.seekingResume));
           final result = await seekAbsolute(target, source: SeekSource.resume);
           if (result.disposition != SeekDisposition.executed) {
@@ -388,7 +386,11 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _prepareCacheForPlan(PlaybackPlan plan, int token) async {
+  Future<void> _prepareCacheForPlan(
+    PlaybackPlan plan,
+    int token, {
+    Duration readAheadAnchor = Duration.zero,
+  }) async {
     final cacheEngine = engine is PlaybackCacheEngine
         ? engine as PlaybackCacheEngine
         : null;
@@ -456,11 +458,18 @@ class PlaybackController extends ChangeNotifier {
       settings: effectiveCacheSettings,
       capabilities: capabilities,
       storage: storageSnapshot,
+      readAheadAnchor: readAheadAnchor,
+      spacePollInterval: cacheSpacePollInterval,
     );
     final forcedReason = _forcedCacheFallbackReason;
     if (forcedReason != null &&
         profile.runtimeMode != PlaybackCacheRuntimeMode.disabled) {
-      profile = profile.memoryFallback(forcedReason);
+      profile = profile.memoryFallback(
+        forcedReason,
+        sizeConfidence: profile.sizeConfidence,
+        readAheadAnchor: profile.readAheadAnchor,
+        estimatedSourceBytes: profile.estimatedSourceBytes,
+      );
     }
     final streamBufferBytes = testOverrides?.streamBufferBytes;
     if (streamBufferBytes != null) {
@@ -505,7 +514,11 @@ class PlaybackController extends ChangeNotifier {
     if (applyResult.requiresPlayerRecreation) {
       await _cleanupCacheSessionSafely();
       await _recreateEngine(token);
-      return _prepareCacheForPlan(plan, token);
+      return _prepareCacheForPlan(
+        plan,
+        token,
+        readAheadAnchor: readAheadAnchor,
+      );
     }
     _diagnostics.cacheApplyResult(applyResult);
     if (applyResult.cacheEvidence != PlaybackCacheEvidence.unconfirmed) {
@@ -1734,6 +1747,22 @@ class PlaybackController extends ChangeNotifier {
             'errorType=${error.runtimeType}',
       );
     }
+  }
+
+  Duration _resumePositionForPlan(PlaybackPlan plan, Duration? requested) {
+    final candidate =
+        requested ??
+        (item.resumePosition > const Duration(seconds: 10)
+            ? item.resumePosition
+            : Duration.zero);
+    final nonnegative = candidate < Duration.zero ? Duration.zero : candidate;
+    final duration = plan.duration;
+    if (duration != null &&
+        duration > Duration.zero &&
+        nonnegative > duration) {
+      return duration;
+    }
+    return nonnegative;
   }
 
   Duration _clampToDuration(Duration position) {

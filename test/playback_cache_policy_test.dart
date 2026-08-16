@@ -330,6 +330,133 @@ void main() {
       expect(unknown.sizeConfidence, PlaybackCacheSizeConfidence.unknown);
       expect(unknown.estimatedSourceBytes, isNull);
     });
+
+    test('known full-read-ahead size bypasses bounded target caps', () {
+      final profile = resolver.resolve(
+        plan: _plan(sourceSizeBytes: 9 << 30),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+        capabilities: _capabilities(),
+        storage: _storage(80 << 30),
+        readAheadAnchor: const Duration(minutes: 5),
+      );
+
+      expect(profile.runtimeMode, PlaybackCacheRuntimeMode.disk);
+      expect(
+        profile.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      expect(profile.budgetPolicy, PlaybackCacheBudgetPolicy.lowSpaceOnly);
+      expect(profile.sessionTargetBytes, greaterThan(4 << 30));
+      expect(profile.sessionTargetBytes, greaterThan(9 << 30));
+      expect(profile.readAheadAnchor, const Duration(minutes: 5));
+    });
+
+    test(
+      'known full-read-ahead size falls back to bounded cache when needed',
+      () {
+        final profile = resolver.resolve(
+          plan: _plan(sourceSizeBytes: 9 << 30),
+          settings: const PlaybackCacheSettings(
+            mode: PlaybackCacheMode.fullReadAhead,
+          ),
+          capabilities: _capabilities(),
+          storage: _storage(8 << 30),
+        );
+
+        expect(profile.runtimeMode, PlaybackCacheRuntimeMode.disk);
+        expect(
+          profile.fallbackReason,
+          PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace,
+        );
+        expect(
+          profile.readAheadStrategy,
+          PlaybackCacheReadAheadStrategy.boundedWindow,
+        );
+        expect(profile.budgetPolicy, PlaybackCacheBudgetPolicy.boundedReopen);
+        expect(profile.sessionTargetBytes, lessThanOrEqualTo(512 << 20));
+      },
+    );
+
+    test('estimated full-read-ahead size uses the remaining duration', () {
+      final profile = resolver.resolve(
+        plan: _plan(),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+        capabilities: _capabilities(),
+        storage: _storage(80 << 30),
+        readAheadAnchor: const Duration(minutes: 30),
+      );
+
+      expect(profile.runtimeMode, PlaybackCacheRuntimeMode.disk);
+      expect(profile.sizeConfidence, PlaybackCacheSizeConfidence.estimated);
+      expect(
+        profile.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      expect(profile.sessionTargetBytes, greaterThan(2 << 30));
+      expect(profile.sessionTargetBytes, lessThan(4 << 30));
+    });
+
+    test('unknown full-read-ahead size uses all safe spendable space', () {
+      const freeBytes = 12 << 30;
+      const settings = PlaybackCacheSettings(
+        mode: PlaybackCacheMode.fullReadAhead,
+        reservedFreeBytes: 2 << 30,
+      );
+      final profile = resolver.resolve(
+        plan: _plan(bitrate: null),
+        settings: settings,
+        capabilities: _capabilities(),
+        storage: _storage(freeBytes),
+        rawInputRateBytesPerSecond: 64 << 20,
+      );
+      final guard = fullReadAheadLowSpaceGuardBytes(
+        mediaBitrate: null,
+        rawInputRateBytesPerSecond: 64 << 20,
+        pollInterval: const Duration(seconds: 10),
+        expectedCloseLatency: const Duration(seconds: 2),
+      );
+
+      expect(profile.runtimeMode, PlaybackCacheRuntimeMode.disk);
+      expect(profile.sizeConfidence, PlaybackCacheSizeConfidence.unknown);
+      expect(
+        profile.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      expect(
+        profile.sessionTargetBytes,
+        freeBytes - settings.reservedFreeBytes - guard,
+      );
+      expect(profile.sessionTargetBytes, greaterThan(4 << 30));
+    });
+
+    test(
+      'unknown full-read-ahead size falls back below the best-effort floor',
+      () {
+        final profile = resolver.resolve(
+          plan: _plan(bitrate: null),
+          settings: const PlaybackCacheSettings(
+            mode: PlaybackCacheMode.fullReadAhead,
+            reservedFreeBytes: 2 << 30,
+          ),
+          capabilities: _capabilities(),
+          storage: _storage((2.4 * (1 << 30)).floor()),
+        );
+
+        expect(profile.runtimeMode, PlaybackCacheRuntimeMode.memoryFallback);
+        expect(
+          profile.fallbackReason,
+          PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace,
+        );
+        expect(
+          profile.readAheadStrategy,
+          PlaybackCacheReadAheadStrategy.boundedWindow,
+        );
+      },
+    );
   });
 }
 
