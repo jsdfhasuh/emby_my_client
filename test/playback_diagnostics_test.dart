@@ -173,6 +173,11 @@ void main() {
     expect(joined, isNot(contains('property_demuxer_cache_state')));
     expect(joined, contains('event=playback_cache_disk_enabled'));
     expect(joined, contains('fingerprint=partial_file'));
+    expect(joined, contains('readaheadstrategy=boundedwindow'));
+    expect(joined, contains('budgetpolicy=boundedreopen'));
+    expect(joined, contains('sizeconfidence=unknown'));
+    expect(joined, contains('fullreadaheadeligible=false'));
+    expect(joined, contains('fullreadaheadreachedend=unavailable'));
   });
 
   test('100 seek requests are emitted as bounded aggregate counts', () {
@@ -230,6 +235,11 @@ void main() {
         requestedMode: PlaybackCacheRuntimeMode.disk,
         confirmedMode: PlaybackCacheRuntimeMode.disk,
         fallbackReason: PlaybackCacheFallbackReason.none,
+        readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+        budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+        sizeConfidence: PlaybackCacheSizeConfidence.serverDeclared,
+        fullReadAheadEligible: true,
+        fullReadAheadReachedEnd: true,
         testOverrideActive: true,
       ),
     );
@@ -246,6 +256,11 @@ void main() {
     expect(output, contains('seekFailedCount=0'));
     expect(output, contains('seekCancelledCount=0'));
     expect(output, contains('testOverrideUsed=true'));
+    expect(output, contains('readAheadStrategy=mediaEnd'));
+    expect(output, contains('budgetPolicy=lowSpaceOnly'));
+    expect(output, contains('sizeConfidence=serverDeclared'));
+    expect(output, contains('fullReadAheadEligible=true'));
+    expect(output, contains('fullReadAheadReachedEnd=true'));
     expect(output, isNot(contains('private-session-id')));
     expect(output, isNot(contains('10')));
   });
@@ -316,6 +331,11 @@ void main() {
     expect(lines.single, contains('peakFileCacheBytes=unavailable'));
     expect(lines.single, contains('maxActualForward=unavailable'));
     expect(lines.single, contains('maxActualBackward=unavailable'));
+    expect(lines.single, contains('readAheadStrategy=unavailable'));
+    expect(lines.single, contains('budgetPolicy=unavailable'));
+    expect(lines.single, contains('sizeConfidence=unavailable'));
+    expect(lines.single, contains('fullReadAheadEligible=unavailable'));
+    expect(lines.single, contains('fullReadAheadReachedEnd=unavailable'));
   });
 
   test('cache and seek summaries use the same frozen exact counts', () {

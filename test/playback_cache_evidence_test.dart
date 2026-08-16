@@ -262,6 +262,11 @@ void main() {
           requestedMode: PlaybackCacheRuntimeMode.disk,
           confirmedMode: PlaybackCacheRuntimeMode.disk,
           cacheEvidence: PlaybackCacheEvidence.diskConfiguredOnly,
+          readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+          budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+          sizeConfidence: PlaybackCacheSizeConfidence.estimated,
+          fullReadAheadEligible: true,
+          fullReadAheadReachedEnd: true,
         ),
       );
       accumulator.observe(
@@ -322,6 +327,14 @@ void main() {
         PlaybackCacheRuntimeRecovery.notAttempted,
       );
       expect(summary.cleanupAttemptCount, 1);
+      expect(
+        summary.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      expect(summary.budgetPolicy, PlaybackCacheBudgetPolicy.lowSpaceOnly);
+      expect(summary.sizeConfidence, PlaybackCacheSizeConfidence.estimated);
+      expect(summary.fullReadAheadEligible, isTrue);
+      expect(summary.fullReadAheadReachedEnd, isTrue);
     },
   );
 
@@ -351,6 +364,51 @@ void main() {
     expect(summary.peakBytes, isNull);
     expect(summary.maxActualForward, isNull);
     expect(summary.maxActualBackward, isNull);
+    expect(summary.readAheadStrategy, isNull);
+    expect(summary.budgetPolicy, isNull);
+    expect(summary.sizeConfidence, isNull);
+    expect(summary.fullReadAheadEligible, isNull);
+    expect(summary.fullReadAheadReachedEnd, isNull);
+  });
+
+  test('full read-ahead completion evidence is sticky once confirmed', () {
+    var now = DateTime.utc(2026, 8, 16);
+    final accumulator = PlaybackCacheEvidenceAccumulator(
+      sessionId: const PlaybackItemSessionId('completion-evidence'),
+      clock: () => now,
+    );
+    accumulator.observe(
+      const PlaybackCacheEvidenceObservation(
+        readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+        budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+        sizeConfidence: PlaybackCacheSizeConfidence.unknown,
+        fullReadAheadEligible: true,
+        fullReadAheadReachedEnd: false,
+      ),
+    );
+    now = now.add(const Duration(seconds: 5));
+    accumulator.observe(
+      const PlaybackCacheEvidenceObservation(
+        readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+        budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+        sizeConfidence: PlaybackCacheSizeConfidence.unknown,
+        fullReadAheadEligible: true,
+        fullReadAheadReachedEnd: true,
+      ),
+    );
+    now = now.add(const Duration(seconds: 5));
+    accumulator.observe(
+      const PlaybackCacheEvidenceObservation(
+        readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+        budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+        sizeConfidence: PlaybackCacheSizeConfidence.unknown,
+        fullReadAheadEligible: true,
+        fullReadAheadReachedEnd: false,
+      ),
+    );
+
+    final summary = accumulator.finalize();
+    expect(summary.fullReadAheadReachedEnd, isTrue);
   });
 
   test('unconfirmed updates do not replace the last confirmed mode', () {

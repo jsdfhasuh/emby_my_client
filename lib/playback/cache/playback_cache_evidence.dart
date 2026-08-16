@@ -68,6 +68,11 @@ class PlaybackCacheEvidenceObservation {
     this.requestedMode,
     this.confirmedMode,
     this.fallbackReason,
+    this.readAheadStrategy,
+    this.budgetPolicy,
+    this.sizeConfidence,
+    this.fullReadAheadEligible,
+    this.fullReadAheadReachedEnd,
     this.settingsMode = PlaybackCacheMode.automatic,
     this.optionalTuningDegraded = false,
     this.optionalTuningUnavailableCount = 0,
@@ -90,6 +95,11 @@ class PlaybackCacheEvidenceObservation {
   final PlaybackCacheRuntimeMode? requestedMode;
   final PlaybackCacheRuntimeMode? confirmedMode;
   final PlaybackCacheFallbackReason? fallbackReason;
+  final PlaybackCacheReadAheadStrategy? readAheadStrategy;
+  final PlaybackCacheBudgetPolicy? budgetPolicy;
+  final PlaybackCacheSizeConfidence? sizeConfidence;
+  final bool? fullReadAheadEligible;
+  final bool? fullReadAheadReachedEnd;
   final PlaybackCacheMode settingsMode;
   final bool optionalTuningDegraded;
   final int optionalTuningUnavailableCount;
@@ -133,6 +143,11 @@ class PlaybackCacheEvidenceSummary {
     required this.seekSuperseded,
     required this.seekFailed,
     required this.seekCancelled,
+    this.readAheadStrategy,
+    this.budgetPolicy,
+    this.sizeConfidence,
+    this.fullReadAheadEligible,
+    this.fullReadAheadReachedEnd,
   });
 
   final PlaybackItemSessionId sessionId;
@@ -168,6 +183,11 @@ class PlaybackCacheEvidenceSummary {
   final int seekSuperseded;
   final int seekFailed;
   final int seekCancelled;
+  final PlaybackCacheReadAheadStrategy? readAheadStrategy;
+  final PlaybackCacheBudgetPolicy? budgetPolicy;
+  final PlaybackCacheSizeConfidence? sizeConfidence;
+  final bool? fullReadAheadEligible;
+  final bool? fullReadAheadReachedEnd;
 }
 
 class PlaybackCacheEvidenceAccumulator {
@@ -208,6 +228,11 @@ class PlaybackCacheEvidenceAccumulator {
   PlaybackCacheRuntimeMode? _requestedMode;
   PlaybackCacheRuntimeMode? _finalConfirmedMode;
   PlaybackCacheFallbackReason? _fallbackReason;
+  PlaybackCacheReadAheadStrategy? _readAheadStrategy;
+  PlaybackCacheBudgetPolicy? _budgetPolicy;
+  PlaybackCacheSizeConfidence? _sizeConfidence;
+  bool? _fullReadAheadEligible;
+  bool? _fullReadAheadReachedEnd;
   bool _optionalTuningDegraded = false;
   int _optionalTuningUnavailableCount = 0;
   int _cleanupAttemptCount = 0;
@@ -368,6 +393,11 @@ class PlaybackCacheEvidenceAccumulator {
       seekSuperseded: seekStatistics?.superseded ?? _seekSuperseded,
       seekFailed: seekStatistics?.failed ?? _seekFailed,
       seekCancelled: seekStatistics?.cancelled ?? _seekCancelled,
+      readAheadStrategy: _readAheadStrategy,
+      budgetPolicy: _budgetPolicy,
+      sizeConfidence: _sizeConfidence,
+      fullReadAheadEligible: _fullReadAheadEligible,
+      fullReadAheadReachedEnd: _fullReadAheadReachedEnd,
     );
   }
 
@@ -436,6 +466,24 @@ class PlaybackCacheEvidenceAccumulator {
     if (observation.fallbackReason != null) {
       _fallbackReason = observation.fallbackReason;
     }
+    if (observation.readAheadStrategy != null) {
+      _readAheadStrategy = observation.readAheadStrategy;
+    }
+    if (observation.budgetPolicy != null) {
+      _budgetPolicy = observation.budgetPolicy;
+    }
+    if (observation.sizeConfidence != null) {
+      _sizeConfidence = observation.sizeConfidence;
+    }
+    if (observation.fullReadAheadEligible != null) {
+      _fullReadAheadEligible = observation.fullReadAheadEligible;
+    }
+    if (observation.fullReadAheadReachedEnd == true) {
+      _fullReadAheadReachedEnd = true;
+    } else if (_fullReadAheadReachedEnd == null &&
+        observation.fullReadAheadReachedEnd != null) {
+      _fullReadAheadReachedEnd = false;
+    }
     _optionalTuningDegraded =
         _optionalTuningDegraded || observation.optionalTuningDegraded;
     _optionalTuningUnavailableCount +=
@@ -468,7 +516,13 @@ class PlaybackCacheEvidenceAccumulator {
         previous.telemetryStatus != observation.telemetryStatus ||
         previous.cacheOnDisk != observation.cacheOnDisk ||
         previous.cacheEvidence != observation.cacheEvidence ||
-        previous.fallbackReason != observation.fallbackReason) {
+        previous.fallbackReason != observation.fallbackReason ||
+        previous.readAheadStrategy != observation.readAheadStrategy ||
+        previous.budgetPolicy != observation.budgetPolicy ||
+        previous.sizeConfidence != observation.sizeConfidence ||
+        previous.fullReadAheadEligible != observation.fullReadAheadEligible ||
+        (observation.fullReadAheadReachedEnd == true &&
+            previous.fullReadAheadReachedEnd != true)) {
       return true;
     }
     final previousBytes = previous.fileCacheBytes ?? 0;
@@ -493,6 +547,11 @@ class PlaybackCacheEvidenceAccumulator {
     _durationBucket(observation.actualForward),
     _durationBucket(observation.actualBackward),
     observation.fallbackReason?.name ?? 'none',
+    observation.readAheadStrategy?.name ?? 'unavailable',
+    observation.budgetPolicy?.name ?? 'unavailable',
+    observation.sizeConfidence?.name ?? 'unavailable',
+    observation.fullReadAheadEligible?.toString() ?? 'unavailable',
+    observation.fullReadAheadReachedEnd?.toString() ?? 'unavailable',
     observation.optionalTuningDegraded.toString(),
     observation.optionalTuningUnavailableCount.toString(),
     _optionalTuningName(observation.optionalTuningUnavailable),

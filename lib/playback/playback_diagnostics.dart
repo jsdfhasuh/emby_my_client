@@ -170,6 +170,11 @@ class PlaybackDiagnostics {
       'backTarget=${_durationBucket(profile.backwardTarget)}',
       'sessionTarget=${_bytesBucket(profile.sessionTargetBytes)}',
       'fallbackReason=${profile.fallbackReason.name}',
+      'readAheadStrategy=${profile.readAheadStrategy.name}',
+      'budgetPolicy=${profile.budgetPolicy.name}',
+      'sizeConfidence=${profile.sizeConfidence.name}',
+      'fullReadAheadEligible=${profile.readAheadStrategy == PlaybackCacheReadAheadStrategy.mediaEnd}',
+      'fullReadAheadReachedEnd=unavailable',
     ]);
   }
 
@@ -276,6 +281,11 @@ class PlaybackDiagnostics {
       'optionalTuningDegraded=${summary.optionalTuningDegraded}',
       'optionalTuningUnavailable=${_optionalTuningName(summary.optionalTuningUnavailable)}',
       'testOverrideUsed=${summary.testOverrideUsed}',
+      'readAheadStrategy=${summary.readAheadStrategy?.name ?? 'unavailable'}',
+      'budgetPolicy=${summary.budgetPolicy?.name ?? 'unavailable'}',
+      'sizeConfidence=${summary.sizeConfidence?.name ?? 'unavailable'}',
+      'fullReadAheadEligible=${summary.fullReadAheadEligible?.toString() ?? 'unavailable'}',
+      'fullReadAheadReachedEnd=${summary.fullReadAheadReachedEnd?.toString() ?? 'unavailable'}',
     ]);
   }
 
@@ -505,6 +515,11 @@ class PlaybackDiagnostics {
     'actualForward=${_durationBucket(observation.actualForward)}',
     'actualBackward=${_durationBucket(observation.actualBackward)}',
     'fallbackReason=${observation.fallbackReason?.name ?? 'none'}',
+    'readAheadStrategy=${observation.readAheadStrategy?.name ?? 'unavailable'}',
+    'budgetPolicy=${observation.budgetPolicy?.name ?? 'unavailable'}',
+    'sizeConfidence=${observation.sizeConfidence?.name ?? 'unavailable'}',
+    'fullReadAheadEligible=${observation.fullReadAheadEligible?.toString() ?? 'unavailable'}',
+    'fullReadAheadReachedEnd=${observation.fullReadAheadReachedEnd?.toString() ?? 'unavailable'}',
     'optionalTuningDegraded=${observation.optionalTuningDegraded}',
     'optionalTuningUnavailable=${_optionalTuningName(observation.optionalTuningUnavailable)}',
     'testOverrideActive=${observation.testOverrideActive}',
