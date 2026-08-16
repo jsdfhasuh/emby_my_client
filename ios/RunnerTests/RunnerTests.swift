@@ -467,6 +467,13 @@ final class RunnerTests: XCTestCase {
     print("STOP_GATE_MEMORY_CACHE_PROFILE=PASSED")
     print("STOP_GATE_ACTIVE_CONTEXT_TELEMETRY_READER=PASSED")
 
+    print(
+      "STOP_GATE_LARGE_CACHE_SECS_READBACK="
+        + (snapshot.mediaDurationCacheSecondsReadBack
+          ? "PASSED"
+          : "BLOCKED_BY_BUNDLED_LIBMPV")
+    )
+
     guard snapshot.diskCapabilityPassed else {
       try attachNativeGateEvidence(
         diskCacheCapability: .blockedByBundledLibmpv,

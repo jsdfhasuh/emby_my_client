@@ -460,8 +460,16 @@ struct PlaybackCacheNativeCapabilitySnapshot {
       }
       && unlinkChoices.contains("immediate")
       && properties.contains("demuxer-cache-state")
+      && mediaDurationCacheSecondsReadBack
       && profileReadBack["disk"] == true
       && profileSwitchStrategy != .unsupported
+  }
+
+  var mediaDurationCacheSecondsReadBack: Bool {
+    guard let nativeName = resolvedOptions["cacheSeconds"] else { return false }
+    return candidateEvidence["cacheSeconds"]?.contains {
+      $0.nativeName == nativeName && $0.writeReadBackPassed
+    } ?? false
   }
 }
 
@@ -473,6 +481,8 @@ enum PlaybackCacheNativeProbeError: Error {
 }
 
 enum PlaybackCacheNativeProbe {
+  static let mediaDurationCacheSeconds = "1800"
+
   static let optionNames = [
     "cache",
     "cache-on-disk",
@@ -690,7 +700,9 @@ enum PlaybackCacheNativeProbe {
       expected = probeDirectory.path
     case "cacheUnlinkFiles":
       expected = "immediate"
-    case "cacheSeconds", "forwardMetadataBytes", "backwardMetadataBytes",
+    case "cacheSeconds":
+      expected = Self.mediaDurationCacheSeconds
+    case "forwardMetadataBytes", "backwardMetadataBytes",
          "cachePauseWait", "streamBufferSize":
       expected = "1"
     case "donateBuffer", "cachePause":
@@ -1166,6 +1178,7 @@ extension PlaybackCacheNativeCapabilitySnapshot {
       "diskProfileReadBack": profileReadBack["disk"] ?? false,
       "memoryProfileReadBack": profileReadBack["memory"] ?? false,
       "disabledProfileReadBack": profileReadBack["disabled"] ?? false,
+      "mediaDurationCacheSecondsReadBack": mediaDurationCacheSecondsReadBack,
       "profileSwitchStrategy": profileSwitchStrategy.rawValue,
       "diskCapabilityPassed": diskCapabilityPassed,
     ]
