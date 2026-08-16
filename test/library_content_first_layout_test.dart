@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
@@ -261,7 +263,7 @@ void main() {
     tester,
   ) async {
     _setView(tester, const Size(1024, 768));
-    final api = _LayoutApi(itemCount: 12);
+    final api = _LayoutApi(itemCount: 12, longTitles: true);
     var homeCalls = 0;
     var searchCalls = 0;
     var settingsCalls = 0;
@@ -307,6 +309,7 @@ void main() {
     final grid = tester.widget<SliverGrid>(find.byType(SliverGrid));
     final geometry = grid.gridDelegate as LibraryGridGeometry;
     expect(geometry.crossAxisCount, 5);
+    expect(geometry.mainAxisExtent, isNotNull);
     final firstRow = [
       for (var index = 0; index < 5; index++)
         tester.getRect(find.byKey(ValueKey('library-item-grid-$index'))),
@@ -321,6 +324,29 @@ void main() {
     expect(firstRow.first.top, greaterThanOrEqualTo(0));
     expect(firstRow.first.bottom, lessThanOrEqualTo(768));
 
+    final firstCard = find.byKey(const ValueKey('library-item-grid-0'));
+    final firstTitle = tester.getRect(
+      find.descendant(
+        of: firstCard,
+        matching: find.text('测试项目 0 这是一个很长的媒体标题用于布局测试'),
+      ),
+    );
+    final firstSubtitle = tester.getRect(
+      find.descendant(of: firstCard, matching: find.text('Movie')),
+    );
+    final firstContentBottom = math.max(
+      firstTitle.bottom,
+      firstSubtitle.bottom,
+    );
+    final secondPoster = tester.getRect(
+      find.descendant(
+        of: find.byKey(const ValueKey('library-item-grid-5')),
+        matching: find.byType(AspectRatio),
+      ),
+    );
+    final visibleGap = secondPoster.top - firstContentBottom;
+    expect(visibleGap, inInclusiveRange(18.0, 44.0));
+
     await tester.tap(find.byKey(const ValueKey('large-screen-home')));
     await tester.tap(find.byKey(const ValueKey('large-screen-search')));
     await tester.tap(find.byKey(const ValueKey('large-screen-settings')));
@@ -328,6 +354,68 @@ void main() {
     await tester.pump();
     expect((homeCalls, searchCalls, settingsCalls, accountCalls), (1, 1, 1, 1));
     expect(tester.takeException(), isNull);
+    await _dispose(tester, api);
+  });
+
+  testWidgets('wide iPad centers the complete scope button group', (
+    tester,
+  ) async {
+    _setView(tester, const Size(1366, 1024));
+    final api = _LayoutApi(itemCount: 5);
+
+    await tester.pumpWidget(
+      _libraryApp(api, capabilities: PlatformCapabilities.ipad),
+    );
+    await tester.pumpAndSettle();
+
+    final bar = tester.getRect(
+      find.byKey(const ValueKey('library-section-bar')),
+    );
+    final first = tester.getRect(
+      find.byKey(const ValueKey('library-section-media')),
+    );
+    final category = tester.getRect(
+      find.byKey(const ValueKey('library-section-genres')),
+    );
+    final last = tester.getRect(
+      find.byKey(const ValueKey('library-section-favorites')),
+    );
+    final groupCenter = (first.left + last.right) / 2;
+    expect(groupCenter, closeTo(bar.center.dx, 1.0));
+    expect(category.center.dx, closeTo(bar.center.dx, 48.0));
+    expect(tester.takeException(), isNull);
+
+    await _dispose(tester, api);
+  });
+
+  testWidgets('narrow iPad keeps the scope group horizontally scrollable', (
+    tester,
+  ) async {
+    _setView(tester, const Size(300, 844));
+    final api = _LayoutApi(itemCount: 5);
+
+    await tester.pumpWidget(
+      _libraryApp(api, capabilities: PlatformCapabilities.ipad),
+    );
+    await tester.pumpAndSettle();
+
+    final scroll = find.byKey(const ValueKey('library-section-scroll'));
+    final bar = tester.getRect(
+      find.byKey(const ValueKey('library-section-bar')),
+    );
+    final lastBefore = tester.getRect(
+      find.byKey(const ValueKey('library-section-favorites')),
+    );
+    expect(lastBefore.right, greaterThan(bar.right));
+
+    await tester.drag(scroll, const Offset(-240, 0));
+    await tester.pumpAndSettle();
+    final lastAfter = tester.getRect(
+      find.byKey(const ValueKey('library-section-favorites')),
+    );
+    expect(lastAfter.right, lessThanOrEqualTo(bar.right + 1));
+    expect(tester.takeException(), isNull);
+
     await _dispose(tester, api);
   });
 
@@ -509,9 +597,11 @@ class _LayoutCall {
 }
 
 class _LayoutApi extends EmbyApi {
-  _LayoutApi({this.itemCount = 1}) : super(_session, dio: Dio());
+  _LayoutApi({this.itemCount = 1, this.longTitles = false})
+    : super(_session, dio: Dio());
 
   final int itemCount;
+  final bool longTitles;
   final List<_LayoutCall> calls = [];
   int scanCalls = 0;
 
@@ -568,7 +658,7 @@ class _LayoutApi extends EmbyApi {
       for (var index = 0; index < itemCount; index++)
         EmbyItem(
           id: 'grid-$index',
-          name: '测试项目 $index',
+          name: longTitles ? '测试项目 $index 这是一个很长的媒体标题用于布局测试' : '测试项目 $index',
           type: type,
           mediaType: type == 'Photo' ? 'Photo' : 'Video',
           imageTags: const {},

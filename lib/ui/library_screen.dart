@@ -467,26 +467,40 @@ class _LibraryScopeBar extends StatelessWidget {
     return Padding(
       key: const ValueKey('library-section-bar'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            for (final scope in visibleScopes) ...[
-              FilterChip(
-                key: ValueKey(
-                  'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
-                ),
-                label: Text(scope.label),
-                selected: selected == scope,
-                showCheckmark: false,
-                onSelected: (isSelected) {
-                  if (isSelected) onSelected(scope);
-                },
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final minWidth = constraints.hasBoundedWidth
+              ? constraints.maxWidth
+              : 0.0;
+          return SingleChildScrollView(
+            key: const ValueKey('library-section-scroll'),
+            scrollDirection: Axis.horizontal,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minWidth: minWidth),
+              child: Row(
+                key: const ValueKey('library-section-content'),
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  for (final scope in visibleScopes) ...[
+                    FilterChip(
+                      key: ValueKey(
+                        'library-section-${scope == LibraryBrowseScope.directory ? 'directories' : scope.name}',
+                      ),
+                      label: Text(scope.label),
+                      selected: selected == scope,
+                      showCheckmark: false,
+                      onSelected: (isSelected) {
+                        if (isSelected) onSelected(scope);
+                      },
+                    ),
+                    if (scope != visibleScopes.last) const SizedBox(width: 8),
+                  ],
+                ],
               ),
-              if (scope != visibleScopes.last) const SizedBox(width: 8),
-            ],
-          ],
-        ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1213,7 +1227,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _state.mediaType == LibraryMediaType.all &&
       widget.profile.allowedMediaTypes.contains(LibraryMediaType.photo);
 
-  LibraryGridGeometry _mediaGridGeometry(bool largeIPadLandscape) {
+  LibraryGridGeometry _mediaGridGeometry(
+    BuildContext context,
+    bool largeIPadLandscape,
+  ) {
     if (_usesPhotoCards) {
       return largeIPadLandscape
           ? libraryIPadPhotoGridGeometry
@@ -1224,25 +1241,33 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           ? libraryIPadMixedGridGeometry
           : libraryMixedGridGeometry;
     }
-    return largeIPadLandscape
-        ? libraryIPadMediaGridGeometry
-        : libraryMediaGridGeometry;
+    if (!largeIPadLandscape) return libraryMediaGridGeometry;
+    final textScaler = MediaQuery.textScalerOf(context);
+    final base = libraryIPadMediaGridGeometry;
+    return libraryIPadMediaGridGeometryForViewport(
+      availableWidth:
+          MediaQuery.sizeOf(context).width - base.padding.horizontal,
+      titleLineHeight: textScaler.scale(13) * 1.2,
+      subtitleLineHeight: textScaler.scale(11) * 1.2,
+    );
   }
 
-  LibraryGridGeometry _gridGeometry(bool largeIPadLandscape) =>
-      switch (_state.scope) {
-        LibraryBrowseScope.directory =>
-          largeIPadLandscape
-              ? libraryIPadDirectoryGridGeometry
-              : libraryDirectoryGridGeometry,
-        LibraryBrowseScope.genres || LibraryBrowseScope.tags =>
-          largeIPadLandscape
-              ? libraryIPadFacetGridGeometry
-              : libraryFacetGridGeometry,
-        LibraryBrowseScope.media ||
-        LibraryBrowseScope.favorites ||
-        LibraryBrowseScope.facet => _mediaGridGeometry(largeIPadLandscape),
-      };
+  LibraryGridGeometry _gridGeometry(
+    BuildContext context,
+    bool largeIPadLandscape,
+  ) => switch (_state.scope) {
+    LibraryBrowseScope.directory =>
+      largeIPadLandscape
+          ? libraryIPadDirectoryGridGeometry
+          : libraryDirectoryGridGeometry,
+    LibraryBrowseScope.genres || LibraryBrowseScope.tags =>
+      largeIPadLandscape
+          ? libraryIPadFacetGridGeometry
+          : libraryFacetGridGeometry,
+    LibraryBrowseScope.media ||
+    LibraryBrowseScope.favorites ||
+    LibraryBrowseScope.facet => _mediaGridGeometry(context, largeIPadLandscape),
+  };
 
   @override
   void initState() {
@@ -2298,7 +2323,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   @override
   Widget build(BuildContext context) {
     final largeIPadLandscape = _isLargeIPadLandscape(context);
-    final geometry = _gridGeometry(largeIPadLandscape);
+    final geometry = _gridGeometry(context, largeIPadLandscape);
     final title = _state.facet?.name ?? widget.view.name;
     final navigationActions = widget.navigationActions;
     return Scaffold(
