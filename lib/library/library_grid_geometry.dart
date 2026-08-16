@@ -8,7 +8,7 @@ const libraryFacetGridGeometry = LibraryFacetGridGeometry();
 
 const libraryIPadMediaGridGeometry = LibraryMediaGridGeometry(
   crossAxisCount: 5,
-  childAspectRatio: 0.44,
+  childAspectRatio: 0.5,
 );
 const libraryIPadPhotoGridGeometry = LibraryPhotoGridGeometry(
   crossAxisCount: 5,
@@ -31,6 +31,7 @@ abstract class LibraryGridGeometry extends SliverGridDelegate {
     required this.maxCrossAxisExtent,
     required this.crossAxisCount,
     required this.childAspectRatio,
+    this.mainAxisExtent,
     required this.crossAxisSpacing,
     required this.mainAxisSpacing,
   }) : assert(maxCrossAxisExtent > 0),
@@ -40,6 +41,7 @@ abstract class LibraryGridGeometry extends SliverGridDelegate {
   final double maxCrossAxisExtent;
   final int? crossAxisCount;
   final double childAspectRatio;
+  final double? mainAxisExtent;
   final double crossAxisSpacing;
   final double mainAxisSpacing;
 
@@ -50,6 +52,7 @@ abstract class LibraryGridGeometry extends SliverGridDelegate {
       return SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: fixedCount,
         childAspectRatio: childAspectRatio,
+        mainAxisExtent: mainAxisExtent,
         crossAxisSpacing: crossAxisSpacing,
         mainAxisSpacing: mainAxisSpacing,
       ).getLayout(constraints);
@@ -57,6 +60,7 @@ abstract class LibraryGridGeometry extends SliverGridDelegate {
     return SliverGridDelegateWithMaxCrossAxisExtent(
       maxCrossAxisExtent: maxCrossAxisExtent,
       childAspectRatio: childAspectRatio,
+      mainAxisExtent: mainAxisExtent,
       crossAxisSpacing: crossAxisSpacing,
       mainAxisSpacing: mainAxisSpacing,
     ).getLayout(constraints);
@@ -68,8 +72,55 @@ abstract class LibraryGridGeometry extends SliverGridDelegate {
       maxCrossAxisExtent != oldDelegate.maxCrossAxisExtent ||
       crossAxisCount != oldDelegate.crossAxisCount ||
       childAspectRatio != oldDelegate.childAspectRatio ||
+      mainAxisExtent != oldDelegate.mainAxisExtent ||
       crossAxisSpacing != oldDelegate.crossAxisSpacing ||
       mainAxisSpacing != oldDelegate.mainAxisSpacing;
+}
+
+double libraryMediaPosterGridMainAxisExtent({
+  required double availableWidth,
+  required int crossAxisCount,
+  required double crossAxisSpacing,
+  required double titleLineHeight,
+  required double subtitleLineHeight,
+}) {
+  final cellWidth =
+      (availableWidth - crossAxisSpacing * (crossAxisCount - 1)) /
+      crossAxisCount;
+  const posterHeightFactor = 3 / 2;
+  const posterToTitleSpacing = 8.0;
+  const titleLineCount = 2;
+  const titleToSubtitleSpacing = 2.0;
+  const bottomPadding = 4.0;
+  return cellWidth * posterHeightFactor +
+      posterToTitleSpacing +
+      titleLineHeight * titleLineCount +
+      titleToSubtitleSpacing +
+      subtitleLineHeight +
+      bottomPadding;
+}
+
+LibraryMediaGridGeometry libraryIPadMediaGridGeometryForViewport({
+  required double availableWidth,
+  required double titleLineHeight,
+  required double subtitleLineHeight,
+}) {
+  final base = libraryIPadMediaGridGeometry;
+  return LibraryMediaGridGeometry(
+    padding: base.padding,
+    maxCrossAxisExtent: base.maxCrossAxisExtent,
+    crossAxisCount: base.crossAxisCount,
+    childAspectRatio: base.childAspectRatio,
+    mainAxisExtent: libraryMediaPosterGridMainAxisExtent(
+      availableWidth: availableWidth,
+      crossAxisCount: base.crossAxisCount!,
+      crossAxisSpacing: base.crossAxisSpacing,
+      titleLineHeight: titleLineHeight,
+      subtitleLineHeight: subtitleLineHeight,
+    ),
+    crossAxisSpacing: base.crossAxisSpacing,
+    mainAxisSpacing: base.mainAxisSpacing,
+  );
 }
 
 class LibraryMediaGridGeometry extends LibraryGridGeometry {
@@ -78,6 +129,7 @@ class LibraryMediaGridGeometry extends LibraryGridGeometry {
     super.maxCrossAxisExtent = 180,
     super.crossAxisCount,
     super.childAspectRatio = 0.46,
+    super.mainAxisExtent,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 18,
   });
@@ -89,6 +141,7 @@ class LibraryPhotoGridGeometry extends LibraryGridGeometry {
     super.maxCrossAxisExtent = 220,
     super.crossAxisCount,
     super.childAspectRatio = 1,
+    super.mainAxisExtent,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 12,
   });
@@ -100,6 +153,7 @@ class LibraryMixedGridGeometry extends LibraryGridGeometry {
     super.maxCrossAxisExtent = 300,
     super.crossAxisCount,
     super.childAspectRatio = 4 / 3,
+    super.mainAxisExtent,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 12,
   });
@@ -111,6 +165,7 @@ class LibraryDirectoryGridGeometry extends LibraryGridGeometry {
     super.maxCrossAxisExtent = 280,
     super.crossAxisCount,
     super.childAspectRatio = 1.45,
+    super.mainAxisExtent,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 12,
   });
@@ -122,6 +177,7 @@ class LibraryFacetGridGeometry extends LibraryGridGeometry {
     super.maxCrossAxisExtent = 240,
     super.crossAxisCount,
     super.childAspectRatio = 1.45,
+    super.mainAxisExtent,
     super.crossAxisSpacing = 12,
     super.mainAxisSpacing = 12,
   });
