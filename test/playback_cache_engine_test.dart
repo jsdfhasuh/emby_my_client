@@ -35,7 +35,30 @@ void main() {
   });
 
   test(
-    'critical disk failure remains unconfirmed after disk capability passes',
+    'media-end disk profile adds a close safety margin to cache-secs',
+    () async {
+      final access = _FakeNativeAccess();
+      final result =
+          await PlaybackCacheProfileApplier(
+            access: access,
+            capabilities: _capabilities(),
+          ).apply(
+            _profile(
+              PlaybackCacheRuntimeMode.disk,
+              readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+            ),
+          );
+
+      expect(result.actualMode, PlaybackCacheRuntimeMode.disk);
+      expect(access.values['cache-secs'], '210');
+      expect(result.readBack['cache-secs'], '210');
+      expect(result.readBack['cache'], 'yes');
+      expect(result.readBack['cache-on-disk'], 'yes');
+    },
+  );
+
+  test(
+    'critical disk failure falls back to a confirmed memory profile',
     () async {
       final access = _FakeNativeAccess(failOnceOn: 'cache-on-disk');
       final result = await PlaybackCacheProfileApplier(
@@ -43,14 +66,40 @@ void main() {
         capabilities: _capabilities(),
       ).apply(_profile(PlaybackCacheRuntimeMode.disk));
 
-      expect(result.actualMode, PlaybackCacheRuntimeMode.unconfirmed);
+      expect(result.actualMode, PlaybackCacheRuntimeMode.memoryFallback);
       expect(
         result.fallbackReason,
         PlaybackCacheFallbackReason.actualModeUnconfirmed,
       );
-      expect(result.readBack, isEmpty);
+      expect(result.readBack['cache-on-disk'], 'no');
     },
   );
+
+  test('critical media-end cache-secs failure falls back safely', () async {
+    final access = _FakeNativeAccess(throwOnRead: 'cache-secs');
+    final result =
+        await PlaybackCacheProfileApplier(
+          access: access,
+          capabilities: _capabilities(),
+        ).apply(
+          _profile(
+            PlaybackCacheRuntimeMode.disk,
+            readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+          ),
+        );
+
+    expect(result.actualMode, PlaybackCacheRuntimeMode.memoryFallback);
+    expect(
+      result.fallbackReason,
+      PlaybackCacheFallbackReason.actualModeUnconfirmed,
+    );
+    expect(result.readBack['cache-on-disk'], 'no');
+    expect(result.optionalTuningDegraded, isTrue);
+    expect(
+      result.optionalTuningUnavailable,
+      contains(PlaybackCacheLogicalOption.cacheSeconds),
+    );
+  });
 
   test(
     'disk capability unavailable permits an explicit memory fallback',
@@ -358,26 +407,30 @@ void main() {
   );
 }
 
-ResolvedPlaybackCacheProfile _profile(PlaybackCacheRuntimeMode mode) =>
-    ResolvedPlaybackCacheProfile(
-      runtimeMode: mode,
-      transportKind: mode == PlaybackCacheRuntimeMode.disabled
-          ? PlaybackTransportKind.offlineLocal
-          : PlaybackTransportKind.progressiveHttp,
-      fallbackReason: PlaybackCacheFallbackReason.none,
-      forwardTarget: const Duration(seconds: 180),
-      backwardTarget: const Duration(seconds: 120),
-      sessionTargetBytes: mode == PlaybackCacheRuntimeMode.disk ? 512 << 20 : 0,
-      reservedFreeBytes: 2 << 30,
-      demuxerForwardMetadataBytes: 32 << 20,
-      demuxerBackwardMetadataBytes: 16 << 20,
-      metadataBudgetCapBytes: 64 << 20,
-      streamBufferBytes: 128 << 10,
-      donateBuffer: true,
-      sessionDirectory: mode == PlaybackCacheRuntimeMode.disk
-          ? Directory.systemTemp
-          : null,
-    );
+ResolvedPlaybackCacheProfile _profile(
+  PlaybackCacheRuntimeMode mode, {
+  PlaybackCacheReadAheadStrategy readAheadStrategy =
+      PlaybackCacheReadAheadStrategy.boundedWindow,
+}) => ResolvedPlaybackCacheProfile(
+  runtimeMode: mode,
+  transportKind: mode == PlaybackCacheRuntimeMode.disabled
+      ? PlaybackTransportKind.offlineLocal
+      : PlaybackTransportKind.progressiveHttp,
+  fallbackReason: PlaybackCacheFallbackReason.none,
+  forwardTarget: const Duration(seconds: 180),
+  backwardTarget: const Duration(seconds: 120),
+  sessionTargetBytes: mode == PlaybackCacheRuntimeMode.disk ? 512 << 20 : 0,
+  reservedFreeBytes: 2 << 30,
+  demuxerForwardMetadataBytes: 32 << 20,
+  demuxerBackwardMetadataBytes: 16 << 20,
+  metadataBudgetCapBytes: 64 << 20,
+  streamBufferBytes: 128 << 10,
+  donateBuffer: true,
+  sessionDirectory: mode == PlaybackCacheRuntimeMode.disk
+      ? Directory.systemTemp
+      : null,
+  readAheadStrategy: readAheadStrategy,
+);
 
 PlaybackCacheEngineCapabilities _capabilities({
   PlaybackCacheProfileSwitchStrategy strategy =

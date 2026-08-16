@@ -275,7 +275,12 @@ class PlaybackCacheProfileApplier {
         cacheEvidence: _evidenceFor(requestedMode, applied.readBack),
       );
     }
-    if (diskRequested) return _unconfirmed(requestedMode);
+    if (diskRequested) {
+      return _applyMemoryFallback(
+        profile,
+        PlaybackCacheFallbackReason.actualModeUnconfirmed,
+      );
+    }
     return PlaybackCacheApplyResult(
       requestedMode: requestedMode,
       actualMode: PlaybackCacheRuntimeMode.unconfirmed,
@@ -497,8 +502,7 @@ class PlaybackCacheProfileValues {
       PlaybackCacheLogicalOption.cacheOnDisk: 'yes',
       PlaybackCacheLogicalOption.cacheDirectory: profile.sessionDirectory!.path,
       PlaybackCacheLogicalOption.cacheUnlinkFiles: 'immediate',
-      PlaybackCacheLogicalOption.cacheSeconds: profile.forwardTarget.inSeconds
-          .toString(),
+      PlaybackCacheLogicalOption.cacheSeconds: _cacheSeconds(profile),
       PlaybackCacheLogicalOption.forwardMetadataBytes: profile
           .demuxerForwardMetadataBytes
           .toString(),
@@ -509,6 +513,14 @@ class PlaybackCacheProfileValues {
     optional: _optionalValues(profile),
   );
 
+  static String _cacheSeconds(ResolvedPlaybackCacheProfile profile) {
+    final seconds = profile.forwardTarget.inSeconds;
+    if (profile.readAheadStrategy != PlaybackCacheReadAheadStrategy.mediaEnd) {
+      return seconds.toString();
+    }
+    return (seconds + 30).toString();
+  }
+
   static PlaybackCacheProfileApplyPlan _memoryValues(
     ResolvedPlaybackCacheProfile profile,
     ResolvedPlaybackCacheOptionBindings bindings,
@@ -517,9 +529,6 @@ class PlaybackCacheProfileValues {
     critical: {
       PlaybackCacheLogicalOption.cache: 'yes',
       PlaybackCacheLogicalOption.cacheOnDisk: 'no',
-      PlaybackCacheLogicalOption.cacheSeconds: profile.forwardTarget.inSeconds
-          .clamp(30, 60)
-          .toString(),
       PlaybackCacheLogicalOption.forwardMetadataBytes: min(
         profile.demuxerForwardMetadataBytes,
         64 * 1024 * 1024,
@@ -529,7 +538,13 @@ class PlaybackCacheProfileValues {
         16 * 1024 * 1024,
       ).toString(),
     },
-    optional: {..._optionalValues(profile), ..._resetOptionalValues(bindings)},
+    optional: {
+      PlaybackCacheLogicalOption.cacheSeconds: profile.forwardTarget.inSeconds
+          .clamp(30, 60)
+          .toString(),
+      ..._optionalValues(profile),
+      ..._resetOptionalValues(bindings),
+    },
   );
 
   static PlaybackCacheProfileApplyPlan _disabledValues(
