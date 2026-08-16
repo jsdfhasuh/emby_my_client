@@ -296,6 +296,126 @@ void main() {
     },
   );
 
+  test('full read-ahead does not reopen at the bounded budget', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(
+      events: events,
+      snapshot: const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 500 << 20,
+        rawInputRateBytesPerSecond: 8 << 20,
+        seekableRanges: [],
+        pausedForCache: false,
+        cacheBufferingPercent: 0,
+        cacheOnDisk: true,
+      ),
+    );
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      cacheSettings: const PlaybackCacheSettings(
+        mode: PlaybackCacheMode.fullReadAhead,
+        reservedFreeBytes: 2 << 30,
+      ),
+    );
+
+    await controller.start();
+    expect(
+      controller.state.cacheProfile?.budgetPolicy,
+      PlaybackCacheBudgetPolicy.lowSpaceOnly,
+    );
+    expect(engine.openCalls, 1);
+
+    await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.controls,
+    );
+
+    expect(engine.openCalls, 1);
+    await controller.shutdown();
+  });
+
+  test(
+    'executed seeks only move the full read-ahead anchor backward',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        item: _item.copyWith(
+          userData: const EmbyUserData(playbackPositionTicks: 3000000000),
+        ),
+        cacheSettings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+          reservedFreeBytes: 2 << 30,
+        ),
+      );
+
+      await controller.start();
+      expect(
+        controller.state.cacheProfile?.readAheadAnchor,
+        const Duration(minutes: 5),
+      );
+
+      await controller.seekAbsolute(
+        const Duration(minutes: 3),
+        source: SeekSource.controls,
+      );
+      expect(
+        controller.state.cacheProfile?.readAheadAnchor,
+        const Duration(minutes: 3),
+      );
+
+      await controller.seekAbsolute(
+        const Duration(minutes: 10),
+        source: SeekSource.controls,
+      );
+      expect(
+        controller.state.cacheProfile?.readAheadAnchor,
+        const Duration(minutes: 3),
+      );
+      await controller.shutdown();
+    },
+  );
+
+  test('reaching the confirmed media end does not reopen the player', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(
+      events: events,
+      snapshot: const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 500 << 20,
+        rawInputRateBytesPerSecond: 8 << 20,
+        seekableRanges: [
+          PlaybackCacheRange(start: Duration.zero, end: Duration(hours: 1)),
+        ],
+        pausedForCache: false,
+        cacheBufferingPercent: 100,
+        cacheOnDisk: true,
+      ),
+    );
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      cacheSettings: const PlaybackCacheSettings(
+        mode: PlaybackCacheMode.fullReadAhead,
+        reservedFreeBytes: 2 << 30,
+      ),
+    );
+
+    await controller.start();
+
+    expect(controller.state.fullReadAheadReachedEnd, isTrue);
+    expect(
+      controller.state.cacheObservation?.actualContinuousEnd,
+      const Duration(hours: 1),
+    );
+    engine.completedController.add(true);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.isCompleted, isTrue);
+    expect(engine.openCalls, 1);
+    await controller.shutdown();
+  });
+
   test(
     'executed seek enforces the cache budget with one memory reopen',
     () async {
@@ -524,6 +644,24 @@ void main() {
       await controller.shutdown();
     },
   );
+
+  test('repeated memory pressure requests perform one safety reopen', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+
+    await Future.wait([
+      controller.handleMemoryPressure(),
+      controller.handleMemoryPressure(),
+    ]);
+
+    expect(engine.openCalls, 2);
+    await controller.shutdown();
+  });
 
   test('cache safety reopen has one fixed total deadline', () async {
     final events = <String>[];

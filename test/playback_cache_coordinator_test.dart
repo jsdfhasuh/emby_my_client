@@ -99,6 +99,138 @@ void main() {
     await coordinator.stop();
   });
 
+  test('media-end profile ignores the bounded budget threshold', () async {
+    final engine = _Engine(
+      const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 500 << 20,
+        rawInputRateBytesPerSecond: 16 << 20,
+        seekableRanges: [],
+        pausedForCache: false,
+        cacheBufferingPercent: 0,
+        cacheOnDisk: true,
+      ),
+    );
+    final reasons = <PlaybackCacheSafetyReason>[];
+    final observations = <PlaybackCacheObservation>[];
+    final coordinator = PlaybackCacheCoordinator(
+      engine: engine,
+      storage: _Storage(freeBytes: 20 << 30),
+      session: _session,
+      profile: _fullProfile,
+      mediaBitrate: 8 * 1000 * 1000,
+      committedPosition: () => Duration.zero,
+      onObservation: observations.add,
+      onSafetyReopen: (reason) async => reasons.add(reason),
+      statePollInterval: const Duration(hours: 1),
+      mediaDuration: const Duration(hours: 1),
+    );
+
+    expect(coordinator.spacePollInterval, const Duration(seconds: 2));
+    await coordinator.start();
+
+    expect(reasons, isEmpty);
+    expect(observations.single.fullReadAheadEligible, isTrue);
+    expect(observations.single.fullReadAheadReachedEnd, isFalse);
+    await coordinator.stop();
+  });
+
+  test('media-end profile still prioritizes low space over budget', () async {
+    final engine = _Engine(
+      const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 500 << 20,
+        rawInputRateBytesPerSecond: 16 << 20,
+        seekableRanges: [],
+        pausedForCache: false,
+        cacheBufferingPercent: 0,
+        cacheOnDisk: true,
+      ),
+    );
+    final reasons = <PlaybackCacheSafetyReason>[];
+    final coordinator = PlaybackCacheCoordinator(
+      engine: engine,
+      storage: _Storage(freeBytes: (2 << 30) + (32 << 20)),
+      session: _session,
+      profile: _fullProfile,
+      mediaBitrate: 8 * 1000 * 1000,
+      committedPosition: () => Duration.zero,
+      onObservation: (_) {},
+      onSafetyReopen: (reason) async => reasons.add(reason),
+      statePollInterval: const Duration(hours: 1),
+      mediaDuration: const Duration(hours: 1),
+    );
+
+    await coordinator.start();
+
+    expect(reasons, [PlaybackCacheSafetyReason.lowSpace]);
+    await coordinator.stop();
+  });
+
+  test('completion requires one continuous range from anchor to end', () {
+    final disconnected = continuousPlaybackCacheCoverage(
+      ranges: const [
+        PlaybackCacheRange(start: Duration.zero, end: Duration(seconds: 100)),
+        PlaybackCacheRange(
+          start: Duration(seconds: 101),
+          end: Duration(hours: 1),
+        ),
+      ],
+      anchor: Duration.zero,
+      mediaDuration: const Duration(hours: 1),
+    );
+    expect(disconnected?.end, const Duration(seconds: 100));
+    expect(disconnected?.reachesMediaEnd, isFalse);
+
+    final continuous = continuousPlaybackCacheCoverage(
+      ranges: const [
+        PlaybackCacheRange(
+          start: Duration(seconds: 1),
+          end: Duration(minutes: 10),
+        ),
+        PlaybackCacheRange(
+          start: Duration(minutes: 10),
+          end: Duration(hours: 1),
+        ),
+      ],
+      anchor: const Duration(seconds: 2),
+      mediaDuration: const Duration(hours: 1),
+    );
+    expect(continuous?.reachesMediaEnd, isTrue);
+  });
+
+  test('unavailable telemetry cannot publish completion evidence', () async {
+    final engine = _Engine(
+      const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 1,
+        rawInputRateBytesPerSecond: 1,
+        seekableRanges: [
+          PlaybackCacheRange(start: Duration.zero, end: Duration(hours: 1)),
+        ],
+        pausedForCache: false,
+        cacheBufferingPercent: 0,
+        cacheOnDisk: true,
+        telemetryStatus: PlaybackCacheTelemetryStatus.readFailed,
+      ),
+    );
+    final observations = <PlaybackCacheObservation>[];
+    final coordinator = PlaybackCacheCoordinator(
+      engine: engine,
+      storage: _Storage(freeBytes: 20 << 30),
+      session: _session,
+      profile: _fullProfile,
+      mediaBitrate: 8 * 1000 * 1000,
+      committedPosition: () => Duration.zero,
+      onObservation: observations.add,
+      onSafetyReopen: (_) async {},
+      mediaDuration: const Duration(hours: 1),
+    );
+
+    await coordinator.start();
+
+    expect(observations.single.telemetryAvailable, isFalse);
+    expect(observations.single.fullReadAheadReachedEnd, isFalse);
+    await coordinator.stop();
+  });
+
   test('concurrent refreshes are serialized and coalesced', () async {
     final gate = Completer<void>();
     final engine = _Engine(null, readGate: gate);
@@ -133,7 +265,19 @@ void main() {
 
   test('stale playback identity cannot publish a cache observation', () async {
     final gate = Completer<void>();
-    final engine = _IdentityEngine(gate);
+    final engine = _IdentityEngine(
+      gate,
+      snapshot: const PlaybackCacheEngineSnapshot(
+        fileCacheBytes: 1 << 30,
+        rawInputRateBytesPerSecond: 1,
+        seekableRanges: [
+          PlaybackCacheRange(start: Duration.zero, end: Duration(hours: 1)),
+        ],
+        pausedForCache: false,
+        cacheBufferingPercent: 100,
+        cacheOnDisk: true,
+      ),
+    );
     final sessionIdentity = Object();
     var current = true;
     final observations = <PlaybackCacheObservation>[];
@@ -141,7 +285,7 @@ void main() {
       engine: engine,
       storage: _Storage(freeBytes: 20 << 30),
       session: _session,
-      profile: _profile,
+      profile: _fullProfile,
       mediaBitrate: 8 * 1000 * 1000,
       committedPosition: () => Duration.zero,
       onObservation: observations.add,
@@ -155,6 +299,7 @@ void main() {
           identity.operationGeneration == 4,
       statePollInterval: const Duration(hours: 1),
       spacePollInterval: const Duration(hours: 1),
+      mediaDuration: const Duration(hours: 1),
     );
 
     final start = coordinator.start();
@@ -186,6 +331,27 @@ const _profile = ResolvedPlaybackCacheProfile(
   streamBufferBytes: 128 << 10,
   donateBuffer: true,
   sessionDirectory: null,
+);
+
+const _fullProfile = ResolvedPlaybackCacheProfile(
+  runtimeMode: PlaybackCacheRuntimeMode.disk,
+  transportKind: PlaybackTransportKind.progressiveHttp,
+  fallbackReason: PlaybackCacheFallbackReason.none,
+  forwardTarget: Duration(hours: 1),
+  backwardTarget: Duration.zero,
+  sessionTargetBytes: 8 << 30,
+  reservedFreeBytes: 2 << 30,
+  demuxerForwardMetadataBytes: 32 << 20,
+  demuxerBackwardMetadataBytes: 16 << 20,
+  metadataBudgetCapBytes: 64 << 20,
+  streamBufferBytes: 128 << 10,
+  donateBuffer: true,
+  sessionDirectory: null,
+  readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+  budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+  sizeConfidence: PlaybackCacheSizeConfidence.estimated,
+  readAheadAnchor: Duration.zero,
+  estimatedSourceBytes: 4 << 30,
 );
 
 final _session = PlaybackCacheSession(
@@ -227,9 +393,10 @@ class _Engine implements PlaybackCacheEngine {
 
 class _IdentityEngine
     implements PlaybackCacheEngine, PlaybackCacheIdentitySnapshotReader {
-  _IdentityEngine(this.gate);
+  _IdentityEngine(this.gate, {this.snapshot});
 
   final Completer<void> gate;
+  final PlaybackCacheEngineSnapshot? snapshot;
   PlaybackCacheReadIdentity? identity;
 
   @override
@@ -253,16 +420,7 @@ class _IdentityEngine
   }) async {
     this.identity = identity;
     await gate.future;
-    return isIdentityCurrent(identity)
-        ? const PlaybackCacheEngineSnapshot(
-            fileCacheBytes: 1,
-            rawInputRateBytesPerSecond: 1,
-            seekableRanges: [],
-            pausedForCache: false,
-            cacheBufferingPercent: 0,
-            cacheOnDisk: true,
-          )
-        : null;
+    return isIdentityCurrent(identity) ? snapshot : null;
   }
 }
 

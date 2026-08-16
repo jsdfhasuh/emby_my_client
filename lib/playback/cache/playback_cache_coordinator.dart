@@ -16,6 +16,13 @@ class PlaybackCacheObservation {
     required this.availableBytes,
     required this.stopThresholdBytes,
     required this.lowSpaceTriggerBytes,
+    this.readAheadAnchor = Duration.zero,
+    this.mediaDuration,
+    this.actualContinuousStart,
+    this.actualContinuousEnd,
+    this.fullReadAheadEligible = false,
+    this.fullReadAheadReachedEnd = false,
+    this.telemetryAvailable = false,
   });
 
   final PlaybackCacheEngineSnapshot? engineSnapshot;
@@ -24,6 +31,13 @@ class PlaybackCacheObservation {
   final int? availableBytes;
   final int stopThresholdBytes;
   final int lowSpaceTriggerBytes;
+  final Duration readAheadAnchor;
+  final Duration? mediaDuration;
+  final Duration? actualContinuousStart;
+  final Duration? actualContinuousEnd;
+  final bool fullReadAheadEligible;
+  final bool fullReadAheadReachedEnd;
+  final bool telemetryAvailable;
 }
 
 typedef PlaybackCachePositionReader = Duration Function();
@@ -43,17 +57,24 @@ class PlaybackCacheCoordinator {
     required this.onObservation,
     required this.onSafetyReopen,
     this.statePollInterval = const Duration(seconds: 1),
-    this.spacePollInterval = const Duration(seconds: 10),
+    Duration? spacePollInterval,
     this.expectedCloseLatency = const Duration(seconds: 2),
     this.generation = 0,
     this.isGenerationCurrent,
     Object? playbackItemSessionIdentity,
     PlaybackCacheReadIdentityCurrent? isReadIdentityCurrent,
+    this.mediaDuration,
   }) : _readIdentity = PlaybackCacheReadIdentity(
          sessionIdentity: playbackItemSessionIdentity ?? session,
          engineIdentity: engine,
          operationGeneration: generation,
        ),
+       spacePollInterval =
+           spacePollInterval ??
+           (profile.readAheadStrategy == PlaybackCacheReadAheadStrategy.mediaEnd
+               ? const Duration(seconds: 2)
+               : const Duration(seconds: 10)),
+       _readAheadAnchor = profile.readAheadAnchor,
        _isReadIdentityCurrent =
            isReadIdentityCurrent ??
            ((identity) =>
@@ -76,10 +97,12 @@ class PlaybackCacheCoordinator {
   final Duration statePollInterval;
   final Duration spacePollInterval;
   final Duration expectedCloseLatency;
+  final Duration? mediaDuration;
   final int generation;
   final bool Function(int generation)? isGenerationCurrent;
   final PlaybackCacheReadIdentity _readIdentity;
   final PlaybackCacheReadIdentityCurrent _isReadIdentityCurrent;
+  Duration _readAheadAnchor;
 
   Timer? _stateTimer;
   Timer? _spaceTimer;
@@ -92,6 +115,7 @@ class PlaybackCacheCoordinator {
 
   bool get isActive => _active;
   bool get safetyReopenRequested => _safetyRequested;
+  Duration get readAheadAnchor => _readAheadAnchor;
 
   Future<void> start() async {
     if (_active) return;
@@ -114,9 +138,21 @@ class PlaybackCacheCoordinator {
     if (_active && !_safetyRequested) _startTimers();
   }
 
-  Future<void> afterExecutedSeek() => refreshNow(checkSpace: true);
+  Future<void> afterExecutedSeek({Duration? committedPosition}) {
+    if (committedPosition != null) {
+      lowerReadAheadAnchor(committedPosition);
+    }
+    return refreshNow(checkSpace: true);
+  }
+
+  void lowerReadAheadAnchor(Duration candidate) {
+    final normalized = candidate < Duration.zero ? Duration.zero : candidate;
+    if (normalized < _readAheadAnchor) _readAheadAnchor = normalized;
+  }
 
   Future<void> handleMemoryPressure() async {
+    if (!_active || _safetyRequested) return;
+    await refreshNow(checkSpace: true);
     if (!_active || _safetyRequested) return;
     await _requestSafetyReopen(PlaybackCacheSafetyReason.memoryPressure);
   }
@@ -188,10 +224,21 @@ class PlaybackCacheCoordinator {
     final ranges = normalizedPlaybackCacheRanges(
       snapshot?.seekableRanges ?? const [],
     );
-    final actual = actualPlaybackCacheRange(
-      ranges: ranges,
-      position: committedPosition(),
-    );
+    final position = committedPosition();
+    final actual = actualPlaybackCacheRange(ranges: ranges, position: position);
+    final telemetryAvailable =
+        snapshot != null &&
+        snapshot.telemetryStatus == PlaybackCacheTelemetryStatus.available;
+    final fullReadAheadEligible =
+        profile.readAheadStrategy == PlaybackCacheReadAheadStrategy.mediaEnd;
+    final continuous =
+        fullReadAheadEligible && telemetryAvailable && mediaDuration != null
+        ? continuousPlaybackCacheCoverage(
+            ranges: ranges,
+            anchor: _readAheadAnchor,
+            mediaDuration: mediaDuration!,
+          )
+        : null;
     try {
       onObservation(
         PlaybackCacheObservation(
@@ -201,6 +248,13 @@ class PlaybackCacheCoordinator {
           availableBytes: _lastAvailableBytes,
           stopThresholdBytes: stopThreshold,
           lowSpaceTriggerBytes: lowSpaceTrigger,
+          readAheadAnchor: _readAheadAnchor,
+          mediaDuration: mediaDuration,
+          actualContinuousStart: continuous?.start,
+          actualContinuousEnd: continuous?.end,
+          fullReadAheadEligible: fullReadAheadEligible,
+          fullReadAheadReachedEnd: continuous?.reachesMediaEnd ?? false,
+          telemetryAvailable: telemetryAvailable,
         ),
       );
     } catch (_) {
@@ -213,7 +267,9 @@ class PlaybackCacheCoordinator {
       return;
     }
     final fileBytes = snapshot?.fileCacheBytes;
-    if (fileBytes != null && fileBytes >= stopThreshold) {
+    if (profile.budgetPolicy == PlaybackCacheBudgetPolicy.boundedReopen &&
+        fileBytes != null &&
+        fileBytes >= stopThreshold) {
       await _requestSafetyReopen(PlaybackCacheSafetyReason.budget);
     }
   }
@@ -274,7 +330,11 @@ List<PlaybackCacheRange> normalizedPlaybackCacheRanges(
   Iterable<PlaybackCacheRange> source,
 ) {
   final sorted =
-      source.where((range) => range.end > range.start).toList(growable: false)
+      source
+          .where(
+            (range) => range.start >= Duration.zero && range.end > range.start,
+          )
+          .toList(growable: false)
         ..sort((left, right) => left.start.compareTo(right.start));
   if (sorted.isEmpty) return const [];
   final merged = <PlaybackCacheRange>[];
@@ -302,6 +362,41 @@ PlaybackCacheActualRange? actualPlaybackCacheRange({
     return PlaybackCacheActualRange(
       backward: position - range.start,
       forward: range.end - position,
+    );
+  }
+  return null;
+}
+
+class PlaybackCacheContinuousCoverage {
+  const PlaybackCacheContinuousCoverage({
+    required this.start,
+    required this.end,
+    required this.reachesMediaEnd,
+  });
+
+  final Duration start;
+  final Duration end;
+  final bool reachesMediaEnd;
+}
+
+PlaybackCacheContinuousCoverage? continuousPlaybackCacheCoverage({
+  required Iterable<PlaybackCacheRange> ranges,
+  required Duration anchor,
+  required Duration mediaDuration,
+  Duration tolerance = const Duration(seconds: 2),
+}) {
+  if (mediaDuration <= Duration.zero) return null;
+  final normalized = normalizedPlaybackCacheRanges(ranges);
+  final normalizedAnchor = anchor < Duration.zero ? Duration.zero : anchor;
+  final startLimit = normalizedAnchor + tolerance;
+  final endLimit = mediaDuration - tolerance;
+  for (final range in normalized) {
+    if (range.end < normalizedAnchor) continue;
+    if (range.start > startLimit) return null;
+    return PlaybackCacheContinuousCoverage(
+      start: range.start,
+      end: range.end,
+      reachesMediaEnd: range.end >= endLimit,
     );
   }
   return null;

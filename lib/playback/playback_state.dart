@@ -78,6 +78,10 @@ class PlaybackState {
   bool get isReady => phase == PlaybackPhase.ready;
   bool get hasError => phase == PlaybackPhase.failed;
   Duration get displayPosition => requestedPosition ?? position;
+  bool get fullReadAheadReachedEnd =>
+      cacheObservation?.fullReadAheadReachedEnd ?? false;
+  bool get fullReadAheadTelemetryAvailable =>
+      cacheObservation?.telemetryAvailable ?? false;
 
   PlaybackState copyWith({
     PlaybackPhase? phase,

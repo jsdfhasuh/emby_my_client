@@ -411,6 +411,11 @@ class PlaybackController extends ChangeNotifier {
             mode: PlaybackCacheMode.custom,
             customSessionTargetBytes: testOverrides!.sessionTargetBytes,
           );
+    final effectiveSpacePollInterval =
+        effectiveCacheSettings.mode == PlaybackCacheMode.fullReadAhead &&
+            isFullReadAheadEligible(plan)
+        ? const Duration(seconds: 2)
+        : cacheSpacePollInterval;
     PlaybackCacheStorageSnapshot storageSnapshot =
         const PlaybackCacheStorageSnapshot.unavailable(
           PlaybackCacheStorageFailureReason.storageCapacityUnknown,
@@ -443,7 +448,7 @@ class PlaybackController extends ChangeNotifier {
       final preliminaryLowSpaceTrigger = cacheLowSpaceTriggerBytes(
         reservedFreeBytes: effectiveCacheSettings.reservedFreeBytes,
         inputRateBytesPerSecond: preliminaryRate,
-        pollInterval: cacheSpacePollInterval,
+        pollInterval: effectiveSpacePollInterval,
         expectedCloseLatency: const Duration(seconds: 2),
       );
       final available = storageSnapshot.freeBytes;
@@ -459,7 +464,7 @@ class PlaybackController extends ChangeNotifier {
       capabilities: capabilities,
       storage: storageSnapshot,
       readAheadAnchor: readAheadAnchor,
-      spacePollInterval: cacheSpacePollInterval,
+      spacePollInterval: effectiveSpacePollInterval,
     );
     final forcedReason = _forcedCacheFallbackReason;
     if (forcedReason != null &&
@@ -483,7 +488,7 @@ class PlaybackController extends ChangeNotifier {
       final lowSpaceTrigger = cacheLowSpaceTriggerBytes(
         reservedFreeBytes: profile.reservedFreeBytes,
         inputRateBytesPerSecond: inputRate,
-        pollInterval: cacheSpacePollInterval,
+        pollInterval: effectiveSpacePollInterval,
         expectedCloseLatency: const Duration(seconds: 2),
       );
       if ((storageSnapshot.freeBytes ?? 0) <= lowSpaceTrigger) {
@@ -535,6 +540,12 @@ class PlaybackController extends ChangeNotifier {
         requestedMode: applyResult.requestedMode,
         confirmedMode: applyResult.actualMode,
         fallbackReason: applyResult.fallbackReason,
+        readAheadStrategy: profile.readAheadStrategy,
+        budgetPolicy: profile.budgetPolicy,
+        sizeConfidence: profile.sizeConfidence,
+        fullReadAheadEligible:
+            profile.readAheadStrategy ==
+            PlaybackCacheReadAheadStrategy.mediaEnd,
         settingsMode: cacheSettings.mode,
         optionalTuningDegraded: applyResult.optionalTuningDegraded,
         optionalTuningUnavailableCount:
@@ -641,9 +652,13 @@ class PlaybackController extends ChangeNotifier {
     _completeSeekBookkeeping(bookkeeping);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
+      final committedPosition = result.committedPosition ?? _state.position;
+      _updateReadAheadAnchorAfterExecutedSeek(committedPosition);
       _injectApprovedSeekFailureIfPending();
       await _reportProgress();
-      await _cacheCoordinator?.afterExecutedSeek();
+      await _cacheCoordinator?.afterExecutedSeek(
+        committedPosition: committedPosition,
+      );
     }
     return result;
   }
@@ -684,9 +699,13 @@ class PlaybackController extends ChangeNotifier {
     _completeSeekBookkeeping(bookkeeping);
     if (result.disposition == SeekDisposition.executed) {
       _recordExecutedSeek();
+      final committedPosition = result.committedPosition ?? _state.position;
+      _updateReadAheadAnchorAfterExecutedSeek(committedPosition);
       _injectApprovedSeekFailureIfPending();
       await _reportProgress();
-      await _cacheCoordinator?.afterExecutedSeek();
+      await _cacheCoordinator?.afterExecutedSeek(
+        committedPosition: committedPosition,
+      );
     }
     return result;
   }
@@ -1126,7 +1145,11 @@ class PlaybackController extends ChangeNotifier {
           identical(identity.engineIdentity, engine) &&
           _isCurrent(identity.operationGeneration),
       onObservation: (observation) {
-        if (_disposed || !identical(_cacheCoordinator, coordinator)) return;
+        if (_disposed ||
+            !_isCurrent(token) ||
+            !identical(_cacheCoordinator, coordinator)) {
+          return;
+        }
         if (observation.engineSnapshot == null &&
             !_cacheSnapshotUnavailableLogged) {
           _cacheEvidence.recordCacheSnapshotUnavailable();
@@ -1145,7 +1168,11 @@ class PlaybackController extends ChangeNotifier {
       },
       onSafetyReopen: _handleCacheSafetyReopen,
       statePollInterval: cacheStatePollInterval,
-      spacePollInterval: cacheSpacePollInterval,
+      spacePollInterval:
+          profile.readAheadStrategy == PlaybackCacheReadAheadStrategy.mediaEnd
+          ? const Duration(seconds: 2)
+          : cacheSpacePollInterval,
+      mediaDuration: _state.plan?.duration,
     );
     _cacheCoordinator = coordinator;
     try {
@@ -1344,6 +1371,21 @@ class PlaybackController extends ChangeNotifier {
     _stablePlaybackSince = null;
     _lastStabilityPosition = _state.position;
     _seekBecameStable = false;
+  }
+
+  void _updateReadAheadAnchorAfterExecutedSeek(Duration committedPosition) {
+    final profile = _state.cacheProfile;
+    if (profile == null ||
+        profile.readAheadStrategy != PlaybackCacheReadAheadStrategy.mediaEnd) {
+      return;
+    }
+    final candidate = committedPosition < Duration.zero
+        ? Duration.zero
+        : committedPosition;
+    if (candidate >= profile.readAheadAnchor) return;
+    final updatedProfile = profile.copyWith(readAheadAnchor: candidate);
+    _setState(_state.copyWith(cacheProfile: updatedProfile));
+    _cacheCoordinator?.lowerReadAheadAnchor(candidate);
   }
 
   void _injectApprovedSeekFailureIfPending() {
@@ -1958,6 +2000,13 @@ class PlaybackController extends ChangeNotifier {
       requestedMode: _state.cacheProfile?.runtimeMode,
       confirmedMode: confirmedMode,
       fallbackReason: _state.cacheFallbackReason,
+      readAheadStrategy: _state.cacheProfile?.readAheadStrategy,
+      budgetPolicy: _state.cacheProfile?.budgetPolicy,
+      sizeConfidence: _state.cacheProfile?.sizeConfidence,
+      fullReadAheadEligible: observation.fullReadAheadEligible,
+      fullReadAheadReachedEnd: observation.fullReadAheadEligible
+          ? observation.fullReadAheadReachedEnd
+          : false,
       settingsMode: cacheSettings.mode,
       cacheEnabled: runtimeMode != PlaybackCacheRuntimeMode.disabled,
       cacheOnDisk: snapshot?.cacheOnDisk,
