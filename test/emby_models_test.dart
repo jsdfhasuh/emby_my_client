@@ -343,6 +343,28 @@ void main() {
     expect(source.runTimeTicks, 900000000);
   });
 
+  test('accepts positive media source sizes and rejects unsafe values', () {
+    for (final entry in <Object?, int?>{
+      123: 123,
+      '456': 456,
+      null: null,
+      0: null,
+      -1: null,
+      '-2': null,
+      '9223372036854775808': null,
+      'not-a-size': null,
+      1.5: null,
+      double.nan: null,
+    }.entries) {
+      final source = PlaybackMediaSource.fromJson({
+        'Id': 'source-1',
+        'SupportsDirectPlay': true,
+        'Size': entry.key,
+      });
+      expect(source.size, entry.value, reason: '${entry.key}');
+    }
+  });
+
   test('diagnostic logs redact network URLs and Emby credentials', () {
     const token = 'c608e7499c5e4df19de4f0951ef6fce9';
     final redacted = DiagnosticLog.redact(

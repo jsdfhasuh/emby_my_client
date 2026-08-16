@@ -1116,6 +1116,7 @@ class EmbyApi {
       errorCode: info.errorCode,
       sourceProtocol: source.protocol,
       duration: duration,
+      sourceSizeBytes: source.size,
       transportKind: classifyPlaybackTransport(
         method: method,
         uri: uri,

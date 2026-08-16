@@ -134,4 +134,17 @@ void main() {
       expect(restored.mode, mode);
     }
   });
+
+  test('full read-ahead mode round-trips without changing defaults', () {
+    const settings = PlaybackSettings(
+      cache: PlaybackCacheSettings(mode: PlaybackCacheMode.fullReadAhead),
+    );
+
+    final restored = PlaybackSettings.fromJson(settings.toJson());
+
+    expect(restored.cache.mode, PlaybackCacheMode.fullReadAhead);
+    expect(restored.maxStreamingBitrate, 120000000);
+    expect(restored.cache.customForwardSeconds, 180);
+    expect(restored.cache.customBackwardSeconds, 120);
+  });
 }

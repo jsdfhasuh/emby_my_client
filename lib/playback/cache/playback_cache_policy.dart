@@ -14,6 +14,12 @@ enum PlaybackCacheRuntimeMode {
   unconfirmed,
 }
 
+enum PlaybackCacheReadAheadStrategy { boundedWindow, mediaEnd }
+
+enum PlaybackCacheBudgetPolicy { boundedReopen, lowSpaceOnly }
+
+enum PlaybackCacheSizeConfidence { serverDeclared, estimated, unknown }
+
 enum PlaybackCacheFallbackReason {
   none,
   offlineMedia,
@@ -28,6 +34,7 @@ enum PlaybackCacheFallbackReason {
   targetTooSmallForMinimumWindow,
   metadataBudgetLimited,
   sessionBudgetReached,
+  fullReadAheadInsufficientSpace,
   lowSpace,
   memoryPressure,
 }
@@ -47,6 +54,11 @@ class ResolvedPlaybackCacheProfile {
     required this.streamBufferBytes,
     required this.donateBuffer,
     required this.sessionDirectory,
+    this.readAheadStrategy = PlaybackCacheReadAheadStrategy.boundedWindow,
+    this.budgetPolicy = PlaybackCacheBudgetPolicy.boundedReopen,
+    this.sizeConfidence = PlaybackCacheSizeConfidence.unknown,
+    this.readAheadAnchor = Duration.zero,
+    this.estimatedSourceBytes,
   });
 
   final PlaybackCacheRuntimeMode runtimeMode;
@@ -62,6 +74,11 @@ class ResolvedPlaybackCacheProfile {
   final int streamBufferBytes;
   final bool donateBuffer;
   final Directory? sessionDirectory;
+  final PlaybackCacheReadAheadStrategy readAheadStrategy;
+  final PlaybackCacheBudgetPolicy budgetPolicy;
+  final PlaybackCacheSizeConfidence sizeConfidence;
+  final Duration readAheadAnchor;
+  final int? estimatedSourceBytes;
 
   int get totalMetadataBytes =>
       demuxerForwardMetadataBytes + demuxerBackwardMetadataBytes;
@@ -69,6 +86,11 @@ class ResolvedPlaybackCacheProfile {
   ResolvedPlaybackCacheProfile copyWith({
     int? sessionTargetBytes,
     int? streamBufferBytes,
+    PlaybackCacheReadAheadStrategy? readAheadStrategy,
+    PlaybackCacheBudgetPolicy? budgetPolicy,
+    PlaybackCacheSizeConfidence? sizeConfidence,
+    Duration? readAheadAnchor,
+    int? estimatedSourceBytes,
   }) => ResolvedPlaybackCacheProfile(
     runtimeMode: runtimeMode,
     transportKind: transportKind,
@@ -83,11 +105,20 @@ class ResolvedPlaybackCacheProfile {
     streamBufferBytes: streamBufferBytes ?? this.streamBufferBytes,
     donateBuffer: donateBuffer,
     sessionDirectory: sessionDirectory,
+    readAheadStrategy: readAheadStrategy ?? this.readAheadStrategy,
+    budgetPolicy: budgetPolicy ?? this.budgetPolicy,
+    sizeConfidence: sizeConfidence ?? this.sizeConfidence,
+    readAheadAnchor: readAheadAnchor ?? this.readAheadAnchor,
+    estimatedSourceBytes: estimatedSourceBytes ?? this.estimatedSourceBytes,
   );
 
   ResolvedPlaybackCacheProfile memoryFallback(
     PlaybackCacheFallbackReason reason, {
     int maximumMetadataBytes = 64 * 1024 * 1024,
+    PlaybackCacheSizeConfidence sizeConfidence =
+        PlaybackCacheSizeConfidence.unknown,
+    Duration readAheadAnchor = Duration.zero,
+    int? estimatedSourceBytes,
   }) {
     final forwardBytes = min(
       demuxerForwardMetadataBytes,
@@ -115,6 +146,11 @@ class ResolvedPlaybackCacheProfile {
       streamBufferBytes: streamBufferBytes,
       donateBuffer: donateBuffer,
       sessionDirectory: null,
+      readAheadStrategy: PlaybackCacheReadAheadStrategy.boundedWindow,
+      budgetPolicy: PlaybackCacheBudgetPolicy.boundedReopen,
+      sizeConfidence: sizeConfidence,
+      readAheadAnchor: readAheadAnchor,
+      estimatedSourceBytes: estimatedSourceBytes,
     );
   }
 }
@@ -171,11 +207,23 @@ String _decodedLowercaseUri(Uri uri) {
   }
 }
 
+bool isFullReadAheadEligible(PlaybackPlan plan) =>
+    plan.transportKind == PlaybackTransportKind.progressiveHttp &&
+    (plan.duration ?? Duration.zero) > Duration.zero;
+
+class _PlaybackCacheSizeEvidence {
+  const _PlaybackCacheSizeEvidence(this.confidence, this.bytes);
+
+  final PlaybackCacheSizeConfidence confidence;
+  final int? bytes;
+}
+
 class PlaybackCacheProfileResolver {
   const PlaybackCacheProfileResolver();
 
   static const int _mib = 1024 * 1024;
   static const int _gib = 1024 * 1024 * 1024;
+  static const int _maxInt = 9223372036854775807;
   static const int defaultBitrate = 8 * 1000 * 1000;
   static const int defaultStreamBufferBytes = 128 * 1024;
 
@@ -185,8 +233,11 @@ class PlaybackCacheProfileResolver {
     required PlaybackCacheEngineCapabilities capabilities,
     required PlaybackCacheStorageSnapshot storage,
     bool memoryPressure = false,
+    Duration readAheadAnchor = Duration.zero,
   }) {
     final preset = _preset(settings, storage.freeBytes);
+    final anchor = _normalizedAnchor(plan.duration, readAheadAnchor);
+    final sizeEvidence = _sizeEvidence(plan);
     if (plan.transportKind == PlaybackTransportKind.offlineLocal) {
       return _nonDiskProfile(
         transportKind: plan.transportKind,
@@ -348,6 +399,19 @@ class PlaybackCacheProfileResolver {
       streamBufferBytes: defaultStreamBufferBytes,
       donateBuffer: true,
       sessionDirectory: storage.session!.directory,
+      readAheadStrategy:
+          settings.mode == PlaybackCacheMode.fullReadAhead &&
+              isFullReadAheadEligible(plan)
+          ? PlaybackCacheReadAheadStrategy.mediaEnd
+          : PlaybackCacheReadAheadStrategy.boundedWindow,
+      budgetPolicy:
+          settings.mode == PlaybackCacheMode.fullReadAhead &&
+              isFullReadAheadEligible(plan)
+          ? PlaybackCacheBudgetPolicy.lowSpaceOnly
+          : PlaybackCacheBudgetPolicy.boundedReopen,
+      sizeConfidence: sizeEvidence.confidence,
+      readAheadAnchor: anchor,
+      estimatedSourceBytes: sizeEvidence.bytes,
     );
   }
 
@@ -407,8 +471,49 @@ class PlaybackCacheProfileResolver {
         settings.customBackwardSeconds,
         settings.customSessionTargetBytes,
       ),
+      PlaybackCacheMode.fullReadAhead => const _CachePreset(
+        180,
+        120,
+        512 * _mib,
+      ),
       PlaybackCacheMode.automatic => _automaticPreset(availableBytes),
     };
+  }
+
+  _PlaybackCacheSizeEvidence _sizeEvidence(PlaybackPlan plan) {
+    final declared = plan.sourceSizeBytes;
+    if (declared != null && declared > 0) {
+      return _PlaybackCacheSizeEvidence(
+        PlaybackCacheSizeConfidence.serverDeclared,
+        declared,
+      );
+    }
+    final duration = plan.duration ?? Duration.zero;
+    final bitrate = plan.bitrate;
+    if (duration <= Duration.zero || bitrate == null || bitrate <= 0) {
+      return const _PlaybackCacheSizeEvidence(
+        PlaybackCacheSizeConfidence.unknown,
+        null,
+      );
+    }
+    final seconds = duration.inMicroseconds / Duration.microsecondsPerSecond;
+    final estimated = bitrate / 8 * seconds * 1.25;
+    if (!estimated.isFinite || estimated <= 0 || estimated > _maxInt) {
+      return const _PlaybackCacheSizeEvidence(
+        PlaybackCacheSizeConfidence.unknown,
+        null,
+      );
+    }
+    return _PlaybackCacheSizeEvidence(
+      PlaybackCacheSizeConfidence.estimated,
+      estimated.ceil(),
+    );
+  }
+
+  Duration _normalizedAnchor(Duration? duration, Duration anchor) {
+    final nonnegative = anchor < Duration.zero ? Duration.zero : anchor;
+    if (duration == null || duration <= Duration.zero) return nonnegative;
+    return nonnegative > duration ? duration : nonnegative;
   }
 
   _CachePreset _automaticPreset(int? availableBytes) {

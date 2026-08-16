@@ -235,6 +235,7 @@ void main() {
                   protocol: 'Http',
                   container: 'strm',
                   runTimeTicks: 900000000,
+                  size: 900000000,
                 ),
               ],
             }),
@@ -245,6 +246,7 @@ void main() {
 
         expect(plan.duration, const Duration(seconds: 90));
         expect(plan.transportKind, PlaybackTransportKind.progressiveHttp);
+        expect(plan.sourceSizeBytes, 900000000);
       },
     );
 
@@ -677,6 +679,7 @@ Map<String, dynamic> _source({
   String? directStreamUrl,
   String? transcodingUrl,
   int? runTimeTicks,
+  int? size,
   String? liveStreamId,
 }) => {
   'Id': id,
@@ -685,6 +688,7 @@ Map<String, dynamic> _source({
   'Protocol': ?protocol,
   'Container': container,
   'Bitrate': 8000000,
+  'Size': ?size,
   'RunTimeTicks': ?runTimeTicks,
   'LiveStreamId': ?liveStreamId,
   'SupportsDirectPlay': directPlay,

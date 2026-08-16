@@ -598,7 +598,7 @@ class PlaybackMediaSource {
         protocol: json['Protocol']?.toString(),
         container: json['Container']?.toString(),
         bitrate: _asInt(json['Bitrate']),
-        size: _asInt(json['Size']),
+        size: _positiveInt(json['Size']),
         runTimeTicks: _asInt(json['RunTimeTicks']),
         directStreamUrl: json['DirectStreamUrl']?.toString(),
         transcodingUrl: json['TranscodingUrl']?.toString(),
@@ -659,6 +659,7 @@ class PlaybackPlan {
     this.sourceProtocol,
     this.duration,
     this.transportKind = PlaybackTransportKind.unknown,
+    this.sourceSizeBytes,
   });
 
   final Uri uri;
@@ -676,6 +677,7 @@ class PlaybackPlan {
   final String? sourceProtocol;
   final Duration? duration;
   final PlaybackTransportKind transportKind;
+  final int? sourceSizeBytes;
   final List<Map<String, dynamic>> mediaStreams;
   final List<String> transcodingReasons;
   final List<PlaybackMediaSource> availableMediaSources;
@@ -700,6 +702,7 @@ class PlaybackPlan {
     String? sourceProtocol,
     Duration? duration,
     PlaybackTransportKind? transportKind,
+    int? sourceSizeBytes,
     List<Map<String, dynamic>>? mediaStreams,
     List<String>? transcodingReasons,
     List<PlaybackMediaSource>? availableMediaSources,
@@ -726,6 +729,7 @@ class PlaybackPlan {
     sourceProtocol: sourceProtocol ?? this.sourceProtocol,
     duration: duration ?? this.duration,
     transportKind: transportKind ?? this.transportKind,
+    sourceSizeBytes: sourceSizeBytes ?? this.sourceSizeBytes,
     mediaStreams: mediaStreams ?? this.mediaStreams,
     transcodingReasons: transcodingReasons ?? this.transcodingReasons,
     availableMediaSources: availableMediaSources ?? this.availableMediaSources,
@@ -745,6 +749,25 @@ int? _asInt(dynamic value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '');
+}
+
+int? _positiveInt(dynamic value) {
+  final parsed = switch (value) {
+    int number => number,
+    num number when number.isFinite && number == number.truncateToDouble() =>
+      number.toInt(),
+    String text => _parseBoundedInt(text),
+    _ => null,
+  };
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+int? _parseBoundedInt(String value) {
+  final parsed = BigInt.tryParse(value.trim());
+  if (parsed == null || parsed <= BigInt.zero) return null;
+  const maximum = 9223372036854775807;
+  final maximumValue = BigInt.from(maximum);
+  return parsed > maximumValue ? null : parsed.toInt();
 }
 
 double? _asDouble(dynamic value) {

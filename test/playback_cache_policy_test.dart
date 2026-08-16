@@ -63,6 +63,23 @@ void main() {
         PlaybackTransportKind.unknown,
       );
     });
+
+    test(
+      'full read-ahead eligibility depends on progressive transport and duration',
+      () {
+        expect(isFullReadAheadEligible(_plan()), isTrue);
+        expect(
+          isFullReadAheadEligible(
+            _plan(transport: PlaybackTransportKind.segmentedHttp),
+          ),
+          isFalse,
+        );
+        expect(
+          isFullReadAheadEligible(_plan(duration: Duration.zero)),
+          isFalse,
+        );
+      },
+    );
   });
 
   group('profile resolution', () {
@@ -269,6 +286,50 @@ void main() {
         profile.demuxerBackwardMetadataBytes.toString(),
       );
     });
+
+    test('resolved profile carries source-size evidence and anchor', () {
+      final declared = resolver.resolve(
+        plan: _plan(sourceSizeBytes: 9 << 30),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+        capabilities: _capabilities(),
+        storage: _storage(80 << 30),
+        readAheadAnchor: const Duration(minutes: 5),
+      );
+      final estimated = resolver.resolve(
+        plan: _plan(),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+        capabilities: _capabilities(),
+        storage: _storage(80 << 30),
+      );
+      final unknown = resolver.resolve(
+        plan: _plan(bitrate: null),
+        settings: const PlaybackCacheSettings(
+          mode: PlaybackCacheMode.fullReadAhead,
+        ),
+        capabilities: _capabilities(),
+        storage: _storage(80 << 30),
+      );
+
+      expect(
+        declared.sizeConfidence,
+        PlaybackCacheSizeConfidence.serverDeclared,
+      );
+      expect(declared.estimatedSourceBytes, 9 << 30);
+      expect(declared.readAheadAnchor, const Duration(minutes: 5));
+      expect(
+        declared.readAheadStrategy,
+        PlaybackCacheReadAheadStrategy.mediaEnd,
+      );
+      expect(declared.budgetPolicy, PlaybackCacheBudgetPolicy.lowSpaceOnly);
+      expect(estimated.sizeConfidence, PlaybackCacheSizeConfidence.estimated);
+      expect(estimated.estimatedSourceBytes, isNotNull);
+      expect(unknown.sizeConfidence, PlaybackCacheSizeConfidence.unknown);
+      expect(unknown.estimatedSourceBytes, isNull);
+    });
   });
 }
 
@@ -291,6 +352,8 @@ PlaybackTransportKind _transport({
 PlaybackPlan _plan({
   PlaybackTransportKind transport = PlaybackTransportKind.progressiveHttp,
   int? bitrate = 8 * 1000 * 1000,
+  Duration duration = const Duration(hours: 1),
+  int? sourceSizeBytes,
 }) => PlaybackPlan(
   uri: Uri.https('media.test', '/video.mp4'),
   mediaSourceId: 'source',
@@ -300,8 +363,9 @@ PlaybackPlan _plan({
   mediaStreams: const [],
   transcodingReasons: const [],
   availableMediaSources: const [],
-  duration: const Duration(hours: 1),
+  duration: duration,
   bitrate: bitrate,
+  sourceSizeBytes: sourceSizeBytes,
   transportKind: transport,
 );
 

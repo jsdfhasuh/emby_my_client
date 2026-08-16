@@ -117,6 +117,8 @@ String _fallbackReasonLabel(PlaybackCacheFallbackReason reason) =>
         '会话目标不足以满足最小缓存窗口',
       PlaybackCacheFallbackReason.metadataBudgetLimited => '内存元数据预算受限',
       PlaybackCacheFallbackReason.sessionBudgetReached => '已达到会话缓存目标',
+      PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace =>
+        '持续预读所需空间不足，已使用有限窗口',
       PlaybackCacheFallbackReason.lowSpace => '设备空间不足',
       PlaybackCacheFallbackReason.memoryPressure => '系统内存压力',
     };

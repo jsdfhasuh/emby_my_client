@@ -5,6 +5,7 @@ enum PlaybackCacheMode {
   balanced,
   aggressive,
   custom,
+  fullReadAhead,
 }
 
 class PlaybackCacheSettings {

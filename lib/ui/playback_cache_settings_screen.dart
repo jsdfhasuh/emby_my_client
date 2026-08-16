@@ -151,7 +151,9 @@ class _PlaybackCacheSettingsScreenState
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    for (final mode in PlaybackCacheMode.values)
+                    for (final mode in PlaybackCacheMode.values.where(
+                      (mode) => mode != PlaybackCacheMode.fullReadAhead,
+                    ))
                       ChoiceChip(
                         key: ValueKey('cache-mode-${mode.name}'),
                         label: Text(playbackCacheModeLabel(mode)),
@@ -317,11 +319,15 @@ String playbackCacheModeLabel(PlaybackCacheMode mode) => switch (mode) {
   PlaybackCacheMode.balanced => '平衡',
   PlaybackCacheMode.aggressive => '大缓存',
   PlaybackCacheMode.custom => '自定义',
+  PlaybackCacheMode.fullReadAhead => '持续预读',
 };
 
 String playbackCacheSettingsSummary(PlaybackCacheSettings settings) {
   if (settings.mode == PlaybackCacheMode.automatic) {
     return '自动 · 根据可用空间动态决定';
+  }
+  if (settings.mode == PlaybackCacheMode.fullReadAhead) {
+    return '持续预读 · 空间允许时预读至结尾';
   }
   final targets = switch (settings.mode) {
     PlaybackCacheMode.automatic => throw StateError('unreachable'),
@@ -333,6 +339,7 @@ String playbackCacheSettingsSummary(PlaybackCacheSettings settings) {
       settings.customForwardSeconds,
       settings.customBackwardSeconds,
     ),
+    PlaybackCacheMode.fullReadAhead => throw StateError('handled above'),
   };
   return '${playbackCacheModeLabel(settings.mode).replaceAll('（推荐）', '')} · '
       '前向 ${formatPlaybackCacheTime(targets.$1)} · '
