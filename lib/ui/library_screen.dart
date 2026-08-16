@@ -552,153 +552,198 @@ class _LibraryBrowseToolbar extends StatelessWidget {
     return SizedBox(
       key: const ValueKey('library-action-bar'),
       height: 64,
-      child: LayoutBuilder(
-        builder: (context, constraints) => SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          scrollDirection: Axis.horizontal,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              minWidth: constraints.maxWidth > 28
-                  ? constraints.maxWidth - 28
-                  : 0,
-            ),
-            child: Row(
-              children: [
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minWidth: largeLayout ? 150 : 56,
-                    maxWidth: largeLayout ? 230 : 88,
+      child: largeLayout
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: _buildSummaryRegion(context),
+                    ),
                   ),
-                  child: Column(
+                  Expanded(flex: 4, child: _buildCenteredActionViewport()),
+                  const Expanded(child: SizedBox()),
+                ],
+              ),
+            )
+          : LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                key: const ValueKey('library-toolbar-scroll'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
+                scrollDirection: Axis.horizontal,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minWidth: constraints.maxWidth > 28
+                        ? constraints.maxWidth - 28
+                        : 0,
+                  ),
+                  child: Row(
                     mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        primaryResultLabel,
-                        key: const ValueKey('library-result-summary'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (scanProgressLabel case final progress?)
-                        Text(
-                          progress,
-                          key: const ValueKey('library-scan-progress'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurfaceVariant
-                                    .withValues(alpha: 0.78),
-                              ),
-                        ),
+                      _buildSummaryRegion(context),
+                      const SizedBox(width: 8),
+                      _buildActionGroup(context),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                if (showPlaybackActions) ...[
-                  _toolbarCommand(
-                    key: const ValueKey('library-play-all-button'),
-                    icon: Icons.play_arrow,
-                    label: videoOnly ? '播放视频' : '播放全部',
-                    enabled: canPlay,
-                    onPressed: onPlayAll,
-                  ),
-                  _toolbarCommand(
-                    key: const ValueKey('library-shuffle-button'),
-                    icon: Icons.shuffle,
-                    label: videoOnly ? '随机视频' : '随机播放',
-                    enabled: canPlay,
-                    onPressed: onShuffle,
-                  ),
-                ],
-                PopupMenuButton<LibrarySortBy>(
-                  key: const ValueKey('library-sort-button'),
-                  tooltip: '排序方式',
-                  initialValue: sortBy,
-                  onSelected: onSortSelected,
-                  itemBuilder: (context) => [
-                    for (final option in LibrarySortBy.values)
-                      PopupMenuItem(
-                        key: ValueKey('library-sort-${option.name}'),
-                        value: option,
-                        child: Text(_sortLabel(option)),
-                      ),
-                  ],
-                  child: _toolbarChild(
-                    icon: Icons.sort,
-                    label: _sortLabel(sortBy),
-                  ),
-                ),
-                IconButton(
-                  key: const ValueKey('library-sort-direction-button'),
-                  tooltip: sortOrder == LibrarySortOrder.ascending
-                      ? '当前升序，点击切换为降序'
-                      : '当前降序，点击切换为升序',
-                  onPressed: onToggleSortOrder,
-                  icon: Icon(
-                    sortOrder == LibrarySortOrder.ascending
-                        ? Icons.arrow_upward
-                        : Icons.arrow_downward,
-                  ),
-                ),
-                if (showFilter)
-                  _toolbarCommand(
-                    key: const ValueKey('library-filter-button'),
-                    icon: filterSummary == '筛选'
-                        ? Icons.filter_list
-                        : Icons.filter_alt,
-                    label: filterSummary,
-                    enabled: true,
-                    onPressed: onShowFilter,
-                  ),
-                PopupMenuButton<_LibraryMoreAction>(
-                  key: const ValueKey('library-more-button'),
-                  tooltip: '更多',
-                  icon: const Icon(Icons.more_horiz),
-                  onSelected: onMoreSelected,
-                  itemBuilder: (context) => [
-                    const PopupMenuItem(
-                      key: ValueKey('library-more-refresh'),
-                      value: _LibraryMoreAction.refresh,
-                      child: ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.refresh),
-                        title: Text('刷新'),
-                      ),
-                    ),
-                    if (canReset)
-                      const PopupMenuItem(
-                        key: ValueKey('library-more-reset'),
-                        value: _LibraryMoreAction.reset,
-                        child: ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.restart_alt),
-                          title: Text('重置筛选和排序'),
-                        ),
-                      ),
-                    if (canClearScan)
-                      const PopupMenuItem(
-                        key: ValueKey('library-more-clear-scan'),
-                        value: _LibraryMoreAction.clearScan,
-                        child: ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.cleaning_services_outlined),
-                          title: Text('清理扫描缓存'),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
+              ),
             ),
+    );
+  }
+
+  Widget _buildSummaryRegion(BuildContext context) {
+    return ConstrainedBox(
+      key: const ValueKey('library-toolbar-summary-region'),
+      constraints: BoxConstraints(
+        minWidth: largeLayout ? 150 : 56,
+        maxWidth: largeLayout ? 230 : 88,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            primaryResultLabel,
+            key: const ValueKey('library-result-summary'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (scanProgressLabel case final progress?)
+            Text(
+              progress,
+              key: const ValueKey('library-scan-progress'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurfaceVariant.withValues(alpha: 0.78),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCenteredActionViewport() {
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        key: const ValueKey('library-toolbar-scroll'),
+        scrollDirection: Axis.horizontal,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minWidth: constraints.maxWidth),
+          child: Align(
+            alignment: Alignment.center,
+            child: _buildActionGroup(context),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildActionGroup(BuildContext context) {
+    return Row(
+      key: const ValueKey('library-toolbar-action-group'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showPlaybackActions) ...[
+          _toolbarCommand(
+            key: const ValueKey('library-play-all-button'),
+            icon: Icons.play_arrow,
+            label: videoOnly ? '播放视频' : '播放全部',
+            enabled: canPlay,
+            onPressed: onPlayAll,
+          ),
+          _toolbarCommand(
+            key: const ValueKey('library-shuffle-button'),
+            icon: Icons.shuffle,
+            label: videoOnly ? '随机视频' : '随机播放',
+            enabled: canPlay,
+            onPressed: onShuffle,
+          ),
+        ],
+        PopupMenuButton<LibrarySortBy>(
+          key: const ValueKey('library-sort-button'),
+          tooltip: '排序方式',
+          initialValue: sortBy,
+          onSelected: onSortSelected,
+          itemBuilder: (context) => [
+            for (final option in LibrarySortBy.values)
+              PopupMenuItem(
+                key: ValueKey('library-sort-${option.name}'),
+                value: option,
+                child: Text(_sortLabel(option)),
+              ),
+          ],
+          child: _toolbarChild(icon: Icons.sort, label: _sortLabel(sortBy)),
+        ),
+        IconButton(
+          key: const ValueKey('library-sort-direction-button'),
+          tooltip: sortOrder == LibrarySortOrder.ascending
+              ? '当前升序，点击切换为降序'
+              : '当前降序，点击切换为升序',
+          onPressed: onToggleSortOrder,
+          icon: Icon(
+            sortOrder == LibrarySortOrder.ascending
+                ? Icons.arrow_upward
+                : Icons.arrow_downward,
+          ),
+        ),
+        if (showFilter)
+          _toolbarCommand(
+            key: const ValueKey('library-filter-button'),
+            icon: filterSummary == '筛选' ? Icons.filter_list : Icons.filter_alt,
+            label: filterSummary,
+            enabled: true,
+            onPressed: onShowFilter,
+          ),
+        PopupMenuButton<_LibraryMoreAction>(
+          key: const ValueKey('library-more-button'),
+          tooltip: '更多',
+          icon: const Icon(Icons.more_horiz),
+          onSelected: onMoreSelected,
+          itemBuilder: (context) => [
+            const PopupMenuItem(
+              key: ValueKey('library-more-refresh'),
+              value: _LibraryMoreAction.refresh,
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.refresh),
+                title: Text('刷新'),
+              ),
+            ),
+            if (canReset)
+              const PopupMenuItem(
+                key: ValueKey('library-more-reset'),
+                value: _LibraryMoreAction.reset,
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.restart_alt),
+                  title: Text('重置筛选和排序'),
+                ),
+              ),
+            if (canClearScan)
+              const PopupMenuItem(
+                key: ValueKey('library-more-clear-scan'),
+                value: _LibraryMoreAction.clearScan,
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.cleaning_services_outlined),
+                  title: Text('清理扫描缓存'),
+                ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 

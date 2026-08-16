@@ -301,6 +301,7 @@ void main() {
     }
     expect(find.text('媒体类型'), findsNothing);
     expect(find.byKey(const ValueKey('library-filter-button')), findsOneWidget);
+    _expectWideToolbarLayout(tester);
     expect(find.byKey(const ValueKey('large-screen-home')), findsOneWidget);
     expect(find.byKey(const ValueKey('large-screen-search')), findsOneWidget);
     expect(find.byKey(const ValueKey('large-screen-settings')), findsOneWidget);
@@ -354,6 +355,96 @@ void main() {
     await tester.pump();
     expect((homeCalls, searchCalls, settingsCalls, accountCalls), (1, 1, 1, 1));
     expect(tester.takeException(), isNull);
+    await _dispose(tester, api);
+  });
+
+  testWidgets(
+    'wide iPad centers toolbar actions independently from result summary',
+    (tester) async {
+      _setView(tester, const Size(1366, 1024));
+      final shortSummaryApi = _LayoutApi(itemCount: 60);
+
+      await tester.pumpWidget(
+        _libraryApp(shortSummaryApi, capabilities: PlatformCapabilities.ipad),
+      );
+      await tester.pumpAndSettle();
+      final shortSummaryActionCenter = tester
+          .getRect(find.byKey(const ValueKey('library-toolbar-action-group')))
+          .center
+          .dx;
+      _expectWideToolbarLayout(tester);
+      await _dispose(tester, shortSummaryApi);
+
+      final longSummaryApi = _LayoutApi(
+        itemCount: 60,
+        reportedTotalCount: 3786,
+      );
+      await tester.pumpWidget(
+        _libraryApp(longSummaryApi, capabilities: PlatformCapabilities.ipad),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('library-result-summary')))
+            .data,
+        '共 3,786 项',
+      );
+      final longSummaryActionCenter = tester
+          .getRect(find.byKey(const ValueKey('library-toolbar-action-group')))
+          .center
+          .dx;
+      _expectWideToolbarLayout(tester);
+      expect(longSummaryActionCenter, closeTo(shortSummaryActionCenter, 1));
+
+      await _dispose(tester, longSummaryApi);
+    },
+  );
+
+  testWidgets('1024px iPad keeps toolbar actions centered without overlap', (
+    tester,
+  ) async {
+    _setView(tester, const Size(1024, 768));
+    final api = _LayoutApi(itemCount: 60, reportedTotalCount: 3786);
+
+    await tester.pumpWidget(
+      _libraryApp(api, capabilities: PlatformCapabilities.ipad),
+    );
+    await tester.pumpAndSettle();
+
+    _expectWideToolbarLayout(tester);
+    expect(tester.takeException(), isNull);
+    await _dispose(tester, api);
+  });
+
+  testWidgets('narrow iPad keeps toolbar actions horizontally scrollable', (
+    tester,
+  ) async {
+    _setView(tester, const Size(300, 844));
+    final api = _LayoutApi(itemCount: 5);
+
+    await tester.pumpWidget(
+      _libraryApp(api, capabilities: PlatformCapabilities.ipad),
+    );
+    await tester.pumpAndSettle();
+
+    final toolbar = tester.getRect(
+      find.byKey(const ValueKey('library-action-bar')),
+    );
+    final scroll = find.byKey(const ValueKey('library-toolbar-scroll'));
+    final more = find.byKey(const ValueKey('library-more-button'));
+    expect(tester.getRect(more).right, greaterThan(toolbar.right));
+
+    await tester.drag(scroll, const Offset(-300, 0));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(more).right, lessThanOrEqualTo(toolbar.right + 1));
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('library-more-refresh')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('library-more-refresh')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
     await _dispose(tester, api);
   });
 
@@ -533,6 +624,36 @@ void main() {
   }
 }
 
+void _expectWideToolbarLayout(WidgetTester tester) {
+  final toolbar = tester.getRect(
+    find.byKey(const ValueKey('library-action-bar')),
+  );
+  final summary = tester.getRect(
+    find.byKey(const ValueKey('library-toolbar-summary-region')),
+  );
+  final actionGroup = tester.getRect(
+    find.byKey(const ValueKey('library-toolbar-action-group')),
+  );
+
+  expect(actionGroup.center.dx, closeTo(toolbar.center.dx, 3));
+  expect(summary.left, greaterThanOrEqualTo(toolbar.left));
+  expect(summary.right, lessThan(actionGroup.left));
+  for (final key in const [
+    'library-play-all-button',
+    'library-shuffle-button',
+    'library-sort-button',
+    'library-sort-direction-button',
+    'library-filter-button',
+    'library-more-button',
+  ]) {
+    expect(find.byKey(ValueKey(key)), findsOneWidget);
+    final rect = tester.getRect(find.byKey(ValueKey(key)));
+    expect(rect.left, greaterThanOrEqualTo(toolbar.left));
+    expect(rect.right, lessThanOrEqualTo(toolbar.right));
+  }
+  expect(tester.takeException(), isNull);
+}
+
 bool _isSelected(WidgetTester tester, String key) =>
     tester.widget<ChoiceChip>(find.byKey(ValueKey(key))).selected;
 
@@ -597,11 +718,15 @@ class _LayoutCall {
 }
 
 class _LayoutApi extends EmbyApi {
-  _LayoutApi({this.itemCount = 1, this.longTitles = false})
-    : super(_session, dio: Dio());
+  _LayoutApi({
+    this.itemCount = 1,
+    this.longTitles = false,
+    this.reportedTotalCount,
+  }) : super(_session, dio: Dio());
 
   final int itemCount;
   final bool longTitles;
+  final int? reportedTotalCount;
   final List<_LayoutCall> calls = [];
   int scanCalls = 0;
 
@@ -669,7 +794,7 @@ class _LayoutApi extends EmbyApi {
     ];
     return EmbyItemPage(
       items: items,
-      totalRecordCount: items.length,
+      totalRecordCount: reportedTotalCount ?? items.length,
       rawItemCount: items.length,
     );
   }
