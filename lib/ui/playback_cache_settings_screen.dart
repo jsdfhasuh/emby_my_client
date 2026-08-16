@@ -151,9 +151,7 @@ class _PlaybackCacheSettingsScreenState
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    for (final mode in PlaybackCacheMode.values.where(
-                      (mode) => mode != PlaybackCacheMode.fullReadAhead,
-                    ))
+                    for (final mode in PlaybackCacheMode.values)
                       ChoiceChip(
                         key: ValueKey('cache-mode-${mode.name}'),
                         label: Text(playbackCacheModeLabel(mode)),
@@ -162,6 +160,49 @@ class _PlaybackCacheSettingsScreenState
                       ),
                   ],
                 ),
+                if (_settings.mode == PlaybackCacheMode.fullReadAhead) ...[
+                  const SizedBox(height: 28),
+                  Text(
+                    '持续预读',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text('有限时长的普通 HTTP 媒体和 STRM 会从本次播放位置持续预读至结尾。'),
+                  const SizedBox(height: 6),
+                  const Text('实际是否到达结尾，会在播放时根据已确认的缓存范围判断。'),
+                  const SizedBox(height: 12),
+                  _bytesField(
+                    key: const ValueKey('cache-reserved-space'),
+                    label: '设备保留空间',
+                    value: _settings.reservedFreeBytes,
+                    values: const [
+                      1 << 30,
+                      2 << 30,
+                      3 << 30,
+                      4 << 30,
+                      6 << 30,
+                      8 << 30,
+                    ],
+                    onChanged: (value) => setState(
+                      () => _settings = _settings.copyWith(
+                        reservedFreeBytes: value,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _availableBytes == null
+                        ? '当前可用空间：无法确认'
+                        : '当前可用空间：约 ${formatPlaybackCacheBytes(_availableBytes!)}',
+                    key: const ValueKey('full-read-ahead-free-space'),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('本次所需空间：播放时根据媒体大小、恢复位置和码率确认'),
+                  const SizedBox(height: 6),
+                  const Text('结尾状态：只有实际连续缓存范围到达结尾才显示完成'),
+                ],
                 if (_settings.mode == PlaybackCacheMode.custom) ...[
                   const SizedBox(height: 28),
                   Text(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../playback/cache/playback_cache_coordinator.dart';
 import '../../playback/cache/playback_cache_policy.dart';
 import '../../playback/cache/playback_cache_settings.dart';
 import '../../playback/playback_state.dart';
@@ -20,6 +21,9 @@ class PlaybackCacheStatusSection extends StatelessWidget {
     final profile = state.cacheProfile;
     final observation = state.cacheObservation;
     final fileBytes = observation?.engineSnapshot?.fileCacheBytes;
+    final fullReadAhead =
+        settings.mode == PlaybackCacheMode.fullReadAhead ||
+        profile?.readAheadStrategy == PlaybackCacheReadAheadStrategy.mediaEnd;
     return Column(
       key: const ValueKey('playback-cache-status'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -38,6 +42,13 @@ class PlaybackCacheStatusSection extends StatelessWidget {
         ),
         if (profile == null)
           _line('实际缓存范围', '暂不可用')
+        else if (fullReadAhead)
+          ..._fullReadAheadLines(
+            profile: profile,
+            observation: observation,
+            fallbackReason: state.cacheFallbackReason,
+            fileBytes: fileBytes,
+          )
         else ...[
           if (profile.sessionTargetBytes > 0)
             _line('本次目标', formatPlaybackCacheBytes(profile.sessionTargetBytes)),
@@ -71,6 +82,58 @@ class PlaybackCacheStatusSection extends StatelessWidget {
     );
   }
 
+  List<Widget> _fullReadAheadLines({
+    required ResolvedPlaybackCacheProfile profile,
+    required PlaybackCacheObservation? observation,
+    required PlaybackCacheFallbackReason fallbackReason,
+    required int? fileBytes,
+  }) {
+    final reachedEnd = observation?.fullReadAheadReachedEnd == true;
+    final telemetryAvailable = observation?.telemetryAvailable == true;
+    final readAheadAnchor =
+        observation?.readAheadAnchor ?? profile.readAheadAnchor;
+    final actualEnd = observation?.actualContinuousEnd;
+    final mediaDuration = observation?.mediaDuration;
+    final expectedBytes =
+        profile.sizeConfidence == PlaybackCacheSizeConfidence.unknown ||
+            fallbackReason ==
+                PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace
+        ? '无法确认'
+        : profile.sessionTargetBytes > 0
+        ? '约 ${formatPlaybackCacheBytes(profile.sessionTargetBytes)}'
+        : '无法确认';
+    final status = reachedEnd
+        ? '已从 ${_formatDurationClock(readAheadAnchor)} 预读至媒体结尾'
+        : fallbackReason ==
+              PlaybackCacheFallbackReason.fullReadAheadInsufficientSpace
+        ? '空间不足，已使用有限窗口'
+        : fallbackReason != PlaybackCacheFallbackReason.none
+        ? '已安全降级'
+        : !telemetryAvailable
+        ? '实际预读范围暂不可确认'
+        : profile.sizeConfidence == PlaybackCacheSizeConfidence.unknown
+        ? '正在按可用空间尽力预读'
+        : '正在持续预读';
+
+    return [
+      _line('设备保留空间', formatPlaybackCacheBytes(profile.reservedFreeBytes)),
+      _line('预计本次需要', expectedBytes),
+      if (actualEnd != null && mediaDuration != null)
+        _line(
+          '已连续预读至',
+          '${_formatDurationClock(actualEnd)} / '
+              '${_formatDurationClock(mediaDuration)}',
+        )
+      else
+        _line('实际预读范围', '暂不可确认'),
+      _line('状态', status),
+      if (fileBytes != null)
+        _line('文件缓存已使用', formatPlaybackCacheBytes(fileBytes)),
+      if (fallbackReason != PlaybackCacheFallbackReason.none)
+        _line('原因', _fallbackReasonLabel(fallbackReason)),
+    ];
+  }
+
   Widget _line(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 4),
     child: Row(
@@ -100,6 +163,13 @@ String _runtimeModeLabel(PlaybackCacheRuntimeMode mode) => switch (mode) {
 
 String _actualDuration(Duration? value) =>
     value == null ? '暂不可用' : '约 ${formatPlaybackCacheTime(value.inSeconds)}';
+
+String _formatDurationClock(Duration value) {
+  final hours = value.inHours.toString().padLeft(2, '0');
+  final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$hours:$minutes:$seconds';
+}
 
 String _fallbackReasonLabel(PlaybackCacheFallbackReason reason) =>
     switch (reason) {

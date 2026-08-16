@@ -47,7 +47,9 @@ void main() {
     expect(find.text('已保存，将从下次播放生效'), findsOneWidget);
   });
 
-  testWidgets('all six cache modes are available exactly once', (tester) async {
+  testWidgets('all seven cache modes are available exactly once', (
+    tester,
+  ) async {
     await _pumpSettings(
       tester,
       repository: PlaybackSettingsRepository(storage: _MemoryStorage()),
@@ -57,6 +59,11 @@ void main() {
     for (final mode in PlaybackCacheMode.values) {
       expect(find.byKey(ValueKey('cache-mode-${mode.name}')), findsOneWidget);
     }
+    await tester.tap(find.byKey(const ValueKey('cache-mode-fullReadAhead')));
+    await tester.pumpAndSettle();
+    expect(find.text('本次所需空间：播放时根据媒体大小、恢复位置和码率确认'), findsOneWidget);
+    expect(find.text('结尾状态：只有实际连续缓存范围到达结尾才显示完成'), findsOneWidget);
+    expect(find.text('前向缓存目标'), findsNothing);
   });
 
   testWidgets('known and unknown free space use fixed safe presentation', (
@@ -152,6 +159,82 @@ void main() {
     expect(find.text('实际可回退'), findsOneWidget);
     expect(find.text('约 1 分 47 秒'), findsOneWidget);
     expect(find.text('186 MB'), findsOneWidget);
+  });
+
+  testWidgets('full read-ahead status uses confirmed continuous end evidence', (
+    tester,
+  ) async {
+    const profile = ResolvedPlaybackCacheProfile(
+      runtimeMode: PlaybackCacheRuntimeMode.disk,
+      transportKind: PlaybackTransportKind.progressiveHttp,
+      fallbackReason: PlaybackCacheFallbackReason.none,
+      forwardTarget: Duration(hours: 2),
+      backwardTarget: Duration.zero,
+      sessionTargetBytes: 7 << 30,
+      reservedFreeBytes: 2 << 30,
+      demuxerForwardMetadataBytes: 64 << 20,
+      demuxerBackwardMetadataBytes: 16 << 20,
+      metadataBudgetCapBytes: 80 << 20,
+      streamBufferBytes: 128 << 10,
+      donateBuffer: true,
+      sessionDirectory: null,
+      readAheadStrategy: PlaybackCacheReadAheadStrategy.mediaEnd,
+      budgetPolicy: PlaybackCacheBudgetPolicy.lowSpaceOnly,
+      sizeConfidence: PlaybackCacheSizeConfidence.serverDeclared,
+      readAheadAnchor: Duration(minutes: 42, seconds: 18),
+      estimatedSourceBytes: 8 << 30,
+    );
+    const snapshot = PlaybackCacheEngineSnapshot(
+      fileCacheBytes: 2 << 30,
+      rawInputRateBytesPerSecond: 1 << 20,
+      seekableRanges: [],
+      pausedForCache: false,
+      cacheBufferingPercent: 100,
+      cacheOnDisk: true,
+    );
+    const observation = PlaybackCacheObservation(
+      engineSnapshot: snapshot,
+      actualForward: Duration.zero,
+      actualBackward: Duration(minutes: 42),
+      availableBytes: 10 << 30,
+      stopThresholdBytes: 4 << 30,
+      lowSpaceTriggerBytes: 3 << 30,
+      readAheadAnchor: Duration(minutes: 42, seconds: 18),
+      mediaDuration: Duration(hours: 2, minutes: 8, seconds: 10),
+      actualContinuousStart: Duration(minutes: 42, seconds: 18),
+      actualContinuousEnd: Duration(hours: 2, minutes: 8, seconds: 10),
+      fullReadAheadEligible: true,
+      fullReadAheadReachedEnd: true,
+      telemetryAvailable: true,
+    );
+    final state = PlaybackState(
+      cacheProfile: profile,
+      cacheRuntimeMode: PlaybackCacheRuntimeMode.disk,
+      cacheObservation: observation,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: PlaybackCacheStatusSection(
+              settings: const PlaybackCacheSettings(
+                mode: PlaybackCacheMode.fullReadAhead,
+              ),
+              state: state,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('预计本次需要'), findsOneWidget);
+    expect(find.text('约 7 GB'), findsOneWidget);
+    expect(find.text('已连续预读至'), findsOneWidget);
+    expect(find.text('02:08:10 / 02:08:10'), findsOneWidget);
+    expect(find.text('已从 00:42:18 预读至媒体结尾'), findsOneWidget);
+    expect(find.text('前向目标'), findsNothing);
+    expect(find.text('后向目标'), findsNothing);
   });
 
   testWidgets('missing telemetry and fallback reason stay explicit', (
