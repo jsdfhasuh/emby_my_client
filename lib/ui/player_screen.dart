@@ -23,6 +23,7 @@ import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../playback/playback_engine.dart';
+import '../playback/horizontal_scrub_mapping.dart';
 import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
@@ -30,6 +31,7 @@ import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
+import '../playback/seek_preview_mode.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
@@ -779,13 +781,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     final startPosition = _horizontalDragStartPosition;
     if (startPosition == null) return;
 
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    if (screenWidth <= 0) return;
-
     _horizontalDragDx += details.delta.dx;
-    final offsetSeconds = (_horizontalDragDx / screenWidth * 120).round();
-    final target = _clampPosition(
-      startPosition + Duration(seconds: offsetSeconds),
+    final target = calculateHorizontalScrubTarget(
+      startPosition: startPosition,
+      duration: _duration,
+      dragDistance: _horizontalDragDx,
+      viewportWidth: MediaQuery.sizeOf(context).width,
+      spanSeconds: _settings.horizontalSwipeSeekSpanSeconds,
     );
     setState(() {
       _horizontalDragPreviewPosition = target;
@@ -822,12 +824,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       _uiSeekPending = false;
     });
     _restartControlsTimer();
-  }
-
-  Duration _clampPosition(Duration position) {
-    if (position < Duration.zero) return Duration.zero;
-    if (position > _duration) return _duration;
-    return position;
   }
 
   @override
@@ -1616,6 +1612,62 @@ class _PlayerScreenState extends State<PlayerScreen>
                   _patchSettings(
                     PlaybackSettingsPatch(seekForwardSeconds: value),
                   ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            key: const ValueKey('horizontal-swipe-seek-span-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.swap_horiz),
+            title: const Text('横向滑动跨度'),
+            subtitle: const Text('横跨整个屏幕对应的快进或快退时间'),
+            trailing: DropdownButton<int>(
+              value: _settings.horizontalSwipeSeekSpanSeconds,
+              items: const [
+                DropdownMenuItem(value: 30, child: Text('30 秒')),
+                DropdownMenuItem(value: 60, child: Text('1 分钟')),
+                DropdownMenuItem(value: 120, child: Text('2 分钟')),
+                DropdownMenuItem(value: 300, child: Text('5 分钟')),
+                DropdownMenuItem(value: 600, child: Text('10 分钟')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(
+                    PlaybackSettingsPatch(
+                      horizontalSwipeSeekSpanSeconds: value,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            key: const ValueKey('seek-preview-mode-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('滑动预览画面'),
+            trailing: DropdownButton<SeekPreviewMode>(
+              value: _settings.seekPreviewMode,
+              items: const [
+                DropdownMenuItem(
+                  value: SeekPreviewMode.automatic,
+                  child: Text('自动（推荐）'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.serverOnly,
+                  child: Text('仅服务器缩略图'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.off,
+                  child: Text('关闭画面预览'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(PlaybackSettingsPatch(seekPreviewMode: value)),
                 );
               },
             ),
