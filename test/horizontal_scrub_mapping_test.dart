@@ -149,4 +149,45 @@ void main() {
       Duration.zero,
     );
   });
+
+  test(
+    'session only completes once and never completes after cancellation',
+    () {
+      final session = HorizontalScrubSession(
+        startPosition: start,
+        duration: duration,
+        spanSeconds: 120,
+      );
+
+      expect(
+        session.update(
+          deltaDistance: viewportWidth / 2,
+          viewportWidth: viewportWidth,
+        ),
+        start + const Duration(seconds: 60),
+      );
+      expect(session.complete(), start + const Duration(seconds: 60));
+      expect(session.complete(), isNull);
+      expect(
+        session.update(
+          deltaDistance: viewportWidth,
+          viewportWidth: viewportWidth,
+        ),
+        start + const Duration(seconds: 60),
+      );
+    },
+  );
+
+  test('cancellation restores the origin without a completion target', () {
+    final session = HorizontalScrubSession(
+      startPosition: start,
+      duration: duration,
+      spanSeconds: 300,
+    );
+    session.update(deltaDistance: viewportWidth, viewportWidth: viewportWidth);
+
+    expect(session.cancel(), start);
+    expect(session.cancel(), isNull);
+    expect(session.complete(), isNull);
+  });
 }
