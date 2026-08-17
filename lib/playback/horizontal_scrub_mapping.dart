@@ -51,6 +51,54 @@ Duration previewSamplePosition({
       : Duration.zero;
 }
 
+class HorizontalScrubSession {
+  HorizontalScrubSession({
+    required Duration startPosition,
+    required this.duration,
+    required this.spanSeconds,
+  }) : startPosition = _clampDuration(startPosition, duration),
+       _targetPosition = _clampDuration(startPosition, duration);
+
+  final Duration startPosition;
+  final Duration duration;
+  final int spanSeconds;
+  double _dragDistance = 0;
+  Duration _targetPosition;
+  bool _active = true;
+
+  bool get isActive => _active;
+  double get dragDistance => _dragDistance;
+  Duration get targetPosition => _targetPosition;
+
+  Duration update({
+    required double deltaDistance,
+    required double viewportWidth,
+  }) {
+    if (!_active) return _targetPosition;
+    if (deltaDistance.isFinite) _dragDistance += deltaDistance;
+    _targetPosition = calculateHorizontalScrubTarget(
+      startPosition: startPosition,
+      duration: duration,
+      dragDistance: _dragDistance,
+      viewportWidth: viewportWidth,
+      spanSeconds: spanSeconds,
+    );
+    return _targetPosition;
+  }
+
+  Duration? complete() {
+    if (!_active) return null;
+    _active = false;
+    return _targetPosition;
+  }
+
+  Duration? cancel() {
+    if (!_active) return null;
+    _active = false;
+    return startPosition;
+  }
+}
+
 Duration _clampDuration(Duration value, Duration duration) {
   if (duration <= Duration.zero) return Duration.zero;
   if (value < Duration.zero) return Duration.zero;

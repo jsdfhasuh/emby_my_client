@@ -230,9 +230,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
-  Duration? _horizontalDragStartPosition;
-  Duration? _horizontalDragPreviewPosition;
-  double _horizontalDragDx = 0;
+  HorizontalScrubSession? _horizontalScrubSession;
   bool _horizontalDragPreviewImageFailed = false;
   bool _playing = false;
   bool _buffering = true;
@@ -770,10 +768,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _controlsTimer?.cancel();
     _invalidateUiSeek();
+    final session = HorizontalScrubSession(
+      startPosition: _position,
+      duration: _duration,
+      spanSeconds: _settings.horizontalSwipeSeekSpanSeconds,
+    );
     setState(() {
-      _horizontalDragStartPosition = _position;
-      _horizontalDragPreviewPosition = _position;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = session;
       _horizontalDragPreviewImageFailed = false;
       _seeking = true;
       _controlsVisible = false;
@@ -781,31 +782,25 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    final startPosition = _horizontalDragStartPosition;
-    if (startPosition == null) return;
+    final session = _horizontalScrubSession;
+    if (session == null || !session.isActive) return;
 
-    _horizontalDragDx += details.delta.dx;
-    final target = calculateHorizontalScrubTarget(
-      startPosition: startPosition,
-      duration: _duration,
-      dragDistance: _horizontalDragDx,
+    final target = session.update(
+      deltaDistance: details.delta.dx,
       viewportWidth: MediaQuery.sizeOf(context).width,
-      spanSeconds: _settings.horizontalSwipeSeekSpanSeconds,
     );
     setState(() {
-      _horizontalDragPreviewPosition = target;
       _position = target;
     });
   }
 
   Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
-    final target = _horizontalDragPreviewPosition;
-    if (_horizontalDragStartPosition == null || target == null) return;
+    final session = _horizontalScrubSession;
+    final target = session?.complete();
+    if (session == null || target == null) return;
 
     setState(() {
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
     });
@@ -813,15 +808,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onHorizontalDragCancel() {
-    final startPosition = _horizontalDragStartPosition;
+    final session = _horizontalScrubSession;
+    final startPosition = session?.cancel();
     if (startPosition == null) return;
 
     _invalidateUiSeek();
     setState(() {
       _position = startPosition;
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
       _uiSeekPending = false;
@@ -1289,6 +1283,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _autoNextCancelled = false;
             _nextCountdown = null;
             _controlsVisible = true;
+            _horizontalScrubSession = null;
             _invalidateUiSeek();
           });
           await _startCurrentItem();
@@ -1876,7 +1871,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   child: _buildControls(),
                 ),
               ),
-              if (_horizontalDragPreviewPosition != null)
+              if (_horizontalScrubSession != null)
                 Positioned(
                   left: 0,
                   right: 0,
@@ -1904,8 +1899,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildHorizontalSeekOverlay() {
-    final startPosition = _horizontalDragStartPosition!;
-    final target = _horizontalDragPreviewPosition!;
+    final session = _horizontalScrubSession!;
+    final startPosition = session.startPosition;
+    final target = session.targetPosition;
     final trickplay =
         _settings.seekPreviewMode == SeekPreviewMode.off ||
             _horizontalDragPreviewImageFailed
@@ -1939,11 +1935,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onHorizontalPreviewImageError() {
-    if (!mounted || _horizontalDragPreviewPosition == null) return;
+    if (!mounted || _horizontalScrubSession == null) return;
     if (_horizontalDragPreviewImageFailed) return;
     _horizontalDragPreviewImageFailed = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _horizontalDragPreviewPosition == null) return;
+      if (!mounted || _horizontalScrubSession == null) return;
       setState(() {});
     });
   }
