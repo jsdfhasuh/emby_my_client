@@ -157,6 +157,14 @@ void main() {
       defaultHorizontalSwipeSeekSpanSeconds,
     );
     expect(restored.seekPreviewMode, SeekPreviewMode.automatic);
+
+    const directlyConstructed = PlaybackSettings(
+      horizontalSwipeSeekSpanSeconds: 91,
+    );
+    expect(
+      directlyConstructed.toJson()['horizontalSwipeSeekSpanSeconds'],
+      defaultHorizontalSwipeSeekSpanSeconds,
+    );
   });
 
   test('scrub settings copyWith normalizes the span and changes the mode', () {
