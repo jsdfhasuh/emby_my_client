@@ -10,6 +10,7 @@ class TrickplayPreview extends StatelessWidget {
     required this.rows,
     required this.column,
     required this.row,
+    this.onError,
   });
 
   final ImageProvider image;
@@ -19,6 +20,7 @@ class TrickplayPreview extends StatelessWidget {
   final int rows;
   final int column;
   final int row;
+  final VoidCallback? onError;
 
   @override
   Widget build(BuildContext context) {
@@ -43,10 +45,15 @@ class TrickplayPreview extends StatelessWidget {
                 image: image,
                 fit: BoxFit.fill,
                 filterQuality: FilterQuality.medium,
-                errorBuilder: (_, _, _) => const ColoredBox(
-                  color: Color(0xFF252A2C),
-                  child: Center(child: Icon(Icons.broken_image_outlined)),
-                ),
+                errorBuilder: (_, _, _) {
+                  final onError = this.onError;
+                  if (onError != null) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      onError();
+                    });
+                  }
+                  return const ColoredBox(color: Color(0xFF252A2C));
+                },
               ),
             );
           },
