@@ -15,9 +15,11 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
     required this.buffer,
     required this.cacheRuntimeMode,
     required this.cacheSnapshot,
+    required this.previewDisabled,
+    required this.previewUnavailable,
     this.preview,
     this.isLoading = false,
-  });
+  }) : assert(!(previewDisabled && previewUnavailable));
 
   final Duration startPosition;
   final Duration targetPosition;
@@ -25,6 +27,8 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
   final Duration buffer;
   final PlaybackCacheRuntimeMode? cacheRuntimeMode;
   final PlaybackCacheEngineSnapshot? cacheSnapshot;
+  final bool previewDisabled;
+  final bool previewUnavailable;
   final Widget? preview;
   final bool isLoading;
 
@@ -33,77 +37,69 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
     return IgnorePointer(
       child: SafeArea(
         top: false,
-        child: SizedBox(
-          height: 276,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final width = constraints.maxWidth;
-              final cardWidth = math.min(270.0, math.max(0.0, width - 8));
-              final maxLeft = math.max(0.0, width - cardWidth);
-              final safeLeft = math.min(4.0, maxLeft);
-              final fraction = duration <= Duration.zero
-                  ? 0.0
-                  : (targetPosition.inMicroseconds / duration.inMicroseconds)
-                        .clamp(0.0, 1.0)
-                        .toDouble();
-              final desiredCenter = width * fraction;
-              final cardLeft = (desiredCenter - cardWidth / 2)
-                  .clamp(safeLeft, math.max(safeLeft, maxLeft - safeLeft))
-                  .toDouble();
-              final maxMilliseconds = duration.inMilliseconds
-                  .toDouble()
-                  .clamp(1.0, double.infinity)
-                  .toDouble();
-              final targetMilliseconds = targetPosition.inMilliseconds
-                  .toDouble()
-                  .clamp(0.0, maxMilliseconds)
-                  .toDouble();
-              final bufferMilliseconds = buffer.inMilliseconds
-                  .toDouble()
-                  .clamp(targetMilliseconds, maxMilliseconds)
-                  .toDouble();
-              return Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Positioned(
-                    left: cardLeft,
-                    top: 0,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth;
+            final cardWidth = math.min(270.0, math.max(0.0, width - 8));
+            final maxLeft = math.max(0.0, width - cardWidth);
+            final safeLeft = math.min(4.0, maxLeft);
+            final fraction = duration <= Duration.zero
+                ? 0.0
+                : (targetPosition.inMicroseconds / duration.inMicroseconds)
+                      .clamp(0.0, 1.0)
+                      .toDouble();
+            final desiredCenter = width * fraction;
+            final cardLeft = (desiredCenter - cardWidth / 2)
+                .clamp(safeLeft, math.max(safeLeft, maxLeft - safeLeft))
+                .toDouble();
+            final maxMilliseconds = duration.inMilliseconds
+                .toDouble()
+                .clamp(1.0, double.infinity)
+                .toDouble();
+            final targetMilliseconds = targetPosition.inMilliseconds
+                .toDouble()
+                .clamp(0.0, maxMilliseconds)
+                .toDouble();
+            final bufferMilliseconds = buffer.inMilliseconds
+                .toDouble()
+                .clamp(targetMilliseconds, maxMilliseconds)
+                .toDouble();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: EdgeInsets.only(left: cardLeft),
+                  child: SizedBox(
                     width: cardWidth,
                     child: _buildPreviewCard(cardWidth),
                   ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: 204,
-                    child: PlaybackTimeline(
-                      key: const ValueKey('horizontal-seek-preview-timeline'),
-                      duration: duration,
-                      max: maxMilliseconds,
-                      value: targetMilliseconds,
-                      secondaryTrackValue: bufferMilliseconds,
-                      cacheRuntimeMode: cacheRuntimeMode,
-                      cacheSnapshot: cacheSnapshot,
-                      onChangeStart: null,
-                      onChanged: null,
-                      onChangeEnd: null,
-                    ),
+                ),
+                const SizedBox(height: 8),
+                PlaybackTimeline(
+                  key: const ValueKey('horizontal-seek-preview-timeline'),
+                  duration: duration,
+                  max: maxMilliseconds,
+                  value: targetMilliseconds,
+                  secondaryTrackValue: bufferMilliseconds,
+                  cacheRuntimeMode: cacheRuntimeMode,
+                  cacheSnapshot: cacheSnapshot,
+                  onChangeStart: null,
+                  onChanged: null,
+                  onChangeEnd: null,
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: Row(
+                    children: [
+                      Text(_formatDuration(targetPosition)),
+                      const Spacer(),
+                      Text(_formatDuration(duration)),
+                    ],
                   ),
-                  Positioned(
-                    left: 10,
-                    right: 10,
-                    top: 248,
-                    child: Row(
-                      children: [
-                        Text(_formatDuration(targetPosition)),
-                        const Spacer(),
-                        Text(_formatDuration(duration)),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -118,10 +114,15 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
         : '当前位置';
     final previewWidth = math.min(220.0, math.max(0.0, cardWidth - 24));
     final previewHeight = previewWidth * 9 / 16;
+    final showPreviewImage = !previewDisabled && preview != null;
+    final showUnavailablePlaceholder =
+        !previewDisabled && preview == null && previewUnavailable;
 
     return Container(
       key: const ValueKey('horizontal-seek-preview-overlay'),
-      constraints: const BoxConstraints(minHeight: 190),
+      constraints: previewDisabled
+          ? null
+          : const BoxConstraints(minHeight: 190),
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
         color: const Color(0xF2171A1C),
@@ -138,15 +139,16 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (preview != null)
+          if (showPreviewImage)
             SizedBox(
               key: const ValueKey('horizontal-seek-preview-image'),
               width: previewWidth,
               height: previewHeight,
               child: preview,
             )
-          else
+          else if (showUnavailablePlaceholder)
             const SizedBox(
+              key: ValueKey('horizontal-seek-preview-unavailable'),
               height: 124,
               child: Center(
                 child: Text(
@@ -155,7 +157,7 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
                 ),
               ),
             ),
-          if (isLoading)
+          if (!previewDisabled && isLoading)
             const Align(
               alignment: Alignment.centerRight,
               child: SizedBox(

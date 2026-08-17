@@ -8,6 +8,7 @@
 ## 阶段结论
 
 - Phase 0 / Gate A：**C**。
+- Gate A=C is a conservative decision for this iteration because real-device evidence is unavailable.
 - Gate B：通过。设置、映射、边界和既有播放器相关定向测试通过。
 - Gate C：通过代码与 Widget/纯 Dart 自动化验证。横滑期间不调用主播放器 seek；正常结束沿用 `SeekSource.horizontalDrag` 单次提交路径；取消使会话失效且不提交 seek。
 - Phase 3 及之后的客户端解码 Provider：不实施。Gate A=C 时按计划停止客户端抽帧正式接入。
@@ -46,6 +47,16 @@ Android API 37 x86_64 模拟器上，本地 MP4 和 Progressive HTTP MP4 的 JPE
 最终验证：`flutter test` 全量通过，共 934 个测试；`flutter analyze` 通过；`dart format --set-exit-if-changed .` 通过；`git diff --check` 通过；`flutter build apk --debug` 通过。
 
 `flutter build ios --debug --no-codesign` 未执行成功：当前 Windows 版 Flutter 不提供 `ios` build 子命令/对应选项，不能替代 macOS Xcode 构建。
+
+## GitHub Actions 证据
+
+Run `31995667377`：<https://github.com/jsdfhasuh/emby_my_client/actions/runs/31995667377>，状态为 `success`，HEAD 为本轮整改前的 `9bf82f11e745eb54153a03426d4f15aaa3356a1e`。
+
+- `Quality and Android`：成功；Format、Analyze、Test、Android debug APK、Android native libmpv capability smoke test、startable Android libmpv smoke test 和 APK artifacts 均成功。
+- `iPadOS device IPA`：成功；native diagnostics and libmpv capability XCTest、unsigned device Runner.app、TrollStore IPA、portable IPA checksum、IPA/SHA-256、dSYM 和 diagnostics artifacts 均成功。
+- IPA 校验输出：`emby-ios-core-067fd3a8ff09-120.ipa: OK`。该 run 的 IPA sidecar `.sha256` 已随 `ios-core-ipa-120` artifact 上传。
+- artifact zip SHA-256：`android-debug-apk-120=2758694730f70a8eee9aeb09da4d75f75a82ecef4008c14c1abf9378b06b8c7d`；`android-debug-split-apks-120=b0e1428546866992a9219324e8f24116083ab72ad57a0380e986fcd8a196a8cb`；`ios-core-ipa-120=5bfd635479f3702cfc17003c970805319198ddb3ab02cce3523a618bca28ac63`；`ios-core-dsym-120=fff11529878c5efb5d43dbca2cdb41a6c3b1140a76688172338deee858624996`；`ios-core-diagnostics-120=080037ca09b3e12249458d18d9a08fcf276251d7f93b184d7c82dd0d02fb1746`。
+- artifacts：`android-debug-apk-120`、`android-debug-split-apks-120`、`ios-core-ipa-120`、`ios-core-dsym-120`、`ios-core-diagnostics-120`，均未过期。
 
 ## 真机缺口
 

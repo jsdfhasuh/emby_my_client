@@ -9,6 +9,8 @@
 
 Gate A：**C**。
 
+Gate A=C is a conservative decision for this iteration because real-device evidence is unavailable.
+
 当前版本公开提供 `Player.screenshot({format, includeLibassSubtitles})`，但在可用的 Android API 37 x86_64 模拟器上，独立预览播放器对本地 MP4 和网络 MP4 均未取得有效画面。JPEG 编码和 `format: null` 的 BGRA 原始帧都返回空结果。当前环境没有 Android 真机、iPhone 或 iPad，因此没有足够证据在本轮启用客户端抽帧。
 
 后续实现不接入客户端解码 Provider，不引入新的 FFmpeg 依赖，也不升级 media_kit。自动模式固定降级为：Trickplay 优先，Trickplay 不可用时显示时间和进度条。
