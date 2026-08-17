@@ -439,6 +439,7 @@ jobs:
               'cacheUnlinkVariant', 'cacheUnlinkModernStatus',
               'cacheUnlinkLegacyStatus', 'diskProfileReadBack',
               'memoryProfileReadBack', 'disabledProfileReadBack',
+              'mediaDurationCacheSecondsReadBack',
               'profileSwitchStrategy', 'diskCapabilityPassed',
           }
           assert set(manifest) == expected_top
@@ -545,6 +546,7 @@ jobs:
           assert type(manifest['diskProfileReadBack']) is bool
           assert type(manifest['memoryProfileReadBack']) is bool
           assert type(manifest['disabledProfileReadBack']) is bool
+          assert type(manifest['mediaDurationCacheSecondsReadBack']) is bool
           assert manifest['memoryProfileReadBack'] is True
           assert manifest['disabledProfileReadBack'] is True
           approved_strategy = manifest['profileSwitchStrategy'] in {
@@ -560,6 +562,7 @@ jobs:
               and resets_complete
               and 'immediate' in manifest['unlinkChoices']
               and manifest['properties']['demuxer-cache-state']
+              and manifest['mediaDurationCacheSecondsReadBack']
               and manifest['diskProfileReadBack']
               and approved_strategy
           )
