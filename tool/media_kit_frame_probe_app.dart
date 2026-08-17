@@ -6,8 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'package:emby_my_client/playback/preview/media_kit_frame_probe.dart';
 
-const _sampleUri =
-    'https://media.w3.org/2010/05/sintel/trailer.mp4';
+const _sampleUri = 'https://media.w3.org/2010/05/sintel/trailer.mp4';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
