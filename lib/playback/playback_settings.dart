@@ -96,7 +96,9 @@ class PlaybackSettings {
     'maxStreamingBitrate': maxStreamingBitrate,
     'seekBackwardSeconds': seekBackwardSeconds,
     'seekForwardSeconds': seekForwardSeconds,
-    'horizontalSwipeSeekSpanSeconds': horizontalSwipeSeekSpanSeconds,
+    'horizontalSwipeSeekSpanSeconds': normalizeHorizontalSwipeSeekSpanSeconds(
+      horizontalSwipeSeekSpanSeconds,
+    ),
     'seekPreviewMode': seekPreviewMode.name,
     'playbackRate': playbackRate,
     'videoFit': videoFit,
