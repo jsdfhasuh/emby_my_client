@@ -35,6 +35,7 @@ import '../playback/seek_preview_mode.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
+import 'widgets/horizontal_seek_preview_overlay.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
@@ -232,6 +233,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration? _horizontalDragStartPosition;
   Duration? _horizontalDragPreviewPosition;
   double _horizontalDragDx = 0;
+  bool _horizontalDragPreviewImageFailed = false;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
@@ -772,6 +774,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _horizontalDragStartPosition = _position;
       _horizontalDragPreviewPosition = _position;
       _horizontalDragDx = 0;
+      _horizontalDragPreviewImageFailed = false;
       _seeking = true;
       _controlsVisible = false;
     });
@@ -1874,7 +1877,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ),
               ),
               if (_horizontalDragPreviewPosition != null)
-                _buildHorizontalSeekOverlay(),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: _buildHorizontalSeekOverlay(),
+                ),
               if (_verticalDragValue != null) _buildVerticalGestureOverlay(),
               if (_showSkipIntro && !_controlsLocked)
                 Positioned(
@@ -1898,77 +1906,66 @@ class _PlayerScreenState extends State<PlayerScreen>
   Widget _buildHorizontalSeekOverlay() {
     final startPosition = _horizontalDragStartPosition!;
     final target = _horizontalDragPreviewPosition!;
-    final deltaSeconds = target.inSeconds - startPosition.inSeconds;
-    final isForward = _horizontalDragDx >= 0;
-    final deltaLabel = deltaSeconds > 0
-        ? '+$deltaSeconds 秒'
-        : '$deltaSeconds 秒';
-    final preview = _trickplayPreview(target);
-
-    return IgnorePointer(
-      child: Center(
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          decoration: BoxDecoration(
-            color: const Color(0xCC111315),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (preview != null) ...[
-                SizedBox(
-                  width: 240,
-                  child: TrickplayPreview(
-                    image: NetworkImage(
-                      preview.url.toString(),
-                      headers: widget.api.playbackHeaders,
-                    ),
-                    thumbnailWidth: preview.info.width,
-                    thumbnailHeight: preview.info.height,
-                    columns: preview.info.tileColumns,
-                    rows: preview.info.tileRows,
-                    column: preview.column,
-                    row: preview.row,
-                  ),
-                ),
-                const SizedBox(height: 10),
-              ],
-              Icon(
-                isForward
-                    ? Icons.fast_forward_rounded
-                    : Icons.fast_rewind_rounded,
-                size: 36,
-                color: Colors.white,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                deltaLabel,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${_formatDuration(target)} / ${_formatDuration(_duration)}',
-                style: const TextStyle(color: Color(0xFFD0D5D6), fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ),
+    final trickplay =
+        _settings.seekPreviewMode == SeekPreviewMode.off ||
+            _horizontalDragPreviewImageFailed
+        ? null
+        : _trickplayPreview(target);
+    final preview = trickplay == null
+        ? null
+        : TrickplayPreview(
+            image: NetworkImage(
+              trickplay.url.toString(),
+              headers: widget.api.playbackHeaders,
+            ),
+            thumbnailWidth: trickplay.info.width,
+            thumbnailHeight: trickplay.info.height,
+            columns: trickplay.info.tileColumns,
+            rows: trickplay.info.tileRows,
+            column: trickplay.column,
+            row: trickplay.row,
+            onError: _onHorizontalPreviewImageError,
+          );
+    final playback = _playbackController?.state;
+    return HorizontalSeekPreviewOverlay(
+      startPosition: startPosition,
+      targetPosition: target,
+      duration: _duration,
+      buffer: _buffer,
+      cacheRuntimeMode: playback?.cacheRuntimeMode,
+      cacheSnapshot: playback?.cacheSnapshot,
+      preview: preview,
     );
+  }
+
+  void _onHorizontalPreviewImageError() {
+    if (!mounted || _horizontalDragPreviewPosition == null) return;
+    if (_horizontalDragPreviewImageFailed) return;
+    _horizontalDragPreviewImageFailed = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _horizontalDragPreviewPosition == null) return;
+      setState(() {});
+    });
   }
 
   ({EmbyTrickplayResolution info, Uri url, int column, int row})?
   _trickplayPreview(Duration position) {
     final plan = _plan;
     final info = _currentItem.trickplay?.resolutionFor(plan?.mediaSourceId);
-    if (plan == null || info == null) return null;
-    final tileIndex = position.inMilliseconds ~/ info.intervalMilliseconds;
+    if (plan == null ||
+        info == null ||
+        info.intervalMilliseconds <= 0 ||
+        info.tilesPerImage <= 0 ||
+        info.tileColumns <= 0 ||
+        info.tileRows <= 0) {
+      return null;
+    }
+    final samplePosition = previewSamplePosition(
+      target: position,
+      duration: _duration,
+    );
+    final tileIndex =
+        samplePosition.inMilliseconds ~/ info.intervalMilliseconds;
     final imageIndex = tileIndex ~/ info.tilesPerImage;
     final tileOffset = tileIndex % info.tilesPerImage;
     return (
