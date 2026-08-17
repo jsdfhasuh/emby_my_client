@@ -10,6 +10,7 @@ class TrickplayPreview extends StatelessWidget {
     required this.rows,
     required this.column,
     required this.row,
+    this.gaplessPlayback = true,
     this.onError,
   });
 
@@ -20,6 +21,7 @@ class TrickplayPreview extends StatelessWidget {
   final int rows;
   final int column;
   final int row;
+  final bool gaplessPlayback;
   final VoidCallback? onError;
 
   @override
@@ -45,6 +47,7 @@ class TrickplayPreview extends StatelessWidget {
                 image: image,
                 fit: BoxFit.fill,
                 filterQuality: FilterQuality.medium,
+                gaplessPlayback: gaplessPlayback,
                 errorBuilder: (_, _, _) {
                   final onError = this.onError;
                   if (onError != null) {

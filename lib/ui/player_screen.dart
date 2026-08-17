@@ -233,7 +233,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
   HorizontalScrubSession? _horizontalScrubSession;
-  bool _horizontalDragPreviewImageFailed = false;
+  int? _horizontalDragPreviewFailedImageIndex;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
@@ -777,7 +777,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     setState(() {
       _horizontalScrubSession = session;
-      _horizontalDragPreviewImageFailed = false;
+      _horizontalDragPreviewFailedImageIndex = null;
       _seeking = true;
       _controlsVisible = false;
     });
@@ -1286,6 +1286,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _nextCountdown = null;
             _controlsVisible = true;
             _horizontalScrubSession = null;
+            _horizontalDragPreviewFailedImageIndex = null;
             _invalidateUiSeek();
           });
           await _startCurrentItem();
@@ -1878,12 +1879,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     final session = _horizontalScrubSession!;
     final startPosition = session.startPosition;
     final target = session.targetPosition;
-    final trickplay =
-        _settings.seekPreviewMode == SeekPreviewMode.off ||
-            _horizontalDragPreviewImageFailed
-        ? null
-        : _trickplayPreview(target);
-    final preview = trickplay == null
+    final previewDisabled = _settings.seekPreviewMode == SeekPreviewMode.off;
+    final trickplay = previewDisabled ? null : _trickplayPreview(target);
+    final previewUnavailable =
+        !previewDisabled &&
+        (trickplay == null ||
+            _horizontalDragPreviewFailedImageIndex == trickplay.imageIndex);
+    final preview = trickplay == null || previewUnavailable
         ? null
         : TrickplayPreview(
             image: NetworkImage(
@@ -1896,7 +1898,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             rows: trickplay.info.tileRows,
             column: trickplay.column,
             row: trickplay.row,
-            onError: _onHorizontalPreviewImageError,
+            onError: () => _onHorizontalPreviewImageError(trickplay.imageIndex),
           );
     final playback = _playbackController?.state;
     return HorizontalSeekPreviewOverlay(
@@ -1906,21 +1908,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       buffer: _buffer,
       cacheRuntimeMode: playback?.cacheRuntimeMode,
       cacheSnapshot: playback?.cacheSnapshot,
+      previewDisabled: previewDisabled,
+      previewUnavailable: previewUnavailable,
       preview: preview,
     );
   }
 
-  void _onHorizontalPreviewImageError() {
+  void _onHorizontalPreviewImageError(int imageIndex) {
     if (!mounted || _horizontalScrubSession == null) return;
-    if (_horizontalDragPreviewImageFailed) return;
-    _horizontalDragPreviewImageFailed = true;
+    final current = _trickplayPreview(_horizontalScrubSession!.targetPosition);
+    if (current == null || current.imageIndex != imageIndex) return;
+    if (_horizontalDragPreviewFailedImageIndex == imageIndex) return;
+    _horizontalDragPreviewFailedImageIndex = imageIndex;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _horizontalScrubSession == null) return;
       setState(() {});
     });
   }
 
-  ({EmbyTrickplayResolution info, Uri url, int column, int row})?
+  ({
+    EmbyTrickplayResolution info,
+    Uri url,
+    int imageIndex,
+    int column,
+    int row,
+  })?
   _trickplayPreview(Duration position) {
     final plan = _plan;
     final info = _currentItem.trickplay?.resolutionFor(plan?.mediaSourceId);
@@ -1948,6 +1960,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         imageIndex: imageIndex,
         mediaSourceId: plan.mediaSourceId,
       ),
+      imageIndex: imageIndex,
       column: tileOffset % info.tileColumns,
       row: tileOffset ~/ info.tileColumns,
     );
