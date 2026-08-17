@@ -1,10 +1,14 @@
 import 'cache/playback_cache_settings.dart';
+import 'horizontal_scrub_mapping.dart';
+import 'seek_preview_mode.dart';
 
 class PlaybackSettings {
   const PlaybackSettings({
     this.maxStreamingBitrate = 120000000,
     this.seekBackwardSeconds = 10,
     this.seekForwardSeconds = 10,
+    this.horizontalSwipeSeekSpanSeconds = defaultHorizontalSwipeSeekSpanSeconds,
+    this.seekPreviewMode = SeekPreviewMode.automatic,
     this.playbackRate = 1,
     this.videoFit = 'contain',
     this.subtitleDelayMilliseconds = 0,
@@ -19,6 +23,8 @@ class PlaybackSettings {
   final int maxStreamingBitrate;
   final int seekBackwardSeconds;
   final int seekForwardSeconds;
+  final int horizontalSwipeSeekSpanSeconds;
+  final SeekPreviewMode seekPreviewMode;
   final double playbackRate;
   final String videoFit;
   final int subtitleDelayMilliseconds;
@@ -33,6 +39,8 @@ class PlaybackSettings {
     int? maxStreamingBitrate,
     int? seekBackwardSeconds,
     int? seekForwardSeconds,
+    int? horizontalSwipeSeekSpanSeconds,
+    SeekPreviewMode? seekPreviewMode,
     double? playbackRate,
     String? videoFit,
     int? subtitleDelayMilliseconds,
@@ -46,6 +54,10 @@ class PlaybackSettings {
     maxStreamingBitrate: maxStreamingBitrate ?? this.maxStreamingBitrate,
     seekBackwardSeconds: seekBackwardSeconds ?? this.seekBackwardSeconds,
     seekForwardSeconds: seekForwardSeconds ?? this.seekForwardSeconds,
+    horizontalSwipeSeekSpanSeconds: normalizeHorizontalSwipeSeekSpanSeconds(
+      horizontalSwipeSeekSpanSeconds ?? this.horizontalSwipeSeekSpanSeconds,
+    ),
+    seekPreviewMode: seekPreviewMode ?? this.seekPreviewMode,
     playbackRate: playbackRate ?? this.playbackRate,
     videoFit: videoFit ?? this.videoFit,
     subtitleDelayMilliseconds:
@@ -65,6 +77,10 @@ class PlaybackSettings {
     maxStreamingBitrate: _asInt(json['maxStreamingBitrate']) ?? 120000000,
     seekBackwardSeconds: _asInt(json['seekBackwardSeconds']) ?? 10,
     seekForwardSeconds: _asInt(json['seekForwardSeconds']) ?? 10,
+    horizontalSwipeSeekSpanSeconds: normalizeHorizontalSwipeSeekSpanSeconds(
+      _asInt(json['horizontalSwipeSeekSpanSeconds']),
+    ),
+    seekPreviewMode: seekPreviewModeFromJson(json['seekPreviewMode']),
     playbackRate: _asDouble(json['playbackRate']) ?? 1,
     videoFit: json['videoFit']?.toString() ?? 'contain',
     subtitleDelayMilliseconds: _asInt(json['subtitleDelayMilliseconds']) ?? 0,
@@ -80,6 +96,8 @@ class PlaybackSettings {
     'maxStreamingBitrate': maxStreamingBitrate,
     'seekBackwardSeconds': seekBackwardSeconds,
     'seekForwardSeconds': seekForwardSeconds,
+    'horizontalSwipeSeekSpanSeconds': horizontalSwipeSeekSpanSeconds,
+    'seekPreviewMode': seekPreviewMode.name,
     'playbackRate': playbackRate,
     'videoFit': videoFit,
     'subtitleDelayMilliseconds': subtitleDelayMilliseconds,
