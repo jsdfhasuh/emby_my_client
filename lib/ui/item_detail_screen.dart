@@ -9,6 +9,7 @@ import '../downloads/download_models.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
 import '../library/item_detail_presentation.dart';
+import '../library/library_navigation_context.dart';
 import '../models/emby_models.dart';
 import '../platform/platform_capabilities.dart';
 import '../playback/playback_queue.dart';
@@ -34,6 +35,7 @@ class ItemDetailScreen extends StatefulWidget {
     this.downloads,
     this.navigationActions,
     this.platformCapabilities,
+    this.libraryOrigin,
     this.now,
   });
 
@@ -42,6 +44,7 @@ class ItemDetailScreen extends StatefulWidget {
   final DownloadService? downloads;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
+  final LibraryBrowseOrigin? libraryOrigin;
   final DateTime Function()? now;
 
   @override
@@ -54,6 +57,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   List<EmbyItem> _episodes = const [];
   final Set<String> _updatingUserData = {};
   final Set<String> _startingDownloads = {};
+  final Set<String> _openingGenres = {};
   late final RealtimeRefreshBinding _realtimeRefresh;
   String? _seasonId;
   bool _loadFailed = false;
@@ -353,6 +357,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
           downloads: widget.downloads,
           navigationActions: widget.navigationActions,
           platformCapabilities: widget.platformCapabilities,
+          libraryOrigin: widget.libraryOrigin,
         ),
       ),
     );
@@ -687,10 +692,78 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   Widget _buildGenres(EmbyItem item) => Wrap(
     spacing: 8,
     runSpacing: 8,
-    children: item.genres
-        .map((genre) => Chip(label: Text(genre)))
-        .toList(growable: false),
+    children: [
+      for (var index = 0; index < item.genres.length; index++)
+        _buildGenreChip(item, item.genres[index], index),
+    ],
   );
+
+  Widget _buildGenreChip(EmbyItem item, String genre, int index) {
+    final openGenre = widget.navigationActions?.openGenre;
+    final key = ValueKey<String>('item-detail-genre-$index');
+    if (openGenre == null) {
+      return Chip(key: key, label: Text(genre));
+    }
+
+    final requestKey = _genreRequestKey(item, genre);
+    final loading = _openingGenres.contains(requestKey);
+    final tooltip = '查看“$genre”分类';
+    return Semantics(
+      button: true,
+      label: tooltip,
+      child: ActionChip(
+        key: key,
+        tooltip: tooltip,
+        onPressed: loading
+            ? null
+            : () => unawaited(_openGenre(item, genre, openGenre)),
+        label: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(genre),
+            const SizedBox(width: 6),
+            SizedBox.square(
+              dimension: 14,
+              child: loading
+                  ? const CircularProgressIndicator(strokeWidth: 2)
+                  : const SizedBox.shrink(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openGenre(
+    EmbyItem item,
+    String genre,
+    Future<void> Function(
+      BuildContext,
+      EmbyItem,
+      String,
+      LibraryBrowseOrigin?,
+      PlatformCapabilities?,
+    )
+    openGenre,
+  ) async {
+    final requestKey = _genreRequestKey(item, genre);
+    if (genre.trim().isEmpty || _openingGenres.contains(requestKey)) return;
+    setState(() => _openingGenres.add(requestKey));
+    try {
+      await openGenre(
+        context,
+        item,
+        genre,
+        widget.libraryOrigin,
+        widget.platformCapabilities,
+      );
+    } finally {
+      if (mounted) setState(() => _openingGenres.remove(requestKey));
+    }
+  }
+
+  String _genreRequestKey(EmbyItem item, String genre) =>
+      '${item.id}\u0000${genre.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase()}';
 
   Widget _buildOverview(BuildContext context, EmbyItem item) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
