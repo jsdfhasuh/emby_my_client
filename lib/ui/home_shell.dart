@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../core/diagnostic_log.dart';
 import '../images/emby_image_cache.dart';
+import '../library/library_genre_resolver.dart';
+import '../library/library_navigation_context.dart';
+import '../library/library_root_resolver.dart';
+import '../models/emby_models.dart';
+import '../platform/platform_capabilities.dart';
 import '../state/app_controller.dart';
 import 'diagnostic_log_screen.dart';
 import 'downloads/downloads_screen.dart';
@@ -21,6 +27,14 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+  final Set<String> _openingGenreRequests = {};
+
+  late final LibraryRootResolver _libraryRootResolver = LibraryRootResolver(
+    api: widget.controller.api,
+  );
+  late final LibraryGenreResolver _libraryGenreResolver = LibraryGenreResolver(
+    api: widget.controller.api,
+  );
 
   late final HomeShellNavigationActions _navigationActions =
       HomeShellNavigationActions(
@@ -28,7 +42,78 @@ class _HomeShellState extends State<HomeShell> {
         showSearch: () => _showShellTab(2),
         openSettings: _openSettingsFromRoute,
         openAccount: _openAccountFromRoute,
+        openGenre: _openGenre,
       );
+
+  Future<void> _openGenre(
+    BuildContext sourceContext,
+    EmbyItem item,
+    String genreName,
+    LibraryBrowseOrigin? knownOrigin,
+    PlatformCapabilities? platformCapabilities,
+  ) async {
+    final normalizedName = normalizeLibraryGenreName(genreName);
+    final requestKey =
+        '${item.id}\u0000${knownOrigin?.rootView.id ?? 'unknown'}\u0000$normalizedName';
+    if (normalizedName.isEmpty || !_openingGenreRequests.add(requestKey)) {
+      return;
+    }
+
+    try {
+      final origin = await _libraryRootResolver.resolve(
+        item: item,
+        knownOrigin: knownOrigin,
+      );
+      final facet = await _libraryGenreResolver.resolve(
+        origin: origin,
+        genreName: genreName,
+      );
+      if (!sourceContext.mounted) return;
+      await Navigator.of(sourceContext).push(
+        MaterialPageRoute(
+          builder: (_) => LibraryBrowseScreen.facet(
+            api: widget.controller.api,
+            view: origin.rootView,
+            facet: facet,
+            downloads: widget.controller.downloads,
+            categorySettings: widget.controller.libraryCategorySettings,
+            libraryScanService: widget.controller.libraryScanService,
+            navigationActions: _navigationActions,
+            platformCapabilities: platformCapabilities,
+            profile: origin.profile,
+            libraryRoot: origin.rootView,
+          ),
+        ),
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'library',
+        'Media detail genre navigation failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (!sourceContext.mounted) return;
+      ScaffoldMessenger.of(sourceContext).showSnackBar(
+        SnackBar(content: Text(_genreNavigationErrorMessage(error))),
+      );
+    } finally {
+      _openingGenreRequests.remove(requestKey);
+    }
+  }
+
+  String _genreNavigationErrorMessage(Object error) {
+    if (error is LibraryRootResolutionException) {
+      return error.failure == LibraryRootResolutionFailure.requestFailed
+          ? '分类加载失败，请重试'
+          : '无法确定该媒体所属的媒体库';
+    }
+    if (error is LibraryGenreResolutionException) {
+      return error.failure == LibraryGenreResolutionFailure.requestFailed
+          ? '分类加载失败，请重试'
+          : '当前媒体库没有找到该分类';
+    }
+    return '分类加载失败，请重试';
+  }
 
   void _showShellTab(int index) {
     Navigator.of(context).popUntil((route) => route.isFirst);

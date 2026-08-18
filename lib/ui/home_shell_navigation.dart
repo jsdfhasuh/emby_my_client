@@ -2,6 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../library/library_navigation_context.dart';
+import '../models/emby_models.dart';
+import '../platform/platform_capabilities.dart';
+
 @immutable
 class HomeShellNavigationActions {
   const HomeShellNavigationActions({
@@ -9,12 +13,21 @@ class HomeShellNavigationActions {
     required this.showSearch,
     required this.openSettings,
     required this.openAccount,
+    this.openGenre,
   });
 
   final VoidCallback showHome;
   final VoidCallback showSearch;
   final Future<void> Function() openSettings;
   final Future<void> Function() openAccount;
+  final Future<void> Function(
+    BuildContext sourceContext,
+    EmbyItem item,
+    String genreName,
+    LibraryBrowseOrigin? knownOrigin,
+    PlatformCapabilities? platformCapabilities,
+  )?
+  openGenre;
 }
 
 class LargeScreenPageChrome extends StatelessWidget
