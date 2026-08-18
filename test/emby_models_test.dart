@@ -60,6 +60,27 @@ void main() {
   });
 
   test(
+    'parses ParentId, normalizes empty values, and preserves it in copyWith',
+    () {
+      final item = EmbyItem.fromJson({
+        'Id': 'movie-1',
+        'Name': 'Movie',
+        'Type': 'Movie',
+        'ParentId': ' library-1 ',
+        'UserData': const {'Played': true},
+      });
+      final empty = EmbyItem.fromJson({'ParentId': '   '});
+
+      expect(item.parentId, 'library-1');
+      expect(empty.parentId, isNull);
+      expect(
+        item.copyWith(userData: const EmbyUserData()).parentId,
+        'library-1',
+      );
+    },
+  );
+
+  test(
     'parses and copies UserData PlayCount without regressing other fields',
     () {
       final parsed = EmbyUserData.fromJson(const {
