@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../library/library_navigation_context.dart';
 import '../models/emby_models.dart';
 import '../people/person_detail_controller.dart';
 import '../platform/platform_capabilities.dart';
@@ -21,6 +22,7 @@ class PersonDetailScreen extends StatefulWidget {
     this.downloads,
     this.navigationActions,
     this.platformCapabilities,
+    this.libraryOrigin,
   });
 
   final EmbyApi api;
@@ -29,6 +31,7 @@ class PersonDetailScreen extends StatefulWidget {
   final DownloadService? downloads;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
+  final LibraryBrowseOrigin? libraryOrigin;
 
   @override
   State<PersonDetailScreen> createState() => _PersonDetailScreenState();
@@ -85,6 +88,7 @@ class _PersonDetailScreenState extends State<PersonDetailScreen> {
           downloads: widget.downloads,
           navigationActions: widget.navigationActions,
           platformCapabilities: widget.platformCapabilities,
+          libraryOrigin: widget.libraryOrigin,
         ),
       ),
     );

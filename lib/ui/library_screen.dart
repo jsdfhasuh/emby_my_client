@@ -16,6 +16,7 @@ import '../library/library_grid_geometry.dart';
 import '../library/library_item_membership.dart';
 import '../library/library_local_media_scan_cache.dart';
 import '../library/library_local_media_scan_service.dart';
+import '../library/library_navigation_context.dart';
 import '../library/library_playback_queue.dart';
 import '../library/library_raw_page_cursor.dart';
 import '../library/library_result_statistics.dart';
@@ -325,7 +326,8 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.sortPreferenceStore,
     this.initialState = const LibraryBrowseState(),
     LibraryContentProfile? profile,
-  }) : profile =
+  }) : libraryRoot = view,
+       profile =
            profile ??
            LibraryContentProfile.fromCollectionType(view.collectionType),
        _pageKind = _LibraryBrowsePageKind.root;
@@ -340,6 +342,7 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.navigationActions,
     this.platformCapabilities,
     this.initialState = const LibraryBrowseState.directory(),
+    this.libraryRoot,
     LibraryContentProfile? profile,
   }) : sortPreferenceStore = null,
        assert(initialState.scope == LibraryBrowseScope.directory),
@@ -359,8 +362,10 @@ class LibraryBrowseScreen extends StatefulWidget {
     this.navigationActions,
     this.platformCapabilities,
     LibraryBrowseState? initialState,
+    EmbyItem? libraryRoot,
     LibraryContentProfile? profile,
   }) : sortPreferenceStore = null,
+       libraryRoot = libraryRoot ?? view,
        initialState = initialState ?? LibraryBrowseState.facet(facet),
        profile =
            profile ??
@@ -378,6 +383,7 @@ class LibraryBrowseScreen extends StatefulWidget {
   final LibraryLocalMediaScanService? libraryScanService;
   final HomeShellNavigationActions? navigationActions;
   final PlatformCapabilities? platformCapabilities;
+  final EmbyItem? libraryRoot;
   final LibrarySortPreferenceStore? sortPreferenceStore;
   final LibraryBrowseState initialState;
   final _LibraryBrowsePageKind _pageKind;
@@ -2215,6 +2221,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               libraryScanService: widget.libraryScanService,
               navigationActions: widget.navigationActions,
               platformCapabilities: widget.platformCapabilities,
+              libraryRoot: widget.libraryRoot,
               profile: widget.profile,
               initialState: _state.scope == LibraryBrowseScope.directory
                   ? LibraryBrowseState.directory(
@@ -2239,6 +2246,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               libraryScanService: widget.libraryScanService,
               navigationActions: widget.navigationActions,
               platformCapabilities: widget.platformCapabilities,
+              libraryRoot: widget.libraryRoot,
               profile: widget.profile,
               facet: LibraryFacet(id: item.id, name: item.name, kind: kind),
             ),
@@ -2253,6 +2261,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
               downloads: widget.downloads,
               navigationActions: widget.navigationActions,
               platformCapabilities: widget.platformCapabilities,
+              libraryOrigin: _libraryBrowseOrigin,
             ),
           ),
         );
@@ -2282,6 +2291,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           ).showSnackBar(const SnackBar(content: Text('暂不支持打开这个项目')));
         }
     }
+  }
+
+  LibraryBrowseOrigin? get _libraryBrowseOrigin {
+    final root = widget.libraryRoot;
+    if (root == null || root.id.trim().isEmpty) return null;
+    return LibraryBrowseOrigin(rootView: root, profile: widget.profile);
   }
 
   void _reportUserDataRefreshFailure(Object error, StackTrace stackTrace) {

@@ -8,6 +8,7 @@ import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_local_media_scan_service.dart';
+import '../library/library_navigation_context.dart';
 import '../images/emby_image_request.dart';
 import '../models/emby_models.dart';
 import '../photos/photo_sequence_source.dart';
@@ -114,7 +115,10 @@ class _HomeScreenState extends State<HomeScreen> {
         .toList(growable: false);
   }
 
-  Future<void> _openDetail(EmbyItem item) async {
+  Future<void> _openDetail(
+    EmbyItem item, {
+    LibraryBrowseOrigin? libraryOrigin,
+  }) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ItemDetailScreen(
@@ -122,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
           initialItem: item,
           downloads: widget.downloads,
           navigationActions: widget.navigationActions,
+          libraryOrigin: libraryOrigin,
         ),
       ),
     );
@@ -148,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen> {
               profile: profile,
               libraryScanService: widget.libraryScanService,
               navigationActions: widget.navigationActions,
+              libraryRoot: section.library,
             ),
           ),
         );
@@ -171,7 +177,13 @@ class _HomeScreenState extends State<HomeScreen> {
         );
         return;
       case LibraryEntryAction.openDetail:
-        await _openDetail(item);
+        await _openDetail(
+          item,
+          libraryOrigin: LibraryBrowseOrigin(
+            rootView: section.library,
+            profile: profile,
+          ),
+        );
         return;
       case LibraryEntryAction.openFacet:
       case LibraryEntryAction.unsupported:
