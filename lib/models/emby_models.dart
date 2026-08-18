@@ -146,6 +146,7 @@ class EmbyItem {
     this.trickplay,
     this.mediaType,
     this.collectionType,
+    this.parentId,
     this.path,
     this.container,
     this.overview,
@@ -165,6 +166,7 @@ class EmbyItem {
   final String type;
   final String? mediaType;
   final String? collectionType;
+  final String? parentId;
   final String? path;
   final String? container;
   final String? overview;
@@ -253,6 +255,7 @@ class EmbyItem {
       type: json['Type']?.toString() ?? 'Unknown',
       mediaType: json['MediaType']?.toString(),
       collectionType: json['CollectionType']?.toString(),
+      parentId: _trimmedString(json['ParentId']),
       path: json['Path']?.toString(),
       container: json['Container']?.toString(),
       overview: json['Overview']?.toString(),
@@ -305,6 +308,7 @@ class EmbyItem {
     trickplay: trickplay,
     mediaType: mediaType,
     collectionType: collectionType,
+    parentId: parentId,
     path: path,
     container: container,
     overview: overview,
@@ -778,5 +782,10 @@ double? _asDouble(dynamic value) {
 
 String? _nonEmptyString(dynamic value) {
   final result = value?.toString();
+  return result == null || result.isEmpty ? null : result;
+}
+
+String? _trimmedString(dynamic value) {
+  final result = value?.toString().trim();
   return result == null || result.isEmpty ? null : result;
 }
