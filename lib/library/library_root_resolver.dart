@@ -27,8 +27,19 @@ class LibraryRootResolver {
 
   final EmbyApi api;
   Future<List<EmbyItem>>? _viewsFuture;
-  final Map<String, LibraryBrowseOrigin> _originByItemId = {};
+  final Map<String, _CachedLibraryOrigin> _originByItemId = {};
   final Map<String, Future<LibraryBrowseOrigin>> _inFlight = {};
+  final Map<String, int> _latestRequestByItemId = {};
+  int _cacheGeneration = 0;
+  int _requestSerial = 0;
+
+  void clear() {
+    _cacheGeneration++;
+    _viewsFuture = null;
+    _originByItemId.clear();
+    _inFlight.clear();
+    _latestRequestByItemId.clear();
+  }
 
   Future<LibraryBrowseOrigin> resolve({
     required EmbyItem item,
@@ -49,21 +60,49 @@ class LibraryRootResolver {
         LibraryRootResolutionFailure.rootUnavailable,
       );
     }
+    final parentId = _nonEmptyId(item.parentId);
     final cached = _originByItemId[itemId];
-    if (cached != null) return cached;
-    final active = _inFlight[itemId];
-    if (active != null) return active;
-
-    final future = _resolveUncached(item);
-    _inFlight[itemId] = future;
-    try {
-      return await future;
-    } finally {
-      if (identical(_inFlight[itemId], future)) _inFlight.remove(itemId);
+    if (parentId != null && cached?.parentId == parentId) {
+      return cached!.origin;
     }
+
+    final inFlightKey = _inFlightKey(itemId, parentId);
+    for (var retry = 0; retry < 2; retry++) {
+      final generation = _cacheGeneration;
+      final active = _inFlight[inFlightKey];
+      if (active != null) {
+        final origin = await active;
+        if (generation == _cacheGeneration) return origin;
+        continue;
+      }
+
+      final requestSerial = ++_requestSerial;
+      _latestRequestByItemId[itemId] = requestSerial;
+      final future = _resolveUncached(
+        item,
+        cacheGeneration: generation,
+        requestSerial: requestSerial,
+      );
+      _inFlight[inFlightKey] = future;
+      try {
+        final origin = await future;
+        if (generation == _cacheGeneration) return origin;
+      } finally {
+        if (identical(_inFlight[inFlightKey], future)) {
+          _inFlight.remove(inFlightKey);
+        }
+      }
+    }
+    throw const LibraryRootResolutionException(
+      LibraryRootResolutionFailure.requestFailed,
+    );
   }
 
-  Future<LibraryBrowseOrigin> _resolveUncached(EmbyItem item) async {
+  Future<LibraryBrowseOrigin> _resolveUncached(
+    EmbyItem item, {
+    required int cacheGeneration,
+    required int requestSerial,
+  }) async {
     final roots = await _loadRoots();
     final rootsById = <String, EmbyItem>{
       for (final root in roots)
@@ -96,6 +135,7 @@ class LibraryRootResolver {
 
     final visitedIds = <String>{};
     final chainIds = <String>[item.id.trim()];
+    final chainParents = <String, String?>{item.id.trim(): parentId};
     String? cursor = parentId;
     for (var depth = 0; depth < maxAncestorDepth; depth++) {
       if (cursor == null || cursor.isEmpty) {
@@ -112,14 +152,25 @@ class LibraryRootResolver {
 
       final root = rootsById[cursor];
       if (root != null) {
+        chainParents[cursor] = _nonEmptyId(root.parentId);
         final origin = LibraryBrowseOrigin(
           rootView: root,
           profile: LibraryContentProfile.fromCollectionType(
             root.collectionType,
           ),
         );
-        for (final id in chainIds) {
-          if (id.isNotEmpty) _originByItemId[id] = origin;
+        if (cacheGeneration == _cacheGeneration) {
+          for (final id in chainIds) {
+            if (id.isEmpty) continue;
+            final latestRequest = _latestRequestByItemId[id];
+            if (latestRequest != null && latestRequest != requestSerial) {
+              continue;
+            }
+            _originByItemId[id] = _CachedLibraryOrigin(
+              parentId: chainParents[id],
+              origin: origin,
+            );
+          }
         }
         return origin;
       }
@@ -135,6 +186,10 @@ class LibraryRootResolver {
         throw const LibraryRootResolutionException(
           LibraryRootResolutionFailure.requestFailed,
         );
+      }
+      final currentId = current.id.trim();
+      if (currentId.isNotEmpty) {
+        chainParents[currentId] = _nonEmptyId(current.parentId);
       }
       cursor = _nonEmptyId(current.parentId);
     }
@@ -164,6 +219,9 @@ class LibraryRootResolver {
     }
   }
 
+  String _inFlightKey(String itemId, String? parentId) =>
+      [itemId, parentId ?? '<missing-parent>'].join(String.fromCharCode(0));
+
   void _logRequestFailure(String message, Object error, StackTrace stackTrace) {
     DiagnosticLog.instance.error(
       'library',
@@ -172,6 +230,13 @@ class LibraryRootResolver {
       stackTrace: stackTrace,
     );
   }
+}
+
+class _CachedLibraryOrigin {
+  const _CachedLibraryOrigin({required this.parentId, required this.origin});
+
+  final String? parentId;
+  final LibraryBrowseOrigin origin;
 }
 
 String? _nonEmptyId(String? value) {

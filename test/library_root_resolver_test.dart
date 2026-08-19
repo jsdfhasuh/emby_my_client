@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
@@ -30,30 +32,99 @@ void main() {
     expect(api.itemRequests, isEmpty);
   });
 
+  test('re-resolves a cached item when its parent ID changes', () async {
+    final root = _item(
+      'library-1',
+      type: 'CollectionFolder',
+      collectionType: 'movies',
+    );
+    final secondRoot = _item(
+      'library-2',
+      type: 'CollectionFolder',
+      collectionType: 'tvshows',
+    );
+    final folder = _item('folder-1', type: 'Folder', parentId: root.id);
+    final secondFolder = _item(
+      'folder-2',
+      type: 'Folder',
+      parentId: secondRoot.id,
+    );
+    final item = _item('movie-1', parentId: folder.id);
+    final api = _RootApi(
+      views: [root, secondRoot],
+      items: {folder.id: folder, secondFolder.id: secondFolder},
+    );
+    addTearDown(api.dispose);
+    final resolver = LibraryRootResolver(api: api);
+
+    final first = await resolver.resolve(item: item);
+    final second = await resolver.resolve(
+      item: _item(item.id, parentId: secondFolder.id),
+    );
+
+    expect(first.rootView.id, root.id);
+    expect(first.profile, LibraryContentProfile.movies);
+    expect(second.rootView.id, secondRoot.id);
+    expect(second.profile, LibraryContentProfile.tvShows);
+    expect(identical(second, first), isFalse);
+    expect(api.viewRequests, 1);
+    expect(api.itemRequests, [folder.id, secondFolder.id]);
+  });
+
+  test('clear forces root and parent chain requests again', () async {
+    final root = _item(
+      'library-1',
+      type: 'CollectionFolder',
+      collectionType: 'movies',
+    );
+    final folder = _item('folder-1', type: 'Folder', parentId: root.id);
+    final item = _item('movie-1', parentId: folder.id);
+    final api = _RootApi(views: [root], items: {folder.id: folder});
+    addTearDown(api.dispose);
+    final resolver = LibraryRootResolver(api: api);
+
+    await resolver.resolve(item: item);
+    resolver.clear();
+    await resolver.resolve(item: item);
+
+    expect(api.viewRequests, 2);
+    expect(api.itemRequests, [folder.id, folder.id]);
+  });
+
   test(
-    'resolves a parent chain to a library root and caches the chain',
+    'clear prevents an old in-flight origin from refilling the cache',
     () async {
-      final root = _item(
-        'library-1',
+      final firstViews = Completer<List<EmbyItem>>();
+      final rootA = _item(
+        'library-a',
         type: 'CollectionFolder',
         collectionType: 'movies',
       );
-      final folder = _item('folder-1', type: 'Folder', parentId: root.id);
-      final item = _item('movie-1', parentId: folder.id);
-      final api = _RootApi(views: [root], items: {folder.id: folder});
+      final rootB = _item(
+        'library-b',
+        type: 'CollectionFolder',
+        collectionType: 'tvshows',
+      );
+      final api = _BlockingRootApi(
+        firstViews: firstViews,
+        subsequentViews: [rootA, rootB],
+      );
       addTearDown(api.dispose);
       final resolver = LibraryRootResolver(api: api);
+      final oldItem = _item('media-1', parentId: rootA.id);
+      final newItem = _item('media-1', parentId: rootB.id);
 
-      final first = await resolver.resolve(item: item);
-      final second = await resolver.resolve(
-        item: _item(item.id, parentId: 'other'),
-      );
+      final oldResult = resolver.resolve(item: oldItem);
+      await Future<void>.delayed(Duration.zero);
+      resolver.clear();
+      final fresh = await resolver.resolve(item: newItem);
+      firstViews.complete([rootA]);
+      final old = await oldResult;
 
-      expect(first.rootView.id, root.id);
-      expect(first.profile, LibraryContentProfile.movies);
-      expect(identical(second, first), isTrue);
-      expect(api.viewRequests, 1);
-      expect(api.itemRequests, [folder.id]);
+      expect(fresh.rootView.id, rootB.id);
+      expect(old.rootView.id, rootA.id);
+      expect((await resolver.resolve(item: newItem)).rootView.id, rootB.id);
+      expect(api.viewRequests, 2);
     },
   );
 
@@ -145,6 +216,23 @@ class _RootApi extends EmbyApi {
     final item = items[itemId];
     if (item == null) throw StateError('Missing test item $itemId');
     return item;
+  }
+}
+
+class _BlockingRootApi extends EmbyApi {
+  _BlockingRootApi({required this.firstViews, required this.subsequentViews})
+    : super(_session, dio: Dio());
+
+  final Completer<List<EmbyItem>> firstViews;
+  final List<EmbyItem> subsequentViews;
+  var viewRequests = 0;
+
+  @override
+  Future<List<EmbyItem>> getViews() {
+    viewRequests++;
+    return viewRequests == 1
+        ? firstViews.future
+        : Future.value(subsequentViews);
   }
 }
 
