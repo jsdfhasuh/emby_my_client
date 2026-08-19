@@ -95,12 +95,52 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
 
-      - name: Install shellcheck
+      - name: Install Linux CI dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes shellcheck
+          sudo apt-get install --no-install-recommends --yes \
+            shellcheck \
+            libmpv-dev \
+            mpv
+
+          shellcheck --version
+          mpv --version | head -n 1
+          echo 'Available libmpv libraries:'
+          ldconfig -p | grep -E 'libmpv\.so' || {
+            echo 'libmpv is not visible to the dynamic linker' >&2
+            exit 1
+          }
+
+      - name: Verify host libmpv availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ctypes
+          import sys
+
+          candidates = (
+              "libmpv.so",
+              "libmpv.so.2",
+          )
+
+          failures = []
+          for candidate in candidates:
+              try:
+                  ctypes.CDLL(candidate)
+              except OSError as error:
+                  failures.append(f"{candidate}: {error}")
+              else:
+                  print(f"HOST_LIBMPV_LOAD=PASS library={candidate}")
+                  break
+          else:
+              print("HOST_LIBMPV_LOAD=FAIL", file=sys.stderr)
+              for failure in failures:
+                  print(failure, file=sys.stderr)
+              raise SystemExit(1)
+          PY
 
       - name: Validate Android and iOS shell scripts
         shell: bash
