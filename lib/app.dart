@@ -5,6 +5,7 @@ import 'playback/playback_diagnostics_test_overrides_scope.dart';
 import 'playback/playback_settings_scope.dart';
 import 'state/app_controller.dart';
 import 'ui/home_shell.dart';
+import 'ui/home_shell_navigation.dart';
 import 'ui/login_screen.dart';
 
 class EmbyClientApp extends StatelessWidget {
@@ -19,6 +20,7 @@ class EmbyClientApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: _darkTheme(),
+      navigatorObservers: [homeShellRouteObserver],
       builder: (context, child) => PlaybackCacheStorageScope(
         storage: controller.playbackCacheStorage,
         child: PlaybackDiagnosticsTestOverridesScope(

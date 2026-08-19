@@ -6,6 +6,36 @@ import '../library/library_navigation_context.dart';
 import '../models/emby_models.dart';
 import '../platform/platform_capabilities.dart';
 
+final homeShellRouteObserver = RouteObserver<ModalRoute<dynamic>>();
+
+typedef LegacyGenreNavigationCallback =
+    Future<void> Function(
+      BuildContext sourceContext,
+      EmbyItem item,
+      String genreName,
+      LibraryBrowseOrigin? knownOrigin,
+      PlatformCapabilities? platformCapabilities,
+    );
+
+@immutable
+class GenreNavigationRequest {
+  const GenreNavigationRequest({
+    required this.sourceContext,
+    required this.item,
+    required this.genreName,
+    required this.knownOrigin,
+    required this.platformCapabilities,
+    required this.isStillValid,
+  });
+
+  final BuildContext sourceContext;
+  final EmbyItem item;
+  final String genreName;
+  final LibraryBrowseOrigin? knownOrigin;
+  final PlatformCapabilities? platformCapabilities;
+  final bool Function() isStillValid;
+}
+
 @immutable
 class HomeShellNavigationActions {
   const HomeShellNavigationActions({
@@ -14,20 +44,15 @@ class HomeShellNavigationActions {
     required this.openSettings,
     required this.openAccount,
     this.openGenre,
+    this.openGenreRequest,
   });
 
   final VoidCallback showHome;
   final VoidCallback showSearch;
   final Future<void> Function() openSettings;
   final Future<void> Function() openAccount;
-  final Future<void> Function(
-    BuildContext sourceContext,
-    EmbyItem item,
-    String genreName,
-    LibraryBrowseOrigin? knownOrigin,
-    PlatformCapabilities? platformCapabilities,
-  )?
-  openGenre;
+  final LegacyGenreNavigationCallback? openGenre;
+  final Future<void> Function(GenreNavigationRequest request)? openGenreRequest;
 }
 
 class LargeScreenPageChrome extends StatelessWidget

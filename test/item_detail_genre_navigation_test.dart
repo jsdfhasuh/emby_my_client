@@ -108,6 +108,128 @@ void main() {
       findsNothing,
     );
   });
+
+  testWidgets('accepts only one genre request per detail route', (
+    tester,
+  ) async {
+    final api = _DetailApi(_detailItem);
+    addTearDown(api.dispose);
+    final pending = Completer<void>();
+    var callCount = 0;
+
+    Future<void> openGenreRequest(GenreNavigationRequest request) async {
+      callCount++;
+      await pending.future;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorObservers: [homeShellRouteObserver],
+        home: ItemDetailScreen(
+          api: api,
+          initialItem: _detailItem,
+          navigationActions: HomeShellNavigationActions(
+            showHome: () {},
+            showSearch: () {},
+            openSettings: () async {},
+            openAccount: () async {},
+            openGenreRequest: openGenreRequest,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-1')));
+    await tester.pump();
+
+    expect(callCount, 1);
+    pending.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('route coverage permanently invalidates a pending request', (
+    tester,
+  ) async {
+    final api = _DetailApi(_detailItem);
+    addTearDown(api.dispose);
+    final pending = Completer<void>();
+    bool? validAfterRouteChange;
+
+    Future<void> openGenreRequest(GenreNavigationRequest request) async {
+      await pending.future;
+      validAfterRouteChange = request.isStillValid();
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorObservers: [homeShellRouteObserver],
+        home: ItemDetailScreen(
+          api: api,
+          initialItem: _detailItem,
+          navigationActions: HomeShellNavigationActions(
+            showHome: () {},
+            showSearch: () {},
+            openSettings: () async {},
+            openAccount: () async {},
+            openGenreRequest: openGenreRequest,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+    await tester.pump();
+
+    unawaited(
+      Navigator.of(tester.element(find.byType(ItemDetailScreen))).push<void>(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pump();
+    pending.complete();
+    await tester.pumpAndSettle();
+
+    expect(validAfterRouteChange, isFalse);
+  });
+
+  testWidgets('disposing detail does not surface a stale genre result', (
+    tester,
+  ) async {
+    final api = _DetailApi(_detailItem);
+    addTearDown(api.dispose);
+    final pending = Completer<void>();
+
+    Future<void> openGenreRequest(GenreNavigationRequest request) async {
+      await pending.future;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ItemDetailScreen(
+          api: api,
+          initialItem: _detailItem,
+          navigationActions: HomeShellNavigationActions(
+            showHome: () {},
+            showSearch: () {},
+            openSettings: () async {},
+            openAccount: () async {},
+            openGenreRequest: openGenreRequest,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+    await tester.pump();
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    pending.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _DetailApi extends EmbyApi {

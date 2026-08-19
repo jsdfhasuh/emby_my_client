@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
@@ -7,6 +9,8 @@ import '../library/library_navigation_context.dart';
 import '../library/library_root_resolver.dart';
 import '../models/emby_models.dart';
 import '../platform/platform_capabilities.dart';
+import '../realtime/emby_event.dart';
+import '../realtime/realtime_refresh_binding.dart';
 import '../state/app_controller.dart';
 import 'diagnostic_log_screen.dart';
 import 'downloads/downloads_screen.dart';
@@ -27,7 +31,8 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
-  final Set<String> _openingGenreRequests = {};
+  final Map<ModalRoute<dynamic>, GenreNavigationRequest>
+  _openingGenreRequestObjects = {};
 
   late final LibraryRootResolver _libraryRootResolver = LibraryRootResolver(
     api: widget.controller.api,
@@ -43,7 +48,24 @@ class _HomeShellState extends State<HomeShell> {
         openSettings: _openSettingsFromRoute,
         openAccount: _openAccountFromRoute,
         openGenre: _openGenre,
+        openGenreRequest: _openGenreRequest,
       );
+
+  late final RealtimeRefreshBinding _resolverInvalidation;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolverInvalidation = RealtimeRefreshBinding(
+      client: widget.controller.api.realtime,
+      refresh: () async {
+        if (!mounted) return;
+        _libraryRootResolver.clear();
+        _libraryGenreResolver.clear();
+      },
+      shouldRefresh: (event) => event is EmbyLibraryChanged,
+    );
+  }
 
   Future<void> _openGenre(
     BuildContext sourceContext,
@@ -51,25 +73,55 @@ class _HomeShellState extends State<HomeShell> {
     String genreName,
     LibraryBrowseOrigin? knownOrigin,
     PlatformCapabilities? platformCapabilities,
-  ) async {
-    final normalizedName = normalizeLibraryGenreName(genreName);
-    final requestKey =
-        '${item.id}\u0000${knownOrigin?.rootView.id ?? 'unknown'}\u0000$normalizedName';
-    if (normalizedName.isEmpty || !_openingGenreRequests.add(requestKey)) {
+  ) {
+    final sourceRoute = ModalRoute.of(sourceContext);
+    return _openGenreRequest(
+      GenreNavigationRequest(
+        sourceContext: sourceContext,
+        item: item,
+        genreName: genreName,
+        knownOrigin: knownOrigin,
+        platformCapabilities: platformCapabilities,
+        isStillValid: () =>
+            sourceContext.mounted &&
+            sourceRoute != null &&
+            identical(ModalRoute.of(sourceContext), sourceRoute) &&
+            sourceRoute.isCurrent,
+      ),
+    );
+  }
+
+  Future<void> _openGenreRequest(GenreNavigationRequest request) async {
+    final sourceContext = request.sourceContext;
+    final sourceRoute = ModalRoute.of(sourceContext);
+    if (sourceRoute == null || !_isGenreRequestValid(request, sourceRoute)) {
       return;
     }
 
+    final normalizedName = normalizeLibraryGenreName(request.genreName);
+    if (normalizedName.isEmpty) return;
+    final active = _openingGenreRequestObjects[sourceRoute];
+    if (active != null) {
+      final activeRoute = ModalRoute.of(active.sourceContext);
+      if (_isGenreRequestValid(active, activeRoute)) return;
+      _openingGenreRequestObjects.remove(sourceRoute);
+    }
+    _openingGenreRequestObjects[sourceRoute] = request;
+    final navigator = Navigator.of(sourceContext);
+
     try {
+      if (!_isGenreRequestValid(request, sourceRoute)) return;
       final origin = await _libraryRootResolver.resolve(
-        item: item,
-        knownOrigin: knownOrigin,
+        item: request.item,
+        knownOrigin: request.knownOrigin,
       );
+      if (!_isGenreRequestValid(request, sourceRoute)) return;
       final facet = await _libraryGenreResolver.resolve(
         origin: origin,
-        genreName: genreName,
+        genreName: request.genreName,
       );
-      if (!sourceContext.mounted) return;
-      await Navigator.of(sourceContext).push(
+      if (!_isGenreRequestValid(request, sourceRoute)) return;
+      await navigator.push(
         MaterialPageRoute(
           builder: (_) => LibraryBrowseScreen.facet(
             api: widget.controller.api,
@@ -79,7 +131,7 @@ class _HomeShellState extends State<HomeShell> {
             categorySettings: widget.controller.libraryCategorySettings,
             libraryScanService: widget.controller.libraryScanService,
             navigationActions: _navigationActions,
-            platformCapabilities: platformCapabilities,
+            platformCapabilities: request.platformCapabilities,
             profile: origin.profile,
             libraryRoot: origin.rootView,
           ),
@@ -92,13 +144,34 @@ class _HomeShellState extends State<HomeShell> {
         error: error,
         stackTrace: stackTrace,
       );
+      if (!_isGenreRequestValid(request, sourceRoute)) return;
       if (!sourceContext.mounted) return;
       ScaffoldMessenger.of(sourceContext).showSnackBar(
         SnackBar(content: Text(genreNavigationErrorMessage(error))),
       );
     } finally {
-      _openingGenreRequests.remove(requestKey);
+      if (identical(_openingGenreRequestObjects[sourceRoute], request)) {
+        _openingGenreRequestObjects.remove(sourceRoute);
+      }
     }
+  }
+
+  bool _isGenreRequestValid(
+    GenreNavigationRequest request,
+    ModalRoute<dynamic>? sourceRoute,
+  ) {
+    if (!request.sourceContext.mounted || sourceRoute == null) return false;
+    if (!identical(ModalRoute.of(request.sourceContext), sourceRoute)) {
+      return false;
+    }
+    if (!sourceRoute.isCurrent) return false;
+    return request.isStillValid();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_resolverInvalidation.dispose());
+    super.dispose();
   }
 
   void _showShellTab(int index) {

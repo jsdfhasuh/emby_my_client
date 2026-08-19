@@ -51,13 +51,16 @@ class ItemDetailScreen extends StatefulWidget {
   State<ItemDetailScreen> createState() => _ItemDetailScreenState();
 }
 
-class _ItemDetailScreenState extends State<ItemDetailScreen> {
+class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   EmbyItem? _item;
   List<EmbyItem> _seasons = const [];
   List<EmbyItem> _episodes = const [];
   final Set<String> _updatingUserData = {};
   final Set<String> _startingDownloads = {};
   final Set<String> _openingGenres = {};
+  String? _openingGenreRequestKey;
+  ModalRoute<dynamic>? _subscribedRoute;
+  int _genreNavigationGeneration = 0;
   late final RealtimeRefreshBinding _realtimeRefresh;
   String? _seasonId;
   bool _loadFailed = false;
@@ -80,7 +83,26 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route == null || identical(route, _subscribedRoute)) return;
+    final previous = _subscribedRoute;
+    if (previous != null) homeShellRouteObserver.unsubscribe(this);
+    _subscribedRoute = route;
+    homeShellRouteObserver.subscribe(this, route);
+  }
+
+  @override
+  void didPushNext() => _invalidateGenreNavigation();
+
+  @override
+  void didPop() => _invalidateGenreNavigation();
+
+  @override
   void dispose() {
+    _invalidateGenreNavigation(updateState: false);
+    if (_subscribedRoute != null) homeShellRouteObserver.unsubscribe(this);
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
@@ -141,6 +163,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   }
 
   Future<void> _play(EmbyItem item) async {
+    _invalidateGenreNavigation();
     final series = _item;
     final queue = item.type == 'Episode' && series?.isSeries == true
         ? PlaybackQueue(
@@ -199,6 +222,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   }
 
   Future<void> _playOffline(DownloadTaskRecord task) async {
+    _invalidateGenreNavigation();
     final downloads = widget.downloads;
     if (downloads == null) return;
     final offlineItem = await downloads.offlineItem(task.itemId);
@@ -348,6 +372,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   Future<void> _openPerson(EmbyPerson person) async {
     final personId = person.id;
     if (personId == null || personId.isEmpty) return;
+    _invalidateGenreNavigation();
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PersonDetailScreen(
@@ -698,9 +723,11 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   );
 
   Widget _buildGenreChip(EmbyItem item, String genre, int index) {
-    final openGenre = widget.navigationActions?.openGenre;
+    final navigationActions = widget.navigationActions;
+    final openGenre = navigationActions?.openGenre;
+    final openGenreRequest = navigationActions?.openGenreRequest;
     final key = ValueKey<String>('item-detail-genre-$index');
-    if (openGenre == null) {
+    if (openGenre == null && openGenreRequest == null) {
       return Chip(key: key, label: Text(genre));
     }
 
@@ -713,9 +740,11 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
       child: ActionChip(
         key: key,
         tooltip: tooltip,
-        onPressed: loading
+        onPressed: loading || _openingGenreRequestKey != null
             ? null
-            : () => unawaited(_openGenre(item, genre, openGenre)),
+            : () => unawaited(
+                _openGenre(item, genre, openGenre, openGenreRequest),
+              ),
         label: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -736,29 +765,68 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   Future<void> _openGenre(
     EmbyItem item,
     String genre,
-    Future<void> Function(
-      BuildContext,
-      EmbyItem,
-      String,
-      LibraryBrowseOrigin?,
-      PlatformCapabilities?,
-    )
-    openGenre,
+    LegacyGenreNavigationCallback? openGenre,
+    Future<void> Function(GenreNavigationRequest request)? openGenreRequest,
   ) async {
     final requestKey = _genreRequestKey(item, genre);
-    if (genre.trim().isEmpty || _openingGenres.contains(requestKey)) return;
-    setState(() => _openingGenres.add(requestKey));
-    try {
-      await openGenre(
-        context,
-        item,
-        genre,
-        widget.libraryOrigin,
-        widget.platformCapabilities,
-      );
-    } finally {
-      if (mounted) setState(() => _openingGenres.remove(requestKey));
+    if (genre.trim().isEmpty ||
+        _openingGenreRequestKey != null ||
+        _openingGenres.contains(requestKey) ||
+        !mounted) {
+      return;
     }
+    final generation = ++_genreNavigationGeneration;
+    setState(() {
+      _openingGenres.add(requestKey);
+      _openingGenreRequestKey = requestKey;
+    });
+    final sourceRoute = ModalRoute.of(context);
+    bool isStillValid() =>
+        mounted &&
+        _genreNavigationGeneration == generation &&
+        sourceRoute != null &&
+        identical(ModalRoute.of(context), sourceRoute) &&
+        sourceRoute.isCurrent;
+    try {
+      if (openGenreRequest != null) {
+        await openGenreRequest(
+          GenreNavigationRequest(
+            sourceContext: context,
+            item: item,
+            genreName: genre,
+            knownOrigin: widget.libraryOrigin,
+            platformCapabilities: widget.platformCapabilities,
+            isStillValid: isStillValid,
+          ),
+        );
+      } else if (openGenre != null) {
+        await openGenre(
+          context,
+          item,
+          genre,
+          widget.libraryOrigin,
+          widget.platformCapabilities,
+        );
+      }
+    } finally {
+      if (mounted &&
+          _genreNavigationGeneration == generation &&
+          _openingGenreRequestKey == requestKey) {
+        setState(() {
+          _openingGenres.remove(requestKey);
+          _openingGenreRequestKey = null;
+        });
+      }
+    }
+  }
+
+  void _invalidateGenreNavigation({bool updateState = true}) {
+    _genreNavigationGeneration++;
+    final requestKey = _openingGenreRequestKey;
+    _openingGenreRequestKey = null;
+    if (requestKey == null) return;
+    _openingGenres.remove(requestKey);
+    if (updateState && mounted) setState(() {});
   }
 
   String _genreRequestKey(EmbyItem item, String genre) =>
