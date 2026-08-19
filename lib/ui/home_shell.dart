@@ -94,25 +94,11 @@ class _HomeShellState extends State<HomeShell> {
       );
       if (!sourceContext.mounted) return;
       ScaffoldMessenger.of(sourceContext).showSnackBar(
-        SnackBar(content: Text(_genreNavigationErrorMessage(error))),
+        SnackBar(content: Text(genreNavigationErrorMessage(error))),
       );
     } finally {
       _openingGenreRequests.remove(requestKey);
     }
-  }
-
-  String _genreNavigationErrorMessage(Object error) {
-    if (error is LibraryRootResolutionException) {
-      return error.failure == LibraryRootResolutionFailure.requestFailed
-          ? '分类加载失败，请重试'
-          : '无法确定该媒体所属的媒体库';
-    }
-    if (error is LibraryGenreResolutionException) {
-      return error.failure == LibraryGenreResolutionFailure.requestFailed
-          ? '分类加载失败，请重试'
-          : '当前媒体库没有找到该分类';
-    }
-    return '分类加载失败，请重试';
   }
 
   void _showShellTab(int index) {
@@ -369,4 +355,25 @@ class _HomeShellState extends State<HomeShell> {
       ),
     );
   }
+}
+
+String genreNavigationErrorMessage(Object error) {
+  if (error is LibraryRootResolutionException) {
+    return switch (error.failure) {
+      LibraryRootResolutionFailure.requestFailed => '分类加载失败，请重试',
+      LibraryRootResolutionFailure.rootUnavailable ||
+      LibraryRootResolutionFailure.ancestorLoop ||
+      LibraryRootResolutionFailure.ancestorDepthExceeded => '无法确定该媒体所属的媒体库',
+    };
+  }
+  if (error is LibraryGenreResolutionException) {
+    return switch (error.failure) {
+      LibraryGenreResolutionFailure.requestFailed ||
+      LibraryGenreResolutionFailure.paginationStalled => '分类加载失败，请重试',
+      LibraryGenreResolutionFailure.notFound ||
+      LibraryGenreResolutionFailure.ambiguous ||
+      LibraryGenreResolutionFailure.unsupportedProfile => '当前媒体库没有找到该分类',
+    };
+  }
+  return '分类加载失败，请重试';
 }

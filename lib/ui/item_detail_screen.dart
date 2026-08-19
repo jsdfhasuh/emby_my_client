@@ -357,7 +357,6 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
           downloads: widget.downloads,
           navigationActions: widget.navigationActions,
           platformCapabilities: widget.platformCapabilities,
-          libraryOrigin: widget.libraryOrigin,
         ),
       ),
     );
@@ -720,7 +719,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         label: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(genre),
+            Flexible(child: Text(genre, softWrap: true)),
             const SizedBox(width: 6),
             SizedBox.square(
               dimension: 14,
