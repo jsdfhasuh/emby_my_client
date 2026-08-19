@@ -5,6 +5,8 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_genre_resolver.dart';
+import 'package:emby_my_client/library/library_root_resolver.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
@@ -19,6 +21,55 @@ import 'package:flutter_test/flutter_test.dart';
 import 'shared_preferences_async_test_backend.dart';
 
 void main() {
+  test(
+    'genre navigation maps every resolver failure to fixed Snackbar text',
+    () {
+      expect(
+        genreNavigationErrorMessage(
+          const LibraryRootResolutionException(
+            LibraryRootResolutionFailure.requestFailed,
+          ),
+        ),
+        '分类加载失败，请重试',
+      );
+      for (final failure in [
+        LibraryRootResolutionFailure.rootUnavailable,
+        LibraryRootResolutionFailure.ancestorLoop,
+        LibraryRootResolutionFailure.ancestorDepthExceeded,
+      ]) {
+        expect(
+          genreNavigationErrorMessage(LibraryRootResolutionException(failure)),
+          '无法确定该媒体所属的媒体库',
+        );
+      }
+
+      for (final failure in [
+        LibraryGenreResolutionFailure.requestFailed,
+        LibraryGenreResolutionFailure.paginationStalled,
+      ]) {
+        expect(
+          genreNavigationErrorMessage(LibraryGenreResolutionException(failure)),
+          '分类加载失败，请重试',
+        );
+      }
+      for (final failure in [
+        LibraryGenreResolutionFailure.notFound,
+        LibraryGenreResolutionFailure.ambiguous,
+        LibraryGenreResolutionFailure.unsupportedProfile,
+      ]) {
+        expect(
+          genreNavigationErrorMessage(LibraryGenreResolutionException(failure)),
+          '当前媒体库没有找到该分类',
+        );
+      }
+
+      expect(
+        genreNavigationErrorMessage(StateError('raw error')),
+        '分类加载失败，请重试',
+      );
+    },
+  );
+
   testWidgets(
     'HomeShell opens one facet route with the resolved library query',
     (tester) async {
