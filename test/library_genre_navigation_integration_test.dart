@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
@@ -9,14 +11,18 @@ import 'package:emby_my_client/library/library_genre_resolver.dart';
 import 'package:emby_my_client/library/library_root_resolver.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
+import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
 import 'package:emby_my_client/ui/home_shell.dart';
+import 'package:emby_my_client/ui/home_shell_navigation.dart';
 import 'package:emby_my_client/ui/item_detail_screen.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
+import 'package:emby_my_client/ui/player_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'shared_preferences_async_test_backend.dart';
 
@@ -109,6 +115,184 @@ void main() {
   );
 
   testWidgets(
+    'pending genre navigation cannot cover the real player route',
+    skip: Platform.isWindows,
+    (tester) async {
+      MediaKit.ensureInitialized();
+      _setViewport(tester);
+      final preferences = SharedPreferencesAsyncTestBackend.install();
+      addTearDown(preferences.restore);
+      final api = _IntegrationApi();
+      final controller = _IntegrationController(api);
+      addTearDown(controller.dispose);
+      addTearDown(api.dispose);
+
+      await _pumpShell(tester, controller);
+      await _openResumeDetail(tester);
+
+      final gate = Completer<EmbyItemPage>();
+      api.genreGate = gate;
+      await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+      await tester.pump();
+      expect(api.genreRequests, hasLength(1));
+
+      await tester.tap(find.text('播放'));
+      await tester.pump();
+      expect(find.byType(PlayerScreen), findsOneWidget);
+
+      gate.complete(_genrePage);
+      await tester.pump(const Duration(milliseconds: 10));
+      expect(find.byType(LibraryBrowseScreen), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+
+      await tester.tap(find.byTooltip('返回'));
+      await tester.pumpAndSettle();
+      expect(find.byType(LibraryBrowseScreen), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'facet detail playback returns with pagination and position intact',
+    skip: Platform.isWindows,
+    (tester) async {
+      MediaKit.ensureInitialized();
+      _setViewport(tester);
+      final preferences = SharedPreferencesAsyncTestBackend.install();
+      addTearDown(preferences.restore);
+      final api = _IntegrationApi(largeFacetResult: true);
+      final controller = _IntegrationController(api);
+      addTearDown(controller.dispose);
+      addTearDown(api.dispose);
+
+      await _pumpShell(tester, controller);
+      await _openResumeDetail(tester);
+      await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+      await tester.pumpAndSettle();
+      final scrollable = _verticalScrollable();
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('library-item-facet-media-60')),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      final position = tester.state<ScrollableState>(scrollable).position;
+      final before = position.pixels;
+      expect(api.mediaRequests.map((request) => request.startIndex), [0, 60]);
+
+      await tester.tap(
+        find.byKey(const ValueKey('library-item-facet-media-60')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ItemDetailScreen), findsOneWidget);
+
+      await tester.tap(find.text('播放'));
+      await tester.pump();
+      expect(find.byType(PlayerScreen), findsOneWidget);
+      await tester.tap(find.byTooltip('返回'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ItemDetailScreen), findsOneWidget);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byType(LibraryBrowseScreen), findsOneWidget);
+      expect(api.mediaRequests.map((request) => request.startIndex), [0, 60]);
+      expect(position.pixels, closeTo(before, 1));
+      expect(
+        find.byKey(const ValueKey('library-item-facet-media-60')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'facet play all returns directly to the preserved facet route',
+    skip: Platform.isWindows,
+    (tester) async {
+      MediaKit.ensureInitialized();
+      _setViewport(tester);
+      final preferences = SharedPreferencesAsyncTestBackend.install();
+      addTearDown(preferences.restore);
+      final api = _IntegrationApi(largeFacetResult: true);
+      final controller = _IntegrationController(api);
+      addTearDown(controller.dispose);
+      addTearDown(api.dispose);
+
+      await _pumpShell(tester, controller);
+      await _openResumeDetail(tester);
+      await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+      await tester.pumpAndSettle();
+      final scrollable = _verticalScrollable();
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('library-item-facet-media-60')),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      final position = tester.state<ScrollableState>(scrollable).position;
+      final before = position.pixels;
+      final playAll = find.byKey(const ValueKey('library-play-all-button'));
+      await tester.ensureVisible(playAll);
+      await tester.tap(playAll);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ItemDetailScreen), findsNothing);
+      expect(find.byType(PlayerScreen), findsOneWidget);
+      await tester.tap(find.byTooltip('返回'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PlayerScreen), findsNothing);
+      expect(find.byType(LibraryBrowseScreen), findsOneWidget);
+      expect(api.mediaRequests.map((request) => request.startIndex), [0, 60]);
+      expect(position.pixels, closeTo(before, 1));
+      expect(
+        find.byKey(const ValueKey('library-item-facet-media-60')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('library changes invalidate root and genre navigation caches', (
+    tester,
+  ) async {
+    _setViewport(tester);
+    final preferences = SharedPreferencesAsyncTestBackend.install();
+    addTearDown(preferences.restore);
+    final api = _IntegrationApi();
+    final controller = _IntegrationController(api);
+    addTearDown(controller.dispose);
+    addTearDown(api.dispose);
+    addTearDown(api.realtime.stop);
+
+    await _pumpShell(tester, controller);
+    await _openResumeDetail(tester);
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+    await tester.pumpAndSettle();
+    expect(api.genreRequests, hasLength(1));
+    expect(api.genreRequests.single.parentId, 'library-1');
+    expect(api.mediaRequests.single.parentId, 'library-1');
+    expect(api.mediaRequests.single.genreId, 'genre-1');
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await api.realtime.start();
+    api.libraryVersion = 2;
+    api.realtimeSocket.emitLibraryChanged();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('item-detail-genre-0')));
+    await tester.pumpAndSettle();
+    expect(api.genreRequests, hasLength(2));
+    expect(api.genreRequests.last.parentId, 'library-2');
+    expect(api.mediaRequests.last.parentId, 'library-2');
+    expect(api.mediaRequests.last.genreId, 'genre-2');
+    expect(api.viewRequests, greaterThan(1));
+    await tester.runAsync(api.realtime.stop);
+  });
+
+  testWidgets(
     'facet pagination and scroll position survive a detail round trip',
     (tester) async {
       _setViewport(tester);
@@ -169,6 +353,7 @@ Future<void> _pumpShell(
   await tester.pumpWidget(
     MaterialApp(
       theme: ThemeData.dark(useMaterial3: true),
+      navigatorObservers: [homeShellRouteObserver],
       home: HomeShell(controller: controller),
     ),
   );
@@ -208,13 +393,26 @@ class _IntegrationController extends AppController {
 }
 
 class _IntegrationApi extends EmbyApi {
-  _IntegrationApi({this.largeFacetResult = false})
-    : super(_session, dio: Dio());
+  factory _IntegrationApi({bool largeFacetResult = false}) =>
+      _IntegrationApi._(largeFacetResult, _IntegrationSocket());
+
+  _IntegrationApi._(this.largeFacetResult, this.realtimeSocket)
+    : super(
+        _session,
+        dio: _integrationDio(),
+        realtimeConnector: (_) async => realtimeSocket,
+      );
 
   final bool largeFacetResult;
+  final _IntegrationSocket realtimeSocket;
   final genreRequests = <_GenreRequest>[];
   final mediaRequests = <_MediaRequest>[];
   Completer<EmbyItemPage>? genreGate;
+  int libraryVersion = 1;
+  int viewRequests = 0;
+
+  String get currentLibraryId => 'library-$libraryVersion';
+  String get currentGenreId => 'genre-$libraryVersion';
 
   @override
   Future<HomeData> getHomeBase() async =>
@@ -225,13 +423,18 @@ class _IntegrationApi extends EmbyApi {
       null;
 
   @override
-  Future<List<EmbyItem>> getViews() async => const [_library];
+  Future<List<EmbyItem>> getViews() async {
+    viewRequests++;
+    return [_libraryFor(currentLibraryId)];
+  }
 
   @override
   Future<EmbyItem> getItem(String itemId) async {
     if (itemId == _resume.id) return _resume;
-    if (itemId == _folder.id) return _folder;
-    if (itemId.startsWith('facet-media-')) return _facetItem(itemId);
+    if (itemId == _folder.id) return _folderFor(currentLibraryId);
+    if (itemId.startsWith('facet-media-')) {
+      return _facetItem(itemId, parentId: currentLibraryId);
+    }
     return _resume;
   }
 
@@ -255,7 +458,21 @@ class _IntegrationApi extends EmbyApi {
       genreGate = null;
       return gate.future;
     }
-    return _genrePage;
+    return EmbyItemPage(
+      items: [
+        EmbyItem(
+          id: currentGenreId,
+          name: 'Sci-Fi & Fantasy',
+          type: 'Genre',
+          imageTags: const {},
+          backdropImageTags: const [],
+          genres: const [],
+          userData: const EmbyUserData(),
+        ),
+      ],
+      rawItemCount: 1,
+      totalRecordCount: 1,
+    );
   }
 
   @override
@@ -283,7 +500,7 @@ class _IntegrationApi extends EmbyApi {
     );
     if (!largeFacetResult) {
       return EmbyItemPage(
-        items: [_facetItem('facet-media-0')],
+        items: [_facetItem('facet-media-0', parentId: currentLibraryId)],
         rawItemCount: 1,
         totalRecordCount: 1,
       );
@@ -292,7 +509,7 @@ class _IntegrationApi extends EmbyApi {
       return EmbyItemPage(
         items: [
           for (var index = 0; index < 60; index++)
-            _facetItem('facet-media-$index'),
+            _facetItem('facet-media-$index', parentId: currentLibraryId),
         ],
         rawItemCount: 60,
         totalRecordCount: 61,
@@ -300,7 +517,7 @@ class _IntegrationApi extends EmbyApi {
     }
     if (startIndex == 60) {
       return EmbyItemPage(
-        items: [_facetItem('facet-media-60')],
+        items: [_facetItem('facet-media-60', parentId: currentLibraryId)],
         rawItemCount: 1,
         totalRecordCount: 61,
       );
@@ -342,11 +559,75 @@ class _MediaRequest {
   final String? genreId;
 }
 
-EmbyItem _facetItem(String id) => EmbyItem(
+Dio _integrationDio() => Dio()
+  ..interceptors.add(
+    InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(
+          Response<dynamic>(requestOptions: options, statusCode: 204),
+        );
+      },
+    ),
+  );
+
+class _IntegrationSocket implements EmbySocket {
+  final StreamController<dynamic> _messages =
+      StreamController<dynamic>.broadcast();
+  bool _closed = false;
+
+  @override
+  Stream<dynamic> get messages => _messages.stream;
+
+  void emitLibraryChanged() {
+    _messages.add(
+      jsonEncode({
+        'MessageType': 'LibraryChanged',
+        'Data': {
+          'ItemsUpdated': ['resume-1'],
+        },
+      }),
+    );
+  }
+
+  @override
+  void add(String data) {}
+
+  @override
+  Future<void> close() {
+    if (_closed) return Future<void>.value();
+    _closed = true;
+    unawaited(_messages.close());
+    return Future<void>.value();
+  }
+}
+
+EmbyItem _libraryFor(String id) => EmbyItem(
   id: id,
-  name: 'Facet Media ${id.split('-').last}',
+  name: 'Movies',
+  type: 'CollectionFolder',
+  collectionType: 'movies',
+  imageTags: const {},
+  backdropImageTags: const [],
+  genres: const [],
+  userData: const EmbyUserData(),
+);
+
+EmbyItem _folderFor(String parentId) => EmbyItem(
+  id: _folder.id,
+  name: _folder.name,
+  type: _folder.type,
+  parentId: parentId,
+  imageTags: const {},
+  backdropImageTags: const [],
+  genres: const [],
+  userData: const EmbyUserData(),
+);
+
+EmbyItem _facetItem(String id, {required String parentId}) => EmbyItem(
+  id: id,
+  name: id,
   type: 'Movie',
-  parentId: _library.id,
+  parentId: parentId,
   imageTags: const {},
   backdropImageTags: const [],
   genres: const [],

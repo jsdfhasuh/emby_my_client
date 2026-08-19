@@ -103,7 +103,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _refresh() async {
     final future = _loadViews();
-    setState(() => _future = future);
+    setState(() {
+      _future = future;
+    });
     await future;
   }
 
