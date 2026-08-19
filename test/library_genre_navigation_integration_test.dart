@@ -11,6 +11,8 @@ import 'package:emby_my_client/library/library_genre_resolver.dart';
 import 'package:emby_my_client/library/library_root_resolver.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage_scope.dart';
+import 'package:emby_my_client/playback/playback_settings_scope.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -354,6 +356,13 @@ Future<void> _pumpShell(
     MaterialApp(
       theme: ThemeData.dark(useMaterial3: true),
       navigatorObservers: [homeShellRouteObserver],
+      builder: (context, child) => PlaybackCacheStorageScope(
+        storage: controller.playbackCacheStorage,
+        child: PlaybackSettingsRepositoryScope(
+          repository: controller.playbackSettingsRepository,
+          child: child ?? const SizedBox.shrink(),
+        ),
+      ),
       home: HomeShell(controller: controller),
     ),
   );
