@@ -26,10 +26,19 @@ class LibraryGenreResolver {
   LibraryGenreResolver({required this.api});
 
   static const pageSize = 60;
+  static const maxGenrePages = 128;
+  static const maxGenreTerms = 10000;
 
   final EmbyApi api;
   final Map<String, LibraryFacet> _cache = {};
   final Map<String, Future<LibraryFacet>> _inFlight = {};
+  int _cacheGeneration = 0;
+
+  void clear() {
+    _cacheGeneration++;
+    _cache.clear();
+    _inFlight.clear();
+  }
 
   Future<LibraryFacet> resolve({
     required LibraryBrowseOrigin origin,
@@ -48,24 +57,36 @@ class LibraryGenreResolver {
       );
     }
 
-    final cacheKey = _cacheKey(libraryId, normalizedName);
-    final cached = _cache[cacheKey];
-    if (cached != null) return cached;
-    final active = _inFlight[cacheKey];
-    if (active != null) return active;
+    final cacheKey = _cacheKey(libraryId, origin, normalizedName);
+    for (var retry = 0; retry < 2; retry++) {
+      final generation = _cacheGeneration;
+      final cached = _cache[cacheKey];
+      if (cached != null) return cached;
+      final active = _inFlight[cacheKey];
+      if (active != null) {
+        final facet = await active;
+        if (generation == _cacheGeneration) return facet;
+        continue;
+      }
 
-    final future = _resolveUncached(
-      origin: origin,
-      requestedName: genreName.trim(),
-      normalizedName: normalizedName,
-      cacheKey: cacheKey,
-    );
-    _inFlight[cacheKey] = future;
-    try {
-      return await future;
-    } finally {
-      if (identical(_inFlight[cacheKey], future)) _inFlight.remove(cacheKey);
+      final future = _resolveUncached(
+        origin: origin,
+        requestedName: genreName.trim(),
+        normalizedName: normalizedName,
+        cacheKey: cacheKey,
+        cacheGeneration: generation,
+      );
+      _inFlight[cacheKey] = future;
+      try {
+        final facet = await future;
+        if (generation == _cacheGeneration) return facet;
+      } finally {
+        if (identical(_inFlight[cacheKey], future)) _inFlight.remove(cacheKey);
+      }
     }
+    throw const LibraryGenreResolutionException(
+      LibraryGenreResolutionFailure.requestFailed,
+    );
   }
 
   Future<LibraryFacet> _resolveUncached({
@@ -73,6 +94,7 @@ class LibraryGenreResolver {
     required String requestedName,
     required String normalizedName,
     required String cacheKey,
+    required int cacheGeneration,
   }) async {
     for (var attempt = 0; attempt < 2; attempt++) {
       final entries = await _readGenreIndex(origin);
@@ -82,7 +104,7 @@ class LibraryGenreResolver {
         normalizedName: normalizedName,
       );
       if (facet != null) {
-        _cache[cacheKey] = facet;
+        if (cacheGeneration == _cacheGeneration) _cache[cacheKey] = facet;
         return facet;
       }
     }
@@ -92,33 +114,81 @@ class LibraryGenreResolver {
   }
 
   Future<List<EmbyItem>> _readGenreIndex(LibraryBrowseOrigin origin) async {
-    final entries = <EmbyItem>[];
+    final entriesById = <String, EmbyItem>{};
+    final seenGenreIds = <String>{};
+    final pageFingerprints = <String>{};
     var startIndex = 0;
+    var pageCount = 0;
+    int? totalCount;
     try {
       while (true) {
+        if (pageCount >= maxGenrePages) {
+          throw const LibraryGenreResolutionException(
+            LibraryGenreResolutionFailure.paginationStalled,
+          );
+        }
+        pageCount++;
         final page = await api.getLibraryGenres(
-          parentId: origin.rootView.id,
+          parentId: origin.rootView.id.trim(),
           profile: origin.profile,
           startIndex: startIndex,
           limit: pageSize,
         );
-        entries.addAll(
-          page.items.where(
-            (item) => item.id.trim().isNotEmpty && item.name.trim().isNotEmpty,
-          ),
-        );
+        final validItems = page.items
+            .where(
+              (item) =>
+                  item.id.trim().isNotEmpty && item.name.trim().isNotEmpty,
+            )
+            .toList(growable: false);
+        final fingerprintParts =
+            validItems
+                .map(
+                  (item) =>
+                      '${item.id.trim()}\u0000${normalizeLibraryGenreName(item.name)}',
+                )
+                .toList()
+              ..sort();
+        final fingerprint =
+            '${page.rawItemCount}\u0000${fingerprintParts.join('\u0001')}';
+        if (!pageFingerprints.add(fingerprint)) {
+          throw const LibraryGenreResolutionException(
+            LibraryGenreResolutionFailure.paginationStalled,
+          );
+        }
+
+        var newGenreCount = 0;
+        for (final item in validItems) {
+          final id = item.id.trim();
+          if (seenGenreIds.add(id)) {
+            newGenreCount++;
+            entriesById[id] = item;
+          }
+        }
+        if (entriesById.length > maxGenreTerms) {
+          throw const LibraryGenreResolutionException(
+            LibraryGenreResolutionFailure.paginationStalled,
+          );
+        }
+
         final cursor = advanceLibraryRawPageCursor(
           currentStartIndex: startIndex,
           rawItemCount: page.rawItemCount,
           pageSize: pageSize,
+          currentTotalCount: totalCount,
           reportedTotalCount: page.totalRecordCount,
         );
+        totalCount = cursor.totalCount;
         if (cursor.paginationStalled) {
           throw const LibraryGenreResolutionException(
             LibraryGenreResolutionFailure.paginationStalled,
           );
         }
-        if (!cursor.hasMore) return entries;
+        if (cursor.hasMore && newGenreCount == 0) {
+          throw const LibraryGenreResolutionException(
+            LibraryGenreResolutionFailure.paginationStalled,
+          );
+        }
+        if (!cursor.hasMore) return entriesById.values.toList(growable: false);
         if (cursor.nextStartIndex <= startIndex) {
           throw const LibraryGenreResolutionException(
             LibraryGenreResolutionFailure.paginationStalled,
@@ -177,8 +247,11 @@ class LibraryGenreResolver {
     );
   }
 
-  String _cacheKey(String libraryId, String normalizedName) =>
-      '$libraryId\u0000$normalizedName';
+  String _cacheKey(
+    String libraryId,
+    LibraryBrowseOrigin origin,
+    String normalizedName,
+  ) => '$libraryId\u0000${origin.profile.kind}\u0000$normalizedName';
 }
 
 String normalizeLibraryGenreName(String value) =>
