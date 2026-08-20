@@ -29,6 +29,14 @@ import 'package:media_kit/media_kit.dart';
 
 import 'shared_preferences_async_test_backend.dart';
 
+const _genreNavigationChildEnvironment = 'EMBY_GENRE_NAVIGATION_CHILD';
+const _pendingPlayerTestName =
+    'pending genre navigation cannot cover the real player route';
+const _facetDetailPlayerTestName =
+    'facet detail playback returns with pagination and position intact';
+const _facetPlayAllPlayerTestName =
+    'facet play all returns directly to the preserved facet route';
+
 void main() {
   test(
     'genre navigation maps every resolver failure to fixed Snackbar text',
@@ -117,10 +125,11 @@ void main() {
     },
   );
 
-  testWidgets(
-    'pending genre navigation cannot cover the real player route',
-    skip: Platform.isWindows,
-    (tester) async {
+  if (Platform.environment[_genreNavigationChildEnvironment] == '1' ||
+      Platform.isWindows) {
+    testWidgets(_pendingPlayerTestName, skip: Platform.isWindows, (
+      tester,
+    ) async {
       final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
@@ -143,8 +152,8 @@ void main() {
 
       await tester.tap(find.text('播放'));
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      _trackPlayerRelease(tester, videoOutput);
       await _pumpUntilCompleted(tester, videoOutput.ready);
-      videoOutput.player = _playerFromVideo(tester);
       expect(find.byType(PlayerScreen), findsOneWidget);
 
       gate.complete(_genrePage);
@@ -157,15 +166,14 @@ void main() {
         tester,
         find.byType(PlayerScreen, skipOffstage: false),
       );
+      await _finishMediaKitVideoTeardown(tester, videoOutput);
       expect(find.byType(LibraryBrowseScreen), findsNothing);
       expect(find.byType(SnackBar), findsNothing);
-    },
-  );
+    });
 
-  testWidgets(
-    'facet detail playback returns with pagination and position intact',
-    skip: Platform.isWindows,
-    (tester) async {
+    testWidgets(_facetDetailPlayerTestName, skip: Platform.isWindows, (
+      tester,
+    ) async {
       final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
@@ -200,14 +208,15 @@ void main() {
 
       await tester.tap(find.text('播放'));
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      _trackPlayerRelease(tester, videoOutput);
       await _pumpUntilCompleted(tester, videoOutput.ready);
-      videoOutput.player = _playerFromVideo(tester);
       expect(find.byType(PlayerScreen), findsOneWidget);
       await tester.tap(find.byTooltip('返回'));
       await _pumpUntilGone(
         tester,
         find.byType(PlayerScreen, skipOffstage: false),
       );
+      await _finishMediaKitVideoTeardown(tester, videoOutput);
       await _pumpUntilFound(tester, find.byType(ItemDetailScreen));
       expect(find.byType(ItemDetailScreen), findsOneWidget);
 
@@ -220,13 +229,11 @@ void main() {
         find.byKey(const ValueKey('library-item-facet-media-60')),
         findsOneWidget,
       );
-    },
-  );
+    });
 
-  testWidgets(
-    'facet play all returns directly to the preserved facet route',
-    skip: Platform.isWindows,
-    (tester) async {
+    testWidgets(_facetPlayAllPlayerTestName, skip: Platform.isWindows, (
+      tester,
+    ) async {
       final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
@@ -259,8 +266,8 @@ void main() {
       final before = position.pixels;
       await tester.tap(playAll);
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      _trackPlayerRelease(tester, videoOutput);
       await _pumpUntilCompleted(tester, videoOutput.ready);
-      videoOutput.player = _playerFromVideo(tester);
 
       expect(find.byType(ItemDetailScreen), findsNothing);
       expect(find.byType(PlayerScreen), findsOneWidget);
@@ -270,6 +277,7 @@ void main() {
         find.byType(PlayerScreen, skipOffstage: false),
         maxPumps: 400,
       );
+      await _finishMediaKitVideoTeardown(tester, videoOutput);
       await _pumpUntilFound(tester, find.byType(LibraryBrowseScreen));
 
       expect(find.byType(PlayerScreen), findsNothing);
@@ -287,8 +295,10 @@ void main() {
         find.byKey(const ValueKey('library-item-facet-media-60')),
         findsOneWidget,
       );
-    },
-  );
+    });
+  } else {
+    _registerIsolatedPlayerTests();
+  }
 
   testWidgets('library changes invalidate root and genre navigation caches', (
     tester,
@@ -384,6 +394,84 @@ void main() {
   );
 }
 
+void _registerIsolatedPlayerTests() {
+  for (final testName in const [
+    _pendingPlayerTestName,
+    _facetDetailPlayerTestName,
+    _facetPlayAllPlayerTestName,
+  ]) {
+    test(
+      'isolated media_kit player test: $testName',
+      () => _runIsolatedPlayerTest(testName),
+      skip: Platform.isWindows,
+    );
+  }
+}
+
+Future<void> _runIsolatedPlayerTest(String testName) async {
+  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
+  final flutterCommand = flutterRoot == null
+      ? 'flutter'
+      : '$flutterRoot${Platform.pathSeparator}bin${Platform.pathSeparator}'
+            'flutter${Platform.isWindows ? '.bat' : ''}';
+  final environment = Map<String, String>.from(Platform.environment)
+    ..[_genreNavigationChildEnvironment] = '1';
+  final process = await Process.start(
+    flutterCommand,
+    [
+      'test',
+      'test/library_genre_navigation_integration_test.dart',
+      '--plain-name',
+      testName,
+      '--reporter',
+      'expanded',
+    ],
+    workingDirectory: Directory.current.path,
+    environment: environment,
+    runInShell: Platform.isWindows,
+  );
+  final stdoutBuffer = StringBuffer();
+  final stderrBuffer = StringBuffer();
+  final stdoutDone = process.stdout.transform(utf8.decoder).forEach((chunk) {
+    stdoutBuffer.write(chunk);
+    stdout.write(chunk);
+  });
+  final stderrDone = process.stderr.transform(utf8.decoder).forEach((chunk) {
+    stderrBuffer.write(chunk);
+    stderr.write(chunk);
+  });
+
+  var timedOut = false;
+  int exitCode;
+  try {
+    exitCode = await process.exitCode.timeout(const Duration(minutes: 3));
+  } on TimeoutException {
+    timedOut = true;
+    process.kill();
+    exitCode = await process.exitCode.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        process.kill(ProcessSignal.sigkill);
+        return -1;
+      },
+    );
+  }
+  await Future.wait([stdoutDone, stderrDone]);
+
+  final output = '${stdoutBuffer.toString()}${stderrBuffer.toString()}';
+  if (timedOut) {
+    fail('Timed out running isolated player test "$testName".\n$output');
+  }
+  if (exitCode != 0) {
+    fail(
+      'Isolated player test "$testName" exited with code $exitCode.\n$output',
+    );
+  }
+  if (!output.contains(testName)) {
+    fail('Isolated player test "$testName" did not run.\n$output');
+  }
+}
+
 Future<void> _pumpShell(
   WidgetTester tester,
   _IntegrationController controller,
@@ -448,7 +536,11 @@ _MediaKitVideoTestChannel _installMediaKitVideoTestChannel() {
     return null;
   });
   addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-  return _MediaKitVideoTestChannel(ready: ready, disposed: disposed);
+  return _MediaKitVideoTestChannel(
+    ready: ready,
+    disposed: disposed,
+    playerReleased: Completer<void>(),
+  );
 }
 
 void _registerMediaKitVideoTeardown(
@@ -458,42 +550,71 @@ void _registerMediaKitVideoTeardown(
   addTearDown(() async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
-    final player = channel.player;
-    if (player != null) {
-      await tester.runAsync(() async {
-        try {
-          await player.dispose();
-        } catch (_) {
-          // PlayerScreen may have already completed the same disposal.
-        }
-      });
-    }
-    if (!channel.ready.isCompleted) return;
-    await _pumpUntilCompleted(
-      tester,
-      channel.disposed,
-      maxPumps: 600,
-      failureMessage:
-          'Timed out waiting for the media video output to dispose.',
-    );
+    await _finishMediaKitVideoTeardown(tester, channel);
   });
 }
 
+Future<void> _finishMediaKitVideoTeardown(
+  WidgetTester tester,
+  _MediaKitVideoTestChannel channel,
+) async {
+  if (channel.teardownCompleted || !channel.ready.isCompleted) return;
+  await _pumpUntilCompleted(
+    tester,
+    channel.disposed,
+    maxPumps: 600,
+    failureMessage: 'Timed out waiting for the media video output to dispose.',
+  );
+  await _pumpUntilCompleted(
+    tester,
+    channel.playerReleased,
+    maxPumps: 600,
+    failureMessage: 'Timed out waiting for the player to release.',
+  );
+  final player = channel.player;
+  if (player?.platform is NativePlayer) {
+    await tester.runAsync(() async {
+      await NativePlayer.lock.synchronized(() {});
+    });
+  }
+  // NativePlayer schedules mpv destruction after release using this test's
+  // fake clock, so the clock must advance after the release callback fires.
+  await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+  await tester.pump(const Duration(seconds: 6));
+  await tester.runAsync(() => Future<void>.delayed(const Duration(seconds: 6)));
+  channel.teardownCompleted = true;
+}
+
 class _MediaKitVideoTestChannel {
-  _MediaKitVideoTestChannel({required this.ready, required this.disposed});
+  _MediaKitVideoTestChannel({
+    required this.ready,
+    required this.disposed,
+    required this.playerReleased,
+  });
 
   final Completer<void> ready;
   final Completer<void> disposed;
+  final Completer<void> playerReleased;
   Player? player;
+  bool teardownCompleted = false;
 }
 
-Player _playerFromVideo(WidgetTester tester) {
+void _trackPlayerRelease(
+  WidgetTester tester,
+  _MediaKitVideoTestChannel channel,
+) {
   final video = tester.widget<Widget>(
     find.byWidgetPredicate(
       (widget) => widget.runtimeType.toString() == 'Video',
     ),
   );
-  return (video as dynamic).controller.player as Player;
+  final player = (video as dynamic).controller.player as Player;
+  channel.player = player;
+  player.platform?.release.add(() async {
+    if (!channel.playerReleased.isCompleted) {
+      channel.playerReleased.complete();
+    }
+  });
 }
 
 Future<void> _pumpUntilFound(
