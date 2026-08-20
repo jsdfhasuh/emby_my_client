@@ -144,6 +144,7 @@ void main() {
       await tester.tap(find.text('播放'));
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
       await _pumpUntilCompleted(tester, videoOutput.ready);
+      videoOutput.player = _playerFromVideo(tester);
       expect(find.byType(PlayerScreen), findsOneWidget);
 
       gate.complete(_genrePage);
@@ -200,6 +201,7 @@ void main() {
       await tester.tap(find.text('播放'));
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
       await _pumpUntilCompleted(tester, videoOutput.ready);
+      videoOutput.player = _playerFromVideo(tester);
       expect(find.byType(PlayerScreen), findsOneWidget);
       await tester.tap(find.byTooltip('返回'));
       await _pumpUntilGone(
@@ -258,6 +260,7 @@ void main() {
       await tester.tap(playAll);
       await _pumpUntilFound(tester, find.byType(PlayerScreen));
       await _pumpUntilCompleted(tester, videoOutput.ready);
+      videoOutput.player = _playerFromVideo(tester);
 
       expect(find.byType(ItemDetailScreen), findsNothing);
       expect(find.byType(PlayerScreen), findsOneWidget);
@@ -455,6 +458,16 @@ void _registerMediaKitVideoTeardown(
   addTearDown(() async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+    final player = channel.player;
+    if (player != null) {
+      await tester.runAsync(() async {
+        try {
+          await player.dispose();
+        } catch (_) {
+          // PlayerScreen may have already completed the same disposal.
+        }
+      });
+    }
     if (!channel.ready.isCompleted) return;
     await _pumpUntilCompleted(
       tester,
@@ -467,13 +480,20 @@ void _registerMediaKitVideoTeardown(
 }
 
 class _MediaKitVideoTestChannel {
-  const _MediaKitVideoTestChannel({
-    required this.ready,
-    required this.disposed,
-  });
+  _MediaKitVideoTestChannel({required this.ready, required this.disposed});
 
   final Completer<void> ready;
   final Completer<void> disposed;
+  Player? player;
+}
+
+Player _playerFromVideo(WidgetTester tester) {
+  final video = tester.widget<Widget>(
+    find.byWidgetPredicate(
+      (widget) => widget.runtimeType.toString() == 'Video',
+    ),
+  );
+  return (video as dynamic).controller.player as Player;
 }
 
 Future<void> _pumpUntilFound(
