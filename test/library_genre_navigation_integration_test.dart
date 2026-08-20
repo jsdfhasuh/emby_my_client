@@ -23,6 +23,7 @@ import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/player_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -120,6 +121,7 @@ void main() {
     'pending genre navigation cannot cover the real player route',
     skip: Platform.isWindows,
     (tester) async {
+      final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
       final preferences = SharedPreferencesAsyncTestBackend.install();
@@ -128,6 +130,7 @@ void main() {
       final controller = _IntegrationController(api);
       addTearDown(controller.dispose);
       addTearDown(api.dispose);
+      _registerMediaKitVideoTeardown(tester, videoOutput);
 
       await _pumpShell(tester, controller);
       await _openResumeDetail(tester);
@@ -139,7 +142,8 @@ void main() {
       expect(api.genreRequests, hasLength(1));
 
       await tester.tap(find.text('播放'));
-      await tester.pump();
+      await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      await _pumpUntilCompleted(tester, videoOutput.ready);
       expect(find.byType(PlayerScreen), findsOneWidget);
 
       gate.complete(_genrePage);
@@ -148,7 +152,10 @@ void main() {
       expect(find.byType(SnackBar), findsNothing);
 
       await tester.tap(find.byTooltip('返回'));
-      await tester.pumpAndSettle();
+      await _pumpUntilGone(
+        tester,
+        find.byType(PlayerScreen, skipOffstage: false),
+      );
       expect(find.byType(LibraryBrowseScreen), findsNothing);
       expect(find.byType(SnackBar), findsNothing);
     },
@@ -158,6 +165,7 @@ void main() {
     'facet detail playback returns with pagination and position intact',
     skip: Platform.isWindows,
     (tester) async {
+      final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
       final preferences = SharedPreferencesAsyncTestBackend.install();
@@ -166,6 +174,7 @@ void main() {
       final controller = _IntegrationController(api);
       addTearDown(controller.dispose);
       addTearDown(api.dispose);
+      _registerMediaKitVideoTeardown(tester, videoOutput);
 
       await _pumpShell(tester, controller);
       await _openResumeDetail(tester);
@@ -189,14 +198,19 @@ void main() {
       expect(find.byType(ItemDetailScreen), findsOneWidget);
 
       await tester.tap(find.text('播放'));
-      await tester.pump();
+      await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      await _pumpUntilCompleted(tester, videoOutput.ready);
       expect(find.byType(PlayerScreen), findsOneWidget);
       await tester.tap(find.byTooltip('返回'));
-      await tester.pumpAndSettle();
+      await _pumpUntilGone(
+        tester,
+        find.byType(PlayerScreen, skipOffstage: false),
+      );
+      await _pumpUntilFound(tester, find.byType(ItemDetailScreen));
       expect(find.byType(ItemDetailScreen), findsOneWidget);
 
       await tester.pageBack();
-      await tester.pumpAndSettle();
+      await _pumpUntilFound(tester, find.byType(LibraryBrowseScreen));
       expect(find.byType(LibraryBrowseScreen), findsOneWidget);
       expect(api.mediaRequests.map((request) => request.startIndex), [0, 60]);
       expect(position.pixels, closeTo(before, 1));
@@ -211,6 +225,7 @@ void main() {
     'facet play all returns directly to the preserved facet route',
     skip: Platform.isWindows,
     (tester) async {
+      final videoOutput = _installMediaKitVideoTestChannel();
       MediaKit.ensureInitialized();
       _setViewport(tester);
       final preferences = SharedPreferencesAsyncTestBackend.install();
@@ -219,6 +234,7 @@ void main() {
       final controller = _IntegrationController(api);
       addTearDown(controller.dispose);
       addTearDown(api.dispose);
+      _registerMediaKitVideoTeardown(tester, videoOutput);
 
       await _pumpShell(tester, controller);
       await _openResumeDetail(tester);
@@ -232,21 +248,38 @@ void main() {
       );
       await tester.pumpAndSettle();
       final position = tester.state<ScrollableState>(scrollable).position;
-      final before = position.pixels;
-      final playAll = find.byKey(const ValueKey('library-play-all-button'));
-      await tester.ensureVisible(playAll);
-      await tester.tap(playAll);
+      position.jumpTo(0);
       await tester.pumpAndSettle();
+      final playAll = find.byKey(const ValueKey('library-play-all-button'));
+      expect(playAll, findsOneWidget);
+      await tester.ensureVisible(playAll);
+      await tester.pumpAndSettle();
+      final before = position.pixels;
+      await tester.tap(playAll);
+      await _pumpUntilFound(tester, find.byType(PlayerScreen));
+      await _pumpUntilCompleted(tester, videoOutput.ready);
 
       expect(find.byType(ItemDetailScreen), findsNothing);
       expect(find.byType(PlayerScreen), findsOneWidget);
       await tester.tap(find.byTooltip('返回'));
-      await tester.pumpAndSettle();
+      await _pumpUntilGone(
+        tester,
+        find.byType(PlayerScreen, skipOffstage: false),
+        maxPumps: 400,
+      );
+      await _pumpUntilFound(tester, find.byType(LibraryBrowseScreen));
 
       expect(find.byType(PlayerScreen), findsNothing);
       expect(find.byType(LibraryBrowseScreen), findsOneWidget);
       expect(api.mediaRequests.map((request) => request.startIndex), [0, 60]);
       expect(position.pixels, closeTo(before, 1));
+      final facetItem = find.byKey(
+        const ValueKey('library-item-facet-media-60'),
+        skipOffstage: false,
+      );
+      await tester.scrollUntilVisible(facetItem, 700, scrollable: scrollable);
+      await tester.ensureVisible(facetItem);
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('library-item-facet-media-60')),
         findsOneWidget,
@@ -376,7 +409,134 @@ Future<void> _openResumeDetail(WidgetTester tester) async {
   expect(find.byType(ItemDetailScreen), findsOneWidget);
 }
 
-Finder _verticalScrollable() => find.byType(Scrollable).first;
+Finder _verticalScrollable() => find.byWidgetPredicate(
+  (widget) =>
+      widget is Scrollable && widget.axisDirection == AxisDirection.down,
+);
+
+_MediaKitVideoTestChannel _installMediaKitVideoTestChannel() {
+  const channel = MethodChannel('com.alexmercerind/media_kit_video');
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  final ready = Completer<void>();
+  final disposed = Completer<void>();
+  var nextTextureId = 1;
+  messenger.setMockMethodCallHandler(channel, (call) async {
+    if (call.method == 'VideoOutputManager.Create') {
+      final arguments = call.arguments as Map<Object?, Object?>;
+      final handle = int.tryParse('${arguments['handle']}') ?? 0;
+      final resize = const StandardMethodCodec().encodeMethodCall(
+        MethodCall('VideoOutput.Resize', <String, Object?>{
+          'handle': handle,
+          'id': nextTextureId++,
+          'rect': <String, Object?>{
+            'left': 0,
+            'top': 0,
+            'width': 1,
+            'height': 1,
+          },
+        }),
+      );
+      await messenger.handlePlatformMessage(channel.name, resize, null);
+      if (!ready.isCompleted) ready.complete();
+    } else if (call.method == 'VideoOutputManager.Dispose') {
+      if (!disposed.isCompleted) disposed.complete();
+    }
+    return null;
+  });
+  addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+  return _MediaKitVideoTestChannel(ready: ready, disposed: disposed);
+}
+
+void _registerMediaKitVideoTeardown(
+  WidgetTester tester,
+  _MediaKitVideoTestChannel channel,
+) {
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    if (!channel.ready.isCompleted) return;
+    await _pumpUntilCompleted(
+      tester,
+      channel.disposed,
+      maxPumps: 600,
+      failureMessage:
+          'Timed out waiting for the media video output to dispose.',
+    );
+  });
+}
+
+class _MediaKitVideoTestChannel {
+  const _MediaKitVideoTestChannel({
+    required this.ready,
+    required this.disposed,
+  });
+
+  final Completer<void> ready;
+  final Completer<void> disposed;
+}
+
+Future<void> _pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  int maxPumps = 100,
+}) async {
+  for (var attempt = 0; attempt < maxPumps; attempt++) {
+    if (finder.evaluate().isNotEmpty) return;
+    await tester.pump(const Duration(milliseconds: 20));
+  }
+  fail('Timed out waiting for $finder after $maxPumps pumps.');
+}
+
+Future<void> _pumpUntilCompleted(
+  WidgetTester tester,
+  Completer<void> completer, {
+  int maxPumps = 500,
+  String failureMessage =
+      'Timed out waiting for the media video output to initialize.',
+}) async {
+  for (var attempt = 0; attempt < maxPumps; attempt++) {
+    if (completer.isCompleted) return;
+    await tester.pump(const Duration(milliseconds: 20));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+  }
+  fail(failureMessage);
+}
+
+Future<void> _pumpUntilGone(
+  WidgetTester tester,
+  Finder finder, {
+  int maxPumps = 300,
+}) async {
+  var emptyFrames = 0;
+  for (var attempt = 0; attempt < maxPumps; attempt++) {
+    if (finder.evaluate().isEmpty) {
+      emptyFrames++;
+      if (emptyFrames >= 3) {
+        await _drainPlayerNativeTeardown(tester);
+        return;
+      }
+    } else {
+      emptyFrames = 0;
+    }
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+  }
+  fail('Timed out waiting for $finder to disappear after $maxPumps pumps.');
+}
+
+Future<void> _drainPlayerNativeTeardown(WidgetTester tester) async {
+  for (var attempt = 0; attempt < 20; attempt++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 250)),
+    );
+    await tester.pump(const Duration(seconds: 5));
+  }
+}
 
 void _setViewport(WidgetTester tester) {
   tester.view.physicalSize = const Size(390, 844);
