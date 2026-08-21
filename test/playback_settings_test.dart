@@ -1,5 +1,7 @@
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
+import 'package:emby_my_client/playback/horizontal_scrub_mapping.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
+import 'package:emby_my_client/playback/seek_preview_mode.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -8,6 +10,8 @@ void main() {
       maxStreamingBitrate: 10000000,
       seekBackwardSeconds: 15,
       seekForwardSeconds: 30,
+      horizontalSwipeSeekSpanSeconds: 600,
+      seekPreviewMode: SeekPreviewMode.serverOnly,
       playbackRate: 1.5,
       videoFit: 'cover',
       subtitleDelayMilliseconds: 500,
@@ -30,6 +34,8 @@ void main() {
     expect(restored.maxStreamingBitrate, 10000000);
     expect(restored.seekBackwardSeconds, 15);
     expect(restored.seekForwardSeconds, 30);
+    expect(restored.horizontalSwipeSeekSpanSeconds, 600);
+    expect(restored.seekPreviewMode, SeekPreviewMode.serverOnly);
     expect(restored.playbackRate, 1.5);
     expect(restored.videoFit, 'cover');
     expect(restored.subtitleDelayMilliseconds, 500);
@@ -55,6 +61,11 @@ void main() {
     expect(restored.maxStreamingBitrate, 10000000);
     expect(restored.playbackRate, 1.5);
     expect(restored.videoFit, 'cover');
+    expect(
+      restored.horizontalSwipeSeekSpanSeconds,
+      defaultHorizontalSwipeSeekSpanSeconds,
+    );
+    expect(restored.seekPreviewMode, SeekPreviewMode.automatic);
     expect(restored.cache.mode, PlaybackCacheMode.automatic);
     expect(
       restored.cache.customSessionTargetBytes,
@@ -132,6 +143,57 @@ void main() {
         PlaybackCacheSettings(mode: mode).toJson(),
       );
       expect(restored.mode, mode);
+    }
+  });
+
+  test('invalid scrub settings recover to safe defaults', () {
+    final restored = PlaybackSettings.fromJson({
+      'horizontalSwipeSeekSpanSeconds': 91,
+      'seekPreviewMode': 'unknown',
+    });
+
+    expect(
+      restored.horizontalSwipeSeekSpanSeconds,
+      defaultHorizontalSwipeSeekSpanSeconds,
+    );
+    expect(restored.seekPreviewMode, SeekPreviewMode.automatic);
+
+    const directlyConstructed = PlaybackSettings(
+      horizontalSwipeSeekSpanSeconds: 91,
+    );
+    expect(
+      directlyConstructed.toJson()['horizontalSwipeSeekSpanSeconds'],
+      defaultHorizontalSwipeSeekSpanSeconds,
+    );
+  });
+
+  test('scrub settings copyWith normalizes the span and changes the mode', () {
+    const settings = PlaybackSettings(
+      horizontalSwipeSeekSpanSeconds: 30,
+      seekPreviewMode: SeekPreviewMode.off,
+    );
+
+    final normalized = settings.copyWith(horizontalSwipeSeekSpanSeconds: 999);
+    expect(
+      normalized.horizontalSwipeSeekSpanSeconds,
+      defaultHorizontalSwipeSeekSpanSeconds,
+    );
+    expect(normalized.seekPreviewMode, SeekPreviewMode.off);
+
+    final changed = settings.copyWith(
+      horizontalSwipeSeekSpanSeconds: 300,
+      seekPreviewMode: SeekPreviewMode.serverOnly,
+    );
+    expect(changed.horizontalSwipeSeekSpanSeconds, 300);
+    expect(changed.seekPreviewMode, SeekPreviewMode.serverOnly);
+  });
+
+  test('all seek preview modes use stable serialized names', () {
+    for (final mode in SeekPreviewMode.values) {
+      final restored = PlaybackSettings.fromJson(
+        PlaybackSettings(seekPreviewMode: mode).toJson(),
+      );
+      expect(restored.seekPreviewMode, mode);
     }
   });
 

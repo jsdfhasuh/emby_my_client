@@ -3,8 +3,10 @@ import 'dart:convert';
 
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_settings.dart';
+import 'package:emby_my_client/playback/horizontal_scrub_mapping.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
+import 'package:emby_my_client/playback/seek_preview_mode.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -74,6 +76,40 @@ void main() {
     expect(result.cache.mode, PlaybackCacheMode.custom);
     expect(result.cache.customForwardSeconds, 300);
   });
+
+  test(
+    'scrub settings patches are normalized and persisted per account',
+    () async {
+      final repository = PlaybackSettingsRepository(storage: _MemoryStorage());
+
+      final saved = await repository.patch(
+        _firstSession,
+        const PlaybackSettingsPatch(
+          horizontalSwipeSeekSpanSeconds: 300,
+          seekPreviewMode: SeekPreviewMode.off,
+        ),
+      );
+      expect(saved.settings.horizontalSwipeSeekSpanSeconds, 300);
+      expect(saved.settings.seekPreviewMode, SeekPreviewMode.off);
+
+      final invalid = await repository.patch(
+        _firstSession,
+        const PlaybackSettingsPatch(horizontalSwipeSeekSpanSeconds: 91),
+      );
+      expect(
+        invalid.settings.horizontalSwipeSeekSpanSeconds,
+        defaultHorizontalSwipeSeekSpanSeconds,
+      );
+      expect(invalid.settings.seekPreviewMode, SeekPreviewMode.off);
+
+      final restored = (await repository.load(_firstSession)).settings;
+      expect(
+        restored.horizontalSwipeSeekSpanSeconds,
+        defaultHorizontalSwipeSeekSpanSeconds,
+      );
+      expect(restored.seekPreviewMode, SeekPreviewMode.off);
+    },
+  );
 
   test('clear invalidates a patch blocked in storage read', () async {
     final storage = _MemoryStorage()

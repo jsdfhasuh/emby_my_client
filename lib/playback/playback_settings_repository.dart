@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_settings.dart';
 import 'playback_settings.dart';
+import 'seek_preview_mode.dart';
 
 abstract interface class PlaybackSettingsStorage {
   Future<String?> read(String key);
@@ -47,6 +48,8 @@ class PlaybackSettingsPatch {
     this.maxStreamingBitrate,
     this.seekBackwardSeconds,
     this.seekForwardSeconds,
+    this.horizontalSwipeSeekSpanSeconds,
+    this.seekPreviewMode,
     this.playbackRate,
     this.videoFit,
     this.subtitleDelayMilliseconds,
@@ -61,6 +64,8 @@ class PlaybackSettingsPatch {
   final int? maxStreamingBitrate;
   final int? seekBackwardSeconds;
   final int? seekForwardSeconds;
+  final int? horizontalSwipeSeekSpanSeconds;
+  final SeekPreviewMode? seekPreviewMode;
   final double? playbackRate;
   final String? videoFit;
   final int? subtitleDelayMilliseconds;
@@ -75,6 +80,8 @@ class PlaybackSettingsPatch {
     maxStreamingBitrate: maxStreamingBitrate,
     seekBackwardSeconds: seekBackwardSeconds,
     seekForwardSeconds: seekForwardSeconds,
+    horizontalSwipeSeekSpanSeconds: horizontalSwipeSeekSpanSeconds,
+    seekPreviewMode: seekPreviewMode,
     playbackRate: playbackRate,
     videoFit: videoFit,
     subtitleDelayMilliseconds: subtitleDelayMilliseconds,

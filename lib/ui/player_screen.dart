@@ -23,6 +23,7 @@ import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../playback/playback_engine.dart';
+import '../playback/horizontal_scrub_mapping.dart';
 import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
@@ -30,9 +31,11 @@ import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
+import '../playback/seek_preview_mode.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
+import 'widgets/horizontal_seek_preview_overlay.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
@@ -227,9 +230,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
-  Duration? _horizontalDragStartPosition;
-  Duration? _horizontalDragPreviewPosition;
-  double _horizontalDragDx = 0;
+  HorizontalScrubSession? _horizontalScrubSession;
+  int? _horizontalDragPreviewFailedImageIndex;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
@@ -766,41 +768,39 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _controlsTimer?.cancel();
     _invalidateUiSeek();
+    final session = HorizontalScrubSession(
+      startPosition: _position,
+      duration: _duration,
+      spanSeconds: _settings.horizontalSwipeSeekSpanSeconds,
+    );
     setState(() {
-      _horizontalDragStartPosition = _position;
-      _horizontalDragPreviewPosition = _position;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = session;
+      _horizontalDragPreviewFailedImageIndex = null;
       _seeking = true;
       _controlsVisible = false;
     });
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    final startPosition = _horizontalDragStartPosition;
-    if (startPosition == null) return;
+    final session = _horizontalScrubSession;
+    if (session == null || !session.isActive) return;
 
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    if (screenWidth <= 0) return;
-
-    _horizontalDragDx += details.delta.dx;
-    final offsetSeconds = (_horizontalDragDx / screenWidth * 120).round();
-    final target = _clampPosition(
-      startPosition + Duration(seconds: offsetSeconds),
+    final target = session.update(
+      deltaDistance: details.delta.dx,
+      viewportWidth: MediaQuery.sizeOf(context).width,
     );
     setState(() {
-      _horizontalDragPreviewPosition = target;
       _position = target;
     });
   }
 
   Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
-    final target = _horizontalDragPreviewPosition;
-    if (_horizontalDragStartPosition == null || target == null) return;
+    final session = _horizontalScrubSession;
+    final target = session?.complete();
+    if (session == null || target == null) return;
 
     setState(() {
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
     });
@@ -808,26 +808,19 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onHorizontalDragCancel() {
-    final startPosition = _horizontalDragStartPosition;
+    final session = _horizontalScrubSession;
+    final startPosition = session?.cancel();
     if (startPosition == null) return;
 
     _invalidateUiSeek();
     setState(() {
       _position = startPosition;
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
       _uiSeekPending = false;
     });
     _restartControlsTimer();
-  }
-
-  Duration _clampPosition(Duration position) {
-    if (position < Duration.zero) return Duration.zero;
-    if (position > _duration) return _duration;
-    return position;
   }
 
   @override
@@ -1290,6 +1283,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             _autoNextCancelled = false;
             _nextCountdown = null;
             _controlsVisible = true;
+            _horizontalScrubSession = null;
+            _horizontalDragPreviewFailedImageIndex = null;
             _invalidateUiSeek();
           });
           await _startCurrentItem();
@@ -1621,6 +1616,62 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
           ListTile(
+            key: const ValueKey('horizontal-swipe-seek-span-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.swap_horiz),
+            title: const Text('横向滑动跨度'),
+            subtitle: const Text('横跨整个屏幕对应的快进或快退时间'),
+            trailing: DropdownButton<int>(
+              value: _settings.horizontalSwipeSeekSpanSeconds,
+              items: const [
+                DropdownMenuItem(value: 30, child: Text('30 秒')),
+                DropdownMenuItem(value: 60, child: Text('1 分钟')),
+                DropdownMenuItem(value: 120, child: Text('2 分钟')),
+                DropdownMenuItem(value: 300, child: Text('5 分钟')),
+                DropdownMenuItem(value: 600, child: Text('10 分钟')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(
+                    PlaybackSettingsPatch(
+                      horizontalSwipeSeekSpanSeconds: value,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            key: const ValueKey('seek-preview-mode-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('滑动预览画面'),
+            trailing: DropdownButton<SeekPreviewMode>(
+              value: _settings.seekPreviewMode,
+              items: const [
+                DropdownMenuItem(
+                  value: SeekPreviewMode.automatic,
+                  child: Text('自动（推荐）'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.serverOnly,
+                  child: Text('仅服务器缩略图'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.off,
+                  child: Text('关闭画面预览'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(PlaybackSettingsPatch(seekPreviewMode: value)),
+                );
+              },
+            ),
+          ),
+          ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.graphic_eq),
             title: const Text('音频延迟'),
@@ -1821,8 +1872,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                   child: _buildControls(),
                 ),
               ),
-              if (_horizontalDragPreviewPosition != null)
-                _buildHorizontalSeekOverlay(),
+              if (_horizontalScrubSession != null)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: _buildHorizontalSeekOverlay(),
+                ),
               if (_verticalDragValue != null) _buildVerticalGestureOverlay(),
               if (_showSkipIntro && !_controlsLocked)
                 Positioned(
@@ -1844,79 +1900,80 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildHorizontalSeekOverlay() {
-    final startPosition = _horizontalDragStartPosition!;
-    final target = _horizontalDragPreviewPosition!;
-    final deltaSeconds = target.inSeconds - startPosition.inSeconds;
-    final isForward = _horizontalDragDx >= 0;
-    final deltaLabel = deltaSeconds > 0
-        ? '+$deltaSeconds 秒'
-        : '$deltaSeconds 秒';
-    final preview = _trickplayPreview(target);
-
-    return IgnorePointer(
-      child: Center(
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          decoration: BoxDecoration(
-            color: const Color(0xCC111315),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (preview != null) ...[
-                SizedBox(
-                  width: 240,
-                  child: TrickplayPreview(
-                    image: NetworkImage(
-                      preview.url.toString(),
-                      headers: widget.api.playbackHeaders,
-                    ),
-                    thumbnailWidth: preview.info.width,
-                    thumbnailHeight: preview.info.height,
-                    columns: preview.info.tileColumns,
-                    rows: preview.info.tileRows,
-                    column: preview.column,
-                    row: preview.row,
-                  ),
-                ),
-                const SizedBox(height: 10),
-              ],
-              Icon(
-                isForward
-                    ? Icons.fast_forward_rounded
-                    : Icons.fast_rewind_rounded,
-                size: 36,
-                color: Colors.white,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                deltaLabel,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${_formatDuration(target)} / ${_formatDuration(_duration)}',
-                style: const TextStyle(color: Color(0xFFD0D5D6), fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ),
+    final session = _horizontalScrubSession!;
+    final startPosition = session.startPosition;
+    final target = session.targetPosition;
+    final previewDisabled = _settings.seekPreviewMode == SeekPreviewMode.off;
+    final trickplay = previewDisabled ? null : _trickplayPreview(target);
+    final previewUnavailable =
+        !previewDisabled &&
+        (trickplay == null ||
+            _horizontalDragPreviewFailedImageIndex == trickplay.imageIndex);
+    final preview = trickplay == null || previewUnavailable
+        ? null
+        : TrickplayPreview(
+            image: NetworkImage(
+              trickplay.url.toString(),
+              headers: widget.api.playbackHeaders,
+            ),
+            thumbnailWidth: trickplay.info.width,
+            thumbnailHeight: trickplay.info.height,
+            columns: trickplay.info.tileColumns,
+            rows: trickplay.info.tileRows,
+            column: trickplay.column,
+            row: trickplay.row,
+            onError: () => _onHorizontalPreviewImageError(trickplay.imageIndex),
+          );
+    final playback = _playbackController?.state;
+    return HorizontalSeekPreviewOverlay(
+      startPosition: startPosition,
+      targetPosition: target,
+      duration: _duration,
+      buffer: _buffer,
+      cacheRuntimeMode: playback?.cacheRuntimeMode,
+      cacheSnapshot: playback?.cacheSnapshot,
+      previewDisabled: previewDisabled,
+      previewUnavailable: previewUnavailable,
+      preview: preview,
     );
   }
 
-  ({EmbyTrickplayResolution info, Uri url, int column, int row})?
+  void _onHorizontalPreviewImageError(int imageIndex) {
+    if (!mounted || _horizontalScrubSession == null) return;
+    final current = _trickplayPreview(_horizontalScrubSession!.targetPosition);
+    if (current == null || current.imageIndex != imageIndex) return;
+    if (_horizontalDragPreviewFailedImageIndex == imageIndex) return;
+    _horizontalDragPreviewFailedImageIndex = imageIndex;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _horizontalScrubSession == null) return;
+      setState(() {});
+    });
+  }
+
+  ({
+    EmbyTrickplayResolution info,
+    Uri url,
+    int imageIndex,
+    int column,
+    int row,
+  })?
   _trickplayPreview(Duration position) {
     final plan = _plan;
     final info = _currentItem.trickplay?.resolutionFor(plan?.mediaSourceId);
-    if (plan == null || info == null) return null;
-    final tileIndex = position.inMilliseconds ~/ info.intervalMilliseconds;
+    if (plan == null ||
+        info == null ||
+        info.intervalMilliseconds <= 0 ||
+        info.tilesPerImage <= 0 ||
+        info.tileColumns <= 0 ||
+        info.tileRows <= 0) {
+      return null;
+    }
+    final samplePosition = previewSamplePosition(
+      target: position,
+      duration: _duration,
+    );
+    final tileIndex =
+        samplePosition.inMilliseconds ~/ info.intervalMilliseconds;
     final imageIndex = tileIndex ~/ info.tilesPerImage;
     final tileOffset = tileIndex % info.tilesPerImage;
     return (
@@ -1927,6 +1984,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         imageIndex: imageIndex,
         mediaSourceId: plan.mediaSourceId,
       ),
+      imageIndex: imageIndex,
       column: tileOffset % info.tileColumns,
       row: tileOffset ~/ info.tileColumns,
     );
