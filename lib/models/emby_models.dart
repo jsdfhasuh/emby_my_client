@@ -444,11 +444,35 @@ class EmbyTrickplay {
 
   final Map<String, List<EmbyTrickplayResolution>> sources;
 
+  EmbyTrickplaySelection? selectionFor(String? mediaSourceId) {
+    if (mediaSourceId != null && mediaSourceId.isNotEmpty) {
+      final exact = sources[mediaSourceId];
+      if (exact != null && exact.isNotEmpty) {
+        return EmbyTrickplaySelection(
+          mediaSourceId: mediaSourceId,
+          resolution: _preferredResolution(exact),
+          sourceMatch: EmbyTrickplaySourceMatch.exact,
+        );
+      }
+    }
+
+    if (sources.length != 1) return null;
+    final entry = sources.entries.single;
+    if (entry.value.isEmpty) return null;
+    return EmbyTrickplaySelection(
+      mediaSourceId: entry.key,
+      resolution: _preferredResolution(entry.value),
+      sourceMatch: EmbyTrickplaySourceMatch.singleFallback,
+    );
+  }
+
   EmbyTrickplayResolution? resolutionFor(String? mediaSourceId) {
-    final candidates =
-        (mediaSourceId == null ? null : sources[mediaSourceId]) ??
-        sources.values.firstOrNull;
-    if (candidates == null || candidates.isEmpty) return null;
+    return selectionFor(mediaSourceId)?.resolution;
+  }
+
+  static EmbyTrickplayResolution _preferredResolution(
+    List<EmbyTrickplayResolution> candidates,
+  ) {
     final sorted = List<EmbyTrickplayResolution>.of(candidates)
       ..sort(
         (left, right) =>
@@ -462,6 +486,7 @@ class EmbyTrickplay {
     if (rawSources.isEmpty) return null;
     final parsed = <String, List<EmbyTrickplayResolution>>{};
     for (final source in rawSources.entries) {
+      if (source.key.isEmpty) continue;
       final rawResolutions = _asMap(source.value);
       final resolutions = rawResolutions.values
           .map(EmbyTrickplayResolution.fromJson)
@@ -473,6 +498,20 @@ class EmbyTrickplay {
   }
 }
 
+enum EmbyTrickplaySourceMatch { exact, singleFallback }
+
+class EmbyTrickplaySelection {
+  const EmbyTrickplaySelection({
+    required this.mediaSourceId,
+    required this.resolution,
+    required this.sourceMatch,
+  });
+
+  final String mediaSourceId;
+  final EmbyTrickplayResolution resolution;
+  final EmbyTrickplaySourceMatch sourceMatch;
+}
+
 class EmbyTrickplayResolution {
   const EmbyTrickplayResolution({
     required this.width,
@@ -480,6 +519,7 @@ class EmbyTrickplayResolution {
     required this.tileColumns,
     required this.tileRows,
     required this.intervalMilliseconds,
+    this.thumbnailCount,
   });
 
   final int width;
@@ -487,6 +527,7 @@ class EmbyTrickplayResolution {
   final int tileColumns;
   final int tileRows;
   final int intervalMilliseconds;
+  final int? thumbnailCount;
 
   int get tilesPerImage => tileColumns * tileRows;
 
@@ -497,6 +538,7 @@ class EmbyTrickplayResolution {
     final columns = _asInt(json['TileWidth']) ?? 0;
     final rows = _asInt(json['TileHeight']) ?? 0;
     final interval = _asInt(json['Interval']) ?? 0;
+    final rawThumbnailCount = _asInt(json['ThumbnailCount']);
     if (width <= 0 ||
         height <= 0 ||
         columns <= 0 ||
@@ -510,6 +552,9 @@ class EmbyTrickplayResolution {
       tileColumns: columns,
       tileRows: rows,
       intervalMilliseconds: interval,
+      thumbnailCount: rawThumbnailCount != null && rawThumbnailCount > 0
+          ? rawThumbnailCount
+          : null,
     );
   }
 }
