@@ -1153,9 +1153,12 @@ class EmbyApi {
     required int width,
     required int imageIndex,
     String? mediaSourceId,
-  }) => Uri.parse(
-    '${session.serverUrl}/Videos/$itemId/Trickplay/$width/$imageIndex.jpg',
-  ).replace(queryParameters: {'MediaSourceId': ?mediaSourceId});
+  }) {
+    final encodedItemId = Uri.encodeComponent(itemId);
+    return Uri.parse(
+      '${session.serverUrl}/Videos/$encodedItemId/Trickplay/$width/$imageIndex.jpg',
+    ).replace(queryParameters: {'MediaSourceId': ?mediaSourceId});
+  }
 
   Future<PlaybackInfoResult> getPlaybackInfo(
     EmbyItem item, {

@@ -500,6 +500,33 @@ void main() {
       expect(uri.toString(), isNot(contains(_session.accessToken)));
     });
 
+    test('uses the actual single fallback source ID in the Trickplay URL', () {
+      final api = _api((options, handler) {
+        handler.resolve(_response(options, const {}));
+      });
+      final selection = EmbyTrickplay({
+        'actual-source': [
+          const EmbyTrickplayResolution(
+            width: 640,
+            height: 360,
+            tileColumns: 4,
+            tileRows: 4,
+            intervalMilliseconds: 5000,
+          ),
+        ],
+      }).selectionFor('playback-source');
+
+      final uri = api.trickplayTileUrl(
+        itemId: 'item-1',
+        width: selection!.resolution.width,
+        imageIndex: 2,
+        mediaSourceId: selection.mediaSourceId,
+      );
+
+      expect(uri.path, '/Videos/item-1/Trickplay/640/2.jpg');
+      expect(uri.queryParameters['MediaSourceId'], 'actual-source');
+    });
+
     test(
       'sends playback headers through Dio and exposes them for libmpv',
       () async {
