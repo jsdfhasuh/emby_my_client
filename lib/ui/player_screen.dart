@@ -33,6 +33,7 @@ import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
 import '../playback/playback_state.dart';
 import '../playback/seek_preview_mode.dart';
+import '../playback/trickplay/trickplay_detail_hydrator.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
@@ -41,7 +42,6 @@ import 'widgets/horizontal_seek_preview_overlay.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
-import 'widgets/trickplay_preview.dart';
 import 'player_system_ui.dart';
 
 abstract interface class PlayerSystemControls {
@@ -216,6 +216,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
+  EmbyItem? _trickplayItem;
+  late final TrickplayDetailHydrator _trickplayDetailHydrator;
   late final PlaybackSettingsRepository _settingsRepository;
   late final PlaybackCacheStorage _cacheStorage;
   PlaybackDiagnosticsTestOverridesController? _diagnosticsTestOverrides;
@@ -233,7 +235,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
   HorizontalScrubSession? _horizontalScrubSession;
-  int? _horizontalDragPreviewFailedImageIndex;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
@@ -250,6 +251,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _showSkipIntro = false;
   bool _autoNextCancelled = false;
   bool _switchingItem = false;
+  bool _trickplayPreviewEnabled = true;
+  int _trickplayResourceGeneration = 0;
   bool _completed = false;
   int? _nextCountdown;
   int _autoPlayedCount = 0;
@@ -269,6 +272,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _currentItem = widget.item;
+    _trickplayItem = _currentItem;
+    _trickplayDetailHydrator = TrickplayDetailHydrator(
+      fetch: widget.api.getItem,
+    );
     _itemSession = _playerSessionCoordinator.beginInitialItem();
     _queue = widget.queue ?? PlaybackQueue.single(widget.api, widget.item);
     if (widget.offlineItem == null) {
@@ -287,9 +294,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         unawaited(_closePlayer(PlayerExitReason.systemBack));
       },
       onModeChanged: (active) {
-        if (mounted && active) {
-          setState(() => _controlsVisible = false);
-        }
+        if (!mounted) return;
+        setState(() {
+          _trickplayPreviewEnabled = !active;
+          if (active) _controlsVisible = false;
+        });
       },
     );
     _closeCoordinator = PlayerCloseCoordinator(
@@ -335,6 +344,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _createPlayer() {
+    _trickplayResourceGeneration++;
     _player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
     );
@@ -408,6 +418,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       maxStreamingBitrate: _settings.maxStreamingBitrate,
     )..addListener(_syncPlaybackState);
     _playbackController = controller;
+    _hydrateTrickplayDetails(item: _currentItem, session: _itemSession);
     await controller.setPlaybackRate(_settings.playbackRate);
     await controller.setAudioDelay(
       Duration(milliseconds: _settings.audioDelayMilliseconds),
@@ -422,6 +433,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       position: _settings.subtitlePosition,
     );
     await controller.start();
+  }
+
+  void _hydrateTrickplayDetails({
+    required EmbyItem item,
+    required PlaybackItemSession session,
+  }) {
+    if (widget.offlineItem != null) return;
+    unawaited(
+      _trickplayDetailHydrator.hydrate(
+        item: item,
+        isCurrent: () =>
+            mounted &&
+            !_playbackResourcesReleased &&
+            _currentItem.id == item.id &&
+            _itemSession.id == session.id,
+        onResolved: (detail) => setState(() => _trickplayItem = detail),
+        onFailure: (error) {
+          DiagnosticLog.instance.warning(
+            'player',
+            'event=trickplay_detail_hydration_failed '
+                'errorType=${error.runtimeType}',
+          );
+        },
+      ),
+    );
   }
 
   Future<PlaybackEngine> _recreatePlaybackEngine(PlaybackItemSession session) =>
@@ -550,6 +586,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _releasePlaybackResources() async {
     if (_playbackResourcesReleased) return;
     _playbackResourcesReleased = true;
+    void clearPreview() {
+      _trickplayPreviewEnabled = false;
+      _horizontalScrubSession?.cancel();
+      _horizontalScrubSession = null;
+      _seeking = false;
+    }
+
+    if (mounted) {
+      setState(clearPreview);
+    } else {
+      clearPreview();
+    }
     _controlsTimer?.cancel();
     _nextCountdownTimer?.cancel();
     _pipController.dispose();
@@ -777,7 +825,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     setState(() {
       _horizontalScrubSession = session;
-      _horizontalDragPreviewFailedImageIndex = null;
       _seeking = true;
       _controlsVisible = false;
     });
@@ -854,9 +901,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
       if (_pipController.isActive || _pipController.isEntering) return;
+      _setTrickplayPreviewEnabled(false);
       final controller = _playbackController;
       if (controller != null) unawaited(controller.pauseForLifecycle());
     } else if (state == AppLifecycleState.resumed) {
+      if (!_pipController.isActive) _setTrickplayPreviewEnabled(true);
       final controller = _playbackController;
       if (controller != null) unawaited(controller.resumeForLifecycle());
     }
@@ -870,6 +919,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _trickplayPreviewEnabled = false;
     _uiSeekRequestGate.invalidate();
     _uiSeekPending = false;
     _logPlayerEvent(
@@ -882,6 +932,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_restoreAfterPlayback().catchError((_) {}));
     }
     super.dispose();
+  }
+
+  void _setTrickplayPreviewEnabled(bool enabled) {
+    if (_trickplayPreviewEnabled == enabled) return;
+    if (mounted) {
+      setState(() => _trickplayPreviewEnabled = enabled);
+    } else {
+      _trickplayPreviewEnabled = enabled;
+    }
   }
 
   void _logPlayerEvent(
@@ -1271,6 +1330,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _createPlayer();
           setState(() {
             _currentItem = item;
+            _trickplayItem = item;
             _playbackController = null;
             _plan = null;
             _position = Duration.zero;
@@ -1285,8 +1345,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             _autoNextCancelled = false;
             _nextCountdown = null;
             _controlsVisible = true;
+            _horizontalScrubSession?.cancel();
             _horizontalScrubSession = null;
-            _horizontalDragPreviewFailedImageIndex = null;
+            _seeking = false;
             _invalidateUiSeek();
           });
           await _startCurrentItem();
@@ -1848,7 +1909,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   child: _buildControls(),
                 ),
               ),
-              if (_horizontalScrubSession != null)
+              if (_horizontalScrubSession != null && _trickplayPreviewEnabled)
                 Positioned(
                   left: 0,
                   right: 0,
@@ -1877,92 +1938,20 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Widget _buildHorizontalSeekOverlay() {
     final session = _horizontalScrubSession!;
-    final startPosition = session.startPosition;
-    final target = session.targetPosition;
-    final previewDisabled = _settings.seekPreviewMode == SeekPreviewMode.off;
-    final trickplay = previewDisabled ? null : _trickplayPreview(target);
-    final previewUnavailable =
-        !previewDisabled &&
-        (trickplay == null ||
-            _horizontalDragPreviewFailedImageIndex == trickplay.imageIndex);
-    final preview = trickplay == null || previewUnavailable
-        ? null
-        : TrickplayPreview(
-            image: NetworkImage(
-              trickplay.url.toString(),
-              headers: widget.api.playbackHeaders,
-            ),
-            thumbnailWidth: trickplay.info.width,
-            thumbnailHeight: trickplay.info.height,
-            columns: trickplay.info.tileColumns,
-            rows: trickplay.info.tileRows,
-            column: trickplay.column,
-            row: trickplay.row,
-            onError: () => _onHorizontalPreviewImageError(trickplay.imageIndex),
-          );
     final playback = _playbackController?.state;
-    return HorizontalSeekPreviewOverlay(
-      startPosition: startPosition,
-      targetPosition: target,
+    return TrickplaySeekPreviewOverlay(
+      api: widget.api,
+      item: _trickplayItem ?? _currentItem,
+      plan: _plan,
+      playerItemGeneration:
+          '${_itemSession.id.value}:$_trickplayResourceGeneration',
+      startPosition: session.startPosition,
+      targetPosition: session.targetPosition,
       duration: _duration,
       buffer: _buffer,
       cacheRuntimeMode: playback?.cacheRuntimeMode,
       cacheSnapshot: playback?.cacheSnapshot,
-      previewDisabled: previewDisabled,
-      previewUnavailable: previewUnavailable,
-      preview: preview,
-    );
-  }
-
-  void _onHorizontalPreviewImageError(int imageIndex) {
-    if (!mounted || _horizontalScrubSession == null) return;
-    final current = _trickplayPreview(_horizontalScrubSession!.targetPosition);
-    if (current == null || current.imageIndex != imageIndex) return;
-    if (_horizontalDragPreviewFailedImageIndex == imageIndex) return;
-    _horizontalDragPreviewFailedImageIndex = imageIndex;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _horizontalScrubSession == null) return;
-      setState(() {});
-    });
-  }
-
-  ({
-    EmbyTrickplayResolution info,
-    Uri url,
-    int imageIndex,
-    int column,
-    int row,
-  })?
-  _trickplayPreview(Duration position) {
-    final plan = _plan;
-    final info = _currentItem.trickplay?.resolutionFor(plan?.mediaSourceId);
-    if (plan == null ||
-        info == null ||
-        info.intervalMilliseconds <= 0 ||
-        info.tilesPerImage <= 0 ||
-        info.tileColumns <= 0 ||
-        info.tileRows <= 0) {
-      return null;
-    }
-    final samplePosition = previewSamplePosition(
-      target: position,
-      duration: _duration,
-    );
-    final tileIndex =
-        samplePosition.inMilliseconds ~/ info.intervalMilliseconds;
-    final imageIndex = tileIndex ~/ info.tilesPerImage;
-    final tileOffset = tileIndex % info.tilesPerImage;
-    return (
-      info: info,
-      url: widget.api.trickplayTileUrl(
-        itemId: _currentItem.id,
-        width: info.width,
-        imageIndex: imageIndex,
-        mediaSourceId: plan.mediaSourceId,
-      ),
-      imageIndex: imageIndex,
-      column: tileOffset % info.tileColumns,
-      row: tileOffset ~/ info.tileColumns,
+      previewDisabled: _settings.seekPreviewMode == SeekPreviewMode.off,
     );
   }
 
