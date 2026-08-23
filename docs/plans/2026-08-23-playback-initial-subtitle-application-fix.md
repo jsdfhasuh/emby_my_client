@@ -80,7 +80,9 @@ paths, titles, and server addresses are excluded.
 - Resume playback applies the server default subtitle before the resume seek.
 - A new media controller follows its own default, and engine recreation
   reapplies an explicit subtitle disable.
+- A late subtitle event from an old engine cannot update the recreated engine.
 - PlaybackInfo compatibility fallback preserves explicit disable.
+- DirectStream and Transcode API plans preserve explicit subtitle disable.
 - URL generation omits `SubtitleStreamIndex=-1` while requests retain the
   explicit disable marker.
 - Offline default and disable semantics remain local and test-covered.
@@ -107,11 +109,11 @@ has been used for acceptance.
   no changes).
 - `flutter analyze`: PASS (no issues found).
 - `flutter test test/playback_controller_test.dart`: PASS (28 tests).
-- `flutter test test/playback_cache_controller_test.dart`: PASS (39 tests).
-- `flutter test test/emby_api_playback_test.dart`: PASS (29 tests).
+- `flutter test test/playback_cache_controller_test.dart`: PASS (40 tests).
+- `flutter test test/emby_api_playback_test.dart`: PASS (30 tests).
 - `flutter test test/playback_subtitle_options_test.dart`: PASS (4 tests).
 - `flutter test test/player_screen_subtitle_options_test.dart`: PASS (2 tests).
-- `flutter test`: PASS (987 tests, 3 skipped).
+- `flutter test`: PASS (989 tests, 3 skipped).
 - `git diff --check`: PASS.
 - `flutter build apk --debug --split-per-abi`: PASS. Generated
   `app-armeabi-v7a-debug.apk`, `app-arm64-v8a-debug.apk`, and

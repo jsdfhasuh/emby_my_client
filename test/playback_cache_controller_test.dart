@@ -295,6 +295,50 @@ void main() {
   });
 
   test(
+    'late subtitle tracks from the old engine cannot affect the new engine',
+    () async {
+      final events = <String>[];
+      final diagnostics = <String>[];
+      final first = _CacheEngine(
+        events: events,
+        requireRecreationAfterOpen: true,
+        keepSubtitleStreamOpenAfterDispose: true,
+      );
+      final second = _CacheEngine(events: events);
+      second.onOpen = () {
+        Timer.run(() {
+          first.subtitleController.add(const [EngineTrack(id: '3')]);
+          second.subtitleController.add(const [EngineTrack(id: '3')]);
+        });
+      };
+      final controller = _controller(
+        engine: first,
+        storage: _CacheStorage(events),
+        resolver: const _SubtitleResolver(),
+        engineRecreator: (_) async => second,
+        diagnostics: _diagnostics(diagnostics),
+      );
+
+      await controller.start();
+      final pendingSelection = controller.selectSubtitleStream(3);
+      await _waitUntil(() => first.subtitleController.hasListener);
+
+      await controller.setMaximumBitrate(10000000);
+      await pendingSelection;
+
+      expect(first.selectedSubtitleTrackIds, isEmpty);
+      expect(second.selectedSubtitleTrackIds, ['3']);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedEmbedded,
+      );
+      expect(controller.state.appliedSubtitleStreamIndex, 3);
+      await first.subtitleController.close();
+      await controller.shutdown();
+    },
+  );
+
+  test(
     'resume anchor is resolved before cache setup and reused for seek',
     () async {
       final events = <String>[];
@@ -1385,6 +1429,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     required this.events,
     this.snapshot,
     this.requireRecreationAfterOpen = false,
+    this.keepSubtitleStreamOpenAfterDispose = false,
     this.seekGate,
     this.stopGate,
     this.noReadyOnOpen = const {},
@@ -1396,6 +1441,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Object? snapshotError;
   Future<void>? snapshotOperation;
   final bool requireRecreationAfterOpen;
+  final bool keepSubtitleStreamOpenAfterDispose;
   final Completer<void>? seekGate;
   final Completer<void>? stopGate;
   final Set<int> noReadyOnOpen;
@@ -1422,6 +1468,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   ResolvedPlaybackCacheProfile? lastProfile;
   final List<ResolvedPlaybackCacheProfile> configuredProfiles = [];
   final List<String?> selectedSubtitleTrackIds = [];
+  void Function()? onOpen;
 
   bool get hasAnyListener =>
       positionController.hasListener ||
@@ -1494,7 +1541,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   @override
   Future<void> dispose() async {
     events.add('dispose');
-    await Future.wait([
+    final closeOperations = <Future<void>>[
       positionController.close(),
       durationController.close(),
       bufferController.close(),
@@ -1504,8 +1551,11 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
       errorController.close(),
       logController.close(),
       audioController.close(),
-      subtitleController.close(),
-    ]);
+    ];
+    if (!keepSubtitleStreamOpenAfterDispose) {
+      closeOperations.add(subtitleController.close());
+    }
+    await Future.wait(closeOperations);
   }
 
   @override
@@ -1526,6 +1576,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     for (final log in logsOnOpen[openCalls] ?? const <String>[]) {
       logController.add(log);
     }
+    onOpen?.call();
     if (!noReadyOnOpen.contains(openCalls)) {
       durationController.add(const Duration(hours: 1));
     }
@@ -1609,6 +1660,43 @@ class _Resolver implements PlaybackStreamResolver {
     method: forceTranscode ? PlayMethod.transcode : PlayMethod.directPlay,
     usesServerAuthentication: false,
     mediaStreams: const [],
+    transcodingReasons: const [],
+    availableMediaSources: const [],
+    bitrate: 8 * 1000 * 1000,
+    duration: const Duration(hours: 1),
+    transportKind: PlaybackTransportKind.progressiveHttp,
+  );
+
+  @override
+  Uri resolveExternalUrl(String rawUrl) => Uri.parse(rawUrl);
+}
+
+class _SubtitleResolver implements PlaybackStreamResolver {
+  const _SubtitleResolver();
+
+  @override
+  bool get canForceTranscode => true;
+
+  @override
+  Future<PlaybackPlan> resolve(
+    EmbyItem item, {
+    String? mediaSourceId,
+    int? audioStreamIndex,
+    int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
+    int maxStreamingBitrate = 120000000,
+    bool forceTranscode = false,
+  }) async => PlaybackPlan(
+    uri: Uri.https('media.test', '/video.mp4'),
+    mediaSourceId: 'source',
+    playSessionId: 'play-session',
+    method: forceTranscode ? PlayMethod.transcode : PlayMethod.directPlay,
+    usesServerAuthentication: false,
+    subtitleStreamIndex: subtitleDisabled ? null : subtitleStreamIndex,
+    subtitleDisabled: subtitleDisabled,
+    mediaStreams: const [
+      {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+    ],
     transcodingReasons: const [],
     availableMediaSources: const [],
     bitrate: 8 * 1000 * 1000,

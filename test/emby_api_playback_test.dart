@@ -522,6 +522,67 @@ void main() {
     );
 
     test(
+      'keeps explicit subtitle disable through DirectStream and Transcode',
+      () async {
+        for (final scenario in [
+          (
+            forceTranscode: false,
+            sourceId: 'stream',
+            method: PlayMethod.directStream,
+            directStream: true,
+            directStreamUrl: '/Videos/item/stream.m3u8',
+            transcode: true,
+            transcodingUrl: '/Videos/item/transcode.m3u8',
+          ),
+          (
+            forceTranscode: true,
+            sourceId: 'transcode',
+            method: PlayMethod.transcode,
+            directStream: false,
+            directStreamUrl: null,
+            transcode: true,
+            transcodingUrl: '/Videos/item/transcode.m3u8',
+          ),
+        ]) {
+          RequestOptions? request;
+          final api = _api((options, handler) {
+            request = options;
+            handler.resolve(
+              _response(options, {
+                'PlaySessionId': 'play-session',
+                'MediaSources': [
+                  _source(
+                    id: scenario.sourceId,
+                    directStream: scenario.directStream,
+                    directStreamUrl: scenario.directStreamUrl,
+                    transcode: scenario.transcode,
+                    transcodingUrl: scenario.transcodingUrl,
+                    defaultSubtitleStreamIndex: 8,
+                  ),
+                ],
+              }),
+            );
+          });
+
+          final plan = await api.getPlaybackPlan(
+            _item,
+            subtitleDisabled: true,
+            forceTranscode: scenario.forceTranscode,
+          );
+
+          expect(plan.method, scenario.method);
+          expect(plan.subtitleDisabled, isTrue);
+          expect(plan.subtitleStreamIndex, isNull);
+          expect((request!.data as Map)['SubtitleStreamIndex'], -1);
+          expect(
+            plan.uri.queryParameters,
+            isNot(contains('SubtitleStreamIndex')),
+          );
+        }
+      },
+    );
+
+    test(
       'resolves the server default subtitle when no override is given',
       () async {
         final api = _api((options, handler) {
