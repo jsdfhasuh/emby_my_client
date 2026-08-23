@@ -24,6 +24,28 @@ void main() {
       expect(plan.playSessionId, 'play-session');
     });
 
+    test(
+      'preserves explicit subtitle disable through compatibility fallback',
+      () async {
+        final requests = <RequestOptions>[];
+        final api = _api((options, handler) {
+          requests.add(options);
+          if (requests.length == 1) {
+            handler.reject(_httpError(options, 400));
+          } else {
+            handler.resolve(_response(options, _directResponse()));
+          }
+        });
+
+        await api.getPlaybackPlan(_item, subtitleDisabled: true);
+
+        expect(requests, hasLength(2));
+        for (final request in requests) {
+          expect((request.data as Map)['SubtitleStreamIndex'], -1);
+        }
+      },
+    );
+
     for (final status in [400, 422, 500]) {
       test('retries a compatibility payload after HTTP $status', () async {
         final requests = <RequestOptions>[];
@@ -467,6 +489,128 @@ void main() {
       expect(absolute.usesServerAuthentication, isFalse);
     });
 
+    test(
+      'encodes explicit subtitle disable separately from server default',
+      () async {
+        RequestOptions? request;
+        final api = _api((options, handler) {
+          request = options;
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'stream',
+                  directStream: true,
+                  directStreamUrl: '/Videos/item/master.m3u8',
+                  defaultSubtitleStreamIndex: 8,
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_item, subtitleDisabled: true);
+
+        expect((request!.data as Map)['SubtitleStreamIndex'], -1);
+        expect(plan.subtitleStreamIndex, isNull);
+        expect(plan.subtitleDisabled, isTrue);
+        expect(
+          plan.uri.queryParameters,
+          isNot(contains('SubtitleStreamIndex')),
+        );
+      },
+    );
+
+    test(
+      'keeps explicit subtitle disable through DirectStream and Transcode',
+      () async {
+        for (final scenario in [
+          (
+            forceTranscode: false,
+            sourceId: 'stream',
+            method: PlayMethod.directStream,
+            directStream: true,
+            directStreamUrl: '/Videos/item/stream.m3u8',
+            transcode: true,
+            transcodingUrl: '/Videos/item/transcode.m3u8',
+          ),
+          (
+            forceTranscode: true,
+            sourceId: 'transcode',
+            method: PlayMethod.transcode,
+            directStream: false,
+            directStreamUrl: null,
+            transcode: true,
+            transcodingUrl: '/Videos/item/transcode.m3u8',
+          ),
+        ]) {
+          RequestOptions? request;
+          final api = _api((options, handler) {
+            request = options;
+            handler.resolve(
+              _response(options, {
+                'PlaySessionId': 'play-session',
+                'MediaSources': [
+                  _source(
+                    id: scenario.sourceId,
+                    directStream: scenario.directStream,
+                    directStreamUrl: scenario.directStreamUrl,
+                    transcode: scenario.transcode,
+                    transcodingUrl: scenario.transcodingUrl,
+                    defaultSubtitleStreamIndex: 8,
+                  ),
+                ],
+              }),
+            );
+          });
+
+          final plan = await api.getPlaybackPlan(
+            _item,
+            subtitleDisabled: true,
+            forceTranscode: scenario.forceTranscode,
+          );
+
+          expect(plan.method, scenario.method);
+          expect(plan.subtitleDisabled, isTrue);
+          expect(plan.subtitleStreamIndex, isNull);
+          expect((request!.data as Map)['SubtitleStreamIndex'], -1);
+          expect(
+            plan.uri.queryParameters,
+            isNot(contains('SubtitleStreamIndex')),
+          );
+        }
+      },
+    );
+
+    test(
+      'resolves the server default subtitle when no override is given',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(
+            _response(options, {
+              'MediaSources': [
+                _source(
+                  id: 'direct',
+                  directPlay: true,
+                  defaultSubtitleStreamIndex: 3,
+                  mediaStreams: const [
+                    {'Index': 0, 'Type': 'Video'},
+                    {'Index': 3, 'Type': 'Subtitle'},
+                  ],
+                ),
+              ],
+            }),
+          );
+        });
+
+        final plan = await api.getPlaybackPlan(_item);
+
+        expect(plan.subtitleStreamIndex, 3);
+        expect(plan.subtitleDisabled, isFalse);
+        expect(plan.uri.queryParameters['SubtitleStreamIndex'], '3');
+      },
+    );
+
     test('keeps a missing PlaySessionId nullable', () async {
       final api = _api((options, handler) {
         handler.resolve(
@@ -584,6 +728,27 @@ void main() {
       expect((requests.single.data as Map), isNot(contains('PlaySessionId')));
     });
 
+    test('reports explicit subtitle disable to the server', () async {
+      final requests = <RequestOptions>[];
+      final api = _api((options, handler) {
+        requests.add(options);
+        handler.resolve(_response(options, const {}));
+      });
+      final plan = _plan(
+        method: PlayMethod.transcode,
+        playSessionId: 'session-1',
+      ).copyWith(subtitleDisabled: true);
+
+      await api.reportPlaybackProgress(
+        _item,
+        plan,
+        position: const Duration(seconds: 2),
+        isPaused: false,
+      );
+
+      expect((requests.single.data as Map)['SubtitleStreamIndex'], -1);
+    });
+
     test('reports stop and cleanup at most once', () async {
       final requests = <RequestOptions>[];
       final api = _api((options, handler) {
@@ -681,6 +846,8 @@ Map<String, dynamic> _source({
   int? runTimeTicks,
   int? size,
   String? liveStreamId,
+  int? defaultSubtitleStreamIndex,
+  List<Map<String, dynamic>>? mediaStreams,
 }) => {
   'Id': id,
   'Name': id,
@@ -696,17 +863,20 @@ Map<String, dynamic> _source({
   'SupportsTranscoding': transcode,
   'DirectStreamUrl': ?directStreamUrl,
   'TranscodingUrl': ?transcodingUrl,
-  'MediaStreams': [
-    {
-      'Index': 0,
-      'Type': 'Video',
-      'Codec': 'h264',
-      'Profile': 'High',
-      'Level': 41,
-      'Width': 1920,
-      'Height': 1080,
-    },
-  ],
+  'DefaultSubtitleStreamIndex': ?defaultSubtitleStreamIndex,
+  'MediaStreams':
+      mediaStreams ??
+      [
+        {
+          'Index': 0,
+          'Type': 'Video',
+          'Codec': 'h264',
+          'Profile': 'High',
+          'Level': 41,
+          'Width': 1920,
+          'Height': 1080,
+        },
+      ],
 };
 
 PlaybackPlan _plan({

@@ -9,6 +9,7 @@ abstract interface class PlaybackStreamResolver {
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
   });
@@ -30,6 +31,7 @@ class EmbyStreamResolver implements PlaybackStreamResolver {
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
   }) => api.getPlaybackPlan(
@@ -37,6 +39,7 @@ class EmbyStreamResolver implements PlaybackStreamResolver {
     mediaSourceId: mediaSourceId,
     audioStreamIndex: audioStreamIndex,
     subtitleStreamIndex: subtitleStreamIndex,
+    subtitleDisabled: subtitleDisabled,
     maxStreamingBitrate: maxStreamingBitrate,
     forceTranscode: forceTranscode,
   );

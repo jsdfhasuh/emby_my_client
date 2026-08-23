@@ -34,6 +34,47 @@ void main() {
     );
   });
 
+  test(
+    'preserves offline subtitle default and explicit disable semantics',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'emby-offline-subtitle-test-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}offline-video.mkv',
+      );
+      await file.writeAsBytes([1, 2, 3, 4]);
+      final offline = _offline(
+        file.path,
+        mediaStreams: const [
+          {
+            'Index': 3,
+            'Type': 'Subtitle',
+            'IsDefault': true,
+            'DisplayTitle': 'Chinese',
+          },
+        ],
+      );
+      final resolver = OfflinePlaybackResolver(offline);
+
+      final defaultPlan = await resolver.resolve(offline.toEmbyItem());
+      final disabledPlan = await resolver.resolve(
+        offline.toEmbyItem(),
+        subtitleDisabled: true,
+      );
+
+      expect(defaultPlan.subtitleStreamIndex, 3);
+      expect(defaultPlan.subtitleDisabled, isFalse);
+      expect(
+        defaultPlan.availableMediaSources.single.defaultSubtitleStreamIndex,
+        3,
+      );
+      expect(disabledPlan.subtitleStreamIndex, isNull);
+      expect(disabledPlan.subtitleDisabled, isTrue);
+    },
+  );
+
   test('rejects an empty local file without online fallback', () async {
     final directory = await Directory.systemTemp.createTemp(
       'emby-offline-empty-test-',
@@ -71,7 +112,11 @@ void main() {
   });
 }
 
-OfflineMediaItem _offline(String path, {int? runtimeTicks}) => OfflineMediaItem(
+OfflineMediaItem _offline(
+  String path, {
+  int? runtimeTicks,
+  List<Map<String, dynamic>> mediaStreams = const [],
+}) => OfflineMediaItem(
   scope: const ServerScope(serverId: 'server-1', userId: 'user-1'),
   itemId: 'item-1',
   mediaSourceId: 'source-1',
@@ -80,7 +125,7 @@ OfflineMediaItem _offline(String path, {int? runtimeTicks}) => OfflineMediaItem(
     itemType: 'Movie',
     container: 'mkv',
     runTimeTicks: runtimeTicks,
-    mediaStreams: const [],
+    mediaStreams: mediaStreams,
   ),
   localMediaPath: path,
   completedAt: DateTime.utc(2026, 7, 30),
