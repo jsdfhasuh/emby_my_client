@@ -655,6 +655,7 @@ class PlaybackPlan {
     required this.availableMediaSources,
     this.audioStreamIndex,
     this.subtitleStreamIndex,
+    this.subtitleDisabled = false,
     this.liveStreamId,
     this.mediaSourceName,
     this.container,
@@ -673,6 +674,7 @@ class PlaybackPlan {
   final bool usesServerAuthentication;
   final int? audioStreamIndex;
   final int? subtitleStreamIndex;
+  final bool subtitleDisabled;
   final String? liveStreamId;
   final String? mediaSourceName;
   final String? container;
@@ -697,6 +699,7 @@ class PlaybackPlan {
     bool clearAudioStreamIndex = false,
     int? subtitleStreamIndex,
     bool clearSubtitleStreamIndex = false,
+    bool? subtitleDisabled,
     String? liveStreamId,
     bool clearLiveStreamId = false,
     String? mediaSourceName,
@@ -725,6 +728,7 @@ class PlaybackPlan {
     subtitleStreamIndex: clearSubtitleStreamIndex
         ? null
         : subtitleStreamIndex ?? this.subtitleStreamIndex,
+    subtitleDisabled: subtitleDisabled ?? this.subtitleDisabled,
     liveStreamId: clearLiveStreamId ? null : liveStreamId ?? this.liveStreamId,
     mediaSourceName: mediaSourceName ?? this.mediaSourceName,
     container: container ?? this.container,

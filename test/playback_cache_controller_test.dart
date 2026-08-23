@@ -1569,6 +1569,7 @@ class _Resolver implements PlaybackStreamResolver {
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
   }) async => PlaybackPlan(

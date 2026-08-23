@@ -30,9 +30,11 @@ import '../playback/playback_session_reporter.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
+import '../playback/playback_state.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
+import 'widgets/playback_subtitle_options.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
@@ -1331,8 +1333,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                   child: TabBarView(
                     children: [
                       _buildQualityOptions(sheetContext, plan),
-                      _buildAudioOptions(sheetContext, plan, audioTracks),
-                      _buildSubtitleOptions(sheetContext, plan, subtitleTracks),
+                      ListenableBuilder(
+                        listenable: controller,
+                        builder: (context, _) => _buildAudioOptions(
+                          sheetContext,
+                          plan,
+                          audioTracks,
+                          controller.state,
+                        ),
+                      ),
+                      ListenableBuilder(
+                        listenable: controller,
+                        builder: (context, _) => PlaybackSubtitleOptions(
+                          tracks: subtitleTracks,
+                          playbackState: controller.state,
+                          onSelect: (index) {
+                            Navigator.pop(sheetContext);
+                            unawaited(controller.selectSubtitleStream(index));
+                          },
+                        ),
+                      ),
                       _buildChapterOptions(sheetContext),
                       _buildPlayerOptions(sheetContext),
                     ],
@@ -1417,6 +1437,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     BuildContext sheetContext,
     PlaybackPlan plan,
     List<PlaybackTrack> tracks,
+    PlaybackState playbackState,
   ) => ListView(
     children: [
       for (final track in tracks)
@@ -1431,66 +1452,21 @@ class _PlayerScreenState extends State<PlayerScreen>
               if (track.isDefault) '默认',
             ].join(' · '),
           ),
-          trailing: track.index == plan.audioStreamIndex
+          trailing:
+              track.index == playbackState.appliedAudioStreamIndex &&
+                  playbackState.audioSelectionStatus ==
+                      AudioSelectionStatus.applied
               ? const Icon(Icons.check, color: Color(0xFF80CBC4))
               : null,
-          onTap: track.index == plan.audioStreamIndex
+          onTap:
+              track.index == playbackState.appliedAudioStreamIndex &&
+                  playbackState.audioSelectionStatus ==
+                      AudioSelectionStatus.applied
               ? null
               : () {
                   Navigator.pop(sheetContext);
                   unawaited(
                     _playbackController?.selectAudioStream(track.index),
-                  );
-                },
-        ),
-    ],
-  );
-
-  Widget _buildSubtitleOptions(
-    BuildContext sheetContext,
-    PlaybackPlan plan,
-    List<PlaybackTrack> tracks,
-  ) => ListView(
-    children: [
-      ListTile(
-        leading: const Icon(Icons.subtitles_off_outlined),
-        title: const Text('关闭字幕'),
-        trailing: plan.subtitleStreamIndex == null
-            ? const Icon(Icons.check, color: Color(0xFF80CBC4))
-            : null,
-        onTap: plan.subtitleStreamIndex == null
-            ? null
-            : () {
-                Navigator.pop(sheetContext);
-                unawaited(_playbackController?.selectSubtitleStream(null));
-              },
-      ),
-      for (final track in tracks)
-        ListTile(
-          leading: Icon(
-            track.isExternal
-                ? Icons.closed_caption_outlined
-                : Icons.subtitles_outlined,
-          ),
-          title: Text(track.title ?? track.language ?? '字幕 ${track.index}'),
-          subtitle: Text(
-            [
-              ?track.language,
-              ?track.codec?.toUpperCase(),
-              if (track.isForced) '强制',
-              if (track.isDefault) '默认',
-              if (track.isExternal) '外挂',
-            ].join(' · '),
-          ),
-          trailing: track.index == plan.subtitleStreamIndex
-              ? const Icon(Icons.check, color: Color(0xFF80CBC4))
-              : null,
-          onTap: track.index == plan.subtitleStreamIndex
-              ? null
-              : () {
-                  Navigator.pop(sheetContext);
-                  unawaited(
-                    _playbackController?.selectSubtitleStream(track.index),
                   );
                 },
         ),

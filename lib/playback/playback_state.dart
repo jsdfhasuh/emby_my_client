@@ -28,6 +28,51 @@ enum PlaybackPhase {
   stopping,
 }
 
+enum SubtitleSelectionSource { serverDefault, explicit, disabled }
+
+class SubtitleSelection {
+  const SubtitleSelection.followServerDefault()
+    : source = SubtitleSelectionSource.serverDefault,
+      streamIndex = null;
+
+  const SubtitleSelection.disabled()
+    : source = SubtitleSelectionSource.disabled,
+      streamIndex = null;
+
+  const SubtitleSelection.explicitStream(int index)
+    : source = SubtitleSelectionSource.explicit,
+      streamIndex = index;
+
+  final SubtitleSelectionSource source;
+  final int? streamIndex;
+
+  bool get isDisabled => source == SubtitleSelectionSource.disabled;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SubtitleSelection &&
+      other.source == source &&
+      other.streamIndex == streamIndex;
+
+  @override
+  int get hashCode => Object.hash(source, streamIndex);
+}
+
+enum SubtitleSelectionStatus {
+  notApplied,
+  applying,
+  appliedNone,
+  appliedEmbedded,
+  appliedExternal,
+  appliedServer,
+  disabled,
+  failed,
+}
+
+enum AppliedSubtitleKind { none, embedded, external, server }
+
+enum AudioSelectionStatus { notApplied, applying, applied, failed }
+
 class PlaybackState {
   const PlaybackState({
     this.phase = PlaybackPhase.idle,
@@ -40,8 +85,17 @@ class PlaybackState {
     this.isCompleted = false,
     this.audioTracks = const [],
     this.subtitleTracks = const [],
+    this.audioSelectionStatus = AudioSelectionStatus.notApplied,
+    this.appliedAudioStreamIndex,
     this.playbackRate = 1,
     this.plan,
+    this.desiredSubtitleSelection =
+        const SubtitleSelection.followServerDefault(),
+    this.subtitleSelectionStatus = SubtitleSelectionStatus.notApplied,
+    this.appliedSubtitleKind = AppliedSubtitleKind.none,
+    this.appliedSubtitleStreamIndex,
+    this.subtitleApplicationGeneration = 0,
+    this.subtitleSelectionError,
     this.errorMessage,
     this.statusMessage,
     this.cacheProfile,
@@ -63,8 +117,16 @@ class PlaybackState {
   final bool isCompleted;
   final List<EngineTrack> audioTracks;
   final List<EngineTrack> subtitleTracks;
+  final AudioSelectionStatus audioSelectionStatus;
+  final int? appliedAudioStreamIndex;
   final double playbackRate;
   final PlaybackPlan? plan;
+  final SubtitleSelection desiredSubtitleSelection;
+  final SubtitleSelectionStatus subtitleSelectionStatus;
+  final AppliedSubtitleKind appliedSubtitleKind;
+  final int? appliedSubtitleStreamIndex;
+  final int subtitleApplicationGeneration;
+  final String? subtitleSelectionError;
   final String? errorMessage;
   final String? statusMessage;
   final ResolvedPlaybackCacheProfile? cacheProfile;
@@ -95,9 +157,20 @@ class PlaybackState {
     bool? isCompleted,
     List<EngineTrack>? audioTracks,
     List<EngineTrack>? subtitleTracks,
+    AudioSelectionStatus? audioSelectionStatus,
+    int? appliedAudioStreamIndex,
+    bool clearAppliedAudioStreamIndex = false,
     double? playbackRate,
     PlaybackPlan? plan,
     bool clearPlan = false,
+    SubtitleSelection? desiredSubtitleSelection,
+    SubtitleSelectionStatus? subtitleSelectionStatus,
+    AppliedSubtitleKind? appliedSubtitleKind,
+    int? appliedSubtitleStreamIndex,
+    bool clearAppliedSubtitleStreamIndex = false,
+    int? subtitleApplicationGeneration,
+    String? subtitleSelectionError,
+    bool clearSubtitleSelectionError = false,
     String? errorMessage,
     bool clearError = false,
     String? statusMessage,
@@ -125,8 +198,25 @@ class PlaybackState {
     isCompleted: isCompleted ?? this.isCompleted,
     audioTracks: audioTracks ?? this.audioTracks,
     subtitleTracks: subtitleTracks ?? this.subtitleTracks,
+    audioSelectionStatus: audioSelectionStatus ?? this.audioSelectionStatus,
+    appliedAudioStreamIndex: clearAppliedAudioStreamIndex
+        ? null
+        : appliedAudioStreamIndex ?? this.appliedAudioStreamIndex,
     playbackRate: playbackRate ?? this.playbackRate,
     plan: clearPlan ? null : plan ?? this.plan,
+    desiredSubtitleSelection:
+        desiredSubtitleSelection ?? this.desiredSubtitleSelection,
+    subtitleSelectionStatus:
+        subtitleSelectionStatus ?? this.subtitleSelectionStatus,
+    appliedSubtitleKind: appliedSubtitleKind ?? this.appliedSubtitleKind,
+    appliedSubtitleStreamIndex: clearAppliedSubtitleStreamIndex
+        ? null
+        : appliedSubtitleStreamIndex ?? this.appliedSubtitleStreamIndex,
+    subtitleApplicationGeneration:
+        subtitleApplicationGeneration ?? this.subtitleApplicationGeneration,
+    subtitleSelectionError: clearSubtitleSelectionError
+        ? null
+        : subtitleSelectionError ?? this.subtitleSelectionError,
     errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
     statusMessage: clearStatus ? null : statusMessage ?? this.statusMessage,
     cacheProfile: clearCacheProfile ? null : cacheProfile ?? this.cacheProfile,

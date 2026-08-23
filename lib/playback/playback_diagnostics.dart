@@ -46,7 +46,14 @@ enum PlaybackDiagnosticEvent {
   seekRecoveryPending('playback_seek_recovery_pending'),
   seekRecoveryStarted('playback_seek_recovery_started'),
   seekRecoverySucceeded('playback_seek_recovery_succeeded'),
-  seekRecoveryFailed('playback_seek_recovery_failed');
+  seekRecoveryFailed('playback_seek_recovery_failed'),
+  subtitleApplyRequested('playback_subtitle_apply_requested'),
+  subtitleApplied('playback_subtitle_applied'),
+  subtitleDisabled('playback_subtitle_disabled'),
+  subtitleApplyFailed('playback_subtitle_apply_failed'),
+  subtitleMappingFailed('playback_subtitle_mapping_failed'),
+  subtitleApplyCancelled('playback_subtitle_apply_cancelled'),
+  subtitleApplySkippedStale('playback_subtitle_apply_skipped_stale');
 
   const PlaybackDiagnosticEvent(this.code);
 
@@ -61,6 +68,8 @@ enum PlaybackOperationTimeoutKind {
   seekSettle('seek_settle'),
   engineStop('engine_stop'),
   engineDispose('engine_dispose'),
+  subtitleTrackWait('subtitle_track_wait'),
+  subtitleApplication('subtitle_application'),
   reporterStop('reporter_stop'),
   cacheSnapshotRead('cache_snapshot_read'),
   cacheMonitorStart('cache_monitor_start'),
@@ -382,6 +391,89 @@ class PlaybackDiagnostics {
           ? PlaybackDiagnosticLevel.info
           : PlaybackDiagnosticLevel.warning,
     );
+  }
+
+  void subtitleApplyRequested({
+    required String selectionSource,
+    required String subtitleKind,
+    required int? streamIndex,
+    required int generation,
+  }) {
+    _emit(PlaybackDiagnosticEvent.subtitleApplyRequested, [
+      'selectionSource=$selectionSource',
+      'subtitleKind=$subtitleKind',
+      'streamIndex=${streamIndex ?? 'none'}',
+      'generation=$generation',
+    ]);
+  }
+
+  void subtitleApplied({
+    required String selectionSource,
+    required String subtitleKind,
+    required int? streamIndex,
+    required int generation,
+  }) {
+    _emit(PlaybackDiagnosticEvent.subtitleApplied, [
+      'selectionSource=$selectionSource',
+      'subtitleKind=$subtitleKind',
+      'streamIndex=${streamIndex ?? 'none'}',
+      'generation=$generation',
+    ]);
+  }
+
+  void subtitleDisabled({required int generation}) {
+    _emit(PlaybackDiagnosticEvent.subtitleDisabled, ['generation=$generation']);
+  }
+
+  void subtitleApplyFailed({
+    required String selectionSource,
+    required String subtitleKind,
+    required int? streamIndex,
+    required int generation,
+    required Object error,
+  }) {
+    _emit(
+      PlaybackDiagnosticEvent.subtitleApplyFailed,
+      [
+        'selectionSource=$selectionSource',
+        'subtitleKind=$subtitleKind',
+        'streamIndex=${streamIndex ?? 'none'}',
+        'generation=$generation',
+        'errorType=${error.runtimeType}',
+      ],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void subtitleMappingFailed({
+    required String selectionSource,
+    required String subtitleKind,
+    required int streamIndex,
+    required int generation,
+  }) {
+    _emit(
+      PlaybackDiagnosticEvent.subtitleMappingFailed,
+      [
+        'selectionSource=$selectionSource',
+        'subtitleKind=$subtitleKind',
+        'streamIndex=$streamIndex',
+        'generation=$generation',
+        'mappingResult=failed',
+      ],
+      level: PlaybackDiagnosticLevel.warning,
+    );
+  }
+
+  void subtitleApplyCancelled({required int generation}) {
+    _emit(PlaybackDiagnosticEvent.subtitleApplyCancelled, [
+      'generation=$generation',
+    ]);
+  }
+
+  void subtitleApplySkippedStale({required int generation}) {
+    _emit(PlaybackDiagnosticEvent.subtitleApplySkippedStale, [
+      'generation=$generation',
+    ]);
   }
 
   PlaybackSeekStatisticsSnapshot snapshotSeekStatistics() =>

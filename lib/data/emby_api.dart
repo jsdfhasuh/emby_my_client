@@ -989,6 +989,7 @@ class EmbyApi {
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
   }) async {
@@ -1003,6 +1004,7 @@ class EmbyApi {
       item,
       audioStreamIndex: audioStreamIndex,
       subtitleStreamIndex: subtitleStreamIndex,
+      subtitleDisabled: subtitleDisabled,
       maxStreamingBitrate: maxStreamingBitrate,
       forceTranscode: forceTranscode,
     );
@@ -1042,6 +1044,11 @@ class EmbyApi {
         ? preferredSource
         : _bestSource(sources, forceTranscode: forceTranscode);
 
+    final selectedAudio = audioStreamIndex ?? source.defaultAudioStreamIndex;
+    final selectedSubtitle = subtitleDisabled
+        ? null
+        : subtitleStreamIndex ?? source.defaultSubtitleStreamIndex;
+
     late final Uri uri;
     late final PlayMethod method;
     if (forceTranscode) {
@@ -1050,52 +1057,44 @@ class EmbyApi {
       }
       uri = _streamUri(
         source.transcodingUrl!,
-        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
-        subtitleStreamIndex:
-            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+        audioStreamIndex: selectedAudio,
+        subtitleStreamIndex: selectedSubtitle,
       );
       method = PlayMethod.transcode;
     } else if (_isStrmSource(source)) {
       uri = _streamUri(
         '${session.serverUrl}/Videos/${item.id}/stream?'
         'MediaSourceId=${Uri.encodeQueryComponent(source.id)}&Static=true',
-        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
-        subtitleStreamIndex:
-            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+        audioStreamIndex: selectedAudio,
+        subtitleStreamIndex: selectedSubtitle,
       );
       method = PlayMethod.directPlay;
     } else if (source.supportsDirectPlay) {
       uri = _streamUri(
         '${session.serverUrl}/Videos/${item.id}/stream?'
         'MediaSourceId=${Uri.encodeQueryComponent(source.id)}&Static=true',
-        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
-        subtitleStreamIndex:
-            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+        audioStreamIndex: selectedAudio,
+        subtitleStreamIndex: selectedSubtitle,
       );
       method = PlayMethod.directPlay;
     } else if (source.supportsDirectStream && source.directStreamUrl != null) {
       uri = _streamUri(
         source.directStreamUrl!,
-        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
-        subtitleStreamIndex:
-            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+        audioStreamIndex: selectedAudio,
+        subtitleStreamIndex: selectedSubtitle,
       );
       method = PlayMethod.directStream;
     } else if (source.supportsTranscoding && source.transcodingUrl != null) {
       uri = _streamUri(
         source.transcodingUrl!,
-        audioStreamIndex: audioStreamIndex ?? source.defaultAudioStreamIndex,
-        subtitleStreamIndex:
-            subtitleStreamIndex ?? source.defaultSubtitleStreamIndex,
+        audioStreamIndex: selectedAudio,
+        subtitleStreamIndex: selectedSubtitle,
       );
       method = PlayMethod.transcode;
     } else {
       throw const EmbyApiException('媒体源没有可用的播放地址');
     }
 
-    final selectedAudio = audioStreamIndex ?? source.defaultAudioStreamIndex;
-    final selectedSubtitle =
-        subtitleStreamIndex ?? source.defaultSubtitleStreamIndex;
     _logPlaybackDecision(
       method: method,
       usesServerAuthentication: _usesServerAuthentication(uri),
@@ -1108,7 +1107,8 @@ class EmbyApi {
       method: method,
       usesServerAuthentication: _usesServerAuthentication(uri),
       audioStreamIndex: selectedAudio,
-      subtitleStreamIndex: selectedSubtitle,
+      subtitleStreamIndex: subtitleDisabled ? null : selectedSubtitle,
+      subtitleDisabled: subtitleDisabled,
       liveStreamId: source.liveStreamId,
       mediaSourceName: source.name,
       container: source.container,
@@ -1161,15 +1161,17 @@ class EmbyApi {
     EmbyItem item, {
     int? audioStreamIndex,
     int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
   }) async {
+    final requestedSubtitleIndex = subtitleDisabled ? -1 : subtitleStreamIndex;
     final commonBody = <String, dynamic>{
       'UserId': session.userId,
       'StartTimeTicks': item.userData.playbackPositionTicks,
       'MaxStreamingBitrate': maxStreamingBitrate,
       'AudioStreamIndex': audioStreamIndex,
-      'SubtitleStreamIndex': subtitleStreamIndex,
+      'SubtitleStreamIndex': requestedSubtitleIndex,
       'EnableDirectPlay': !forceTranscode,
       'EnableDirectStream': !forceTranscode,
       'EnableTranscoding': true,
@@ -1183,6 +1185,8 @@ class EmbyApi {
     final minimalBody = <String, dynamic>{
       'UserId': session.userId,
       'StartTimeTicks': item.userData.playbackPositionTicks,
+      'AudioStreamIndex': ?audioStreamIndex,
+      'SubtitleStreamIndex': ?requestedSubtitleIndex,
       if (forceTranscode) ...{
         'EnableDirectPlay': false,
         'EnableDirectStream': false,
@@ -1279,7 +1283,9 @@ class EmbyApi {
           'CanSeek': true,
           if (plan.audioStreamIndex != null)
             'AudioStreamIndex': plan.audioStreamIndex,
-          if (plan.subtitleStreamIndex != null)
+          if (plan.subtitleDisabled)
+            'SubtitleStreamIndex': -1
+          else if (plan.subtitleStreamIndex != null)
             'SubtitleStreamIndex': plan.subtitleStreamIndex,
         },
       ),
