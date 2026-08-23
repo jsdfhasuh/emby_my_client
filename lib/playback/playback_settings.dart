@@ -35,6 +35,17 @@ class PlaybackSettings {
   final int subtitlePosition;
   final PlaybackCacheSettings cache;
 
+  HorizontalScrubSession createHorizontalScrubSession({
+    required Duration startPosition,
+    required Duration duration,
+  }) => HorizontalScrubSession(
+    startPosition: startPosition,
+    duration: duration,
+    spanSeconds: normalizeHorizontalSwipeSeekSpanSeconds(
+      horizontalSwipeSeekSpanSeconds,
+    ),
+  );
+
   PlaybackSettings copyWith({
     int? maxStreamingBitrate,
     int? seekBackwardSeconds,

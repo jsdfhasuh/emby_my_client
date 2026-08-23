@@ -818,10 +818,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _controlsTimer?.cancel();
     _invalidateUiSeek();
-    final session = HorizontalScrubSession(
+    final session = _settings.createHorizontalScrubSession(
       startPosition: _position,
       duration: _duration,
-      spanSeconds: _settings.horizontalSwipeSeekSpanSeconds,
     );
     setState(() {
       _horizontalScrubSession = session;

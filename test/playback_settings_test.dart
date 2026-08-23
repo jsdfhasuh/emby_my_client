@@ -188,6 +188,19 @@ void main() {
     expect(changed.seekPreviewMode, SeekPreviewMode.serverOnly);
   });
 
+  test('configured span drives the player scrub session target', () {
+    const settings = PlaybackSettings(horizontalSwipeSeekSpanSeconds: 300);
+    final session = settings.createHorizontalScrubSession(
+      startPosition: const Duration(minutes: 10),
+      duration: const Duration(minutes: 30),
+    );
+
+    final target = session.update(deltaDistance: 400, viewportWidth: 400);
+
+    expect(session.spanSeconds, 300);
+    expect(target, const Duration(minutes: 15));
+  });
+
   test('all seek preview modes use stable serialized names', () {
     for (final mode in SeekPreviewMode.values) {
       final restored = PlaybackSettings.fromJson(

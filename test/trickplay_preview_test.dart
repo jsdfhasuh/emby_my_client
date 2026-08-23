@@ -454,18 +454,29 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: TrickplaySeekPreviewOverlay(
-          api: api,
-          item: _plainItem,
-          plan: null,
-          playerItemGeneration: 'item-generation',
-          startPosition: Duration.zero,
-          targetPosition: const Duration(seconds: 5),
-          duration: const Duration(minutes: 1),
-          buffer: const Duration(seconds: 30),
-          cacheRuntimeMode: null,
-          cacheSnapshot: null,
-          previewDisabled: false,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: TrickplaySeekPreviewOverlay(
+                  api: api,
+                  item: _plainItem,
+                  plan: null,
+                  playerItemGeneration: 'item-generation',
+                  startPosition: Duration.zero,
+                  targetPosition: const Duration(seconds: 5),
+                  duration: const Duration(minutes: 1),
+                  buffer: const Duration(seconds: 30),
+                  cacheRuntimeMode: null,
+                  cacheSnapshot: null,
+                  previewDisabled: false,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
