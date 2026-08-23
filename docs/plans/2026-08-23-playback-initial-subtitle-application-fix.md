@@ -77,6 +77,9 @@ paths, titles, and server addresses are excluded.
 - DirectStream and Transcode record server-applied subtitle state.
 - Explicit disable survives bitrate reconfiguration and controlled reopen.
 - Explicit subtitle selection survives controlled reopen.
+- Resume playback applies the server default subtitle before the resume seek.
+- A new media controller follows its own default, and engine recreation
+  reapplies an explicit subtitle disable.
 - PlaybackInfo compatibility fallback preserves explicit disable.
 - URL generation omits `SubtitleStreamIndex=-1` while requests retain the
   explicit disable marker.
@@ -103,11 +106,12 @@ has been used for acceptance.
 - `dart format --output=none --set-exit-if-changed lib test`: PASS (239 files,
   no changes).
 - `flutter analyze`: PASS (no issues found).
-- `flutter test test/playback_controller_test.dart`: PASS (27 tests).
+- `flutter test test/playback_controller_test.dart`: PASS (28 tests).
+- `flutter test test/playback_cache_controller_test.dart`: PASS (39 tests).
 - `flutter test test/emby_api_playback_test.dart`: PASS (29 tests).
 - `flutter test test/playback_subtitle_options_test.dart`: PASS (4 tests).
 - `flutter test test/player_screen_subtitle_options_test.dart`: PASS (2 tests).
-- `flutter test`: PASS (985 tests, 3 skipped).
+- `flutter test`: PASS (987 tests, 3 skipped).
 - `git diff --check`: PASS.
 - `flutter build apk --debug --split-per-abi`: PASS. Generated
   `app-armeabi-v7a-debug.apk`, `app-arm64-v8a-debug.apk`, and

@@ -52,32 +52,45 @@ void main() {
     );
   });
 
-  test('opens paused, waits for ready, seeks and verifies resume', () async {
-    final requests = <RequestOptions>[];
-    final api = _api(requests);
-    final engine = _FakeEngine();
-    engine.onOpen = (_) {
-      engineLater(
-        () => engine.durationController.add(const Duration(hours: 1)),
+  test(
+    'opens paused, applies the default subtitle, seeks and verifies resume',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, defaultSubtitleStreamIndex: 3);
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engineLater(() {
+          engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+          engine.durationController.add(const Duration(hours: 1));
+        });
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _resumeItem,
       );
-    };
-    final controller = _controller(api: api, engine: engine, item: _resumeItem);
 
-    await controller.start();
+      await controller.start();
 
-    expect(engine.openPlayValues, [false]);
-    expect(engine.openHeaders.single['X-Emby-Token'], _session.accessToken);
-    expect(engine.seekValues, [const Duration(minutes: 15)]);
-    expect(engine.playCalls, 1);
-    expect(controller.state.phase, PlaybackPhase.ready);
-    expect(controller.state.position, const Duration(minutes: 15));
-    final start = requests.singleWhere(
-      (request) => request.path == '/Sessions/Playing',
-    );
-    expect((start.data as Map)['PositionTicks'], 9000000000);
+      expect(engine.openPlayValues, [false]);
+      expect(engine.openHeaders.single['X-Emby-Token'], _session.accessToken);
+      expect(engine.selectedSubtitleTrackIds, ['3']);
+      expect(engine.seekValues, [const Duration(minutes: 15)]);
+      expect(engine.playCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.position, const Duration(minutes: 15));
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedEmbedded,
+      );
+      final start = requests.singleWhere(
+        (request) => request.path == '/Sessions/Playing',
+      );
+      expect((start.data as Map)['PositionTicks'], 9000000000);
 
-    await controller.shutdown();
-  });
+      await controller.shutdown();
+    },
+  );
 
   test(
     'applies the server-resolved default subtitle during initial DirectPlay',
@@ -435,6 +448,71 @@ void main() {
       expect(resolver.subtitleStreamRequests, [null, 4]);
       expect(controller.state.appliedSubtitleStreamIndex, 4);
       await controller.shutdown();
+    },
+  );
+
+  test(
+    'a new media controller follows its own default subtitle selection',
+    () async {
+      final api = _api([]);
+      addTearDown(api.dispose);
+
+      final firstEngine = _FakeEngine();
+      firstEngine.onOpen = (_) {
+        firstEngine.durationController.add(const Duration(hours: 1));
+        firstEngine.subtitleTracksController.add(const [
+          EngineTrack(id: '3'),
+          EngineTrack(id: '4'),
+        ]);
+      };
+      final firstController = _controller(
+        api: api,
+        engine: firstEngine,
+        item: _plainItem,
+        resolver: _PlanResolver(
+          _testPlan(
+            subtitleStreamIndex: 3,
+            mediaStreams: const [
+              {'Index': 3, 'Type': 'Subtitle'},
+              {'Index': 4, 'Type': 'Subtitle'},
+            ],
+          ),
+        ),
+      );
+
+      await firstController.start();
+      await firstController.selectSubtitleStream(4);
+      expect(firstController.state.appliedSubtitleStreamIndex, 4);
+      await firstController.shutdown();
+
+      final secondEngine = _FakeEngine();
+      secondEngine.onOpen = (_) {
+        secondEngine.durationController.add(const Duration(hours: 1));
+        secondEngine.subtitleTracksController.add(const [EngineTrack(id: '5')]);
+      };
+      final secondController = _controller(
+        api: api,
+        engine: secondEngine,
+        item: _nextItem,
+        resolver: _PlanResolver(
+          _testPlan(
+            subtitleStreamIndex: 5,
+            mediaStreams: const [
+              {'Index': 5, 'Type': 'Subtitle'},
+            ],
+          ),
+        ),
+      );
+
+      await secondController.start();
+
+      expect(
+        secondController.state.desiredSubtitleSelection,
+        const SubtitleSelection.followServerDefault(),
+      );
+      expect(secondEngine.selectedSubtitleTrackIds, ['5']);
+      expect(secondController.state.appliedSubtitleStreamIndex, 5);
+      await secondController.shutdown();
     },
   );
 
@@ -1365,6 +1443,17 @@ const _plainItem = EmbyItem(
   id: 'item-1',
   name: 'Movie',
   type: 'Movie',
+  mediaType: 'Video',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _nextItem = EmbyItem(
+  id: 'item-2',
+  name: 'Episode 2',
+  type: 'Episode',
   mediaType: 'Video',
   imageTags: {},
   backdropImageTags: [],

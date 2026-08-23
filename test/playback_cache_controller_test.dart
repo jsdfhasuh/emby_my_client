@@ -267,6 +267,33 @@ void main() {
     await controller.shutdown();
   });
 
+  test('engine recreation reapplies an explicit subtitle disable', () async {
+    final events = <String>[];
+    final first = _CacheEngine(
+      events: events,
+      requireRecreationAfterOpen: true,
+    );
+    final second = _CacheEngine(events: events);
+    final storage = _CacheStorage(events);
+    final controller = _controller(
+      engine: first,
+      storage: storage,
+      engineRecreator: (_) async => second,
+    );
+
+    await controller.start();
+    await controller.selectSubtitleStream(null);
+    await controller.setMaximumBitrate(10000000);
+
+    expect(first.selectedSubtitleTrackIds, [null]);
+    expect(second.selectedSubtitleTrackIds, [null]);
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.disabled,
+    );
+    await controller.shutdown();
+  });
+
   test(
     'resume anchor is resolved before cache setup and reused for seek',
     () async {
@@ -1394,6 +1421,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   int maxConcurrentSeeks = 0;
   ResolvedPlaybackCacheProfile? lastProfile;
   final List<ResolvedPlaybackCacheProfile> configuredProfiles = [];
+  final List<String?> selectedSubtitleTrackIds = [];
 
   bool get hasAnyListener =>
       positionController.hasListener ||
@@ -1539,7 +1567,9 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void> selectAudioTrack(String trackId) async {}
 
   @override
-  Future<void> selectSubtitleTrack(String? trackId) async {}
+  Future<void> selectSubtitleTrack(String? trackId) async {
+    selectedSubtitleTrackIds.add(trackId);
+  }
 
   @override
   Future<void> setAudioDelay(Duration delay) async {}
