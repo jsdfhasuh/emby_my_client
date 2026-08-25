@@ -1,3 +1,5 @@
+const disabledSubtitleStreamIndex = -1;
+
 class EmbySession {
   const EmbySession({
     required this.serverUrl,
@@ -143,6 +145,7 @@ class EmbyItem {
     this.people = const [],
     this.chapters = const [],
     this.mediaSources = const [],
+    this.mediaStreams = const [],
     this.trickplay,
     this.mediaType,
     this.collectionType,
@@ -187,6 +190,7 @@ class EmbyItem {
   final EmbyUserData userData;
   final List<EmbyChapter> chapters;
   final List<PlaybackMediaSource> mediaSources;
+  final List<Map<String, dynamic>> mediaStreams;
   final EmbyTrickplay? trickplay;
 
   bool get isPlayable =>
@@ -289,6 +293,10 @@ class EmbyItem {
           )
           .where((source) => source.id.isNotEmpty)
           .toList(growable: false),
+      mediaStreams: (json['MediaStreams'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((stream) => Map<String, dynamic>.from(stream))
+          .toList(growable: false),
       trickplay: EmbyTrickplay.fromJson(json['Trickplay']),
     );
   }
@@ -305,6 +313,7 @@ class EmbyItem {
     userData: userData ?? this.userData,
     chapters: chapters,
     mediaSources: mediaSources,
+    mediaStreams: mediaStreams,
     trickplay: trickplay,
     mediaType: mediaType,
     collectionType: collectionType,
@@ -686,6 +695,45 @@ class PlaybackInfoResult {
     playSessionId: _nonEmptyString(json['PlaySessionId']),
     errorCode: _nonEmptyString(json['ErrorCode']),
   );
+}
+
+List<Map<String, dynamic>> mergeMediaStreams(
+  Iterable<Map<String, dynamic>> primary,
+  Iterable<Map<String, dynamic>> fallback,
+) {
+  final merged = <Map<String, dynamic>>[];
+  final positionByIdentity = <String, int>{};
+
+  String identityFor(Map<String, dynamic> stream) {
+    final type = stream['Type']?.toString().toLowerCase() ?? '';
+    final index = _asInt(stream['Index']);
+    return index != null
+        ? '$type:$index'
+        : [
+            type,
+            stream['DisplayTitle'],
+            stream['Title'],
+            stream['Language'],
+            stream['Codec'],
+          ].map((value) => value?.toString() ?? '').join('|');
+  }
+
+  for (final stream in primary) {
+    final identity = identityFor(stream);
+    positionByIdentity[identity] = merged.length;
+    merged.add(stream);
+  }
+  for (final stream in fallback) {
+    final identity = identityFor(stream);
+    final position = positionByIdentity[identity];
+    if (position == null) {
+      positionByIdentity[identity] = merged.length;
+      merged.add(stream);
+    } else {
+      merged[position] = {...stream, ...merged[position]};
+    }
+  }
+  return List<Map<String, dynamic>>.unmodifiable(merged);
 }
 
 class PlaybackPlan {

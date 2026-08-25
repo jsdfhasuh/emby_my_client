@@ -4,9 +4,11 @@ import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
 import '../playback/cache/playback_cache_settings.dart';
 import '../playback/cache/playback_cache_storage.dart';
+import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
 import 'playback_cache_settings_screen.dart';
+import 'playback_preferences_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -37,6 +39,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late LibraryCategorySettings _settings;
   bool _saving = false;
   bool _deletingAccountData = false;
+  PlaybackSettings? _playbackSettings;
   PlaybackCacheSettings? _playbackCacheSettings;
 
   @override
@@ -52,7 +55,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         widget.session,
       );
       if (mounted) {
-        setState(() => _playbackCacheSettings = snapshot.settings.cache);
+        setState(() {
+          _playbackSettings = snapshot.settings;
+          _playbackCacheSettings = snapshot.settings.cache;
+        });
       }
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
@@ -71,6 +77,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           session: widget.session,
           repository: widget.playbackSettingsRepository,
           storage: widget.playbackCacheStorage,
+        ),
+      ),
+    );
+    if (mounted) await _loadPlaybackCacheSummary();
+  }
+
+  Future<void> _openPlaybackPreferences() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlaybackPreferencesScreen(
+          session: widget.session,
+          repository: widget.playbackSettingsRepository,
         ),
       ),
     );
@@ -215,6 +233,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   context,
                 ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
               ),
+            ),
+            ListTile(
+              key: const ValueKey('playback-preferences-entry'),
+              leading: const Icon(Icons.play_circle_outline),
+              title: const Text('播放设置'),
+              subtitle: Text(
+                _playbackSettings == null
+                    ? '正在读取播放设置'
+                    : playbackPreferencesSummary(_playbackSettings!),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _deletingAccountData ? null : _openPlaybackPreferences,
             ),
             ListTile(
               key: const ValueKey('playback-cache-settings-entry'),

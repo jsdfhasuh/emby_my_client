@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/emby_models.dart';
 import '../platform/platform_capabilities.dart';
+import '../playback/track_mapper.dart';
 
 bool usesAmbientIPadDetailLayout(
   PlatformCapabilities capabilities,
@@ -29,6 +30,7 @@ class ItemDetailTechnicalPresentation {
     this.video,
     this.audio,
     this.bitrate,
+    this.subtitle,
   });
 
   final String? source;
@@ -36,6 +38,7 @@ class ItemDetailTechnicalPresentation {
   final String? video;
   final String? audio;
   final String? bitrate;
+  final String? subtitle;
 
   List<String> get facts => [
     source,
@@ -43,6 +46,7 @@ class ItemDetailTechnicalPresentation {
     video,
     audio,
     bitrate,
+    subtitle,
   ].whereType<String>().toList(growable: false);
 
   bool get isEmpty => facts.isEmpty;
@@ -50,18 +54,45 @@ class ItemDetailTechnicalPresentation {
 
 ItemDetailTechnicalPresentation technicalPresentationForItem(EmbyItem item) {
   final source = _selectSource(item.mediaSources);
-  if (source == null) return const ItemDetailTechnicalPresentation();
-  final video = _firstStream(source, 'Video');
-  final audio = _selectAudioStream(source);
+  final streams = _streamsForItem(item, source);
+  if (source == null && streams.isEmpty) {
+    return const ItemDetailTechnicalPresentation();
+  }
+  final video = _firstStream(streams, 'Video');
+  final audio = _selectAudioStream(source, streams);
+  final subtitles = const TrackMapper().fromStreams(streams, 'subtitle');
   return ItemDetailTechnicalPresentation(
-    source: _cleanText(source.name),
-    container: _cleanText(source.container)?.toUpperCase(),
+    source: _cleanText(source?.name),
+    container: _cleanText(source?.container ?? item.container)?.toUpperCase(),
     video: _videoLabel(video),
     audio: _audioLabel(audio),
     bitrate: _bitrateLabel(
-      source.bitrate ?? _streamInt(video, const ['BitRate', 'Bitrate']),
+      source?.bitrate ?? _streamInt(video, const ['BitRate', 'Bitrate']),
     ),
+    subtitle: streams.isEmpty
+        ? null
+        : subtitles.isEmpty
+        ? '无字幕'
+        : '字幕 ${subtitles.length} 条',
   );
+}
+
+List<PlaybackTrack> subtitleTracksForItem(EmbyItem item) {
+  final source = _selectSource(item.mediaSources);
+  return const TrackMapper().fromStreams(
+    _streamsForItem(item, source),
+    'subtitle',
+  );
+}
+
+int? defaultSubtitleStreamIndexForItem(EmbyItem item) {
+  final source = _selectSource(item.mediaSources);
+  final sourceDefault = source?.defaultSubtitleStreamIndex;
+  if (sourceDefault != null) return sourceDefault;
+  for (final track in subtitleTracksForItem(item)) {
+    if (track.isDefault) return track.index;
+  }
+  return null;
 }
 
 PlaybackMediaSource? _selectSource(List<PlaybackMediaSource> sources) {
@@ -76,12 +107,20 @@ PlaybackMediaSource? _selectSource(List<PlaybackMediaSource> sources) {
   return sources.first;
 }
 
-Map<String, dynamic>? _selectAudioStream(PlaybackMediaSource source) {
-  final audio = source.mediaStreams
+List<Map<String, dynamic>> _streamsForItem(
+  EmbyItem item,
+  PlaybackMediaSource? source,
+) => mergeMediaStreams(source?.mediaStreams ?? const [], item.mediaStreams);
+
+Map<String, dynamic>? _selectAudioStream(
+  PlaybackMediaSource? source,
+  List<Map<String, dynamic>> streams,
+) {
+  final audio = streams
       .where((stream) => _streamType(stream) == 'audio')
       .toList(growable: false);
   if (audio.isEmpty) return null;
-  final defaultIndex = source.defaultAudioStreamIndex;
+  final defaultIndex = source?.defaultAudioStreamIndex;
   if (defaultIndex != null) {
     for (final stream in audio) {
       if (_streamInt(stream, const ['Index']) == defaultIndex) return stream;
@@ -93,9 +132,12 @@ Map<String, dynamic>? _selectAudioStream(PlaybackMediaSource source) {
   return audio.first;
 }
 
-Map<String, dynamic>? _firstStream(PlaybackMediaSource source, String type) {
+Map<String, dynamic>? _firstStream(
+  List<Map<String, dynamic>> streams,
+  String type,
+) {
   final expected = type.toLowerCase();
-  for (final stream in source.mediaStreams) {
+  for (final stream in streams) {
     if (_streamType(stream) == expected) return stream;
   }
   return null;

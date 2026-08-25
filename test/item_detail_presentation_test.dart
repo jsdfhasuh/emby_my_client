@@ -72,6 +72,7 @@ void main() {
             bitrate: 8500000,
             playable: true,
             defaultAudioStreamIndex: 3,
+            defaultSubtitleStreamIndex: 4,
             streams: const [
               {
                 'Index': 2,
@@ -95,6 +96,22 @@ void main() {
                 'ChannelLayout': '5.1',
                 'Language': 'zho',
               },
+              {
+                'Index': 4,
+                'Type': 'Subtitle',
+                'DisplayTitle': '中文字幕',
+                'Codec': 'ass',
+                'Language': 'zho',
+                'IsDefault': true,
+              },
+              {
+                'Index': 5,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'English',
+                'Codec': 'srt',
+                'Language': 'eng',
+                'IsExternal': true,
+              },
             ],
           ),
         ],
@@ -106,6 +123,9 @@ void main() {
       expect(presentation.video, 'H264 · 1920×1080');
       expect(presentation.audio, 'EAC3 · 5.1 · zho');
       expect(presentation.bitrate, '8.5 Mbps');
+      expect(presentation.subtitle, '字幕 2 条');
+      expect(subtitleTracksForItem(item), hasLength(2));
+      expect(defaultSubtitleStreamIndexForItem(item), 4);
     },
   );
 
@@ -151,6 +171,48 @@ void main() {
     expect(presentation.isEmpty, isTrue);
     expect(presentation.facts, isEmpty);
   });
+
+  test('top-level media streams remain available as a detail fallback', () {
+    final item = EmbyItem.fromJson({
+      'Id': 'media-1',
+      'Name': 'Top-level streams',
+      'Type': 'Movie',
+      'MediaType': 'Video',
+      'Container': 'mp4',
+      'MediaSources': [
+        {
+          'Id': 'source',
+          'SupportsDirectPlay': true,
+          'MediaStreams': const [
+            {'Index': 0, 'Type': 'Video', 'Codec': 'h264'},
+          ],
+        },
+      ],
+      'MediaStreams': const [
+        {
+          'Index': 0,
+          'Type': 'Video',
+          'Codec': 'h264',
+          'Width': 1920,
+          'Height': 1080,
+        },
+        {
+          'Index': 6,
+          'Type': 'Subtitle',
+          'DisplayTitle': '简体中文',
+          'Language': 'zho',
+          'IsDefault': true,
+        },
+      ],
+    });
+
+    expect(item.mediaStreams, hasLength(2));
+    final presentation = technicalPresentationForItem(item);
+    expect(presentation.video, 'H264 · 1920×1080');
+    expect(presentation.subtitle, '字幕 1 条');
+    expect(subtitleTracksForItem(item).single.title, '简体中文');
+    expect(defaultSubtitleStreamIndexForItem(item), 6);
+  });
 }
 
 PlaybackMediaSource _source({
@@ -159,6 +221,7 @@ PlaybackMediaSource _source({
   String? container,
   int? bitrate,
   int? defaultAudioStreamIndex,
+  int? defaultSubtitleStreamIndex,
   bool playable = false,
   List<Map<String, dynamic>> streams = const [],
 }) => PlaybackMediaSource(
@@ -167,6 +230,7 @@ PlaybackMediaSource _source({
   container: container,
   bitrate: bitrate,
   defaultAudioStreamIndex: defaultAudioStreamIndex,
+  defaultSubtitleStreamIndex: defaultSubtitleStreamIndex,
   supportsDirectPlay: playable,
   supportsDirectStream: false,
   supportsTranscoding: false,

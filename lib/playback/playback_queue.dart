@@ -1,6 +1,12 @@
 import '../data/emby_api.dart';
 import '../models/emby_models.dart';
 
+/// Carries only the item-independent subtitle state across queue items.
+int? subtitleSelectionForNextQueueItem(int? currentSelection) =>
+    currentSelection == disabledSubtitleStreamIndex
+    ? disabledSubtitleStreamIndex
+    : null;
+
 class PlaybackQueue {
   PlaybackQueue({
     required this.api,

@@ -5,6 +5,15 @@ import 'package:emby_my_client/playback/playback_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('queue transitions carry only the stable subtitles-off state', () {
+    expect(subtitleSelectionForNextQueueItem(null), isNull);
+    expect(subtitleSelectionForNextQueueItem(3), isNull);
+    expect(
+      subtitleSelectionForNextQueueItem(disabledSubtitleStreamIndex),
+      disabledSubtitleStreamIndex,
+    );
+  });
+
   test('loads the next season when the current queue ends', () async {
     final requests = <RequestOptions>[];
     final dio = Dio();

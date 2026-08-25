@@ -13,6 +13,7 @@ import '../library/library_navigation_context.dart';
 import '../models/emby_models.dart';
 import '../platform/platform_capabilities.dart';
 import '../playback/playback_queue.dart';
+import '../playback/track_mapper.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import 'home_shell_navigation.dart';
 import 'person_detail_screen.dart';
@@ -58,6 +59,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   final Set<String> _updatingUserData = {};
   final Set<String> _startingDownloads = {};
   final Set<String> _openingGenres = {};
+  final Map<String, int> _subtitleSelections = {};
   String? _openingGenreRequestKey;
   ModalRoute<dynamic>? _subscribedRoute;
   int _genreNavigationGeneration = 0;
@@ -176,7 +178,12 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
         : PlaybackQueue.single(widget.api, item);
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => PlayerScreen(api: widget.api, item: item, queue: queue),
+        builder: (_) => PlayerScreen(
+          api: widget.api,
+          item: item,
+          queue: queue,
+          initialSubtitleStreamIndex: _subtitleSelections[item.id],
+        ),
       ),
     );
     await _refreshCurrentData();
@@ -532,20 +539,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
                                     ],
                                     if (!technical.isEmpty) ...[
                                       const SizedBox(height: 10),
-                                      Wrap(
-                                        key: const ValueKey(
-                                          'item-detail-technical-info',
-                                        ),
-                                        spacing: 16,
-                                        runSpacing: 8,
-                                        children: [
-                                          for (final fact in technical.facts)
-                                            _DetailFact(
-                                              icon: Icons.high_quality_outlined,
-                                              label: fact,
-                                            ),
-                                        ],
-                                      ),
+                                      _buildTechnicalInfo(technical),
                                     ],
                                     const SizedBox(height: 20),
                                     _buildPrimaryActions(item),
@@ -590,6 +584,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
     required EmbyImageRequest? poster,
   }) {
     final heroHeight = _heroHeight(context);
+    final technical = technicalPresentationForItem(item);
 
     return Scaffold(
       body: CustomScrollView(
@@ -671,6 +666,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
                       ),
                     ],
                   ),
+                  if (!technical.isEmpty) ...[
+                    const SizedBox(height: 18),
+                    _buildTechnicalInfo(technical),
+                  ],
                   if (item.genres.isNotEmpty) ...[
                     const SizedBox(height: 22),
                     _buildGenres(item),
@@ -704,6 +703,30 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
         ? null
         : '★ ${item.communityRating!.toStringAsFixed(1)}',
   ].whereType<String>().where((value) => value.isNotEmpty).join(' · ');
+
+  Widget _buildTechnicalInfo(ItemDetailTechnicalPresentation technical) => Wrap(
+    key: const ValueKey('item-detail-technical-info'),
+    spacing: 16,
+    runSpacing: 8,
+    children: [
+      for (final fact in [
+        technical.source,
+        technical.container,
+        technical.video,
+        technical.audio,
+        technical.bitrate,
+      ].whereType<String>())
+        _DetailFact(icon: Icons.high_quality_outlined, label: fact),
+      if (technical.subtitle != null)
+        _DetailFact(
+          key: const ValueKey('item-detail-subtitle-fact'),
+          icon: technical.subtitle == '无字幕'
+              ? Icons.subtitles_off_outlined
+              : Icons.subtitles_outlined,
+          label: technical.subtitle!,
+        ),
+    ],
+  );
 
   bool _hasOverview(EmbyItem item) => item.overview?.isNotEmpty ?? false;
 
@@ -1029,6 +1052,11 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
 
   Widget _buildPrimaryActions(EmbyItem item) {
     final updating = _updatingUserData.contains(item.id);
+    final subtitleTracks = subtitleTracksForItem(item);
+    final selectedSubtitle =
+        _subtitleSelections[item.id] ??
+        defaultSubtitleStreamIndexForItem(item) ??
+        disabledSubtitleStreamIndex;
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -1052,6 +1080,19 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
             ),
             icon: const Icon(Icons.play_arrow_rounded),
             label: const Text('播放剧集'),
+          ),
+        if (item.isPlayable)
+          IconButton.filledTonal(
+            key: const ValueKey('item-detail-subtitle-selector'),
+            tooltip: _subtitleSelectionLabel(subtitleTracks, selectedSubtitle),
+            onPressed: subtitleTracks.isEmpty
+                ? null
+                : () => _showSubtitleSelector(item, subtitleTracks),
+            icon: Icon(
+              selectedSubtitle == disabledSubtitleStreamIndex
+                  ? Icons.subtitles_off_outlined
+                  : Icons.subtitles_outlined,
+            ),
           ),
         IconButton.filledTonal(
           tooltip: item.userData.isFavorite ? '取消收藏' : '收藏',
@@ -1078,6 +1119,81 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
       ],
     );
   }
+
+  Future<void> _showSubtitleSelector(
+    EmbyItem item,
+    List<PlaybackTrack> tracks,
+  ) async {
+    final current =
+        _subtitleSelections[item.id] ??
+        defaultSubtitleStreamIndexForItem(item) ??
+        disabledSubtitleStreamIndex;
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.only(bottom: 12),
+          children: [
+            ListTile(
+              title: Text(
+                '字幕',
+                style: Theme.of(sheetContext).textTheme.titleLarge,
+              ),
+            ),
+            ListTile(
+              key: const ValueKey('item-detail-subtitle-off'),
+              leading: const Icon(Icons.subtitles_off_outlined),
+              title: const Text('关闭字幕'),
+              trailing: current == disabledSubtitleStreamIndex
+                  ? const Icon(Icons.check)
+                  : null,
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(disabledSubtitleStreamIndex),
+            ),
+            for (final track in tracks)
+              ListTile(
+                key: ValueKey('item-detail-subtitle-${track.index}'),
+                leading: Icon(
+                  track.isExternal
+                      ? Icons.closed_caption_outlined
+                      : Icons.subtitles_outlined,
+                ),
+                title: Text(_subtitleTrackTitle(track)),
+                subtitle: Text(_subtitleTrackDetails(track)),
+                trailing: current == track.index
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () => Navigator.of(sheetContext).pop(track.index),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || selected == null) return;
+    setState(() => _subtitleSelections[item.id] = selected);
+  }
+
+  String _subtitleSelectionLabel(List<PlaybackTrack> tracks, int selected) {
+    if (tracks.isEmpty) return '无可用字幕';
+    if (selected == disabledSubtitleStreamIndex) return '字幕：关闭';
+    for (final track in tracks) {
+      if (track.index == selected) return '字幕：${_subtitleTrackTitle(track)}';
+    }
+    return '选择字幕';
+  }
+
+  String _subtitleTrackTitle(PlaybackTrack track) =>
+      track.title ?? track.language ?? '字幕 ${track.index}';
+
+  String _subtitleTrackDetails(PlaybackTrack track) => [
+    track.language,
+    track.codec?.toUpperCase(),
+    if (track.isForced) '强制',
+    if (track.isDefault) '默认',
+    if (track.isExternal) '外挂',
+  ].whereType<String>().join(' · ');
 
   Widget _buildEpisodeStatusMenu(EmbyItem episode) {
     if (_updatingUserData.contains(episode.id)) {

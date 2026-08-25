@@ -522,6 +522,47 @@ void main() {
     );
 
     test(
+      'playback plan merges top-level tracks missing from the source',
+      () async {
+        final api = _api((options, handler) {
+          handler.resolve(_response(options, _directResponse()));
+        });
+        const item = EmbyItem(
+          id: 'item-with-top-level-subtitle',
+          name: 'Top-level subtitle',
+          type: 'Movie',
+          mediaType: 'Video',
+          imageTags: {},
+          backdropImageTags: [],
+          genres: [],
+          userData: EmbyUserData(),
+          mediaStreams: [
+            {'Index': 0, 'Type': 'Video', 'Codec': 'h264'},
+            {
+              'Index': 4,
+              'Type': 'Subtitle',
+              'DisplayTitle': '简体中文',
+              'Language': 'zho',
+            },
+          ],
+        );
+
+        final plan = await api.getPlaybackPlan(item);
+
+        expect(
+          plan.mediaStreams.where((stream) => stream['Type'] == 'Video').length,
+          1,
+        );
+        expect(
+          plan.mediaStreams.singleWhere(
+            (stream) => stream['Type'] == 'Subtitle',
+          )['Index'],
+          4,
+        );
+      },
+    );
+
+    test(
       'keeps explicit subtitle disable through DirectStream and Transcode',
       () async {
         for (final scenario in [

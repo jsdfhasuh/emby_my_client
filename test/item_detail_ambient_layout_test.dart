@@ -86,9 +86,27 @@ void main() {
       'H264 · 1920×1080',
       'EAC3 · 5.1 · zho',
       '8.5 Mbps',
+      '字幕 2 条',
     ]) {
       expect(find.text(fact), findsOneWidget);
     }
+    await tester.tap(
+      find.byKey(const ValueKey('item-detail-subtitle-selector')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('关闭字幕'), findsOneWidget);
+    expect(find.text('中文字幕'), findsOneWidget);
+    expect(find.text('English'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('item-detail-subtitle-5')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('item-detail-subtitle-selector')),
+          )
+          .tooltip,
+      '字幕：English',
+    );
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -305,6 +323,7 @@ Map<String, dynamic> _detailItemJson(
       'Bitrate': 8500000,
       'SupportsDirectPlay': true,
       'DefaultAudioStreamIndex': 3,
+      'DefaultSubtitleStreamIndex': 4,
       'MediaStreams': [
         {
           'Index': 0,
@@ -327,6 +346,22 @@ Map<String, dynamic> _detailItemJson(
           'Codec': 'eac3',
           'ChannelLayout': '5.1',
           'Language': 'zho',
+        },
+        {
+          'Index': 4,
+          'Type': 'Subtitle',
+          'DisplayTitle': '中文字幕',
+          'Codec': 'ass',
+          'Language': 'zho',
+          'IsDefault': true,
+        },
+        {
+          'Index': 5,
+          'Type': 'Subtitle',
+          'DisplayTitle': 'English',
+          'Codec': 'srt',
+          'Language': 'eng',
+          'IsExternal': true,
         },
       ],
     },

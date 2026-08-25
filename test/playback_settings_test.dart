@@ -73,6 +73,23 @@ void main() {
     );
   });
 
+  test('seek steps accept supported values and reject stale values', () {
+    final supported = PlaybackSettings.fromJson({
+      'seekBackwardSeconds': 60,
+      'seekForwardSeconds': '30',
+    });
+    final stale = PlaybackSettings.fromJson({
+      'seekBackwardSeconds': 120,
+      'seekForwardSeconds': -1,
+    });
+
+    expect(playbackSeekStepSecondsOptions, containsAll([5, 10, 15, 30, 60]));
+    expect(supported.seekBackwardSeconds, 60);
+    expect(supported.seekForwardSeconds, 30);
+    expect(stale.seekBackwardSeconds, 10);
+    expect(stale.seekForwardSeconds, 10);
+  });
+
   test('damaged cache only falls back the cache field', () {
     final restored = PlaybackSettings.fromJson({
       'maxStreamingBitrate': 7000000,

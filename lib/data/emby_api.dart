@@ -1043,7 +1043,6 @@ class EmbyApi {
                     preferredSource.transcodingUrl != null))
         ? preferredSource
         : _bestSource(sources, forceTranscode: forceTranscode);
-
     final selectedAudio = audioStreamIndex ?? source.defaultAudioStreamIndex;
     final selectedSubtitle = subtitleDisabled
         ? null
@@ -1126,7 +1125,7 @@ class EmbyApi {
         duration: duration,
         sourceUri: Uri.tryParse(source.path ?? ''),
       ),
-      mediaStreams: source.mediaStreams,
+      mediaStreams: mergeMediaStreams(source.mediaStreams, item.mediaStreams),
       transcodingReasons: source.transcodingReasons,
       availableMediaSources: sources,
     );

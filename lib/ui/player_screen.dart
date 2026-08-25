@@ -177,6 +177,7 @@ class PlayerScreen extends StatefulWidget {
     this.systemUiController,
     this.cacheStorage,
     this.diagnosticsTestOverrides,
+    this.initialSubtitleStreamIndex,
   }) : assert(
          (offlineItem == null && downloads == null) ||
              (offlineItem != null && downloads != null),
@@ -192,6 +193,7 @@ class PlayerScreen extends StatefulWidget {
   final PlayerSystemUiController? systemUiController;
   final PlaybackCacheStorage? cacheStorage;
   final PlaybackDiagnosticsTestOverridesController? diagnosticsTestOverrides;
+  final int? initialSubtitleStreamIndex;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -263,6 +265,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlayerCloseCoordinator _closeCoordinator;
   bool _playbackResourcesReleased = false;
   bool _playbackInitializationStarted = false;
+  late int? _sessionSubtitleSelection;
   double? _lastMetricsWidth;
   double? _lastMetricsHeight;
   AppLifecycleState? _lastLifecycleState;
@@ -276,6 +279,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _trickplayDetailHydrator = TrickplayDetailHydrator(
       fetch: widget.api.getItem,
     );
+    _sessionSubtitleSelection = widget.initialSubtitleStreamIndex;
     _itemSession = _playerSessionCoordinator.beginInitialItem();
     _queue = widget.queue ?? PlaybackQueue.single(widget.api, widget.item);
     if (widget.offlineItem == null) {
@@ -432,7 +436,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       outlineColor: _settings.subtitleOutlineColor,
       position: _settings.subtitlePosition,
     );
-    await controller.start();
+    final subtitleSelection = _sessionSubtitleSelection;
+    await controller.start(
+      subtitleStreamIndex: subtitleSelection == disabledSubtitleStreamIndex
+          ? null
+          : subtitleSelection,
+      subtitleDisabled: subtitleSelection == disabledSubtitleStreamIndex,
+    );
   }
 
   void _hydrateTrickplayDetails({
@@ -1011,6 +1021,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Future<void> _selectSubtitleStream(int? streamIndex) async {
+    final controller = _playbackController;
+    if (controller == null) return;
+    await controller.selectSubtitleStream(streamIndex);
+    _sessionSubtitleSelection = streamIndex ?? disabledSubtitleStreamIndex;
+  }
+
   Future<void> _changeSubtitleStyle(PlaybackSettings settings) async {
     await _playbackController?.configureSubtitleStyle(
       fontSize: settings.subtitleFontSize,
@@ -1326,6 +1343,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         openNext: (session) async {
           if (!mounted) return;
           _itemSession = session;
+          _sessionSubtitleSelection = subtitleSelectionForNextQueueItem(
+            _sessionSubtitleSelection,
+          );
           _createPlayer();
           setState(() {
             _currentItem = item;
@@ -1404,7 +1424,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           playbackState: controller.state,
                           onSelect: (index) {
                             Navigator.pop(sheetContext);
-                            unawaited(controller.selectSubtitleStream(index));
+                            unawaited(_selectSubtitleStream(index));
                           },
                         ),
                       ),
@@ -1610,14 +1630,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.fast_rewind),
-            title: const Text('快退时长'),
+            title: const Text('按钮/双击快退'),
             trailing: DropdownButton<int>(
               value: _settings.seekBackwardSeconds,
-              items: const [
-                DropdownMenuItem(value: 5, child: Text('5 秒')),
-                DropdownMenuItem(value: 10, child: Text('10 秒')),
-                DropdownMenuItem(value: 15, child: Text('15 秒')),
-                DropdownMenuItem(value: 30, child: Text('30 秒')),
+              items: [
+                for (final seconds in playbackSeekStepSecondsOptions)
+                  DropdownMenuItem(value: seconds, child: Text('$seconds 秒')),
               ],
               onChanged: (value) {
                 if (value == null) return;
@@ -1632,14 +1650,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.fast_forward),
-            title: const Text('快进时长'),
+            title: const Text('按钮/双击快进'),
             trailing: DropdownButton<int>(
               value: _settings.seekForwardSeconds,
-              items: const [
-                DropdownMenuItem(value: 5, child: Text('5 秒')),
-                DropdownMenuItem(value: 10, child: Text('10 秒')),
-                DropdownMenuItem(value: 15, child: Text('15 秒')),
-                DropdownMenuItem(value: 30, child: Text('30 秒')),
+              items: [
+                for (final seconds in playbackSeekStepSecondsOptions)
+                  DropdownMenuItem(value: seconds, child: Text('$seconds 秒')),
               ],
               onChanged: (value) {
                 if (value == null) return;

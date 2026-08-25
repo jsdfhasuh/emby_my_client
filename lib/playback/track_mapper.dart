@@ -31,8 +31,15 @@ class TrackMapper {
   const TrackMapper();
 
   List<PlaybackTrack> fromPlan(PlaybackPlan plan, String type) {
+    return fromStreams(plan.mediaStreams, type);
+  }
+
+  List<PlaybackTrack> fromStreams(
+    Iterable<Map<String, dynamic>> streams,
+    String type,
+  ) {
     final normalizedType = type.toLowerCase();
-    return plan.mediaStreams
+    return streams
         .where(
           (stream) =>
               stream['Type']?.toString().toLowerCase() == normalizedType,

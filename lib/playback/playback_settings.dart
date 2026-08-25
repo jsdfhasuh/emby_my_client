@@ -2,6 +2,8 @@ import 'cache/playback_cache_settings.dart';
 import 'horizontal_scrub_mapping.dart';
 import 'seek_preview_mode.dart';
 
+const playbackSeekStepSecondsOptions = <int>[5, 10, 15, 30, 60];
+
 class PlaybackSettings {
   const PlaybackSettings({
     this.maxStreamingBitrate = 120000000,
@@ -86,8 +88,8 @@ class PlaybackSettings {
     Map<String, dynamic> json,
   ) => PlaybackSettings(
     maxStreamingBitrate: _asInt(json['maxStreamingBitrate']) ?? 120000000,
-    seekBackwardSeconds: _asInt(json['seekBackwardSeconds']) ?? 10,
-    seekForwardSeconds: _asInt(json['seekForwardSeconds']) ?? 10,
+    seekBackwardSeconds: _seekStep(json['seekBackwardSeconds']),
+    seekForwardSeconds: _seekStep(json['seekForwardSeconds']),
     horizontalSwipeSeekSpanSeconds: normalizeHorizontalSwipeSeekSpanSeconds(
       _asInt(json['horizontalSwipeSeekSpanSeconds']),
     ),
@@ -133,4 +135,9 @@ double? _asDouble(dynamic value) {
   if (value is double) return value;
   if (value is num) return value.toDouble();
   return double.tryParse(value?.toString() ?? '');
+}
+
+int _seekStep(dynamic value) {
+  final parsed = _asInt(value);
+  return playbackSeekStepSecondsOptions.contains(parsed) ? parsed! : 10;
 }
