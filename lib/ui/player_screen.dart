@@ -23,6 +23,7 @@ import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../playback/playback_engine.dart';
+import '../playback/horizontal_scrub_mapping.dart';
 import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
@@ -31,14 +32,16 @@ import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
 import '../playback/playback_state.dart';
+import '../playback/seek_preview_mode.dart';
+import '../playback/trickplay/trickplay_detail_hydrator.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
 import 'widgets/playback_subtitle_options.dart';
+import 'widgets/horizontal_seek_preview_overlay.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
-import 'widgets/trickplay_preview.dart';
 import 'player_system_ui.dart';
 
 abstract interface class PlayerSystemControls {
@@ -213,6 +216,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
   late final PlaybackQueue _queue;
   late EmbyItem _currentItem;
+  EmbyItem? _trickplayItem;
+  late final TrickplayDetailHydrator _trickplayDetailHydrator;
   late final PlaybackSettingsRepository _settingsRepository;
   late final PlaybackCacheStorage _cacheStorage;
   PlaybackDiagnosticsTestOverridesController? _diagnosticsTestOverrides;
@@ -229,9 +234,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
-  Duration? _horizontalDragStartPosition;
-  Duration? _horizontalDragPreviewPosition;
-  double _horizontalDragDx = 0;
+  HorizontalScrubSession? _horizontalScrubSession;
   bool _playing = false;
   bool _buffering = true;
   bool _controlsVisible = true;
@@ -248,6 +251,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _showSkipIntro = false;
   bool _autoNextCancelled = false;
   bool _switchingItem = false;
+  bool _trickplayPreviewEnabled = true;
+  int _trickplayResourceGeneration = 0;
   bool _completed = false;
   int? _nextCountdown;
   int _autoPlayedCount = 0;
@@ -267,6 +272,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _currentItem = widget.item;
+    _trickplayItem = _currentItem;
+    _trickplayDetailHydrator = TrickplayDetailHydrator(
+      fetch: widget.api.getItem,
+    );
     _itemSession = _playerSessionCoordinator.beginInitialItem();
     _queue = widget.queue ?? PlaybackQueue.single(widget.api, widget.item);
     if (widget.offlineItem == null) {
@@ -285,9 +294,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         unawaited(_closePlayer(PlayerExitReason.systemBack));
       },
       onModeChanged: (active) {
-        if (mounted && active) {
-          setState(() => _controlsVisible = false);
-        }
+        if (!mounted) return;
+        setState(() {
+          _trickplayPreviewEnabled = !active;
+          if (active) _controlsVisible = false;
+        });
       },
     );
     _closeCoordinator = PlayerCloseCoordinator(
@@ -333,6 +344,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _createPlayer() {
+    _trickplayResourceGeneration++;
     _player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
     );
@@ -406,6 +418,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       maxStreamingBitrate: _settings.maxStreamingBitrate,
     )..addListener(_syncPlaybackState);
     _playbackController = controller;
+    _hydrateTrickplayDetails(item: _currentItem, session: _itemSession);
     await controller.setPlaybackRate(_settings.playbackRate);
     await controller.setAudioDelay(
       Duration(milliseconds: _settings.audioDelayMilliseconds),
@@ -420,6 +433,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       position: _settings.subtitlePosition,
     );
     await controller.start();
+  }
+
+  void _hydrateTrickplayDetails({
+    required EmbyItem item,
+    required PlaybackItemSession session,
+  }) {
+    if (widget.offlineItem != null) return;
+    unawaited(
+      _trickplayDetailHydrator.hydrate(
+        item: item,
+        isCurrent: () =>
+            mounted &&
+            !_playbackResourcesReleased &&
+            _currentItem.id == item.id &&
+            _itemSession.id == session.id,
+        onResolved: (detail) => setState(() => _trickplayItem = detail),
+        onFailure: (error) {
+          DiagnosticLog.instance.warning(
+            'player',
+            'event=trickplay_detail_hydration_failed '
+                'errorType=${error.runtimeType}',
+          );
+        },
+      ),
+    );
   }
 
   Future<PlaybackEngine> _recreatePlaybackEngine(PlaybackItemSession session) =>
@@ -548,6 +586,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _releasePlaybackResources() async {
     if (_playbackResourcesReleased) return;
     _playbackResourcesReleased = true;
+    void clearPreview() {
+      _trickplayPreviewEnabled = false;
+      _horizontalScrubSession?.cancel();
+      _horizontalScrubSession = null;
+      _seeking = false;
+    }
+
+    if (mounted) {
+      setState(clearPreview);
+    } else {
+      clearPreview();
+    }
     _controlsTimer?.cancel();
     _nextCountdownTimer?.cancel();
     _pipController.dispose();
@@ -768,41 +818,37 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _controlsTimer?.cancel();
     _invalidateUiSeek();
+    final session = _settings.createHorizontalScrubSession(
+      startPosition: _position,
+      duration: _duration,
+    );
     setState(() {
-      _horizontalDragStartPosition = _position;
-      _horizontalDragPreviewPosition = _position;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = session;
       _seeking = true;
       _controlsVisible = false;
     });
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    final startPosition = _horizontalDragStartPosition;
-    if (startPosition == null) return;
+    final session = _horizontalScrubSession;
+    if (session == null || !session.isActive) return;
 
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    if (screenWidth <= 0) return;
-
-    _horizontalDragDx += details.delta.dx;
-    final offsetSeconds = (_horizontalDragDx / screenWidth * 120).round();
-    final target = _clampPosition(
-      startPosition + Duration(seconds: offsetSeconds),
+    final target = session.update(
+      deltaDistance: details.delta.dx,
+      viewportWidth: MediaQuery.sizeOf(context).width,
     );
     setState(() {
-      _horizontalDragPreviewPosition = target;
       _position = target;
     });
   }
 
   Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
-    final target = _horizontalDragPreviewPosition;
-    if (_horizontalDragStartPosition == null || target == null) return;
+    final session = _horizontalScrubSession;
+    final target = session?.complete();
+    if (session == null || target == null) return;
 
     setState(() {
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
     });
@@ -810,26 +856,19 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onHorizontalDragCancel() {
-    final startPosition = _horizontalDragStartPosition;
+    final session = _horizontalScrubSession;
+    final startPosition = session?.cancel();
     if (startPosition == null) return;
 
     _invalidateUiSeek();
     setState(() {
       _position = startPosition;
-      _horizontalDragStartPosition = null;
-      _horizontalDragPreviewPosition = null;
-      _horizontalDragDx = 0;
+      _horizontalScrubSession = null;
       _seeking = false;
       _controlsVisible = true;
       _uiSeekPending = false;
     });
     _restartControlsTimer();
-  }
-
-  Duration _clampPosition(Duration position) {
-    if (position < Duration.zero) return Duration.zero;
-    if (position > _duration) return _duration;
-    return position;
   }
 
   @override
@@ -861,9 +900,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
       if (_pipController.isActive || _pipController.isEntering) return;
+      _setTrickplayPreviewEnabled(false);
       final controller = _playbackController;
       if (controller != null) unawaited(controller.pauseForLifecycle());
     } else if (state == AppLifecycleState.resumed) {
+      if (!_pipController.isActive) _setTrickplayPreviewEnabled(true);
       final controller = _playbackController;
       if (controller != null) unawaited(controller.resumeForLifecycle());
     }
@@ -877,6 +918,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _trickplayPreviewEnabled = false;
     _uiSeekRequestGate.invalidate();
     _uiSeekPending = false;
     _logPlayerEvent(
@@ -889,6 +931,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_restoreAfterPlayback().catchError((_) {}));
     }
     super.dispose();
+  }
+
+  void _setTrickplayPreviewEnabled(bool enabled) {
+    if (_trickplayPreviewEnabled == enabled) return;
+    if (mounted) {
+      setState(() => _trickplayPreviewEnabled = enabled);
+    } else {
+      _trickplayPreviewEnabled = enabled;
+    }
   }
 
   void _logPlayerEvent(
@@ -1278,6 +1329,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _createPlayer();
           setState(() {
             _currentItem = item;
+            _trickplayItem = item;
             _playbackController = null;
             _plan = null;
             _position = Duration.zero;
@@ -1292,6 +1344,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             _autoNextCancelled = false;
             _nextCountdown = null;
             _controlsVisible = true;
+            _horizontalScrubSession?.cancel();
+            _horizontalScrubSession = null;
+            _seeking = false;
             _invalidateUiSeek();
           });
           await _startCurrentItem();
@@ -1597,6 +1652,62 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
           ListTile(
+            key: const ValueKey('horizontal-swipe-seek-span-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.swap_horiz),
+            title: const Text('横向滑动跨度'),
+            subtitle: const Text('横跨整个屏幕对应的快进或快退时间'),
+            trailing: DropdownButton<int>(
+              value: _settings.horizontalSwipeSeekSpanSeconds,
+              items: const [
+                DropdownMenuItem(value: 30, child: Text('30 秒')),
+                DropdownMenuItem(value: 60, child: Text('1 分钟')),
+                DropdownMenuItem(value: 120, child: Text('2 分钟')),
+                DropdownMenuItem(value: 300, child: Text('5 分钟')),
+                DropdownMenuItem(value: 600, child: Text('10 分钟')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(
+                    PlaybackSettingsPatch(
+                      horizontalSwipeSeekSpanSeconds: value,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          ListTile(
+            key: const ValueKey('seek-preview-mode-setting'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('滑动预览画面'),
+            trailing: DropdownButton<SeekPreviewMode>(
+              value: _settings.seekPreviewMode,
+              items: const [
+                DropdownMenuItem(
+                  value: SeekPreviewMode.automatic,
+                  child: Text('自动（推荐）'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.serverOnly,
+                  child: Text('仅服务器缩略图'),
+                ),
+                DropdownMenuItem(
+                  value: SeekPreviewMode.off,
+                  child: Text('关闭画面预览'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                unawaited(
+                  _patchSettings(PlaybackSettingsPatch(seekPreviewMode: value)),
+                );
+              },
+            ),
+          ),
+          ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.graphic_eq),
             title: const Text('音频延迟'),
@@ -1797,8 +1908,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                   child: _buildControls(),
                 ),
               ),
-              if (_horizontalDragPreviewPosition != null)
-                _buildHorizontalSeekOverlay(),
+              if (_horizontalScrubSession != null && _trickplayPreviewEnabled)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: _buildHorizontalSeekOverlay(),
+                ),
               if (_verticalDragValue != null) _buildVerticalGestureOverlay(),
               if (_showSkipIntro && !_controlsLocked)
                 Positioned(
@@ -1820,91 +1936,21 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildHorizontalSeekOverlay() {
-    final startPosition = _horizontalDragStartPosition!;
-    final target = _horizontalDragPreviewPosition!;
-    final deltaSeconds = target.inSeconds - startPosition.inSeconds;
-    final isForward = _horizontalDragDx >= 0;
-    final deltaLabel = deltaSeconds > 0
-        ? '+$deltaSeconds 秒'
-        : '$deltaSeconds 秒';
-    final preview = _trickplayPreview(target);
-
-    return IgnorePointer(
-      child: Center(
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          decoration: BoxDecoration(
-            color: const Color(0xCC111315),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (preview != null) ...[
-                SizedBox(
-                  width: 240,
-                  child: TrickplayPreview(
-                    image: NetworkImage(
-                      preview.url.toString(),
-                      headers: widget.api.playbackHeaders,
-                    ),
-                    thumbnailWidth: preview.info.width,
-                    thumbnailHeight: preview.info.height,
-                    columns: preview.info.tileColumns,
-                    rows: preview.info.tileRows,
-                    column: preview.column,
-                    row: preview.row,
-                  ),
-                ),
-                const SizedBox(height: 10),
-              ],
-              Icon(
-                isForward
-                    ? Icons.fast_forward_rounded
-                    : Icons.fast_rewind_rounded,
-                size: 36,
-                color: Colors.white,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                deltaLabel,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${_formatDuration(target)} / ${_formatDuration(_duration)}',
-                style: const TextStyle(color: Color(0xFFD0D5D6), fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  ({EmbyTrickplayResolution info, Uri url, int column, int row})?
-  _trickplayPreview(Duration position) {
-    final plan = _plan;
-    final info = _currentItem.trickplay?.resolutionFor(plan?.mediaSourceId);
-    if (plan == null || info == null) return null;
-    final tileIndex = position.inMilliseconds ~/ info.intervalMilliseconds;
-    final imageIndex = tileIndex ~/ info.tilesPerImage;
-    final tileOffset = tileIndex % info.tilesPerImage;
-    return (
-      info: info,
-      url: widget.api.trickplayTileUrl(
-        itemId: _currentItem.id,
-        width: info.width,
-        imageIndex: imageIndex,
-        mediaSourceId: plan.mediaSourceId,
-      ),
-      column: tileOffset % info.tileColumns,
-      row: tileOffset ~/ info.tileColumns,
+    final session = _horizontalScrubSession!;
+    final playback = _playbackController?.state;
+    return TrickplaySeekPreviewOverlay(
+      api: widget.api,
+      item: _trickplayItem ?? _currentItem,
+      plan: _plan,
+      playerItemGeneration:
+          '${_itemSession.id.value}:$_trickplayResourceGeneration',
+      startPosition: session.startPosition,
+      targetPosition: session.targetPosition,
+      duration: _duration,
+      buffer: _buffer,
+      cacheRuntimeMode: playback?.cacheRuntimeMode,
+      cacheSnapshot: playback?.cacheSnapshot,
+      previewDisabled: _settings.seekPreviewMode == SeekPreviewMode.off,
     );
   }
 

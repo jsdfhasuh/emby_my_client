@@ -1,5 +1,16 @@
 import 'package:flutter/material.dart';
 
+Alignment trickplayCellAlignment({
+  required int columns,
+  required int rows,
+  required int column,
+  required int row,
+}) {
+  final alignmentX = columns <= 1 ? 0.0 : -1 + (2 * column / (columns - 1));
+  final alignmentY = rows <= 1 ? 0.0 : -1 + (2 * row / (rows - 1));
+  return Alignment(alignmentX, alignmentY);
+}
+
 class TrickplayPreview extends StatelessWidget {
   const TrickplayPreview({
     super.key,
@@ -10,6 +21,8 @@ class TrickplayPreview extends StatelessWidget {
     required this.rows,
     required this.column,
     required this.row,
+    this.gaplessPlayback = true,
+    this.onError,
   });
 
   final ImageProvider image;
@@ -19,6 +32,8 @@ class TrickplayPreview extends StatelessWidget {
   final int rows;
   final int column;
   final int row;
+  final bool gaplessPlayback;
+  final VoidCallback? onError;
 
   @override
   Widget build(BuildContext context) {
@@ -29,24 +44,31 @@ class TrickplayPreview extends StatelessWidget {
           builder: (context, constraints) {
             final sheetWidth = constraints.maxWidth * columns;
             final sheetHeight = constraints.maxHeight * rows;
-            final alignmentX = columns <= 1
-                ? 0.0
-                : -1 + (2 * column / (columns - 1));
-            final alignmentY = rows <= 1 ? 0.0 : -1 + (2 * row / (rows - 1));
             return OverflowBox(
               minWidth: sheetWidth,
               maxWidth: sheetWidth,
               minHeight: sheetHeight,
               maxHeight: sheetHeight,
-              alignment: Alignment(alignmentX, alignmentY),
+              alignment: trickplayCellAlignment(
+                columns: columns,
+                rows: rows,
+                column: column,
+                row: row,
+              ),
               child: Image(
                 image: image,
                 fit: BoxFit.fill,
                 filterQuality: FilterQuality.medium,
-                errorBuilder: (_, _, _) => const ColoredBox(
-                  color: Color(0xFF252A2C),
-                  child: Center(child: Icon(Icons.broken_image_outlined)),
-                ),
+                gaplessPlayback: gaplessPlayback,
+                errorBuilder: (_, _, _) {
+                  final onError = this.onError;
+                  if (onError != null) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      onError();
+                    });
+                  }
+                  return const ColoredBox(color: Color(0xFF252A2C));
+                },
               ),
             );
           },

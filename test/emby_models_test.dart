@@ -310,6 +310,7 @@ void main() {
             'TileWidth': 10,
             'TileHeight': 10,
             'Interval': 10000,
+            'ThumbnailCount': 37,
           },
         },
       },
@@ -320,6 +321,72 @@ void main() {
     expect(info?.height, 180);
     expect(info?.tilesPerImage, 100);
     expect(info?.intervalMilliseconds, 10000);
+    expect(info?.thumbnailCount, 37);
+  });
+
+  test(
+    'treats a missing or non-positive ThumbnailCount as compatible absence',
+    () {
+      for (final value in [null, 0, -1, 'not-a-count']) {
+        final item = EmbyItem.fromJson({
+          'Trickplay': {
+            'source-1': {
+              '320': {
+                'Width': 320,
+                'Height': 180,
+                'TileWidth': 10,
+                'TileHeight': 10,
+                'Interval': 10000,
+                'ThumbnailCount': value,
+              },
+            },
+          },
+        });
+
+        expect(
+          item.trickplay?.resolutionFor('source-1')?.thumbnailCount,
+          isNull,
+        );
+      }
+    },
+  );
+
+  test('does not mix a fallback source grid with the requested source URL', () {
+    final trickplay = EmbyTrickplay({
+      'source-a': [
+        const EmbyTrickplayResolution(
+          width: 320,
+          height: 180,
+          tileColumns: 2,
+          tileRows: 2,
+          intervalMilliseconds: 10000,
+        ),
+      ],
+      'source-b': [
+        const EmbyTrickplayResolution(
+          width: 640,
+          height: 360,
+          tileColumns: 4,
+          tileRows: 4,
+          intervalMilliseconds: 5000,
+        ),
+      ],
+    });
+
+    final exact = trickplay.selectionFor('source-b');
+    final singleFallback = EmbyTrickplay({
+      'source-a': trickplay.sources['source-a']!,
+    }).selectionFor('missing');
+
+    expect(exact?.mediaSourceId, 'source-b');
+    expect(exact?.resolution.tileColumns, 4);
+    expect(exact?.sourceMatch, EmbyTrickplaySourceMatch.exact);
+    expect(singleFallback?.mediaSourceId, 'source-a');
+    expect(
+      singleFallback?.sourceMatch,
+      EmbyTrickplaySourceMatch.singleFallback,
+    );
+    expect(EmbyTrickplay(trickplay.sources).selectionFor('missing'), isNull);
   });
 
   test('classifies STRM items from item and media source metadata', () {
