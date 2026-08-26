@@ -15,7 +15,6 @@ import '../models/emby_models.dart';
 import '../offline/offline_playback_reporter.dart';
 import '../offline/offline_playback_resolver.dart';
 import '../platform/platform_capabilities.dart';
-import '../playback/emby_stream_resolver.dart';
 import '../playback/cache/playback_cache_storage.dart';
 import '../playback/cache/playback_cache_storage_scope.dart';
 import '../playback/playback_controller.dart';
@@ -27,7 +26,7 @@ import '../playback/horizontal_scrub_mapping.dart';
 import '../playback/playback_operation_coordinator.dart';
 import '../playback/picture_in_picture.dart';
 import '../playback/playback_queue.dart';
-import '../playback/playback_session_reporter.dart';
+import '../playback/playback_session_bootstrap.dart';
 import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
@@ -386,58 +385,50 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _startCurrentItem() async {
     final offlineItem = widget.offlineItem;
     final downloads = widget.downloads;
-    final PlaybackStreamResolver resolver;
-    final PlaybackReporter reporter;
-    final Map<String, String> playbackHeaders;
+    late final PlaybackController controller;
     if (offlineItem != null && downloads != null) {
       if (_currentItem.id != offlineItem.itemId) {
         throw StateError('Offline playback cannot switch media items');
       }
-      resolver = OfflinePlaybackResolver(offlineItem);
-      reporter = OfflinePlaybackReporter(
-        item: offlineItem,
-        writeProgress: (position, played) => downloads.recordOfflineProgress(
-          offlineItem,
-          position,
-          played: played,
+      controller = PlaybackController(
+        item: _currentItem,
+        engine: MediaKitPlaybackEngine(_player),
+        resolver: OfflinePlaybackResolver(offlineItem),
+        reporter: OfflinePlaybackReporter(
+          item: offlineItem,
+          writeProgress: (position, played) => downloads.recordOfflineProgress(
+            offlineItem,
+            position,
+            played: played,
+          ),
         ),
+        playbackHeaders: const {},
+        engineRecreator: _recreatePlaybackEngine,
+        session: _itemSession,
+        cacheSettings: _settings.cache,
+        cacheStorage: _cacheStorage,
+        testOverrides: _diagnosticsTestOverrides?.consumeForPlayback(),
+        maxStreamingBitrate: _settings.maxStreamingBitrate,
       );
-      playbackHeaders = const {};
     } else {
-      resolver = EmbyStreamResolver(widget.api);
-      reporter = PlaybackSessionReporter(api: widget.api, item: _currentItem);
-      playbackHeaders = widget.api.playbackHeaders;
+      controller = PlaybackSessionBootstrap.createOnlineController(
+        api: widget.api,
+        item: _currentItem,
+        engine: MediaKitPlaybackEngine(_player),
+        engineRecreator: _recreatePlaybackEngine,
+        session: _itemSession,
+        settings: _settings,
+        cacheStorage: _cacheStorage,
+        testOverrides: _diagnosticsTestOverrides?.consumeForPlayback(),
+      );
     }
-    final controller = PlaybackController(
-      item: _currentItem,
-      engine: MediaKitPlaybackEngine(_player),
-      resolver: resolver,
-      reporter: reporter,
-      playbackHeaders: playbackHeaders,
-      engineRecreator: _recreatePlaybackEngine,
-      session: _itemSession,
-      cacheSettings: _settings.cache,
-      cacheStorage: _cacheStorage,
-      testOverrides: _diagnosticsTestOverrides?.consumeForPlayback(),
-      maxStreamingBitrate: _settings.maxStreamingBitrate,
-    )..addListener(_syncPlaybackState);
+    controller.addListener(_syncPlaybackState);
     _playbackController = controller;
     _hydrateTrickplayDetails(item: _currentItem, session: _itemSession);
-    await controller.setPlaybackRate(_settings.playbackRate);
-    await controller.setAudioDelay(
-      Duration(milliseconds: _settings.audioDelayMilliseconds),
-    );
-    await controller.setSubtitleDelay(
-      Duration(milliseconds: _settings.subtitleDelayMilliseconds),
-    );
-    await controller.configureSubtitleStyle(
-      fontSize: _settings.subtitleFontSize,
-      color: _settings.subtitleColor,
-      outlineColor: _settings.subtitleOutlineColor,
-      position: _settings.subtitlePosition,
-    );
     final subtitleSelection = _sessionSubtitleSelection;
-    await controller.start(
+    await PlaybackSessionBootstrap.configureAndStart(
+      controller: controller,
+      settings: _settings,
       subtitleStreamIndex: subtitleSelection == disabledSubtitleStreamIndex
           ? null
           : subtitleSelection,

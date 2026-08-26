@@ -164,6 +164,8 @@ class PlaybackController extends ChangeNotifier {
     int? audioStreamIndex,
     int? subtitleStreamIndex,
     bool subtitleDisabled = false,
+    Duration? resumePosition,
+    bool playAfterReady = true,
   }) {
     _selectedMediaSourceId = mediaSourceId;
     _selectedAudioStreamIndex = audioStreamIndex;
@@ -175,7 +177,10 @@ class PlaybackController extends ChangeNotifier {
     if (!_tryReserveAutomaticOpen(AutomaticPlaybackOpenReason.initial)) {
       return Future.error(StateError('Initial playback open is unavailable'));
     }
-    return _startPlayback();
+    return _startPlayback(
+      resumePosition: resumePosition,
+      playAfterReady: playAfterReady,
+    );
   }
 
   Future<void> _startPlayback({

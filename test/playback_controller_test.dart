@@ -9,6 +9,8 @@ import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
+import 'package:emby_my_client/playback/playback_session_bootstrap.dart';
+import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -91,6 +93,106 @@ void main() {
       await controller.shutdown();
     },
   );
+
+  test('explicit resume position overrides the Emby item position', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _resumeItem,
+    );
+
+    await controller.start(resumePosition: const Duration(minutes: 5));
+
+    expect(engine.openPlayValues, [false]);
+    expect(engine.seekValues, [const Duration(minutes: 5)]);
+    expect(engine.playCalls, 1);
+    expect(controller.state.position, const Duration(minutes: 5));
+    await controller.shutdown();
+  });
+
+  test('playAfterReady false leaves initial playback paused', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+
+    await controller.start(playAfterReady: false);
+
+    expect(engine.openPlayValues, [false]);
+    expect(engine.playCalls, 0);
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.isPlaying, isFalse);
+    await controller.shutdown();
+  });
+
+  test('shared online bootstrap applies settings and start options', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    const settings = PlaybackSettings(
+      maxStreamingBitrate: 20000000,
+      playbackRate: 1.5,
+      audioDelayMilliseconds: 250,
+      subtitleDelayMilliseconds: -500,
+      subtitleFontSize: 52,
+      subtitleColor: 0xFFFFFF00,
+      subtitleOutlineColor: 0xFF404040,
+      subtitlePosition: 88,
+    );
+    final controller = PlaybackSessionBootstrap.createOnlineController(
+      api: api,
+      item: _plainItem,
+      engine: engine,
+      session: PlaybackItemSession.forTest('bootstrap-session'),
+      settings: settings,
+    );
+
+    await PlaybackSessionBootstrap.configureAndStart(
+      controller: controller,
+      settings: settings,
+      resumePosition: const Duration(minutes: 4),
+      playAfterReady: false,
+    );
+
+    expect(engine.rateValues, isNotEmpty);
+    expect(engine.rateValues, everyElement(1.5));
+    expect(
+      engine.audioDelayValues,
+      everyElement(const Duration(milliseconds: 250)),
+    );
+    expect(
+      engine.subtitleDelayValues,
+      everyElement(const Duration(milliseconds: -500)),
+    );
+    expect(engine.subtitleStyleValues, isNotEmpty);
+    expect(engine.subtitleStyleValues.last, (52.0, 0xFFFFFF00, 0xFF404040, 88));
+    expect(engine.openPlayValues, [false]);
+    expect(engine.seekValues, [const Duration(minutes: 4)]);
+    expect(engine.playCalls, 0);
+    final playbackInfo = requests.singleWhere(
+      (request) => request.path.endsWith('/PlaybackInfo'),
+    );
+    expect((playbackInfo.data as Map)['MaxStreamingBitrate'], 20000000);
+    await controller.shutdown();
+  });
 
   test(
     'applies the server-resolved default subtitle during initial DirectPlay',
@@ -1256,6 +1358,10 @@ class _FakeEngine implements PlaybackEngine {
   final List<String?> selectedSubtitleTrackIds = [];
   final List<int> selectedSubtitleOpenCounts = [];
   final List<Uri> externalSubtitleUris = [];
+  final List<double> rateValues = [];
+  final List<Duration> audioDelayValues = [];
+  final List<Duration> subtitleDelayValues = [];
+  final List<(double, int, int, int)> subtitleStyleValues = [];
   int playCalls = 0;
   int stopCalls = 0;
   int disposeCalls = 0;
@@ -1348,13 +1454,15 @@ class _FakeEngine implements PlaybackEngine {
   }
 
   @override
-  Future<void> setRate(double rate) async {}
+  Future<void> setRate(double rate) async => rateValues.add(rate);
 
   @override
-  Future<void> setAudioDelay(Duration delay) async {}
+  Future<void> setAudioDelay(Duration delay) async =>
+      audioDelayValues.add(delay);
 
   @override
-  Future<void> setSubtitleDelay(Duration delay) async {}
+  Future<void> setSubtitleDelay(Duration delay) async =>
+      subtitleDelayValues.add(delay);
 
   @override
   Future<void> configureSubtitleStyle({
@@ -1362,7 +1470,8 @@ class _FakeEngine implements PlaybackEngine {
     required int color,
     required int outlineColor,
     required int position,
-  }) async {}
+  }) async =>
+      subtitleStyleValues.add((fontSize, color, outlineColor, position));
 
   @override
   Future<void> stop() async {
