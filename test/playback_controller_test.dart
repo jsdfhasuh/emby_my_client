@@ -162,6 +162,82 @@ void main() {
     await controller.shutdown();
   });
 
+  test('quiescence starts while native play is blocked', () async {
+    final playGate = Completer<void>();
+    final engine = _FakeEngine(playOperation: playGate.future);
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+    await controller.start(playAfterReady: false);
+
+    final play = controller.play();
+    await _waitUntil(() => engine.playCalls == 1);
+    final quiescence = controller.quiesce();
+    await _waitUntil(() => engine.quiesceCalls == 1);
+
+    expect(engine.playCalls, 1);
+    expect(engine.quiesceCalls, 1);
+    expect(controller.state.isPlaying, isFalse);
+
+    playGate.complete();
+    await Future.wait([play, quiescence]);
+    expect(controller.state.isPlaying, isFalse);
+    await controller.shutdown();
+  });
+
+  test(
+    'quiescence cancels logical seek and shutdown waits native seek',
+    () async {
+      final seekGate = Completer<void>();
+      final engine = _FakeEngine(seekOperation: seekGate.future);
+      engine.onOpen = (_) {
+        engineLater(
+          () => engine.durationController.add(const Duration(hours: 1)),
+        );
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+      );
+      await controller.start(playAfterReady: false);
+
+      final seek = controller.seekAbsolute(
+        const Duration(minutes: 10),
+        source: SeekSource.progressBar,
+      );
+      await _waitUntil(() => engine.seekValues.isNotEmpty);
+      await controller.quiesce();
+
+      final result = await seek;
+      expect(result.disposition, SeekDisposition.cancelled);
+      expect(result.failureKind, SeekFailureKind.higherPriorityOperation);
+      expect(engine.quiesceCalls, 1);
+
+      var shutdownCompleted = false;
+      final shutdown = controller.shutdown().then(
+        (_) => shutdownCompleted = true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(shutdownCompleted, isFalse);
+      expect(engine.stopCalls, 0);
+      expect(engine.disposeCalls, 0);
+
+      seekGate.complete();
+      await shutdown;
+      expect(shutdownCompleted, isTrue);
+      expect(engine.stopCalls, 1);
+      expect(engine.disposeCalls, 1);
+    },
+  );
+
   test('shared online bootstrap applies settings and start options', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -1130,11 +1206,21 @@ void main() {
       source: SeekSource.remote,
     );
     await Future<void>.delayed(Duration.zero);
-    final shutdown = controller.shutdown();
+    var shutdownCompleted = false;
+    final shutdown = controller.shutdown().then(
+      (_) => shutdownCompleted = true,
+    );
     final result = await seek;
-    await shutdown;
 
     expect(result.disposition, SeekDisposition.cancelled);
+    await Future<void>.delayed(Duration.zero);
+    expect(shutdownCompleted, isFalse);
+    expect(engine.stopCalls, 0);
+    expect(engine.disposeCalls, 0);
+
+    seekGate.complete();
+    await shutdown;
+    expect(shutdownCompleted, isTrue);
     expect(diagnostics, contains('event=playback_seek_cancelled count=1'));
     expect(
       diagnostics,
@@ -1146,8 +1232,6 @@ void main() {
         ),
       ),
     );
-    seekGate.complete();
-    await Future<void>.delayed(Duration.zero);
     expect(controller.state.phase, PlaybackPhase.idle);
   });
 
@@ -1190,25 +1274,32 @@ void main() {
     },
   );
 
-  test('inline media kit session forwards lifecycle APIs distinctly', () async {
-    final controller = _LifecycleSpyPlaybackController();
-    final session = MediaKitInlinePlaybackSession.forTesting(
-      itemId: _plainItem.id,
-      controller: controller,
-    );
+  test(
+    'inline media kit session forwards quiescence APIs distinctly',
+    () async {
+      final controller = _LifecycleSpyPlaybackController();
+      final session = MediaKitInlinePlaybackSession.forTesting(
+        itemId: _plainItem.id,
+        controller: controller,
+      );
 
-    await session.pauseForLifecycle();
-    await session.resumeForLifecycle();
-    await session.pause();
+      await session.quiesce();
+      await session.quiesceForLifecycle();
+      await session.pauseForLifecycle();
+      await session.resumeForLifecycle();
+      await session.pause();
 
-    expect(controller.calls, [
-      'pauseForLifecycle',
-      'resumeForLifecycle',
-      'pause',
-    ]);
-    await session.shutdown();
-    expect(controller.shutdownCalls, 1);
-  });
+      expect(controller.calls, [
+        'quiesce',
+        'quiesceForLifecycle',
+        'pauseForLifecycle',
+        'resumeForLifecycle',
+        'pause',
+      ]);
+      await session.shutdown();
+      expect(controller.shutdownCalls, 1);
+    },
+  );
 }
 
 class _LifecycleSpyPlaybackController extends PlaybackController {
@@ -1227,6 +1318,12 @@ class _LifecycleSpyPlaybackController extends PlaybackController {
 
   @override
   Future<void> pause() async => calls.add('pause');
+
+  @override
+  Future<void> quiesce() async => calls.add('quiesce');
+
+  @override
+  Future<void> quiesceForLifecycle() async => calls.add('quiesceForLifecycle');
 
   @override
   Future<void> pauseForLifecycle() async => calls.add('pauseForLifecycle');
@@ -1398,15 +1495,25 @@ void engineLater(void Function() action) {
   scheduleMicrotask(action);
 }
 
+Future<void> _waitUntil(bool Function() predicate) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await Future<void>.delayed(Duration.zero);
+  }
+  fail('Timed out waiting for asynchronous test condition');
+}
+
 class _FakeEngine implements PlaybackEngine {
   _FakeEngine({
     this.openOperation,
+    this.playOperation,
     this.stopOperation,
     this.disposeOperation,
     this.seekOperation,
   });
 
   final Future<void>? openOperation;
+  final Future<void>? playOperation;
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
   final Future<void>? seekOperation;
@@ -1440,8 +1547,14 @@ class _FakeEngine implements PlaybackEngine {
   bool emitPlayingOnPlay = true;
   int playCalls = 0;
   int pauseCalls = 0;
+  int quiesceCalls = 0;
+  int lifecycleQuiesceCalls = 0;
+  int lifecycleQuiescenceResumeCalls = 0;
   int stopCalls = 0;
   int disposeCalls = 0;
+  int _quiescenceEpoch = 0;
+  bool _retiring = false;
+  bool _lifecycleQuiesced = false;
   Object? openError;
   Object? externalSubtitleError;
 
@@ -1494,6 +1607,9 @@ class _FakeEngine implements PlaybackEngine {
   @override
   Future<void> play() async {
     playCalls++;
+    final epoch = _quiescenceEpoch;
+    await playOperation;
+    if (_retiring || _lifecycleQuiesced || epoch != _quiescenceEpoch) return;
     if (emitPlayingOnPlay) playingController.add(true);
   }
 
@@ -1504,9 +1620,34 @@ class _FakeEngine implements PlaybackEngine {
   }
 
   @override
+  Future<void> quiesce() async {
+    quiesceCalls++;
+    _retiring = true;
+    _quiescenceEpoch++;
+    playingController.add(false);
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() async {
+    lifecycleQuiesceCalls++;
+    _lifecycleQuiesced = true;
+    _quiescenceEpoch++;
+    playingController.add(false);
+  }
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {
+    lifecycleQuiescenceResumeCalls++;
+    _lifecycleQuiesced = false;
+    _quiescenceEpoch++;
+  }
+
+  @override
   Future<void> seek(Duration position) async {
     seekValues.add(position);
+    final epoch = _quiescenceEpoch;
     await seekOperation;
+    if (_retiring || _lifecycleQuiesced || epoch != _quiescenceEpoch) return;
     positionController.add(position);
   }
 

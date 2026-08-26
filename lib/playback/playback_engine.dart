@@ -73,6 +73,9 @@ abstract interface class PlaybackEngine {
 
   Future<void> play();
   Future<void> pause();
+  Future<void> quiesce();
+  Future<void> quiesceForLifecycle();
+  Future<void> resumeFromLifecycleQuiescence();
   Future<void> seek(Duration position);
   Future<void> selectAudioTrack(String trackId);
   Future<void> selectSubtitleTrack(String? trackId);
@@ -117,6 +120,10 @@ class MediaKitPlaybackEngine
   final PlaybackDiagnostics _diagnostics;
   NativePlaybackCacheEngine? _cacheEngine;
   bool _hasOpenedMedia = false;
+  bool _retiring = false;
+  bool _lifecycleQuiesced = false;
+  int _quiescenceEpoch = 0;
+  Future<void>? _pauseOutputOperation;
 
   @override
   Stream<Duration> get positionStream => player.stream.position;
@@ -181,8 +188,13 @@ class MediaKitPlaybackEngine
     required Map<String, String> headers,
     required bool play,
   }) async {
+    if (_retiring) return;
+    final quiescenceEpoch = _quiescenceEpoch;
     _hasOpenedMedia = true;
     await player.open(Media(uri.toString(), httpHeaders: headers), play: play);
+    if (play && _mustReassertQuiescence(quiescenceEpoch)) {
+      await _pauseOutput();
+    }
   }
 
   @override
@@ -226,13 +238,60 @@ class MediaKitPlaybackEngine
       Future.value();
 
   @override
-  Future<void> play() => player.play();
+  Future<void> play() async {
+    if (_retiring || _lifecycleQuiesced) return;
+    final quiescenceEpoch = _quiescenceEpoch;
+    await player.play();
+    if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+  }
 
   @override
   Future<void> pause() => player.pause();
 
   @override
-  Future<void> seek(Duration position) => player.seek(position);
+  Future<void> quiesce() {
+    _retiring = true;
+    _quiescenceEpoch++;
+    return _pauseOutput();
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() {
+    _lifecycleQuiesced = true;
+    _quiescenceEpoch++;
+    return _pauseOutput();
+  }
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {
+    if (_retiring) return;
+    _lifecycleQuiesced = false;
+    _quiescenceEpoch++;
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    if (_retiring || _lifecycleQuiesced) return;
+    final quiescenceEpoch = _quiescenceEpoch;
+    await player.seek(position);
+    if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+  }
+
+  bool _mustReassertQuiescence(int operationEpoch) =>
+      operationEpoch != _quiescenceEpoch || _retiring || _lifecycleQuiesced;
+
+  Future<void> _pauseOutput() {
+    final existing = _pauseOutputOperation;
+    if (existing != null) return existing;
+    late final Future<void> operation;
+    operation = Future<void>.sync(player.pause).whenComplete(() {
+      if (identical(_pauseOutputOperation, operation)) {
+        _pauseOutputOperation = null;
+      }
+    });
+    _pauseOutputOperation = operation;
+    return operation;
+  }
 
   @override
   Future<void> selectAudioTrack(String trackId) async {

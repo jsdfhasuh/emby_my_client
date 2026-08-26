@@ -121,6 +121,12 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
   Future<void> pause() => _controller.pause();
 
   @override
+  Future<void> quiesce() => _controller.quiesce();
+
+  @override
+  Future<void> quiesceForLifecycle() => _controller.quiesceForLifecycle();
+
+  @override
   Future<void> pauseForLifecycle() => _controller.pauseForLifecycle();
 
   @override

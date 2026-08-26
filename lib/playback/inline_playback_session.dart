@@ -61,6 +61,8 @@ abstract interface class InlinePlaybackSession implements Listenable {
   Future<void> start({Duration? resumePosition});
   Future<void> play();
   Future<void> pause();
+  Future<void> quiesce();
+  Future<void> quiesceForLifecycle();
   Future<void> pauseForLifecycle();
   Future<void> resumeForLifecycle();
   Future<void> seek(Duration position);

@@ -1589,6 +1589,15 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void> play() async => playingController.add(true);
 
   @override
+  Future<void> quiesce() async => playingController.add(false);
+
+  @override
+  Future<void> quiesceForLifecycle() async => playingController.add(false);
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {}
+
+  @override
   Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
     events.add('probe');
     return _capabilities();

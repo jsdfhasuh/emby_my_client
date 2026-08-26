@@ -101,6 +101,9 @@ class PlaybackController extends ChangeNotifier {
   Completer<void>? _readyCompleter;
   Timer? _progressTimer;
   Future<void>? _shutdownOperation;
+  Future<void>? _retirementQuiescenceOperation;
+  Future<void>? _lifecycleQuiescenceOperation;
+  Future<void>? _lifecycleResumeOperation;
   String? _selectedMediaSourceId;
   int? _selectedAudioStreamIndex;
   SubtitleSelection _desiredSubtitleSelection =
@@ -119,6 +122,7 @@ class PlaybackController extends ChangeNotifier {
   bool _disposed = false;
   bool _shuttingDown = false;
   bool _engineDisposed = false;
+  bool _retiring = false;
   PlaybackCacheSession? _cacheSession;
   PlaybackCacheCoordinator? _cacheCoordinator;
   PlaybackCacheFallbackReason? _forcedCacheFallbackReason;
@@ -128,6 +132,7 @@ class PlaybackController extends ChangeNotifier {
   Duration? _lastStabilityPosition;
   bool _seekBecameStable = false;
   bool _lifecycleSuspended = false;
+  int _lifecycleQuiescenceRevision = 0;
   PlaybackRecoveryFingerprint? _pendingRecoveryFingerprint;
   final Map<PlaybackRecoveryFingerprint, DateTime>
   _recoveryFingerprintLastSeen = {};
@@ -253,13 +258,18 @@ class PlaybackController extends ChangeNotifier {
         );
         _prepareReadyWait();
         try {
+          final boundEngine = engine;
+          final openingPlan = plan;
           await _withDeadline(
-            engine.open(
-              plan.uri,
-              headers: plan.usesServerAuthentication
-                  ? playbackHeaders
-                  : const <String, String>{},
-              play: resume == Duration.zero && playAfterReady,
+            _operationCoordinator.runTrackedNativeOperation(
+              () => boundEngine.open(
+                openingPlan.uri,
+                headers: openingPlan.usesServerAuthentication
+                    ? playbackHeaders
+                    : const <String, String>{},
+                play: resume == Duration.zero && playAfterReady,
+              ),
+              barrierTimeout: openTimeout,
             ),
             openTimeout,
             PlaybackOperationTimeoutKind.engineOpen,
@@ -296,7 +306,12 @@ class PlaybackController extends ChangeNotifier {
             throw TimeoutException('Resume seek did not settle');
           }
           _throwIfStale(token);
-          if (playAfterReady) await engine.play();
+          if (playAfterReady) {
+            final boundEngine = engine;
+            await _operationCoordinator.runTrackedNativeOperation(
+              boundEngine.play,
+            );
+          }
         }
 
         _setState(
@@ -404,8 +419,11 @@ class PlaybackController extends ChangeNotifier {
           );
           _advanceGeneration();
         }
+        final quiescence = quiesce();
         _shuttingDown = true;
-        _operationCoordinator.shutdown();
+        final nativeBarrier = _operationCoordinator.shutdown();
+        await _awaitQuiescenceSafely(quiescence);
+        await nativeBarrier;
         await _waitForSeekBookkeeping();
         _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
         await _cancelSubscriptions();
@@ -625,28 +643,127 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> play() async {
+    if (_retiring ||
+        _shuttingDown ||
+        _disposed ||
+        _engineDisposed ||
+        _lifecycleSuspended) {
+      return;
+    }
     _desiredPlaying = true;
-    if (!_state.isPlaying) await engine.play();
+    if (!_state.isPlaying) {
+      final boundEngine = engine;
+      await _operationCoordinator.runTrackedNativeOperation(boundEngine.play);
+    }
+    if (_retiring || _lifecycleSuspended) {
+      _setState(_state.copyWith(isPlaying: false));
+    }
     await _reportProgress();
   }
 
   Future<void> pause() async {
     final shouldPause = _desiredPlaying || _state.isPlaying;
     _desiredPlaying = false;
-    if (shouldPause) await engine.pause();
+    if (shouldPause && !_engineDisposed && !_shuttingDown) {
+      final boundEngine = engine;
+      await _operationCoordinator.runTrackedNativeOperation(boundEngine.pause);
+    }
+    if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
     await _reportProgress();
+  }
+
+  Future<void> quiesce() {
+    final existing = _retirementQuiescenceOperation;
+    if (existing != null) return existing;
+
+    _retiring = true;
+    _desiredPlaying = false;
+    _advanceGeneration();
+    _cacheCoordinator?.pause();
+    if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
+    if (_engineDisposed) {
+      return _retirementQuiescenceOperation = Future<void>.value();
+    }
+    final boundEngine = engine;
+    return _retirementQuiescenceOperation = _operationCoordinator
+        .beginQuiescence(boundEngine.quiesce);
+  }
+
+  Future<void> quiesceForLifecycle() {
+    _lifecycleQuiescenceRevision++;
+    final resumeInFlight = _lifecycleResumeOperation != null;
+    _lifecycleSuspended = true;
+    _cacheCoordinator?.pause();
+    if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) {
+      return Future<void>.value();
+    }
+    final existing = _lifecycleQuiescenceOperation;
+    if (existing != null && !resumeInFlight) return existing;
+
+    final boundEngine = engine;
+    final operation = _operationCoordinator.beginQuiescence(
+      boundEngine.quiesceForLifecycle,
+    );
+    _lifecycleQuiescenceOperation = operation;
+    unawaited(
+      operation.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+    );
+    return operation;
   }
 
   Future<void> pauseForLifecycle() async {
-    _lifecycleSuspended = true;
-    _cacheCoordinator?.pause();
-    if (_state.isPlaying) await engine.pause();
+    await quiesceForLifecycle();
     await _reportProgress();
   }
 
-  Future<void> resumeForLifecycle() async {
+  Future<void> resumeForLifecycle() {
+    final existing = _lifecycleResumeOperation;
+    if (existing != null) return existing;
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) {
+      return Future<void>.value();
+    }
+    final revision = _lifecycleQuiescenceRevision;
+    late final Future<void> operation;
+    operation = _resumeForLifecycle(revision).whenComplete(() {
+      if (identical(_lifecycleResumeOperation, operation)) {
+        _lifecycleResumeOperation = null;
+      }
+    });
+    _lifecycleResumeOperation = operation;
+    return operation;
+  }
+
+  Future<void> _resumeForLifecycle(int revision) async {
+    final quiescence = _lifecycleQuiescenceOperation;
+    if (quiescence != null) await quiescence;
+    if (!_canResumeLifecycle(revision)) return;
+
+    final boundEngine = engine;
+    await _operationCoordinator.runTrackedNativeOperation(
+      boundEngine.resumeFromLifecycleQuiescence,
+    );
+    if (!_canResumeLifecycle(revision)) {
+      if (!_retiring && identical(engine, boundEngine)) {
+        await _operationCoordinator.beginQuiescence(
+          boundEngine.quiesceForLifecycle,
+        );
+      }
+      return;
+    }
+
     await _cacheCoordinator?.resume();
+    if (!_canResumeLifecycle(revision)) {
+      _cacheCoordinator?.pause();
+      if (!_retiring && identical(engine, boundEngine)) {
+        await _operationCoordinator.beginQuiescence(
+          boundEngine.quiesceForLifecycle,
+        );
+      }
+      return;
+    }
     _lifecycleSuspended = false;
+    _lifecycleQuiescenceOperation = null;
     if (_pendingRecoveryFingerprint != null) _scheduleRuntimeRecovery();
   }
 
@@ -658,7 +775,7 @@ class PlaybackController extends ChangeNotifier {
     Duration position, {
     required SeekSource source,
   }) {
-    if (_shuttingDown || _disposed) {
+    if (_retiring || _lifecycleSuspended || _shuttingDown || _disposed) {
       return Future.value(_cancelledSeekResult(position));
     }
     final bookkeeping = Completer<void>();
@@ -706,7 +823,7 @@ class PlaybackController extends ChangeNotifier {
     Duration offset, {
     required SeekSource source,
   }) {
-    if (_shuttingDown || _disposed) {
+    if (_retiring || _lifecycleSuspended || _shuttingDown || _disposed) {
       return Future.value(
         _cancelledSeekResult(_state.displayPosition + offset),
       );
@@ -960,16 +1077,22 @@ class PlaybackController extends ChangeNotifier {
   Future<void> shutdown() {
     final existing = _shutdownOperation;
     if (existing != null) return existing;
+    final quiescence = quiesce();
     _shuttingDown = true;
-    _operationCoordinator.shutdown();
-    final operation = _shutdown();
+    final nativeBarrier = _operationCoordinator.shutdown();
+    final operation = _shutdown(quiescence, nativeBarrier);
     _shutdownOperation = operation;
     return operation;
   }
 
-  Future<void> _shutdown() async {
+  Future<void> _shutdown(
+    Future<void> quiescence,
+    Future<void> nativeBarrier,
+  ) async {
     _advanceGeneration();
     _pendingRecoveryFingerprint = null;
+    await _awaitQuiescenceSafely(quiescence);
+    await nativeBarrier;
     await _waitForSeekBookkeeping();
     _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
     _progressTimer?.cancel();
@@ -1051,7 +1174,11 @@ class PlaybackController extends ChangeNotifier {
       }),
       boundEngine.playingStream.listen((playing) {
         if (!eventIsCurrent()) return;
-        _setState(_state.copyWith(isPlaying: playing));
+        _setState(
+          _state.copyWith(
+            isPlaying: playing && !_retiring && !_lifecycleSuspended,
+          ),
+        );
       }),
       boundEngine.bufferingStream.listen((buffering) {
         if (!eventIsCurrent()) return;
@@ -1430,7 +1557,10 @@ class PlaybackController extends ChangeNotifier {
     }
     try {
       await _withDeadline(
-        engine.stop(),
+        _operationCoordinator.runTrackedNativeOperation(
+          engine.stop,
+          barrierTimeout: stopTimeout,
+        ),
         stopTimeout,
         PlaybackOperationTimeoutKind.engineStop,
       );
@@ -2350,7 +2480,15 @@ class PlaybackController extends ChangeNotifier {
   }
 
   bool _isCurrent(int token) =>
-      !_disposed && !_shuttingDown && token == _generation;
+      !_disposed && !_shuttingDown && !_retiring && token == _generation;
+
+  bool _canResumeLifecycle(int revision) =>
+      !_retiring &&
+      !_shuttingDown &&
+      !_disposed &&
+      !_engineDisposed &&
+      _lifecycleSuspended &&
+      revision == _lifecycleQuiescenceRevision;
 
   int _advanceGeneration() {
     _generation++;
@@ -2463,16 +2601,49 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _recreateEngine(int token) async {
     final recreate = engineRecreator;
     if (recreate == null) throw const _PlaybackEngineRecreationRequired();
-    _operationCoordinator.invalidateForHigherPriorityOperation();
+    final retiringEngine = engine;
+    final quiescence = _operationCoordinator.beginQuiescence(
+      retiringEngine.quiesce,
+    );
+    await _awaitQuiescenceSafely(quiescence);
+    await _operationCoordinator.waitForNativeOperations();
     await _cancelSubscriptions();
     await _disposeEngine();
     _throwIfStale(token);
     final replacement = await recreate(session);
-    _throwIfStale(token);
+    if (!_isCurrent(token)) {
+      await _disposeReplacementEngine(replacement);
+      throw const _PlaybackCancelled();
+    }
     _engine = replacement;
     _engineDisposed = false;
     _operationCoordinator.replaceSeekEngine(replacement.seek);
+    if (_lifecycleSuspended) {
+      _lifecycleQuiescenceOperation = null;
+      await quiesceForLifecycle();
+    }
     await _bindEngine(token);
+  }
+
+  Future<void> _disposeReplacementEngine(PlaybackEngine replacement) async {
+    try {
+      await replacement.quiesce();
+    } catch (_) {
+      // Disposal is still required when a replacement becomes stale.
+    }
+    try {
+      await replacement.dispose();
+    } catch (_) {
+      // The original cancellation remains the caller-visible result.
+    }
+  }
+
+  Future<void> _awaitQuiescenceSafely(Future<void> operation) async {
+    try {
+      await operation;
+    } catch (_) {
+      // Native teardown must continue even when an urgent pause fails.
+    }
   }
 
   bool _tryReserveAutomaticOpen(AutomaticPlaybackOpenReason reason) {

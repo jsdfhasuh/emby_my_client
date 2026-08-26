@@ -249,7 +249,7 @@ void main() {
 
     expect(find.text('Photo 2'), findsOneWidget);
     expect(find.text('3 / 3'), findsOneWidget);
-    expect(harness.sessions.single.pauseCalls, greaterThanOrEqualTo(1));
+    expect(harness.sessions.single.quiesceCalls, 1);
     expect(harness.sessions.single.shutdownCalls, 1);
     expect(harness.maxActiveSessions, 1);
   });
@@ -394,6 +394,130 @@ void main() {
     expect(harness.sessions.single.seekPositions, hasLength(1));
   });
 
+  testWidgets('blocked slider seek quiesces before swiping to a photo', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1, _photo1],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final session = harness.sessions.single;
+    final coordinator =
+        (tester.state(find.byType(PhotoViewerScreen)) as PhotoViewerDebugState)
+            .debugInlineCoordinator!;
+    final seekGate = Completer<void>();
+    session.seekGate = seekGate;
+
+    final slider = find.byKey(const Key('inline-video-slider-video-1'));
+    final seekGesture = await tester.startGesture(tester.getCenter(slider));
+    await seekGesture.moveBy(const Offset(120, 0));
+    await seekGesture.up();
+    await tester.pump();
+    expect(session.seekCalls, 1);
+
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await _pumpPageTransition(tester);
+
+    expect(find.text('Photo 1'), findsOneWidget);
+    expect(find.text('2 / 2'), findsOneWidget);
+    expect(session.quiesceCalls, 1);
+    expect(session.seekPositions, isEmpty);
+    expect(session.shutdownCalls, 0);
+
+    seekGate.complete();
+    await tester.pumpAndSettle();
+    expect(session.shutdownCalls, 1);
+    expect(session.state.isPlaying, isFalse);
+    expect(coordinator.inFlightRetirementCount, 0);
+    expect(coordinator.inFlightQuiescenceCount, 0);
+
+    await tester.drag(find.byType(PageView), const Offset(600, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('Video 1'), findsOneWidget);
+    expect(harness.sessions, hasLength(2));
+    expect(harness.maxActiveSessions, 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    expect(harness.activeSessions, 0);
+    expect(coordinator.inFlightRetirementCount, 0);
+    expect(coordinator.inFlightQuiescenceCount, 0);
+  });
+
+  testWidgets('blocked slider seek quiesces on lifecycle pause', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final session = harness.sessions.single;
+    final coordinator =
+        (tester.state(find.byType(PhotoViewerScreen)) as PhotoViewerDebugState)
+            .debugInlineCoordinator!;
+    final seekGate = Completer<void>();
+    session.seekGate = seekGate;
+
+    final slider = find.byKey(const Key('inline-video-slider-video-1'));
+    final seekGesture = await tester.startGesture(tester.getCenter(slider));
+    await seekGesture.moveBy(const Offset(120, 0));
+    await seekGesture.up();
+    await tester.pump();
+    expect(session.seekCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+
+    expect(session.lifecycleQuiesceCalls, 1);
+    expect(session.seekPositions, isEmpty);
+    expect(session.playCalls, 1);
+
+    seekGate.complete();
+    await tester.pumpAndSettle();
+    expect(session.state.isPlaying, isFalse);
+    expect(coordinator.inFlightQuiescenceCount, 0);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(session.lifecycleResumeCalls, 1);
+    expect(session.playCalls, 2);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    expect(session.shutdownCalls, 1);
+    expect(harness.activeSessions, 0);
+    expect(coordinator.inFlightRetirementCount, 0);
+    expect(coordinator.inFlightQuiescenceCount, 0);
+  });
+
   testWidgets('consecutive video pages keep one active session', (
     tester,
   ) async {
@@ -509,7 +633,7 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
 
-    expect(session.lifecyclePauseCalls, 1);
+    expect(session.lifecycleQuiesceCalls, 1);
     expect(session.lifecycleResumeCalls, 1);
     expect(session.playCalls, 2);
   });
@@ -543,7 +667,7 @@ void main() {
 
     final session = harness.sessions.single;
     expect(session.playCalls, 0);
-    expect(session.lifecyclePauseCalls, 1);
+    expect(session.lifecycleQuiesceCalls, 1);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
     expect(session.lifecycleResumeCalls, 1);
@@ -581,14 +705,14 @@ void main() {
     startGate.complete();
     for (
       var attempt = 0;
-      attempt < 20 && session.lifecyclePauseCalls == 0;
+      attempt < 20 && session.lifecycleQuiesceCalls == 0;
       attempt++
     ) {
       await tester.pump();
     }
 
     expect(session.playCalls, 0);
-    expect(session.lifecyclePauseCalls, 1);
+    expect(session.lifecycleQuiesceCalls, 1);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
     expect(session.playCalls, 0);
@@ -734,13 +858,20 @@ class _ViewerFakeSession extends ChangeNotifier
   InlinePlaybackState _state;
   int playCalls = 0;
   int pauseCalls = 0;
+  int quiesceCalls = 0;
   int lifecyclePauseCalls = 0;
+  int lifecycleQuiesceCalls = 0;
   int lifecycleResumeCalls = 0;
+  int seekCalls = 0;
   int shutdownCalls = 0;
   final seekPositions = <Duration>[];
   Completer<void>? lifecyclePauseGate;
+  Completer<void>? lifecycleQuiesceGate;
   Completer<void>? lifecycleResumeGate;
+  Completer<void>? seekGate;
   bool _shutdown = false;
+  bool _retiring = false;
+  bool _lifecycleQuiesced = false;
 
   @override
   InlinePlaybackState get state => _state;
@@ -769,6 +900,7 @@ class _ViewerFakeSession extends ChangeNotifier
   @override
   Future<void> play() async {
     playCalls++;
+    if (_retiring || _lifecycleQuiesced) return;
     _update(_state.copyWith(isPlaying: true, isCompleted: false));
   }
 
@@ -781,7 +913,24 @@ class _ViewerFakeSession extends ChangeNotifier
   @override
   Future<void> pauseForLifecycle() async {
     lifecyclePauseCalls++;
+    _lifecycleQuiesced = true;
     await lifecyclePauseGate?.future;
+    if (_shutdown) return;
+    _update(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> quiesce() async {
+    quiesceCalls++;
+    _retiring = true;
+    _update(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() async {
+    lifecycleQuiesceCalls++;
+    _lifecycleQuiesced = true;
+    await lifecycleQuiesceGate?.future;
     if (_shutdown) return;
     _update(_state.copyWith(isPlaying: false));
   }
@@ -790,11 +939,15 @@ class _ViewerFakeSession extends ChangeNotifier
   Future<void> resumeForLifecycle() async {
     lifecycleResumeCalls++;
     await lifecycleResumeGate?.future;
+    if (!_retiring) _lifecycleQuiesced = false;
   }
 
   @override
   Future<void> seek(Duration position) async {
+    seekCalls++;
+    await seekGate?.future;
     seekPositions.add(position);
+    if (_retiring || _lifecycleQuiesced) return;
     _update(_state.copyWith(position: position));
   }
 

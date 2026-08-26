@@ -119,6 +119,7 @@ class PlaybackItemSession {
 }
 
 typedef PlaybackEngineSeek = Future<void> Function(Duration target);
+typedef PlaybackEngineOperation = Future<void> Function();
 typedef PlaybackTargetClamp = Duration Function(Duration target);
 typedef RequestedPositionListener = void Function(Duration? position);
 typedef PlaybackSessionCurrent = bool Function(PlaybackItemSessionId sessionId);
@@ -164,6 +165,8 @@ class PlaybackOperationCoordinator {
   _ControlOperationRequest? _controlActive;
   bool _controlDraining = false;
   int _controlSequence = 0;
+  final Set<Future<void>> _nativeOperations = {};
+  Future<void>? _shutdownOperation;
 
   Duration get committedPosition => _committedPosition;
   Duration? get requestedPosition => _requestedPosition;
@@ -214,6 +217,26 @@ class PlaybackOperationCoordinator {
     _seekEngine = seekEngine;
   }
 
+  Future<void> runTrackedNativeOperation(
+    PlaybackEngineOperation operation, {
+    Duration? barrierTimeout,
+  }) {
+    if (_shutdown) return Future<void>.value();
+    return _trackNativeOperation(operation, barrierTimeout: barrierTimeout);
+  }
+
+  Future<void> beginQuiescence(PlaybackEngineOperation operation) {
+    if (_shutdown) return Future<void>.value();
+    invalidateForHigherPriorityOperation();
+    return _trackNativeOperation(operation);
+  }
+
+  Future<void> waitForNativeOperations() async {
+    while (_nativeOperations.isNotEmpty) {
+      await Future.wait<void>(List<Future<void>>.of(_nativeOperations));
+    }
+  }
+
   Future<SeekResult> seekAbsolute(
     Duration target, {
     required SeekSource source,
@@ -253,26 +276,32 @@ class PlaybackOperationCoordinator {
     _refreshRequestedPosition();
   }
 
-  void shutdown() {
-    if (_shutdown) return;
-    _shutdown = true;
-    _operationGeneration++;
-    _completePending(
-      disposition: SeekDisposition.cancelled,
-      failureKind: SeekFailureKind.staleSession,
-    );
-    _completeInFlight(
-      disposition: SeekDisposition.cancelled,
-      failureKind: SeekFailureKind.staleSession,
-    );
-    _completeSettleWaiter();
-    _refreshRequestedPosition();
-    final active = _controlActive;
-    if (active != null) _cancelControlOperation(active);
-    for (final pending in List<_ControlOperationRequest>.of(_controlPending)) {
-      _cancelControlOperation(pending);
+  Future<void> shutdown() {
+    final existing = _shutdownOperation;
+    if (existing != null) return existing;
+    if (!_shutdown) {
+      _shutdown = true;
+      _operationGeneration++;
+      _completePending(
+        disposition: SeekDisposition.cancelled,
+        failureKind: SeekFailureKind.staleSession,
+      );
+      _completeInFlight(
+        disposition: SeekDisposition.cancelled,
+        failureKind: SeekFailureKind.staleSession,
+      );
+      _completeSettleWaiter();
+      _refreshRequestedPosition();
+      final active = _controlActive;
+      if (active != null) _cancelControlOperation(active);
+      for (final pending in List<_ControlOperationRequest>.of(
+        _controlPending,
+      )) {
+        _cancelControlOperation(pending);
+      }
+      _controlPending.clear();
     }
-    _controlPending.clear();
+    return _shutdownOperation = waitForNativeOperations();
   }
 
   Future<void> _drainControlOperations() async {
@@ -394,7 +423,7 @@ class PlaybackOperationCoordinator {
 
     late final Future<void> nativeCall;
     try {
-      nativeCall = Future.sync(() => _seekEngine(request.target));
+      nativeCall = _trackNativeOperation(() => _seekEngine(request.target));
       await nativeCall.timeout(seekCallTimeout);
     } on TimeoutException {
       _nativeSeekOutstanding = true;
@@ -473,6 +502,27 @@ class PlaybackOperationCoordinator {
   void _nativeSeekCompleted() {
     _nativeSeekOutstanding = false;
     if (!_shutdown) unawaited(_drain());
+  }
+
+  Future<void> _trackNativeOperation(
+    PlaybackEngineOperation operation, {
+    Duration? barrierTimeout,
+  }) {
+    final nativeOperation = Future<void>.sync(operation);
+    final completion = nativeOperation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    final barrier = barrierTimeout == null
+        ? completion
+        : completion.timeout(barrierTimeout, onTimeout: () {});
+    _nativeOperations.add(barrier);
+    unawaited(
+      barrier.whenComplete(() {
+        _nativeOperations.remove(barrier);
+      }),
+    );
+    return nativeOperation;
   }
 
   bool _isCurrent(_SeekRequest request) =>
