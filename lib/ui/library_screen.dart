@@ -1120,6 +1120,7 @@ class _LibraryFacetCard extends StatelessWidget {
 
 class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   static const _pageSize = 60;
+  static const _scrollTolerance = 0.5;
 
   final _controller = ScrollController();
   final List<EmbyItem> _items = [];
@@ -1144,7 +1145,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _reportedTotalBelowLoaded = false;
   int _generation = 0;
   int _positionGeneration = 0;
+  int _scrollSuppressionGeneration = 0;
   bool _suppressPositionNotifications = false;
+  SliverConstraints? _latestGridConstraints;
+  LibraryGridGeometry? _latestGridGeometry;
   LibraryScanKey? _activeScanKey;
   LibraryLocalScanSnapshot? _scanSnapshot;
   bool _preparingPlaybackQueue = false;
@@ -1402,9 +1406,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _onScroll() {
-    if (_usesLocalScan || _isReloadingCurrentGeneration || _loadFailed) return;
+    if (_suppressPositionNotifications ||
+        _usesLocalScan ||
+        _isReloadingCurrentGeneration ||
+        _loadFailed) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
+          _suppressPositionNotifications ||
           !_controller.hasClients ||
           _usesLocalScan ||
           _isReloadingCurrentGeneration ||
@@ -1459,6 +1469,56 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       _controller.jumpTo(0);
     }
     _positionController.clear();
+  }
+
+  void _scheduleViewerPositionRestore(String? mediaId) {
+    if (mediaId == null || mediaId.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final targetIndex = _items.indexWhere((item) => item.id == mediaId);
+      final constraints = _latestGridConstraints;
+      final geometry = _latestGridGeometry;
+      if (targetIndex < 0 || constraints == null || geometry == null) return;
+
+      final targetGeometry = geometry
+          .getLayout(constraints)
+          .getGeometryForChildIndex(targetIndex);
+      final visibleStart = constraints.scrollOffset;
+      final visibleEnd = visibleStart + constraints.remainingPaintExtent;
+      final targetStart = targetGeometry.scrollOffset;
+      final targetEnd = targetStart + targetGeometry.mainAxisExtent;
+      final overlapsVisibleRange =
+          targetEnd > visibleStart + _scrollTolerance &&
+          targetStart < visibleEnd - _scrollTolerance;
+      if (overlapsVisibleRange) return;
+
+      final gridGlobalOrigin = constraints.precedingScrollExtent;
+      final targetOffset = (gridGlobalOrigin + targetStart)
+          .clamp(
+            _controller.position.minScrollExtent,
+            _controller.position.maxScrollExtent,
+          )
+          .toDouble();
+      if ((targetOffset - _controller.offset).abs() <= _scrollTolerance) {
+        return;
+      }
+      final suppressionGeneration = ++_scrollSuppressionGeneration;
+      _suppressPositionNotifications = true;
+      try {
+        _controller.jumpTo(targetOffset);
+      } catch (_) {
+        if (suppressionGeneration == _scrollSuppressionGeneration) {
+          _suppressPositionNotifications = false;
+        }
+        rethrow;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || suppressionGeneration != _scrollSuppressionGeneration) {
+          return;
+        }
+        _suppressPositionNotifications = false;
+      });
+    });
   }
 
   Future<void> _loadMore({int? expectedGeneration}) {
@@ -2280,14 +2340,16 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           _reportUserDataRefreshFailure(error, stackTrace);
         }
       case LibraryEntryAction.openPhoto:
-        await Navigator.of(context).push(
-          MaterialPageRoute(
+        final finalMediaId = await Navigator.of(context).push<String>(
+          MaterialPageRoute<String>(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
               source: _photoSequenceSource(item),
             ),
           ),
         );
+        if (!mounted) return;
+        _scheduleViewerPositionRestore(finalMediaId);
       case LibraryEntryAction.unsupported:
         DiagnosticLog.instance.warning(
           'library',
@@ -2354,6 +2416,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       padding: geometry.padding,
       sliver: SliverLayoutBuilder(
         builder: (context, constraints) {
+          _latestGridConstraints = constraints;
+          _latestGridGeometry = geometry;
           _schedulePositionUpdate(constraints: constraints, geometry: geometry);
           return grid;
         },

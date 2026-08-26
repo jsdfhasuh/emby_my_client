@@ -562,6 +562,97 @@ void main() {
     ]);
   });
 
+  testWidgets(
+    'viewer result restores the final loaded media without loading another page',
+    (tester) async {
+      tester.view.physicalSize = const Size(1024, 768);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final browseStarts = <int>[];
+      Map<String, dynamic> responseItem(int index) => {
+        'Id': 'home-item-$index',
+        'Name': index == 118 ? '目标视频 118' : '家庭图片 $index',
+        'Type': index == 118 ? 'Video' : 'Photo',
+        if (index == 118) 'MediaType': 'Video',
+        'ImageTags': const <String, String>{},
+        'BackdropImageTags': const <String>[],
+        'Genres': const <String>[],
+        'UserData': const <String, dynamic>{},
+      };
+      final api = _api((options, handler) {
+        final start = options.queryParameters['StartIndex'] as int;
+        final limit = options.queryParameters['Limit'] as int;
+        browseStarts.add(start);
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: {
+              'TotalRecordCount': 180,
+              'Items': [
+                for (
+                  var index = start;
+                  index < (start + limit).clamp(0, 180);
+                  index++
+                )
+                  responseItem(index),
+              ],
+            },
+          ),
+        );
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final scrollable = _verticalScrollable();
+      await tester.scrollUntilVisible(
+        find.text('家庭图片 70'),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('家庭图片 5'),
+        -700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      const targetKey = ValueKey('library-item-home-item-118');
+      expect(find.byKey(targetKey), findsNothing);
+      expect(browseStarts, [0, 60]);
+
+      await tester.tap(find.text('家庭图片 5'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PhotoViewerScreen), findsOneWidget);
+      final viewer = tester.widget<PhotoViewerScreen>(
+        find.byType(PhotoViewerScreen),
+      );
+      expect(
+        viewer.source.initialItems.map((item) => item.id),
+        contains('home-item-118'),
+      );
+      expect(viewer.source.initialRawCursor, 120);
+      expect(viewer.source.initialHasMore, isTrue);
+      Navigator.of(
+        tester.element(find.byType(PhotoViewerScreen)),
+      ).pop('home-item-118');
+      await tester.pumpAndSettle();
+
+      final target = find.byKey(targetKey);
+      expect(target, findsOneWidget);
+      final targetRect = tester.getRect(target);
+      expect(targetRect.overlaps(tester.getRect(scrollable)), isTrue);
+      expect(browseStarts, [0, 60]);
+    },
+  );
+
   testWidgets('generic mixed library photo viewer remains photos-only', (
     tester,
   ) async {
