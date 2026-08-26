@@ -37,8 +37,14 @@ class PhotoViewerScreen extends StatefulWidget {
   State<PhotoViewerScreen> createState() => _PhotoViewerScreenState();
 }
 
+@visibleForTesting
+abstract interface class PhotoViewerDebugState {
+  InlinePlaybackCoordinator? get debugInlineCoordinator;
+}
+
 class _PhotoViewerScreenState extends State<PhotoViewerScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver
+    implements PhotoViewerDebugState {
   late PhotoViewerController _controller;
   late PageController _pageController;
   bool _initialized = false;
@@ -49,10 +55,16 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   InlinePlaybackCoordinator? _inlineCoordinator;
   Future<void>? _closeOperation;
   Future<void>? _restoreSystemUiOperation;
+  late AppLifecycleState _lifecycleState;
+
+  @override
+  InlinePlaybackCoordinator? get debugInlineCoordinator => _inlineCoordinator;
 
   @override
   void initState() {
     super.initState();
+    _lifecycleState =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     unawaited(
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky),
@@ -120,6 +132,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
     unawaited(_inlineCoordinator?.handleAppLifecycleState(state));
   }
 
@@ -202,8 +215,10 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
         testOverrides: diagnosticsController?.consumeForPlayback(),
       );
     }
-    final coordinator = InlinePlaybackCoordinator(factory: factory)
-      ..addListener(_handleInlinePlaybackChanged);
+    final coordinator = InlinePlaybackCoordinator(
+      factory: factory,
+      initialLifecycleState: _lifecycleState,
+    )..addListener(_handleInlinePlaybackChanged);
     _inlineCoordinator = coordinator;
     return coordinator;
   }
@@ -225,7 +240,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   Future<void> _closeViewer() => _closeOperation ??= _closeViewerOnce();
 
   Future<void> _closeViewerOnce() async {
-    final result = _controller.currentItemId;
+    final result = _controller.result;
     await _inlineCoordinator?.shutdown();
     await _restoreSystemUiSafely();
     if (!mounted || _didPop) return;

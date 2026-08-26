@@ -151,30 +151,35 @@ void main() {
     );
     final api = EmbyApi(_session, dio: Dio());
     addTearDown(api.dispose);
-    String? returnedItemId;
+    MediaViewerResult? returnedResult;
 
     await tester.pumpWidget(
       MaterialApp(
         home: Builder(
           builder: (context) => FilledButton(
             onPressed: () async {
-              returnedItemId = await Navigator.of(context).push<String>(
-                MaterialPageRoute(
-                  builder: (_) => PhotoViewerScreen(
-                    api: api,
-                    source: DirectoryPhotoSource(
-                      queryFingerprint: 'return-test',
-                      initialItems: const [_photo1, _photo2, _photo3],
-                      initialItemId: 'photo-1',
-                      initialRawCursor: 3,
-                      initialTotalCount: 3,
-                      initialHasMore: false,
-                      loadPage: ({required startIndex, required limit}) async =>
-                          const EmbyItemPage(items: [], totalRecordCount: 0),
+              returnedResult = await Navigator.of(context)
+                  .push<MediaViewerResult>(
+                    MaterialPageRoute<MediaViewerResult>(
+                      builder: (_) => PhotoViewerScreen(
+                        api: api,
+                        source: DirectoryPhotoSource(
+                          queryFingerprint: 'return-test',
+                          initialItems: const [_photo1, _photo2, _photo3],
+                          initialItemId: 'photo-1',
+                          initialRawCursor: 3,
+                          initialTotalCount: 3,
+                          initialHasMore: false,
+                          loadPage:
+                              ({required startIndex, required limit}) async =>
+                                  const EmbyItemPage(
+                                    items: [],
+                                    totalRecordCount: 0,
+                                  ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              );
+                  );
             },
             child: const Text('打开图片'),
           ),
@@ -197,7 +202,13 @@ void main() {
     await tester.tap(find.byTooltip('返回'));
     await tester.pumpAndSettle();
 
-    expect(returnedItemId, 'photo-3');
+    expect(returnedResult?.currentItemId, 'photo-3');
+    expect(returnedResult?.queryFingerprint, 'return-test');
+    expect(returnedResult?.rawItems.map((item) => item.id), [
+      'photo-1',
+      'photo-2',
+      'photo-3',
+    ]);
     expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
     expect(find.text('打开图片'), findsOneWidget);
   });
@@ -294,25 +305,26 @@ void main() {
       final shutdownGate = Completer<void>();
       harness.nextShutdownGate = shutdownGate;
       addTearDown(api.dispose);
-      String? returnedItemId;
+      MediaViewerResult? returnedResult;
       await tester.pumpWidget(
         MaterialApp(
           home: Builder(
             builder: (context) => FilledButton(
               onPressed: () async {
-                returnedItemId = await Navigator.of(context).push<String>(
-                  MaterialPageRoute(
-                    builder: (_) => PhotoViewerScreen(
-                      api: api,
-                      source: _viewerSource(
-                        mode: MediaViewerMode.homeMedia,
-                        items: const [_video1, _photo1],
-                        initialItemId: _video1.id,
+                returnedResult = await Navigator.of(context)
+                    .push<MediaViewerResult>(
+                      MaterialPageRoute<MediaViewerResult>(
+                        builder: (_) => PhotoViewerScreen(
+                          api: api,
+                          source: _viewerSource(
+                            mode: MediaViewerMode.homeMedia,
+                            items: const [_video1, _photo1],
+                            initialItemId: _video1.id,
+                          ),
+                          inlineSessionFactory: harness.create,
+                        ),
                       ),
-                      inlineSessionFactory: harness.create,
-                    ),
-                  ),
-                );
+                    );
               },
               child: const Text('打开媒体'),
             ),
@@ -327,7 +339,7 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(const Key('photo-viewer')), findsOneWidget);
-      expect(returnedItemId, isNull);
+      expect(returnedResult, isNull);
       expect(
         platformCalls.last.arguments,
         isNot(SystemUiMode.edgeToEdge.toString()),
@@ -337,13 +349,13 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(const Key('photo-viewer')), findsOneWidget);
-      expect(returnedItemId, isNull);
+      expect(returnedResult, isNull);
       expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
 
       restoreSystemUiGate.complete();
       await tester.pumpAndSettle();
 
-      expect(returnedItemId, _video1.id);
+      expect(returnedResult?.currentItemId, _video1.id);
       expect(find.text('打开媒体'), findsOneWidget);
       expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
     },
@@ -497,8 +509,164 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
 
-    expect(session.pauseCalls, 1);
+    expect(session.lifecyclePauseCalls, 1);
+    expect(session.lifecycleResumeCalls, 1);
     expect(session.playCalls, 2);
+  });
+
+  testWidgets('lifecycle state before coordinator creation is inherited', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_photo1, _video1],
+            initialItemId: _photo1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(harness.sessions, isEmpty);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await _pumpPageTransition(tester);
+
+    final session = harness.sessions.single;
+    expect(session.playCalls, 0);
+    expect(session.lifecyclePauseCalls, 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(session.lifecycleResumeCalls, 1);
+    expect(session.playCalls, 0);
+  });
+
+  testWidgets('loading video moved to background never autoplays', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    final startGate = Completer<void>();
+    harness.nextStartGate = startGate;
+    addTearDown(api.dispose);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    for (var attempt = 0; attempt < 20 && harness.sessions.isEmpty; attempt++) {
+      await tester.pump();
+    }
+    final session = harness.sessions.single;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    startGate.complete();
+    for (
+      var attempt = 0;
+      attempt < 20 && session.lifecyclePauseCalls == 0;
+      attempt++
+    ) {
+      await tester.pump();
+    }
+
+    expect(session.playCalls, 0);
+    expect(session.lifecyclePauseCalls, 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(session.playCalls, 0);
+  });
+
+  testWidgets('route exit ignores a late lifecycle resume completion', (
+    tester,
+  ) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (_) async => null,
+    );
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    Object? returnedResult;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => FilledButton(
+            onPressed: () async {
+              returnedResult = await Navigator.of(context).push<Object?>(
+                MaterialPageRoute<Object?>(
+                  builder: (_) => PhotoViewerScreen(
+                    api: api,
+                    source: _viewerSource(
+                      mode: MediaViewerMode.homeMedia,
+                      items: const [_video1],
+                      initialItemId: _video1.id,
+                    ),
+                    inlineSessionFactory: harness.create,
+                  ),
+                ),
+              );
+            },
+            child: const Text('打开生命周期查看器'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开生命周期查看器'));
+    await tester.pumpAndSettle();
+    final session = harness.sessions.single;
+    final debugState =
+        tester.state(find.byType(PhotoViewerScreen)) as PhotoViewerDebugState;
+    final coordinator = debugState.debugInlineCoordinator!;
+    var coordinatorNotifications = 0;
+    coordinator.addListener(() => coordinatorNotifications++);
+    expect(session.playCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    final resumeGate = Completer<void>();
+    session.lifecycleResumeGate = resumeGate;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(session.lifecycleResumeCalls, 1);
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(coordinator.state.phase, InlinePlaybackPhase.inactive);
+    final notificationsAfterCloseStarted = coordinatorNotifications;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    resumeGate.complete();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+
+    expect(session.shutdownCalls, 1);
+    expect(find.byType(PhotoViewerScreen), findsNothing);
+    expect(returnedResult, isNotNull);
+    expect(session.playCalls, 1);
+    expect(coordinator.state.phase, InlinePlaybackPhase.inactive);
+    expect(coordinatorNotifications, notificationsAfterCloseStarted);
   });
 }
 
@@ -566,8 +734,12 @@ class _ViewerFakeSession extends ChangeNotifier
   InlinePlaybackState _state;
   int playCalls = 0;
   int pauseCalls = 0;
+  int lifecyclePauseCalls = 0;
+  int lifecycleResumeCalls = 0;
   int shutdownCalls = 0;
   final seekPositions = <Duration>[];
+  Completer<void>? lifecyclePauseGate;
+  Completer<void>? lifecycleResumeGate;
   bool _shutdown = false;
 
   @override
@@ -604,6 +776,20 @@ class _ViewerFakeSession extends ChangeNotifier
   Future<void> pause() async {
     pauseCalls++;
     _update(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> pauseForLifecycle() async {
+    lifecyclePauseCalls++;
+    await lifecyclePauseGate?.future;
+    if (_shutdown) return;
+    _update(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> resumeForLifecycle() async {
+    lifecycleResumeCalls++;
+    await lifecycleResumeGate?.future;
   }
 
   @override

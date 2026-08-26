@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/widgets.dart';
 
@@ -9,23 +10,30 @@ typedef InlinePlaybackSessionFactory =
     Future<InlinePlaybackSession> Function(EmbyItem item);
 
 class InlinePlaybackCoordinator extends ChangeNotifier {
-  InlinePlaybackCoordinator({required InlinePlaybackSessionFactory factory})
-    : _factory = factory;
+  InlinePlaybackCoordinator({
+    required InlinePlaybackSessionFactory factory,
+    AppLifecycleState initialLifecycleState = AppLifecycleState.resumed,
+  }) : _factory = factory,
+       _lifecycleSuspended = initialLifecycleState != AppLifecycleState.resumed;
 
   final InlinePlaybackSessionFactory _factory;
   final Map<String, Duration> _resumePositions = {};
   final Map<InlinePlaybackSession, Future<void>> _retirements = {};
+  final Set<InlinePlaybackSession> _mutedSessionNotifications = {};
   InlinePlaybackState _state = const InlinePlaybackState();
   InlinePlaybackSession? _session;
   VoidCallback? _sessionListener;
   EmbyItem? _targetItem;
-  Future<void> _tail = Future<void>.value();
+  final Queue<_QueuedInlineOperation> _operations = Queue();
+  bool _operationRunning = false;
   Future<void>? _targetOperation;
   Future<void>? _shutdownOperation;
   int _generation = 0;
+  int _lifecycleRevision = 0;
   bool _shuttingDown = false;
   bool _disposed = false;
-  bool _lifecycleSuspended = false;
+  bool _lifecycleSuspended;
+  bool _sessionLifecycleSuspended = false;
   bool _resumeAfterLifecycle = false;
   InlinePlaybackSession? _lifecycleSession;
   String? _lifecycleItemId;
@@ -35,6 +43,12 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
   Map<String, Duration> get resumePositions =>
       Map<String, Duration>.unmodifiable(_resumePositions);
 
+  @visibleForTesting
+  int get inFlightRetirementCount => _retirements.length;
+
+  @visibleForTesting
+  bool get lifecycleSuspended => _lifecycleSuspended;
+
   Future<void> activate(EmbyItem item) {
     if (_shuttingDown || _disposed) return Future<void>.value();
     if (_targetItem?.id == item.id) {
@@ -42,9 +56,9 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     }
 
     final generation = ++_generation;
+    final lifecycleRevision = _lifecycleRevision;
     _targetItem = item;
-    _clearLifecycleIntent();
-    final retirement = _session == null ? null : _retireSession(_session!);
+    _clearLifecycleResumeIdentity();
     _publish(
       InlinePlaybackState(
         itemId: item.id,
@@ -55,9 +69,10 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
 
     late final Future<void> operation;
     operation = _enqueue(() async {
-      if (retirement != null) await retirement;
+      final previousSession = _session;
+      if (previousSession != null) await _retireSession(previousSession);
       if (!_isCurrent(item.id, generation)) return;
-      await _activateCurrent(item, generation);
+      await _activateCurrent(item, generation, lifecycleRevision);
     });
     _targetOperation = operation;
     unawaited(
@@ -73,11 +88,11 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     ++_generation;
     _targetItem = null;
     _targetOperation = null;
-    _clearLifecycleIntent();
-    final retirement = _session == null ? null : _retireSession(_session!);
+    _clearLifecycleResumeIdentity();
     _publish(const InlinePlaybackState());
     return _enqueue(() async {
-      if (retirement != null) await retirement;
+      final session = _session;
+      if (session != null) await _retireSession(session);
     });
   }
 
@@ -88,91 +103,137 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     }
     ++_generation;
     _targetItem = null;
+    _clearLifecycleResumeIdentity();
     return activate(item);
   }
 
-  Future<void> play() async {
+  Future<void> play() {
     final session = _session;
     final itemId = _targetItem?.id;
     final generation = _generation;
-    if (session == null || itemId == null) return;
-
-    if (session.state.isCompleted) {
-      await session.seek(Duration.zero);
-      if (!_matches(session, itemId, generation)) return;
-    }
-    await session.play();
-    if (_matches(session, itemId, generation)) {
-      _publish(session.state);
-    } else {
-      await _retireSession(session);
-    }
-  }
-
-  Future<void> pause() async {
-    _clearLifecycleIntent();
-    final session = _session;
-    final itemId = _targetItem?.id;
-    final generation = _generation;
-    if (session == null || itemId == null) return;
-    await _pauseSafely(session);
-    _savePosition(session);
-    if (_matches(session, itemId, generation)) _publish(session.state);
-  }
-
-  Future<void> seek(Duration position) async {
-    final session = _session;
-    final itemId = _targetItem?.id;
-    final generation = _generation;
-    if (session == null || itemId == null) return;
-    await session.seek(position);
-    if (_matches(session, itemId, generation)) _publish(session.state);
-  }
-
-  Future<void> handleAppLifecycleState(AppLifecycleState lifecycleState) async {
-    switch (lifecycleState) {
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.hidden:
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-        if (_lifecycleSuspended) return;
-        _lifecycleSuspended = true;
-        final session = _session;
-        final itemId = _targetItem?.id;
-        if (session == null || itemId == null) {
-          _clearLifecycleResumeIdentity();
+    final lifecycleRevision = _lifecycleRevision;
+    if (session == null || itemId == null) return Future<void>.value();
+    return _enqueue(() async {
+      if (!_matches(session, itemId, generation) ||
+          _lifecycleSuspended ||
+          session.state.hasError) {
+        return;
+      }
+      if (_sessionLifecycleSuspended) {
+        final lifecycleResumed = await _ensureLifecycleResumed(session);
+        if (!lifecycleResumed ||
+            !_matches(session, itemId, generation) ||
+            _lifecycleSuspended ||
+            _lifecycleRevision != lifecycleRevision) {
           return;
         }
-        _resumeAfterLifecycle = session.state.isPlaying;
+      }
+      try {
+        if (session.state.isCompleted) {
+          await _runMuted(session, () => session.seek(Duration.zero));
+          if (!_matches(session, itemId, generation)) return;
+        }
+        await _runMuted(session, session.play);
+        await _finishPlayOperation(
+          session: session,
+          itemId: itemId,
+          generation: generation,
+          lifecycleRevision: lifecycleRevision,
+        );
+      } catch (_) {
+        await _failSession(session, itemId, generation);
+      }
+    });
+  }
+
+  Future<void> pause() {
+    _clearLifecycleResumeIdentity();
+    final session = _session;
+    final itemId = _targetItem?.id;
+    final generation = _generation;
+    if (session == null || itemId == null) return Future<void>.value();
+    return _enqueue(() async {
+      if (!_matches(session, itemId, generation)) return;
+      await _pauseSafely(session);
+      _savePosition(session);
+      if (_matches(session, itemId, generation)) _publish(session.state);
+    });
+  }
+
+  Future<void> seek(Duration position) {
+    final session = _session;
+    final itemId = _targetItem?.id;
+    final generation = _generation;
+    if (session == null || itemId == null) return Future<void>.value();
+    return _enqueue(() async {
+      if (!_matches(session, itemId, generation)) return;
+      try {
+        await _runMuted(session, () => session.seek(position));
+        if (_matches(session, itemId, generation)) _publish(session.state);
+      } catch (_) {
+        await _failSession(session, itemId, generation);
+      }
+    });
+  }
+
+  Future<void> handleAppLifecycleState(AppLifecycleState lifecycleState) {
+    if (_shuttingDown || _disposed) return Future<void>.value();
+    final shouldSuspend = lifecycleState != AppLifecycleState.resumed;
+    if (shouldSuspend) {
+      if (_lifecycleSuspended) return Future<void>.value();
+      _lifecycleSuspended = true;
+      final revision = ++_lifecycleRevision;
+      final session = _session;
+      final itemId = _targetItem?.id;
+      final generation = _generation;
+      final wasPlaying =
+          session != null &&
+          itemId != null &&
+          _matches(session, itemId, generation) &&
+          session.state.isPlaying;
+      if (wasPlaying) {
+        _resumeAfterLifecycle = true;
         _lifecycleSession = session;
         _lifecycleItemId = itemId;
-        _lifecycleGeneration = _generation;
-        await _pauseSafely(session);
-        _savePosition(session);
-        if (_matches(session, itemId, _generation)) _publish(session.state);
-      case AppLifecycleState.resumed:
-        if (!_lifecycleSuspended) return;
-        _lifecycleSuspended = false;
-        final shouldResume = _resumeAfterLifecycle;
-        final session = _lifecycleSession;
-        final itemId = _lifecycleItemId;
-        final generation = _lifecycleGeneration;
+        _lifecycleGeneration = generation;
+      } else {
         _clearLifecycleResumeIdentity();
-        if (!shouldResume ||
-            session == null ||
-            itemId == null ||
-            generation == null ||
-            !_matches(session, itemId, generation)) {
-          return;
-        }
-        await session.play();
-        if (_matches(session, itemId, generation)) _publish(session.state);
+      }
+      return _enqueue(() => _reconcileLifecyclePause(revision));
     }
+
+    if (!_lifecycleSuspended) return Future<void>.value();
+    _lifecycleSuspended = false;
+    final revision = ++_lifecycleRevision;
+    final shouldResume = _resumeAfterLifecycle;
+    final resumeSession = _lifecycleSession;
+    final resumeItemId = _lifecycleItemId;
+    final resumeGeneration = _lifecycleGeneration;
+    _clearLifecycleResumeIdentity();
+    return _enqueue(
+      () => _reconcileLifecycleResume(
+        revision: revision,
+        shouldResume: shouldResume,
+        resumeSession: resumeSession,
+        resumeItemId: resumeItemId,
+        resumeGeneration: resumeGeneration,
+      ),
+    );
   }
 
-  Future<void> handleMemoryPressure() async {
+  Future<void> handleMemoryPressure() {
     final session = _session;
-    if (session != null) await session.handleMemoryPressure();
+    final itemId = _targetItem?.id;
+    final generation = _generation;
+    if (session == null || itemId == null) return Future<void>.value();
+    return _enqueue(() async {
+      if (!_matches(session, itemId, generation)) return;
+      try {
+        await session.handleMemoryPressure();
+      } catch (_) {
+        // Memory pressure handling must not break the control queue.
+      }
+    });
   }
 
   Future<void> shutdown() {
@@ -182,17 +243,19 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     ++_generation;
     _targetItem = null;
     _targetOperation = null;
-    _clearLifecycleIntent();
-    final retirement = _session == null ? null : _retireSession(_session!);
+    _clearLifecycleResumeIdentity();
     _publish(const InlinePlaybackState());
     return _shutdownOperation = _enqueue(() async {
-      if (retirement != null) await retirement;
-      final lateSession = _session;
-      if (lateSession != null) await _retireSession(lateSession);
+      final session = _session;
+      if (session != null) await _retireSession(session);
     });
   }
 
-  Future<void> _activateCurrent(EmbyItem item, int generation) async {
+  Future<void> _activateCurrent(
+    EmbyItem item,
+    int generation,
+    int activationLifecycleRevision,
+  ) async {
     InlinePlaybackSession? session;
     try {
       session = await _factory(item);
@@ -202,9 +265,11 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
       }
 
       _session = session;
+      _sessionLifecycleSuspended = false;
       void listener() {
         if (_matches(session!, item.id, generation) &&
-            !_retirements.containsKey(session)) {
+            !_retirements.containsKey(session) &&
+            !_mutedSessionNotifications.contains(session)) {
           _publish(session.state);
         }
       }
@@ -216,31 +281,165 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
         await _retireSession(session);
         return;
       }
-      await session.play();
-      if (!_matches(session, item.id, generation)) {
+      final startedState = session.state;
+      if (startedState.hasError) {
         await _retireSession(session);
+        if (_isCurrent(item.id, generation)) _publish(startedState);
         return;
       }
-      _publish(session.state);
-    } catch (error) {
+      if (_lifecycleSuspended) {
+        await _ensureLifecyclePaused(session);
+        _savePosition(session);
+        if (_matches(session, item.id, generation)) _publish(session.state);
+        return;
+      }
+      if (_lifecycleRevision != activationLifecycleRevision) {
+        _publish(session.state);
+        return;
+      }
+      await _runMuted(session, session.play);
+      await _finishPlayOperation(
+        session: session,
+        itemId: item.id,
+        generation: generation,
+        lifecycleRevision: activationLifecycleRevision,
+      );
+    } catch (_) {
       final failedState = session?.state;
       if (session != null) await _retireSession(session);
       if (_isCurrent(item.id, generation)) {
-        _publish(
-          InlinePlaybackState(
-            itemId: item.id,
-            phase: InlinePlaybackPhase.failed,
-            position: failedState?.position ?? Duration.zero,
-            duration: failedState?.duration ?? Duration.zero,
-            errorMessage: failedState?.errorMessage ?? '视频加载失败，请重试',
-          ),
-        );
+        _publish(_failedState(item.id, failedState));
       }
     }
   }
 
-  Future<void> _retireSession(InlinePlaybackSession session) =>
-      _retirements.putIfAbsent(session, () => _retireSessionOnce(session));
+  Future<void> _finishPlayOperation({
+    required InlinePlaybackSession session,
+    required String itemId,
+    required int generation,
+    required int lifecycleRevision,
+  }) async {
+    if (!_matches(session, itemId, generation)) {
+      await _retireSession(session);
+      return;
+    }
+    if (_lifecycleRevision != lifecycleRevision) {
+      if (_lifecycleSuspended) {
+        await _ensureLifecyclePaused(session);
+      } else {
+        await _pauseSafely(session);
+      }
+      _savePosition(session);
+      if (_matches(session, itemId, generation)) _publish(session.state);
+      return;
+    }
+    if (_lifecycleSuspended) {
+      await _ensureLifecyclePaused(session);
+      _savePosition(session);
+    }
+    if (_matches(session, itemId, generation)) _publish(session.state);
+  }
+
+  Future<void> _reconcileLifecyclePause(int revision) async {
+    final session = _session;
+    final itemId = _targetItem?.id;
+    final generation = _generation;
+    if (session == null ||
+        itemId == null ||
+        !_matches(session, itemId, generation)) {
+      return;
+    }
+    await _ensureLifecyclePaused(session);
+    _savePosition(session);
+    if (revision == _lifecycleRevision &&
+        _lifecycleSuspended &&
+        _matches(session, itemId, generation)) {
+      _publish(session.state);
+    }
+  }
+
+  Future<void> _reconcileLifecycleResume({
+    required int revision,
+    required bool shouldResume,
+    required InlinePlaybackSession? resumeSession,
+    required String? resumeItemId,
+    required int? resumeGeneration,
+  }) async {
+    final session = _session;
+    final itemId = _targetItem?.id;
+    final generation = _generation;
+    if (session == null ||
+        itemId == null ||
+        !_matches(session, itemId, generation)) {
+      return;
+    }
+    final lifecycleResumed = await _ensureLifecycleResumed(session);
+    if (!lifecycleResumed) return;
+    if (revision != _lifecycleRevision ||
+        _lifecycleSuspended ||
+        !_matches(session, itemId, generation)) {
+      return;
+    }
+    final resumeMatches =
+        shouldResume &&
+        identical(session, resumeSession) &&
+        itemId == resumeItemId &&
+        generation == resumeGeneration;
+    if (!resumeMatches) {
+      _publish(session.state);
+      return;
+    }
+    try {
+      await _runMuted(session, session.play);
+      await _finishPlayOperation(
+        session: session,
+        itemId: itemId,
+        generation: generation,
+        lifecycleRevision: revision,
+      );
+    } catch (_) {
+      await _failSession(session, itemId, generation);
+    }
+  }
+
+  Future<void> _failSession(
+    InlinePlaybackSession session,
+    String itemId,
+    int generation,
+  ) async {
+    final failedState = session.state;
+    await _retireSession(session);
+    if (_isCurrent(itemId, generation)) {
+      _publish(_failedState(itemId, failedState));
+    }
+  }
+
+  InlinePlaybackState _failedState(
+    String itemId,
+    InlinePlaybackState? failedState,
+  ) {
+    if (failedState?.hasError ?? false) return failedState!;
+    return InlinePlaybackState(
+      itemId: itemId,
+      phase: InlinePlaybackPhase.failed,
+      position: failedState?.position ?? Duration.zero,
+      duration: failedState?.duration ?? Duration.zero,
+      errorMessage: failedState?.errorMessage ?? '视频加载失败，请重试',
+    );
+  }
+
+  Future<void> _retireSession(InlinePlaybackSession session) {
+    final existing = _retirements[session];
+    if (existing != null) return existing;
+    late final Future<void> retirement;
+    retirement = _retireSessionOnce(session).whenComplete(() {
+      if (identical(_retirements[session], retirement)) {
+        _retirements.remove(session);
+      }
+    });
+    _retirements[session] = retirement;
+    return retirement;
+  }
 
   Future<void> _retireSessionOnce(InlinePlaybackSession session) async {
     await _pauseSafely(session);
@@ -255,15 +454,55 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     } catch (_) {
       // A failed teardown must not prevent the next serialized session.
     } finally {
-      if (identical(_session, session)) _session = null;
+      _mutedSessionNotifications.remove(session);
+      if (identical(_session, session)) {
+        _session = null;
+        _sessionLifecycleSuspended = false;
+      }
     }
   }
 
   Future<void> _pauseSafely(InlinePlaybackSession session) async {
     try {
-      await session.pause();
+      await _runMuted(session, session.pause);
     } catch (_) {
       // Shutdown remains mandatory even if a backend pause fails.
+    }
+  }
+
+  Future<void> _ensureLifecyclePaused(InlinePlaybackSession session) async {
+    if (!identical(_session, session) || _sessionLifecycleSuspended) return;
+    _sessionLifecycleSuspended = true;
+    try {
+      await _runMuted(session, session.pauseForLifecycle);
+    } catch (_) {
+      // The controller records suspension before pausing its backend.
+    }
+  }
+
+  Future<bool> _ensureLifecycleResumed(InlinePlaybackSession session) async {
+    if (!identical(_session, session)) return false;
+    if (!_sessionLifecycleSuspended) return true;
+    try {
+      await _runMuted(session, session.resumeForLifecycle);
+      if (!identical(_session, session)) return false;
+      _sessionLifecycleSuspended = false;
+      return true;
+    } catch (_) {
+      // Keep the session marked suspended when reconciliation fails.
+      return false;
+    }
+  }
+
+  Future<void> _runMuted(
+    InlinePlaybackSession session,
+    Future<void> Function() operation,
+  ) async {
+    _mutedSessionNotifications.add(session);
+    try {
+      await operation();
+    } finally {
+      _mutedSessionNotifications.remove(session);
     }
   }
 
@@ -282,20 +521,43 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
       identical(_session, session) && _isCurrent(itemId, generation);
 
   Future<void> _enqueue(Future<void> Function() operation) {
-    final next = _tail.then((_) => operation());
-    _tail = next.catchError((Object _) {});
-    return next;
+    final completer = Completer<void>();
+    _operations.add(
+      _QueuedInlineOperation(operation: operation, completer: completer),
+    );
+    _drainOperations();
+    return completer.future;
+  }
+
+  void _drainOperations() {
+    if (_operationRunning || _operations.isEmpty) return;
+    _operationRunning = true;
+    final queued = _operations.removeFirst();
+    late final Future<void> operation;
+    try {
+      operation = queued.operation();
+    } catch (error, stackTrace) {
+      queued.completer.completeError(error, stackTrace);
+      _operationRunning = false;
+      _drainOperations();
+      return;
+    }
+    operation
+        .then<void>(
+          (_) => queued.completer.complete(),
+          onError: (Object error, StackTrace stackTrace) =>
+              queued.completer.completeError(error, stackTrace),
+        )
+        .whenComplete(() {
+          _operationRunning = false;
+          _drainOperations();
+        });
   }
 
   void _publish(InlinePlaybackState value) {
     if (_disposed) return;
     _state = value;
     notifyListeners();
-  }
-
-  void _clearLifecycleIntent() {
-    _lifecycleSuspended = false;
-    _clearLifecycleResumeIdentity();
   }
 
   void _clearLifecycleResumeIdentity() {
@@ -308,8 +570,19 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
   @override
   void dispose() {
     if (_disposed) return;
+    final shutdownOperation = shutdown();
     _disposed = true;
-    unawaited(shutdown());
+    unawaited(shutdownOperation);
     super.dispose();
   }
+}
+
+class _QueuedInlineOperation {
+  const _QueuedInlineOperation({
+    required this.operation,
+    required this.completer,
+  });
+
+  final Future<void> Function() operation;
+  final Completer<void> completer;
 }

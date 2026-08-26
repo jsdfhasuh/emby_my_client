@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
+import 'package:emby_my_client/playback/media_kit_inline_playback_session.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
@@ -1188,6 +1189,57 @@ void main() {
       );
     },
   );
+
+  test('inline media kit session forwards lifecycle APIs distinctly', () async {
+    final controller = _LifecycleSpyPlaybackController();
+    final session = MediaKitInlinePlaybackSession.forTesting(
+      itemId: _plainItem.id,
+      controller: controller,
+    );
+
+    await session.pauseForLifecycle();
+    await session.resumeForLifecycle();
+    await session.pause();
+
+    expect(controller.calls, [
+      'pauseForLifecycle',
+      'resumeForLifecycle',
+      'pause',
+    ]);
+    await session.shutdown();
+    expect(controller.shutdownCalls, 1);
+  });
+}
+
+class _LifecycleSpyPlaybackController extends PlaybackController {
+  _LifecycleSpyPlaybackController()
+    : super(
+        item: _plainItem,
+        engine: _FakeEngine(),
+        resolver: _PlanResolver(_testPlan()),
+        reporter: _BlockingReporter(),
+        playbackHeaders: const {},
+      );
+
+  final List<String> calls = [];
+  int shutdownCalls = 0;
+  bool _shutdown = false;
+
+  @override
+  Future<void> pause() async => calls.add('pause');
+
+  @override
+  Future<void> pauseForLifecycle() async => calls.add('pauseForLifecycle');
+
+  @override
+  Future<void> resumeForLifecycle() async => calls.add('resumeForLifecycle');
+
+  @override
+  Future<void> shutdown() async {
+    if (_shutdown) return;
+    _shutdown = true;
+    shutdownCalls++;
+  }
 }
 
 PlaybackController _controller({

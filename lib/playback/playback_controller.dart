@@ -645,8 +645,8 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> resumeForLifecycle() async {
-    _lifecycleSuspended = false;
     await _cacheCoordinator?.resume();
+    _lifecycleSuspended = false;
     if (_pendingRecoveryFingerprint != null) _scheduleRuntimeRecovery();
   }
 

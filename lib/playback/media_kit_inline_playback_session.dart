@@ -20,7 +20,7 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
   MediaKitInlinePlaybackSession._({
     required this.itemId,
     required PlaybackItemSession itemSession,
-    required VideoController videoController,
+    required VideoController? videoController,
     required PlaybackController controller,
     required PlaybackSettings settings,
   }) : _itemSession = itemSession,
@@ -33,6 +33,18 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
        ) {
     _controller.addListener(_syncControllerState);
   }
+
+  @visibleForTesting
+  MediaKitInlinePlaybackSession.forTesting({
+    required String itemId,
+    required PlaybackController controller,
+  }) : this._(
+         itemId: itemId,
+         itemSession: controller.session,
+         videoController: null,
+         controller: controller,
+         settings: const PlaybackSettings(),
+       );
 
   static Future<MediaKitInlinePlaybackSession> create({
     required EmbyApi api,
@@ -75,7 +87,7 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
   final PlaybackItemSession _itemSession;
   final PlaybackSettings _settings;
   final PlaybackController _controller;
-  VideoController _videoController;
+  VideoController? _videoController;
   InlinePlaybackState _state;
   Future<void>? _shutdownOperation;
   bool _shuttingDown = false;
@@ -107,6 +119,12 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
 
   @override
   Future<void> pause() => _controller.pause();
+
+  @override
+  Future<void> pauseForLifecycle() => _controller.pauseForLifecycle();
+
+  @override
+  Future<void> resumeForLifecycle() => _controller.resumeForLifecycle();
 
   @override
   Future<void> seek(Duration position) async {

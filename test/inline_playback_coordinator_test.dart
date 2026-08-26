@@ -181,8 +181,9 @@ void main() {
     final session = harness.sessions.single;
 
     await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
-    expect(session.pauseCalls, 1);
+    expect(session.lifecyclePauseCalls, 1);
     await coordinator.handleAppLifecycleState(AppLifecycleState.resumed);
+    expect(session.lifecycleResumeCalls, 1);
     expect(session.playCalls, 2);
 
     await coordinator.pause();
@@ -197,6 +198,324 @@ void main() {
     await coordinator.shutdown();
     coordinator.dispose();
   });
+
+  test('factory completion after lifecycle pause never autoplays', () async {
+    final harness = _SessionHarness();
+    final factoryGate = Completer<void>();
+    harness.nextFactoryGate = factoryGate;
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+
+    final activation = coordinator.activate(_video('a'));
+    await harness.waitForFactoryCount(1);
+    final pause = coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    factoryGate.complete();
+    await Future.wait([activation, pause]);
+
+    final session = harness.sessions.single;
+    expect(session.playCalls, 0);
+    expect(session.lifecyclePauseCalls, 1);
+    expect(coordinator.state.isPlaying, isFalse);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('start completion after lifecycle pause never autoplays', () async {
+    final harness = _SessionHarness();
+    final startGate = Completer<void>();
+    harness.nextStartGate = startGate;
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+
+    final activation = coordinator.activate(_video('a'));
+    await harness.waitForSessionCount(1);
+    final pause = coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    startGate.complete();
+    await Future.wait([activation, pause]);
+
+    final session = harness.sessions.single;
+    expect(session.playCalls, 0);
+    expect(session.lifecyclePauseCalls, 1);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test(
+    'an initially suspended coordinator activates without playing',
+    () async {
+      final harness = _SessionHarness();
+      final coordinator = InlinePlaybackCoordinator(
+        factory: harness.create,
+        initialLifecycleState: AppLifecycleState.paused,
+      );
+
+      await coordinator.activate(_video('a'));
+
+      expect(harness.sessions.single.playCalls, 0);
+      expect(harness.sessions.single.lifecyclePauseCalls, 1);
+      expect(coordinator.lifecycleSuspended, isTrue);
+      await coordinator.shutdown();
+      coordinator.dispose();
+    },
+  );
+
+  test('activation while suspended remains ready and paused', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+
+    await coordinator.activate(_video('a'));
+
+    expect(harness.sessions.single.playCalls, 0);
+    expect(coordinator.state.phase, InlinePlaybackPhase.ready);
+    expect(coordinator.state.isPlaying, isFalse);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('resumed does not autoplay a session that never played', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(
+      factory: harness.create,
+      initialLifecycleState: AppLifecycleState.paused,
+    );
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+
+    await coordinator.handleAppLifecycleState(AppLifecycleState.resumed);
+
+    expect(session.lifecycleResumeCalls, 1);
+    expect(session.playCalls, 0);
+    expect(coordinator.state.isPlaying, isFalse);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('resumed restores the same session that was actually playing', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+
+    await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    await coordinator.handleAppLifecycleState(AppLifecycleState.resumed);
+
+    expect(
+      harness.events,
+      containsAllInOrder(['lifecycle-pause:a', 'lifecycle-resume:a', 'play:a']),
+    );
+    expect(session.playCalls, 2);
+    expect(coordinator.state.isPlaying, isTrue);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('target changes do not clear global lifecycle suspension', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+
+    await coordinator.activate(_video('b'));
+    final second = harness.sessions.last;
+
+    expect(coordinator.lifecycleSuspended, isTrue);
+    expect(second.playCalls, 0);
+    await coordinator.handleAppLifecycleState(AppLifecycleState.resumed);
+    expect(second.playCalls, 0);
+    expect(harness.sessions.first.playCalls, 1);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('delayed lifecycle pause reconciles to a newer resumed state', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+    final pauseGate = Completer<void>();
+    session.lifecyclePauseGate = pauseGate;
+
+    final pause = coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    await _waitUntil(() => session.lifecyclePauseCalls == 1);
+    final resume = coordinator.handleAppLifecycleState(
+      AppLifecycleState.resumed,
+    );
+    pauseGate.complete();
+    await Future.wait([pause, resume]);
+
+    expect(session.lifecycleResumeCalls, 1);
+    expect(session.playCalls, 2);
+    expect(coordinator.lifecycleSuspended, isFalse);
+    expect(coordinator.state.isPlaying, isTrue);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test(
+    'a newer pause prevents a delayed lifecycle resume from playing',
+    () async {
+      final harness = _SessionHarness();
+      final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+      await coordinator.activate(_video('a'));
+      final session = harness.sessions.single;
+      await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+      final resumeGate = Completer<void>();
+      session.lifecycleResumeGate = resumeGate;
+
+      final resume = coordinator.handleAppLifecycleState(
+        AppLifecycleState.resumed,
+      );
+      await _waitUntil(() => session.lifecycleResumeCalls == 1);
+      final pause = coordinator.handleAppLifecycleState(
+        AppLifecycleState.paused,
+      );
+      resumeGate.complete();
+      await Future.wait([resume, pause]);
+
+      expect(session.playCalls, 1);
+      expect(coordinator.lifecycleSuspended, isTrue);
+      expect(coordinator.state.isPlaying, isFalse);
+      await coordinator.shutdown();
+      coordinator.dispose();
+    },
+  );
+
+  test('a failed lifecycle resume never falls through to play', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+    await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    session.lifecycleResumeError = StateError('resume failed');
+    final playCallsBeforeResume = session.playCalls;
+
+    await expectLater(
+      coordinator.handleAppLifecycleState(AppLifecycleState.resumed),
+      completes,
+    );
+    await coordinator.play();
+
+    expect(session.lifecycleResumeCalls, 2);
+    expect(session.playCalls, playCallsBeforeResume);
+    expect(session.state.isPlaying, isFalse);
+    expect(coordinator.state.isPlaying, isFalse);
+
+    session.lifecycleResumeError = null;
+    await coordinator.play();
+    expect(session.lifecycleResumeCalls, 3);
+    expect(session.playCalls, playCallsBeforeResume + 1);
+    expect(coordinator.state.isPlaying, isTrue);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('lifecycle and user pause use distinct session APIs', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+
+    await coordinator.handleAppLifecycleState(AppLifecycleState.paused);
+    await coordinator.handleAppLifecycleState(AppLifecycleState.resumed);
+    final ordinaryPausesBeforeUserAction = session.pauseCalls;
+    await coordinator.pause();
+
+    expect(session.lifecyclePauseCalls, 1);
+    expect(session.lifecycleResumeCalls, 1);
+    expect(session.pauseCalls, ordinaryPausesBeforeUserAction + 1);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test('retirement references are released after 100 session churns', () async {
+    final harness = _SessionHarness();
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+
+    for (var index = 0; index < 100; index++) {
+      await coordinator.activate(_video('video-$index'));
+    }
+    await coordinator.deactivate();
+
+    expect(harness.maxActiveSessions, 1);
+    expect(harness.activeSessions, 0);
+    expect(coordinator.inFlightRetirementCount, 0);
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test(
+    'pending retirement stays single-flight and releases its reference',
+    () async {
+      final harness = _SessionHarness();
+      final shutdownGate = Completer<void>();
+      harness.nextShutdownGate = shutdownGate;
+      final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+      await coordinator.activate(_video('a'));
+      final session = harness.sessions.single;
+
+      final deactivation = coordinator.deactivate();
+      await _waitUntil(() => session.shutdownCalls == 1);
+      final repeatedDeactivation = coordinator.deactivate();
+
+      expect(coordinator.inFlightRetirementCount, 1);
+      expect(session.shutdownCalls, 1);
+      expect(harness.activeSessions, 1);
+      shutdownGate.complete();
+      await Future.wait([deactivation, repeatedDeactivation]);
+
+      expect(session.shutdownCalls, 1);
+      expect(harness.activeSessions, 0);
+      expect(harness.maxActiveSessions, 1);
+      expect(coordinator.inFlightRetirementCount, 0);
+      await coordinator.shutdown();
+      coordinator.dispose();
+    },
+  );
+
+  test('failed state returned by start is never followed by play', () async {
+    final harness = _SessionHarness();
+    harness.nextStartFailureMessage = 'original playback failure';
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+
+    await coordinator.activate(_video('a'));
+
+    final session = harness.sessions.single;
+    expect(session.playCalls, 0);
+    expect(session.shutdownCalls, 1);
+    expect(coordinator.state.phase, InlinePlaybackPhase.failed);
+    expect(coordinator.state.errorMessage, 'original playback failure');
+    await coordinator.shutdown();
+    coordinator.dispose();
+  });
+
+  test(
+    'control operations and retirement settle without async errors',
+    () async {
+      final harness = _SessionHarness();
+      final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+      await coordinator.activate(_video('a'));
+      final session = harness.sessions.single;
+      await coordinator.pause();
+      final playGate = Completer<void>();
+      session.playGate = playGate;
+
+      final play = coordinator.play();
+      await _waitUntil(() => session.playCalls == 2);
+      final pause = coordinator.pause();
+      final seek = coordinator.seek(const Duration(seconds: 12));
+      final deactivate = coordinator.deactivate();
+      playGate.complete();
+
+      await expectLater(
+        Future.wait([play, pause, seek, deactivate]),
+        completes,
+      );
+      expect(session.shutdownCalls, 1);
+      expect(harness.activeSessions, 0);
+      expect(coordinator.inFlightRetirementCount, 0);
+      await coordinator.shutdown();
+      coordinator.dispose();
+    },
+  );
 
   test('memory pressure is forwarded only to the active session', () async {
     final harness = _SessionHarness();
@@ -236,19 +555,31 @@ class _SessionHarness {
   final List<_FakeInlinePlaybackSession> sessions = [];
   final List<String> events = [];
   Completer<void>? nextStartGate;
+  Completer<void>? nextFactoryGate;
+  Completer<void>? nextShutdownGate;
   Object? nextStartError;
+  String? nextStartFailureMessage;
+  int factoryCalls = 0;
   int activeSessions = 0;
   int maxActiveSessions = 0;
 
   Future<InlinePlaybackSession> create(EmbyItem item) async {
+    factoryCalls++;
+    final factoryGate = nextFactoryGate;
+    nextFactoryGate = null;
+    await factoryGate?.future;
     final session = _FakeInlinePlaybackSession(
       itemId: item.id,
       harness: this,
       startGate: nextStartGate,
       startError: nextStartError,
+      startFailureMessage: nextStartFailureMessage,
+      shutdownGate: nextShutdownGate,
     );
     nextStartGate = null;
     nextStartError = null;
+    nextStartFailureMessage = null;
+    nextShutdownGate = null;
     sessions.add(session);
     activeSessions++;
     if (activeSessions > maxActiveSessions) {
@@ -265,6 +596,9 @@ class _SessionHarness {
     }
     fail('Timed out waiting for $count inline sessions');
   }
+
+  Future<void> waitForFactoryCount(int count) =>
+      _waitUntil(() => factoryCalls >= count);
 }
 
 class _FakeInlinePlaybackSession extends ChangeNotifier
@@ -274,6 +608,8 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
     required this.harness,
     this.startGate,
     this.startError,
+    this.startFailureMessage,
+    this.shutdownGate,
   }) : _state = InlinePlaybackState(itemId: itemId);
 
   @override
@@ -281,15 +617,25 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
   final _SessionHarness harness;
   final Completer<void>? startGate;
   final Object? startError;
+  final String? startFailureMessage;
+  final Completer<void>? shutdownGate;
   InlinePlaybackState _state;
   bool _shutdown = false;
   int startCalls = 0;
   int playCalls = 0;
   int pauseCalls = 0;
+  int lifecyclePauseCalls = 0;
+  int lifecycleResumeCalls = 0;
   int shutdownCalls = 0;
   int memoryPressureCalls = 0;
   final List<Duration?> resumePositions = [];
   final List<Duration> seekPositions = [];
+  Completer<void>? playGate;
+  Completer<void>? pauseGate;
+  Completer<void>? lifecyclePauseGate;
+  Completer<void>? lifecycleResumeGate;
+  Object? lifecycleResumeError;
+  Completer<void>? seekGate;
 
   @override
   InlinePlaybackState get state => _state;
@@ -313,6 +659,16 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
       );
       throw error;
     }
+    if (startFailureMessage case final message?) {
+      _setState(
+        _state.copyWith(
+          phase: InlinePlaybackPhase.failed,
+          isBuffering: false,
+          errorMessage: message,
+        ),
+      );
+      return;
+    }
     if (_shutdown) return;
     _setState(
       _state.copyWith(
@@ -328,6 +684,7 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
   Future<void> play() async {
     playCalls++;
     harness.events.add('play:$itemId');
+    await playGate?.future;
     _setState(
       _state.copyWith(
         phase: InlinePlaybackPhase.ready,
@@ -341,11 +698,29 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
   Future<void> pause() async {
     pauseCalls++;
     harness.events.add('pause:$itemId');
+    await pauseGate?.future;
     _setState(_state.copyWith(isPlaying: false));
   }
 
   @override
+  Future<void> pauseForLifecycle() async {
+    lifecyclePauseCalls++;
+    harness.events.add('lifecycle-pause:$itemId');
+    await lifecyclePauseGate?.future;
+    _setState(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> resumeForLifecycle() async {
+    lifecycleResumeCalls++;
+    harness.events.add('lifecycle-resume:$itemId');
+    await lifecycleResumeGate?.future;
+    if (lifecycleResumeError case final error?) throw error;
+  }
+
+  @override
   Future<void> seek(Duration position) async {
+    await seekGate?.future;
     seekPositions.add(position);
     _setState(
       _state.copyWith(
@@ -366,6 +741,7 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
     _shutdown = true;
     shutdownCalls++;
     harness.events.add('shutdown:$itemId');
+    await shutdownGate?.future;
     harness.activeSessions--;
   }
 
@@ -389,6 +765,14 @@ class _FakeInlinePlaybackSession extends ChangeNotifier
     _state = value;
     notifyListeners();
   }
+}
+
+Future<void> _waitUntil(bool Function() predicate) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await Future<void>.delayed(Duration.zero);
+  }
+  fail('Timed out waiting for asynchronous test condition');
 }
 
 EmbyItem _video(String id) => EmbyItem(
