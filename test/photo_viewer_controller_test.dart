@@ -9,6 +9,133 @@ import 'package:emby_my_client/photos/photo_viewer_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('photos-only mode excludes playable videos', () {
+    final controller = PhotoViewerController(
+      source: _source(
+        initialItems: [
+          _item('photo-1', 'Photo'),
+          _item('video-1', 'Video', mediaType: 'Video'),
+          _item('movie-1', 'Movie', mediaType: 'Video'),
+        ],
+        initialItemId: 'photo-1',
+        initialRawCursor: 3,
+        initialTotalCount: 3,
+        initialHasMore: false,
+        loadPage: _emptyLoader,
+      ),
+      imageRequestFor: _request,
+      prefetcher: PhotoPrefetcher(load: (_) async {}),
+    );
+
+    expect(controller.mediaItems.map((item) => item.id), ['photo-1']);
+    expect(controller.positionLabel, '1 / 1');
+    controller.dispose();
+  });
+
+  test(
+    'home-media mode keeps photo and playable video in original order',
+    () async {
+      final loaded = <String>[];
+      final controller = PhotoViewerController(
+        source: _source(
+          mode: MediaViewerMode.homeMedia,
+          initialItems: [
+            _item('folder', 'Folder'),
+            _item('photo-1', 'Photo'),
+            _item('video-1', 'Video', mediaType: 'Video'),
+            _item('album', 'PhotoAlbum'),
+            _item('movie-1', 'Movie', mediaType: 'Video'),
+            _item('series', 'Series'),
+            _item('photo-2', 'Photo'),
+          ],
+          initialItemId: 'video-1',
+          initialRawCursor: 7,
+          initialTotalCount: 7,
+          initialHasMore: false,
+          loadPage: _emptyLoader,
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(
+          load: (request) async => loaded.add(request.cacheKey),
+        ),
+      );
+
+      expect(controller.mediaItems.map((item) => item.id), [
+        'photo-1',
+        'video-1',
+        'movie-1',
+        'photo-2',
+      ]);
+      expect(controller.currentIndex, 1);
+      expect(controller.currentItemId, 'video-1');
+      expect(controller.positionLabel, '2 / 4');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(loaded, containsAll(['photo-1', 'video-1', 'movie-1', 'photo-2']));
+      controller.dispose();
+    },
+  );
+
+  test(
+    'home-media pagination skips unsupported pages and preserves raw order',
+    () async {
+      final starts = <int>[];
+      var page = 0;
+      final controller = PhotoViewerController(
+        source: _source(
+          mode: MediaViewerMode.homeMedia,
+          initialItems: [
+            _item('photo-1', 'Photo'),
+            _item('video-duplicate', 'Video', mediaType: 'Video'),
+          ],
+          initialItemId: 'video-duplicate',
+          initialRawCursor: 2,
+          initialTotalCount: 7,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            page++;
+            return switch (page) {
+              1 => EmbyItemPage(
+                items: [
+                  _item('folder-2', 'Folder'),
+                  _item('album-2', 'PhotoAlbum'),
+                ],
+                rawItemCount: 2,
+                totalRecordCount: 7,
+              ),
+              _ => EmbyItemPage(
+                items: [
+                  _item('video-duplicate', 'Video', mediaType: 'Video'),
+                  _item('video-2', 'Video', mediaType: 'Video'),
+                  _item('photo-2', 'Photo'),
+                ],
+                rawItemCount: 3,
+                totalRecordCount: 7,
+              ),
+            };
+          },
+        ),
+        pageSize: 3,
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+
+      await _waitForViewerLoad(controller);
+
+      expect(starts, [2, 4]);
+      expect(controller.nextStartIndex, 7);
+      expect(controller.hasMore, isFalse);
+      expect(controller.mediaItems.map((item) => item.id), [
+        'photo-1',
+        'video-duplicate',
+        'video-2',
+        'photo-2',
+      ]);
+      controller.dispose();
+    },
+  );
+
   test(
     'starts at requested item and prefetches a bounded neighbor window',
     () async {
@@ -318,6 +445,7 @@ Future<EmbyItemPage> _emptyLoader({
 }) async => const EmbyItemPage(items: [], totalRecordCount: 0);
 
 DirectoryPhotoSource _source({
+  MediaViewerMode mode = MediaViewerMode.photosOnly,
   required List<EmbyItem> initialItems,
   required String initialItemId,
   required int initialRawCursor,
@@ -325,6 +453,7 @@ DirectoryPhotoSource _source({
   required bool initialHasMore,
   required PhotoPageLoader loadPage,
 }) => DirectoryPhotoSource(
+  mode: mode,
   queryFingerprint: 'test-query',
   initialItems: initialItems,
   initialItemId: initialItemId,
@@ -342,10 +471,11 @@ EmbyImageRequest? _request(EmbyItem item) => EmbyImageRequest(
   decodeHeight: 512,
 );
 
-EmbyItem _item(String id, String type) => EmbyItem(
+EmbyItem _item(String id, String type, {String? mediaType}) => EmbyItem(
   id: id,
   name: id,
   type: type,
+  mediaType: mediaType,
   imageTags: const {'Primary': 'tag'},
   backdropImageTags: const [],
   genres: const [],

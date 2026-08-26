@@ -2,6 +2,16 @@ import 'package:flutter/foundation.dart';
 
 import '../models/emby_models.dart';
 
+enum MediaViewerMode {
+  photosOnly,
+  homeMedia;
+
+  bool accepts(EmbyItem item) => switch (this) {
+    MediaViewerMode.photosOnly => item.isPhoto,
+    MediaViewerMode.homeMedia => item.isPhoto || item.isPlayable,
+  };
+}
+
 typedef PhotoPageLoader =
     Future<EmbyItemPage> Function({
       required int startIndex,
@@ -11,6 +21,7 @@ typedef PhotoPageLoader =
 @immutable
 sealed class PhotoSequenceSource {
   PhotoSequenceSource({
+    this.mode = MediaViewerMode.photosOnly,
     required this.queryFingerprint,
     required List<EmbyItem> initialItems,
     required this.initialItemId,
@@ -23,6 +34,7 @@ sealed class PhotoSequenceSource {
        assert(initialTotalCount == null || initialTotalCount >= 0),
        initialItems = List.unmodifiable(initialItems);
 
+  final MediaViewerMode mode;
   final String queryFingerprint;
   final List<EmbyItem> initialItems;
   final String initialItemId;
@@ -34,6 +46,7 @@ sealed class PhotoSequenceSource {
 
 final class DirectoryPhotoSource extends PhotoSequenceSource {
   DirectoryPhotoSource({
+    super.mode = MediaViewerMode.photosOnly,
     required super.queryFingerprint,
     required super.initialItems,
     required super.initialItemId,
@@ -46,6 +59,7 @@ final class DirectoryPhotoSource extends PhotoSequenceSource {
 
 final class FilteredLibraryPhotoSource extends PhotoSequenceSource {
   FilteredLibraryPhotoSource({
+    super.mode = MediaViewerMode.photosOnly,
     required super.queryFingerprint,
     required super.initialItems,
     required super.initialItemId,

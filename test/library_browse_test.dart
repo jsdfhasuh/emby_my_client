@@ -3,6 +3,7 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
@@ -513,8 +514,16 @@ void main() {
           requestOptions: options,
           statusCode: 200,
           data: {
-            'TotalRecordCount': 1,
+            'TotalRecordCount': 2,
             'Items': [
+              {
+                'Id': 'video-1',
+                'Name': '媒体库视频',
+                'Type': 'Video',
+                'MediaType': 'Video',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
               {
                 'Id': 'photo-1',
                 'Name': '媒体库图片',
@@ -543,6 +552,54 @@ void main() {
     await tester.tap(find.text('媒体库图片'));
     await tester.pumpAndSettle();
     expect(find.byType(PhotoViewerScreen), findsOneWidget);
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    expect(viewer.source.mode, MediaViewerMode.homeMedia);
+    expect(viewer.source.initialItems.map((item) => item.id), [
+      'video-1',
+      'photo-1',
+    ]);
+  });
+
+  testWidgets('generic mixed library photo viewer remains photos-only', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [
+              {
+                'Id': 'photo-1',
+                'Name': '普通混合图片',
+                'Type': 'Photo',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.root(api: api, view: _mixedLibrary),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('普通混合图片'));
+    await tester.pumpAndSettle();
+
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    expect(viewer.source.mode, MediaViewerMode.photosOnly);
   });
 }
 
@@ -645,6 +702,17 @@ const _homeVideoLibrary = EmbyItem(
   name: '家庭视频和照片',
   type: 'CollectionFolder',
   collectionType: 'homevideos',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _mixedLibrary = EmbyItem(
+  id: 'mixed-library',
+  name: '普通混合媒体',
+  type: 'CollectionFolder',
+  collectionType: 'mixed',
   imageTags: {},
   backdropImageTags: [],
   genres: [],

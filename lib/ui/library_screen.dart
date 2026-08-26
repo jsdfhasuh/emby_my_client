@@ -2150,6 +2150,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final api = widget.api;
     final viewId = widget.view.id;
     final profile = widget.profile;
+    final viewerMode =
+        profile.kind == LibraryContentProfileKind.homeVideosAndPhotos
+        ? MediaViewerMode.homeMedia
+        : MediaViewerMode.photosOnly;
     Future<EmbyItemPage> loadPage({
       required int startIndex,
       required int limit,
@@ -2191,6 +2195,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final initialItems = List<EmbyItem>.of(_items);
     return state.scope == LibraryBrowseScope.directory
         ? DirectoryPhotoSource(
+            mode: viewerMode,
             queryFingerprint: fingerprint,
             initialItems: initialItems,
             initialItemId: initialItem.id,
@@ -2200,6 +2205,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             loadPage: loadPage,
           )
         : FilteredLibraryPhotoSource(
+            mode: viewerMode,
             queryFingerprint: fingerprint,
             initialItems: initialItems,
             initialItemId: initialItem.id,
