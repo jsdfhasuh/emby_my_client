@@ -138,6 +138,29 @@ void main() {
     await controller.shutdown();
   });
 
+  test('pause stops a play request before playing state arrives', () async {
+    final engine = _FakeEngine()..emitPlayingOnPlay = false;
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+    await controller.start(playAfterReady: false);
+
+    await controller.play();
+    expect(controller.state.isPlaying, isFalse);
+    await controller.pause();
+
+    expect(engine.playCalls, 1);
+    expect(engine.pauseCalls, 1);
+    await controller.shutdown();
+  });
+
   test('shared online bootstrap applies settings and start options', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -1362,7 +1385,9 @@ class _FakeEngine implements PlaybackEngine {
   final List<Duration> audioDelayValues = [];
   final List<Duration> subtitleDelayValues = [];
   final List<(double, int, int, int)> subtitleStyleValues = [];
+  bool emitPlayingOnPlay = true;
   int playCalls = 0;
+  int pauseCalls = 0;
   int stopCalls = 0;
   int disposeCalls = 0;
   Object? openError;
@@ -1417,11 +1442,12 @@ class _FakeEngine implements PlaybackEngine {
   @override
   Future<void> play() async {
     playCalls++;
-    playingController.add(true);
+    if (emitPlayingOnPlay) playingController.add(true);
   }
 
   @override
   Future<void> pause() async {
+    pauseCalls++;
     playingController.add(false);
   }
 

@@ -625,14 +625,15 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> play() async {
-    if (!_state.isPlaying) await engine.play();
     _desiredPlaying = true;
+    if (!_state.isPlaying) await engine.play();
     await _reportProgress();
   }
 
   Future<void> pause() async {
-    if (_state.isPlaying) await engine.pause();
+    final shouldPause = _desiredPlaying || _state.isPlaying;
     _desiredPlaying = false;
+    if (shouldPause) await engine.pause();
     await _reportProgress();
   }
 
