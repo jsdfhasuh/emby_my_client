@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/playback/inline_playback_session.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
+import 'package:emby_my_client/ui/photos/inline_video_page.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:emby_my_client/ui/photos/zoomable_photo_page.dart';
 import 'package:flutter/material.dart';
@@ -197,6 +201,423 @@ void main() {
     expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
     expect(find.text('打开图片'), findsOneWidget);
   });
+
+  testWidgets('home media swipes photo to video to photo with one session', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_photo1, _video1, _photo2],
+            initialItemId: _photo1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(harness.sessions, isEmpty);
+
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(InlineVideoPage), findsWidgets);
+    expect(find.text('Video 1'), findsOneWidget);
+    expect(find.text('2 / 3'), findsOneWidget);
+    expect(harness.sessions, hasLength(1));
+    expect(harness.sessions.single.playCalls, 1);
+
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Photo 2'), findsOneWidget);
+    expect(find.text('3 / 3'), findsOneWidget);
+    expect(harness.sessions.single.pauseCalls, greaterThanOrEqualTo(1));
+    expect(harness.sessions.single.shutdownCalls, 1);
+    expect(harness.maxActiveSessions, 1);
+  });
+
+  testWidgets('photos-only viewer never creates an inline session', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            items: const [_photo1, _video1, _photo2],
+            initialItemId: _photo1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await tester.pump(const Duration(milliseconds: 260));
+
+    expect(harness.sessions, isEmpty);
+    expect(find.text('2 / 2'), findsOneWidget);
+    expect(find.text('Photo 2'), findsOneWidget);
+  });
+
+  testWidgets(
+    'system back waits for video shutdown before returning media ID',
+    (tester) async {
+      final platformCalls = <MethodCall>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'SystemChrome.setEnabledSystemUIMode') {
+          platformCalls.add(call);
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      final api = EmbyApi(_session, dio: Dio());
+      final harness = _ViewerSessionHarness();
+      final shutdownGate = Completer<void>();
+      harness.nextShutdownGate = shutdownGate;
+      addTearDown(api.dispose);
+      String? returnedItemId;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => FilledButton(
+              onPressed: () async {
+                returnedItemId = await Navigator.of(context).push<String>(
+                  MaterialPageRoute(
+                    builder: (_) => PhotoViewerScreen(
+                      api: api,
+                      source: _viewerSource(
+                        mode: MediaViewerMode.homeMedia,
+                        items: const [_video1, _photo1],
+                        initialItemId: _video1.id,
+                      ),
+                      inlineSessionFactory: harness.create,
+                    ),
+                  ),
+                );
+              },
+              child: const Text('打开媒体'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开媒体'));
+      await tester.pumpAndSettle();
+      expect(harness.sessions.single.playCalls, 1);
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+
+      expect(find.byKey(const Key('photo-viewer')), findsOneWidget);
+      expect(returnedItemId, isNull);
+      expect(
+        platformCalls.last.arguments,
+        isNot(SystemUiMode.edgeToEdge.toString()),
+      );
+
+      shutdownGate.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(returnedItemId, _video1.id);
+      expect(find.text('打开媒体'), findsOneWidget);
+      expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
+    },
+  );
+
+  testWidgets('video slider seeks without changing the PageView page', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1, _photo1],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final slider = find.byKey(const Key('inline-video-slider-video-1'));
+    final gesture = await tester.startGesture(tester.getCenter(slider));
+    await gesture.moveBy(const Offset(120, 0));
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 260));
+
+    expect(find.text('Video 1'), findsOneWidget);
+    expect(find.text('1 / 2'), findsOneWidget);
+    expect(harness.sessions.single.seekPositions, hasLength(1));
+  });
+
+  testWidgets('consecutive video pages keep one active session', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1, _video2],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+
+    expect(harness.sessions, hasLength(2));
+    expect(harness.sessions.first.shutdownCalls, 1);
+    expect(harness.sessions.last.playCalls, 1);
+    expect(harness.maxActiveSessions, 1);
+    expect(find.text('Video 2'), findsOneWidget);
+  });
+
+  testWidgets('rapid loading video to photo to video drops stale autoplay', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    final startGate = Completer<void>();
+    harness.nextStartGate = startGate;
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_photo1, _video1, _photo2, _video2],
+            initialItemId: _photo1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await _pumpPageTransition(tester);
+    expect(find.text('2 / 4'), findsOneWidget);
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await _pumpPageTransition(tester);
+    expect(find.text('3 / 4'), findsOneWidget);
+    await tester.drag(find.byType(PageView), const Offset(-600, 0));
+    await _pumpPageTransition(tester);
+    expect(harness.sessions, hasLength(1));
+    expect(harness.sessions.single.playCalls, 0);
+    expect(find.text('Video 2'), findsOneWidget);
+    expect(find.text('4 / 4'), findsOneWidget);
+
+    startGate.complete();
+    for (
+      var attempt = 0;
+      attempt < 20 && harness.sessions.length < 2;
+      attempt++
+    ) {
+      await tester.pump();
+    }
+
+    expect(harness.sessions, hasLength(2));
+    expect(harness.sessions.first.playCalls, 0);
+    expect(harness.sessions.first.shutdownCalls, 1);
+    expect(harness.sessions.last.playCalls, 1);
+    expect(harness.maxActiveSessions, 1);
+    expect(find.text('Video 2'), findsOneWidget);
+    expect(find.text('4 / 4'), findsOneWidget);
+  });
+
+  testWidgets('viewer lifecycle pauses and resumes the active video', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_video1],
+            initialItemId: _video1.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final session = harness.sessions.single;
+    expect(session.playCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    expect(session.pauseCalls, 1);
+    expect(session.playCalls, 2);
+  });
+}
+
+Future<void> _pumpPageTransition(WidgetTester tester) async {
+  for (var frame = 0; frame < 10; frame++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
+DirectoryPhotoSource _viewerSource({
+  MediaViewerMode mode = MediaViewerMode.photosOnly,
+  required List<EmbyItem> items,
+  required String initialItemId,
+}) => DirectoryPhotoSource(
+  mode: mode,
+  queryFingerprint: 'mixed-viewer-test-$initialItemId',
+  initialItems: items,
+  initialItemId: initialItemId,
+  initialRawCursor: items.length,
+  initialTotalCount: items.length,
+  initialHasMore: false,
+  loadPage: ({required startIndex, required limit}) async =>
+      const EmbyItemPage(items: [], totalRecordCount: 0),
+);
+
+class _ViewerSessionHarness {
+  final sessions = <_ViewerFakeSession>[];
+  Completer<void>? nextStartGate;
+  Completer<void>? nextShutdownGate;
+  int activeSessions = 0;
+  int maxActiveSessions = 0;
+
+  Future<InlinePlaybackSession> create(EmbyItem item) async {
+    final session = _ViewerFakeSession(
+      item.id,
+      this,
+      startGate: nextStartGate,
+      shutdownGate: nextShutdownGate,
+    );
+    nextStartGate = null;
+    nextShutdownGate = null;
+    sessions.add(session);
+    activeSessions++;
+    maxActiveSessions = activeSessions > maxActiveSessions
+        ? activeSessions
+        : maxActiveSessions;
+    return session;
+  }
+}
+
+class _ViewerFakeSession extends ChangeNotifier
+    implements InlinePlaybackSession {
+  _ViewerFakeSession(
+    this.itemId,
+    this.harness, {
+    this.startGate,
+    this.shutdownGate,
+  }) : _state = InlinePlaybackState(itemId: itemId);
+
+  @override
+  final String itemId;
+  final _ViewerSessionHarness harness;
+  final Completer<void>? startGate;
+  final Completer<void>? shutdownGate;
+  InlinePlaybackState _state;
+  int playCalls = 0;
+  int pauseCalls = 0;
+  int shutdownCalls = 0;
+  final seekPositions = <Duration>[];
+  bool _shutdown = false;
+
+  @override
+  InlinePlaybackState get state => _state;
+
+  @override
+  Future<void> start({Duration? resumePosition}) async {
+    _update(
+      InlinePlaybackState(
+        itemId: itemId,
+        phase: InlinePlaybackPhase.loading,
+        isBuffering: true,
+      ),
+    );
+    await startGate?.future;
+    if (_shutdown) return;
+    _update(
+      InlinePlaybackState(
+        itemId: itemId,
+        phase: InlinePlaybackPhase.ready,
+        position: resumePosition ?? Duration.zero,
+        duration: const Duration(minutes: 4),
+      ),
+    );
+  }
+
+  @override
+  Future<void> play() async {
+    playCalls++;
+    _update(_state.copyWith(isPlaying: true, isCompleted: false));
+  }
+
+  @override
+  Future<void> pause() async {
+    pauseCalls++;
+    _update(_state.copyWith(isPlaying: false));
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    seekPositions.add(position);
+    _update(_state.copyWith(position: position));
+  }
+
+  @override
+  Future<void> handleMemoryPressure() async {}
+
+  @override
+  Future<void> shutdown() async {
+    if (_shutdown) return;
+    _shutdown = true;
+    shutdownCalls++;
+    await shutdownGate?.future;
+    harness.activeSessions--;
+  }
+
+  void _update(InlinePlaybackState value) {
+    _state = value;
+    notifyListeners();
+  }
 }
 
 const _session = EmbySession(
@@ -243,6 +664,28 @@ const _photo3 = EmbyItem(
   id: 'photo-3',
   name: 'Photo 3',
   type: 'Photo',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _video1 = EmbyItem(
+  id: 'video-1',
+  name: 'Video 1',
+  type: 'Video',
+  mediaType: 'Video',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _video2 = EmbyItem(
+  id: 'video-2',
+  name: 'Video 2',
+  type: 'Video',
+  mediaType: 'Video',
   imageTags: {},
   backdropImageTags: [],
   genres: [],

@@ -10,30 +10,50 @@ import '../../images/emby_image_cache.dart';
 import '../../images/emby_image_request.dart';
 import '../../images/photo_prefetcher.dart';
 import '../../models/emby_models.dart';
+import '../../playback/cache/playback_cache_storage_scope.dart';
+import '../../playback/inline_playback_coordinator.dart';
+import '../../playback/inline_playback_session.dart';
+import '../../playback/media_kit_inline_playback_session.dart';
+import '../../playback/playback_diagnostics_test_overrides_scope.dart';
+import '../../playback/playback_settings_scope.dart';
 import '../../photos/photo_viewer_controller.dart';
 import '../../photos/photo_sequence_source.dart';
+import 'inline_video_page.dart';
 import 'zoomable_photo_page.dart';
 
 class PhotoViewerScreen extends StatefulWidget {
-  const PhotoViewerScreen({super.key, required this.api, required this.source});
+  const PhotoViewerScreen({
+    super.key,
+    required this.api,
+    required this.source,
+    this.inlineSessionFactory,
+  });
 
   final EmbyApi api;
   final PhotoSequenceSource source;
+  final InlinePlaybackSessionFactory? inlineSessionFactory;
 
   @override
   State<PhotoViewerScreen> createState() => _PhotoViewerScreenState();
 }
 
-class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
+class _PhotoViewerScreenState extends State<PhotoViewerScreen>
+    with WidgetsBindingObserver {
   late PhotoViewerController _controller;
   late PageController _pageController;
   bool _initialized = false;
   bool _currentPageZoomed = false;
+  bool _seekInteractionActive = false;
+  bool _didPop = false;
   int _viewerDimension = 1920;
+  InlinePlaybackCoordinator? _inlineCoordinator;
+  Future<void>? _closeOperation;
+  Future<void>? _restoreSystemUiOperation;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky),
     );
@@ -92,15 +112,37 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     );
     _pageController = PageController(initialPage: _controller.currentIndex);
     _initialized = true;
+    if (_controller.mediaItems.isNotEmpty &&
+        _controller.mediaItems[_controller.currentIndex].isPlayable) {
+      unawaited(Future<void>.microtask(_syncCurrentPlayback));
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    unawaited(_inlineCoordinator?.handleAppLifecycleState(state));
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    unawaited(_inlineCoordinator?.handleMemoryPressure());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    final inlineCoordinator = _inlineCoordinator;
+    inlineCoordinator?.removeListener(_handleInlinePlaybackChanged);
+    if (inlineCoordinator != null) {
+      unawaited(
+        inlineCoordinator.shutdown().whenComplete(inlineCoordinator.dispose),
+      );
+    }
     if (_initialized) {
       _pageController.dispose();
       _controller.dispose();
     }
-    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    unawaited(_restoreSystemUiSafely());
     super.dispose();
   }
 
@@ -114,10 +156,14 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
       widget.api.imageRequest(item, maxWidth: 512, maxHeight: 512);
 
   void _onPageChanged(int index) {
-    if (_currentPageZoomed) {
-      setState(() => _currentPageZoomed = false);
+    if (_currentPageZoomed || _seekInteractionActive) {
+      setState(() {
+        _currentPageZoomed = false;
+        _seekInteractionActive = false;
+      });
     }
     _controller.setCurrentIndex(index);
+    unawaited(_syncCurrentPlayback());
   }
 
   void _setZoomed(int index, bool zoomed) {
@@ -129,8 +175,77 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
     setState(() => _currentPageZoomed = zoomed);
   }
 
+  void _setSeekInteractionActive(bool active) {
+    if (!mounted || _seekInteractionActive == active) return;
+    setState(() => _seekInteractionActive = active);
+    if (active) _controller.showControlsTemporarily();
+  }
+
+  InlinePlaybackCoordinator _ensureInlineCoordinator() {
+    final existing = _inlineCoordinator;
+    if (existing != null) return existing;
+    final injectedFactory = widget.inlineSessionFactory;
+    final InlinePlaybackSessionFactory factory;
+    if (injectedFactory != null) {
+      factory = injectedFactory;
+    } else {
+      final settingsRepository = PlaybackSettingsRepositoryScope.of(context);
+      final cacheStorage = PlaybackCacheStorageScope.of(context);
+      final diagnosticsController =
+          PlaybackDiagnosticsTestOverridesScope.maybeOf(context);
+      final settings = settingsRepository.load(widget.api.session);
+      factory = (item) async => MediaKitInlinePlaybackSession.create(
+        api: widget.api,
+        item: item,
+        settings: (await settings).settings,
+        cacheStorage: cacheStorage,
+        testOverrides: diagnosticsController?.consumeForPlayback(),
+      );
+    }
+    final coordinator = InlinePlaybackCoordinator(factory: factory)
+      ..addListener(_handleInlinePlaybackChanged);
+    _inlineCoordinator = coordinator;
+    return coordinator;
+  }
+
+  Future<void> _syncCurrentPlayback() {
+    if (!_initialized || widget.source.mode != MediaViewerMode.homeMedia) {
+      return Future<void>.value();
+    }
+    if (_controller.mediaItems.isEmpty) return Future<void>.value();
+    final item = _controller.mediaItems[_controller.currentIndex];
+    if (item.isPlayable) return _ensureInlineCoordinator().activate(item);
+    return _inlineCoordinator?.deactivate() ?? Future<void>.value();
+  }
+
+  void _handleInlinePlaybackChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _closeViewer() => _closeOperation ??= _closeViewerOnce();
+
+  Future<void> _closeViewerOnce() async {
+    final result = _controller.currentItemId;
+    await _inlineCoordinator?.shutdown();
+    unawaited(_restoreSystemUiSafely());
+    if (!mounted || _didPop) return;
+    _didPop = true;
+    Navigator.of(context).pop(result);
+  }
+
+  Future<void> _restoreSystemUi() => _restoreSystemUiOperation ??=
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+  Future<void> _restoreSystemUiSafely() async {
+    try {
+      await _restoreSystemUi();
+    } catch (_) {
+      // Platform UI restoration failure must not strand the viewer route.
+    }
+  }
+
   Future<void> _goTo(int index) async {
-    if (index < 0 || index >= _controller.photos.length) return;
+    if (index < 0 || index >= _controller.mediaItems.length) return;
     await _pageController.animateToPage(
       index,
       duration: const Duration(milliseconds: 220),
@@ -141,65 +256,98 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   @override
   Widget build(BuildContext context) {
     if (!_initialized) return const SizedBox.shrink();
-    return Scaffold(
-      key: const Key('photo-viewer'),
-      backgroundColor: Colors.black,
-      body: ListenableBuilder(
-        listenable: _controller,
-        builder: (context, _) {
-          final photos = _controller.photos;
-          if (photos.isEmpty) {
-            return const Center(
-              child: Icon(
-                Icons.broken_image_outlined,
-                size: 64,
-                color: Colors.white54,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_closeViewer());
+      },
+      child: Scaffold(
+        key: const Key('photo-viewer'),
+        backgroundColor: Colors.black,
+        body: ListenableBuilder(
+          listenable: _controller,
+          builder: (context, _) {
+            final mediaItems = _controller.mediaItems;
+            if (mediaItems.isEmpty) {
+              return const Center(
+                child: Icon(
+                  Icons.broken_image_outlined,
+                  size: 64,
+                  color: Colors.white54,
+                ),
+              );
+            }
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _controller.toggleControls,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  PageView.builder(
+                    controller: _pageController,
+                    physics: _currentPageZoomed || _seekInteractionActive
+                        ? const NeverScrollableScrollPhysics()
+                        : const PageScrollPhysics(),
+                    itemCount: mediaItems.length,
+                    onPageChanged: _onPageChanged,
+                    itemBuilder: (context, index) {
+                      final item = mediaItems[index];
+                      if (item.isPlayable) {
+                        final coordinatorState = _inlineCoordinator?.state;
+                        final playbackState =
+                            coordinatorState?.itemId == item.id
+                            ? coordinatorState!
+                            : InlinePlaybackState(itemId: item.id);
+                        return InlineVideoPage(
+                          key: ValueKey('video-page-${item.id}'),
+                          itemId: item.id,
+                          coverRequest: _viewerRequest(item),
+                          isActive: index == _controller.currentIndex,
+                          state: playbackState,
+                          onPlay: () => unawaited(
+                            _inlineCoordinator?.play() ?? Future<void>.value(),
+                          ),
+                          onPause: () => unawaited(
+                            _inlineCoordinator?.pause() ?? Future<void>.value(),
+                          ),
+                          onSeek: (position) => unawaited(
+                            _inlineCoordinator?.seek(position) ??
+                                Future<void>.value(),
+                          ),
+                          onRetry: () => unawaited(
+                            _inlineCoordinator?.retry() ?? Future<void>.value(),
+                          ),
+                          onSeekInteractionChanged: _setSeekInteractionActive,
+                        );
+                      }
+                      return ZoomablePhotoPage(
+                        key: ValueKey('photo-page-${item.id}'),
+                        request: _viewerRequest(item),
+                        thumbnailRequest: _thumbnailRequest(item),
+                        isActive: index == _controller.currentIndex,
+                        onZoomChanged: (zoomed) => _setZoomed(index, zoomed),
+                      );
+                    },
+                  ),
+                  _ViewerControls(
+                    visible: _controller.controlsVisible,
+                    title: mediaItems[_controller.currentIndex].name,
+                    positionLabel: _controller.positionLabel,
+                    canGoPrevious: _controller.canGoPrevious,
+                    canGoNext: _controller.canGoNext,
+                    loadingMore: _controller.isLoadingMore,
+                    loadMoreError: _controller.loadMoreError,
+                    onBack: () => unawaited(_closeViewer()),
+                    onPrevious: () => _goTo(_controller.currentIndex - 1),
+                    onNext: () => _goTo(_controller.currentIndex + 1),
+                    onRetryLoadMore: () =>
+                        _controller.loadMoreIfNeeded(force: true),
+                  ),
+                ],
               ),
             );
-          }
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _controller.toggleControls,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                PageView.builder(
-                  controller: _pageController,
-                  physics: _currentPageZoomed
-                      ? const NeverScrollableScrollPhysics()
-                      : const PageScrollPhysics(),
-                  itemCount: photos.length,
-                  onPageChanged: _onPageChanged,
-                  itemBuilder: (context, index) {
-                    final item = photos[index];
-                    return ZoomablePhotoPage(
-                      key: ValueKey('photo-page-${item.id}'),
-                      request: _viewerRequest(item),
-                      thumbnailRequest: _thumbnailRequest(item),
-                      isActive: index == _controller.currentIndex,
-                      onZoomChanged: (zoomed) => _setZoomed(index, zoomed),
-                    );
-                  },
-                ),
-                _ViewerControls(
-                  visible: _controller.controlsVisible,
-                  title: photos[_controller.currentIndex].name,
-                  positionLabel: _controller.positionLabel,
-                  canGoPrevious: _controller.canGoPrevious,
-                  canGoNext: _controller.canGoNext,
-                  loadingMore: _controller.isLoadingMore,
-                  loadMoreError: _controller.loadMoreError,
-                  onBack: () =>
-                      Navigator.of(context).maybePop(_controller.currentItemId),
-                  onPrevious: () => _goTo(_controller.currentIndex - 1),
-                  onNext: () => _goTo(_controller.currentIndex + 1),
-                  onRetryLoadMore: () =>
-                      _controller.loadMoreIfNeeded(force: true),
-                ),
-              ],
-            ),
-          );
-        },
+          },
+        ),
       ),
     );
   }
@@ -299,7 +447,7 @@ class _ViewerControls extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     IconButton(
-                      tooltip: '上一张',
+                      tooltip: '上一个',
                       onPressed: canGoPrevious ? onPrevious : null,
                       icon: const Icon(Icons.chevron_left, size: 34),
                     ),
@@ -319,7 +467,7 @@ class _ViewerControls extends StatelessWidget {
                       const SizedBox.square(dimension: 24),
                     const SizedBox(width: 32),
                     IconButton(
-                      tooltip: '下一张',
+                      tooltip: '下一个',
                       onPressed: canGoNext ? onNext : null,
                       icon: const Icon(Icons.chevron_right, size: 34),
                     ),
