@@ -227,7 +227,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   Future<void> _closeViewerOnce() async {
     final result = _controller.currentItemId;
     await _inlineCoordinator?.shutdown();
-    unawaited(_restoreSystemUiSafely());
+    await _restoreSystemUiSafely();
     if (!mounted || _didPop) return;
     _didPop = true;
     Navigator.of(context).pop(result);

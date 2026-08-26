@@ -274,11 +274,15 @@ void main() {
     'system back waits for video shutdown before returning media ID',
     (tester) async {
       final platformCalls = <MethodCall>[];
+      final restoreSystemUiGate = Completer<void>();
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
         if (call.method == 'SystemChrome.setEnabledSystemUIMode') {
           platformCalls.add(call);
+          if (call.arguments == SystemUiMode.edgeToEdge.toString()) {
+            await restoreSystemUiGate.future;
+          }
         }
         return null;
       });
@@ -331,7 +335,13 @@ void main() {
 
       shutdownGate.complete();
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byKey(const Key('photo-viewer')), findsOneWidget);
+      expect(returnedItemId, isNull);
+      expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
+
+      restoreSystemUiGate.complete();
+      await tester.pumpAndSettle();
 
       expect(returnedItemId, _video1.id);
       expect(find.text('打开媒体'), findsOneWidget);

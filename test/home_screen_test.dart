@@ -5,6 +5,7 @@ import 'package:emby_my_client/ui/home_screen.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:emby_my_client/ui/widgets/media_widgets.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -266,6 +267,15 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (_) async => null,
+    );
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
 
     final views = [
       for (var index = 0; index < 6; index++)
