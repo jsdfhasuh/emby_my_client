@@ -75,6 +75,15 @@ class PhotoViewerController extends ChangeNotifier {
   bool get totalDirty => _totalDirty;
   String? get currentItemId =>
       _mediaItems.isEmpty ? null : _mediaItems[_currentIndex].id;
+  MediaViewerResult get result => MediaViewerResult(
+    queryFingerprint: _source.queryFingerprint,
+    rawItems: _rawItems,
+    currentItemId: currentItemId,
+    nextStartIndex: _nextStartIndex,
+    totalCount: _totalCount,
+    totalDirty: _totalDirty,
+    hasMore: _hasMore,
+  );
 
   String get positionLabel {
     if (_mediaItems.isEmpty) return '0 / 0';

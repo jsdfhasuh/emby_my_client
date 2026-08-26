@@ -8,7 +8,10 @@ enum MediaViewerMode {
 
   bool accepts(EmbyItem item) => switch (this) {
     MediaViewerMode.photosOnly => item.isPhoto,
-    MediaViewerMode.homeMedia => item.isPhoto || item.isPlayable,
+    MediaViewerMode.homeMedia => switch (item.type) {
+      'Photo' || 'Movie' || 'Video' || 'Episode' => true,
+      _ => false,
+    },
   };
 }
 
@@ -17,6 +20,30 @@ typedef PhotoPageLoader =
       required int startIndex,
       required int limit,
     });
+
+@immutable
+final class MediaViewerResult {
+  MediaViewerResult({
+    required this.queryFingerprint,
+    required List<EmbyItem> rawItems,
+    required this.currentItemId,
+    required this.nextStartIndex,
+    required this.totalCount,
+    required this.totalDirty,
+    required this.hasMore,
+  }) : assert(queryFingerprint != ''),
+       assert(nextStartIndex >= 0),
+       assert(totalCount == null || totalCount >= 0),
+       rawItems = List.unmodifiable(rawItems);
+
+  final String queryFingerprint;
+  final List<EmbyItem> rawItems;
+  final String? currentItemId;
+  final int nextStartIndex;
+  final int? totalCount;
+  final bool totalDirty;
+  final bool hasMore;
+}
 
 @immutable
 sealed class PhotoSequenceSource {
