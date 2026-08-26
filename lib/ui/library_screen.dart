@@ -64,6 +64,20 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
+@visibleForTesting
+abstract interface class LibraryBrowseDebugState {
+  List<String> get debugLoadedItemIds;
+  int get debugNextStartIndex;
+  int? get debugTotalCount;
+  bool get debugTotalDirty;
+  bool get debugHasMore;
+  bool get debugLoadFailed;
+  bool get debugLoading;
+  int get debugGeneration;
+  String get debugQueryFingerprint;
+  Future<void> debugRefresh();
+}
+
 class _LibraryScreenState extends State<LibraryScreen> {
   late Future<List<EmbyItem>> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
@@ -1118,7 +1132,8 @@ class _LibraryFacetCard extends StatelessWidget {
   }
 }
 
-class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
+class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
+    implements LibraryBrowseDebugState {
   static const _pageSize = 60;
   static const _scrollTolerance = 0.5;
 
@@ -1152,6 +1167,37 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   LibraryScanKey? _activeScanKey;
   LibraryLocalScanSnapshot? _scanSnapshot;
   bool _preparingPlaybackQueue = false;
+
+  @override
+  List<String> get debugLoadedItemIds =>
+      List<String>.unmodifiable(_items.map((item) => item.id));
+
+  @override
+  int get debugNextStartIndex => _nextStartIndex;
+
+  @override
+  int? get debugTotalCount => _totalCount;
+
+  @override
+  bool get debugTotalDirty => _resultTotalDirty;
+
+  @override
+  bool get debugHasMore => _hasMore;
+
+  @override
+  bool get debugLoadFailed => _loadFailed;
+
+  @override
+  bool get debugLoading => _loading;
+
+  @override
+  int get debugGeneration => _generation;
+
+  @override
+  String get debugQueryFingerprint => _photoQueryFingerprint(_state);
+
+  @override
+  Future<void> debugRefresh() => _refresh();
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
@@ -1554,21 +1600,27 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         pageSize: _pageSize,
         dirty: _resultTotalDirty,
       );
+      final staleCursor = startIndex < _nextStartIndex;
       setState(() {
-        _nextStartIndex = cursor.nextStartIndex;
-        _totalCount = cursor.totalCount;
-        _resultTotalDirty = cursor.dirty;
         for (final item in page.items) {
           if (!_seenItemIds.add(item.id)) continue;
           _items.add(item);
         }
-        _hasMore = cursor.hasMore || cursor.paginationStalled;
-        _loadFailed = cursor.paginationStalled;
+        if (staleCursor) {
+          _mergeNonRegressingTotal(cursor.totalCount, cursor.dirty);
+        } else {
+          _nextStartIndex = cursor.nextStartIndex;
+          _totalCount = cursor.totalCount;
+          _resultTotalDirty = cursor.dirty;
+          _hasMore = cursor.hasMore || cursor.paginationStalled;
+          _loadFailed = cursor.paginationStalled;
+        }
         _loading = false;
       });
       _recordCursorDiagnostics(cursor);
     } catch (error, stackTrace) {
       if (!mounted || generation != _generation) return;
+      final staleCursor = startIndex < _nextStartIndex;
       DiagnosticLog.instance.error(
         'library',
         'Library page load failed scope=${_state.scope.name}',
@@ -1577,8 +1629,21 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       );
       setState(() {
         _loading = false;
-        _loadFailed = true;
+        if (!staleCursor) _loadFailed = true;
       });
+    }
+  }
+
+  void _mergeNonRegressingTotal(int? incomingTotal, bool incomingDirty) {
+    final currentTotal = _totalCount;
+    final totalsDiffer =
+        currentTotal != null &&
+        incomingTotal != null &&
+        currentTotal != incomingTotal;
+    _resultTotalDirty = _resultTotalDirty || incomingDirty || totalsDiffer;
+    if (incomingTotal == null) return;
+    if (currentTotal == null || incomingTotal > currentTotal) {
+      _totalCount = incomingTotal;
     }
   }
 
@@ -2205,6 +2270,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  String _photoQueryFingerprint(LibraryBrowseState state) =>
+      'library:${Object.hash(widget.view.id, state, widget.profile.kind).toUnsigned(32)}';
+
   PhotoSequenceSource _photoSequenceSource(EmbyItem initialItem) {
     final state = _state;
     final api = widget.api;
@@ -2250,8 +2318,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       ),
     };
 
-    final fingerprint =
-        'library:${Object.hash(viewId, state, profile.kind).toUnsigned(32)}';
+    final fingerprint = _photoQueryFingerprint(state);
     final initialItems = List<EmbyItem>.of(_items);
     return state.scope == LibraryBrowseScope.directory
         ? DirectoryPhotoSource(
@@ -2274,6 +2341,41 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
             initialHasMore: _hasMore,
             loadPage: loadPage,
           );
+  }
+
+  bool _mergeViewerResult(
+    MediaViewerResult result, {
+    required int expectedGeneration,
+    required String expectedFingerprint,
+  }) {
+    if (_usesLocalScan ||
+        expectedGeneration != _generation ||
+        result.queryFingerprint != expectedFingerprint ||
+        result.queryFingerprint != _photoQueryFingerprint(_state)) {
+      return false;
+    }
+    final previousCursor = _nextStartIndex;
+    final resultAdvancesCursor = result.nextStartIndex > previousCursor;
+    setState(() {
+      for (final item in result.rawItems) {
+        if (!_seenItemIds.add(item.id)) continue;
+        _items.add(item);
+      }
+      if (resultAdvancesCursor) {
+        _nextStartIndex = result.nextStartIndex;
+        _hasMore = result.hasMore;
+        _loadFailed = false;
+      } else if (result.nextStartIndex == previousCursor) {
+        _hasMore = _hasMore && result.hasMore;
+      }
+      _mergeNonRegressingTotal(result.totalCount, result.totalDirty);
+      final total = _totalCount;
+      if (total != null && total < _items.length) {
+        _resultTotalDirty = true;
+        _reportedTotalBelowLoaded = true;
+      }
+    });
+    return true;
   }
 
   Future<void> _open(EmbyItem item) async {
@@ -2340,16 +2442,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           _reportUserDataRefreshFailure(error, stackTrace);
         }
       case LibraryEntryAction.openPhoto:
-        final finalMediaId = await Navigator.of(context).push<String>(
-          MaterialPageRoute<String>(
-            builder: (_) => PhotoViewerScreen(
-              api: widget.api,
-              source: _photoSequenceSource(item),
-            ),
+        final generation = _generation;
+        final source = _photoSequenceSource(item);
+        final result = await Navigator.of(context).push<MediaViewerResult>(
+          MaterialPageRoute<MediaViewerResult>(
+            builder: (_) => PhotoViewerScreen(api: widget.api, source: source),
           ),
         );
-        if (!mounted) return;
-        _scheduleViewerPositionRestore(finalMediaId);
+        if (!mounted || result == null) return;
+        final merged = _mergeViewerResult(
+          result,
+          expectedGeneration: generation,
+          expectedFingerprint: source.queryFingerprint,
+        );
+        if (merged) _scheduleViewerPositionRestore(result.currentItemId);
       case LibraryEntryAction.unsupported:
         DiagnosticLog.instance.warning(
           'library',
