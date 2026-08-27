@@ -7,6 +7,7 @@ import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_telemetry.dart';
 import 'playback_diagnostics.dart';
+import 'playback_output_quiescer.dart';
 
 typedef NativePropertyWriter =
     Future<void> Function(String property, String value);
@@ -101,8 +102,11 @@ class MediaKitPlaybackEngine
   MediaKitPlaybackEngine(
     this.player, {
     this.nativePropertyWriter,
+    PlaybackOutputQuiescer? outputQuiescer,
     PlaybackDiagnostics? diagnostics,
-  }) : _diagnostics = diagnostics ?? PlaybackDiagnostics() {
+  }) : _outputQuiescer =
+           outputQuiescer ?? MediaKitPlaybackOutputQuiescer(player),
+       _diagnostics = diagnostics ?? PlaybackDiagnostics() {
     final platform = player.platform;
     if (platform is NativePlayer) {
       _cacheEngine = NativePlaybackCacheEngine(
@@ -117,13 +121,17 @@ class MediaKitPlaybackEngine
 
   final Player player;
   final NativePropertyWriter? nativePropertyWriter;
+  final PlaybackOutputQuiescer _outputQuiescer;
   final PlaybackDiagnostics _diagnostics;
   NativePlaybackCacheEngine? _cacheEngine;
+  final Set<Future<void>> _nativeOperations = <Future<void>>{};
   bool _hasOpenedMedia = false;
   bool _retiring = false;
   bool _lifecycleQuiesced = false;
+  bool _disposeStarted = false;
   int _quiescenceEpoch = 0;
   Future<void>? _pauseOutputOperation;
+  Future<void>? _disposeOperation;
 
   @override
   Stream<Duration> get positionStream => player.stream.position;
@@ -135,7 +143,10 @@ class MediaKitPlaybackEngine
   Stream<Duration> get bufferStream => player.stream.buffer;
 
   @override
-  Stream<bool> get playingStream => player.stream.playing;
+  Stream<bool> get playingStream => player.stream.playing.map(
+    (playing) =>
+        playing && !_retiring && !_lifecycleQuiesced && !_disposeStarted,
+  );
 
   @override
   Stream<bool> get bufferingStream => player.stream.buffering;
@@ -187,69 +198,97 @@ class MediaKitPlaybackEngine
     Uri uri, {
     required Map<String, String> headers,
     required bool play,
-  }) async {
-    if (_retiring) return;
+  }) {
+    if (_retiring || _disposeStarted) return Future<void>.value();
     final quiescenceEpoch = _quiescenceEpoch;
     _hasOpenedMedia = true;
-    await player.open(Media(uri.toString(), httpHeaders: headers), play: play);
-    if (play && _mustReassertQuiescence(quiescenceEpoch)) {
-      await _pauseOutput();
-    }
+    return _trackNativeOperation(() async {
+      await player.open(
+        Media(uri.toString(), httpHeaders: headers),
+        play: play,
+      );
+      if (play && _mustReassertQuiescence(quiescenceEpoch)) {
+        await _pauseOutput();
+      }
+    });
   }
 
   @override
-  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
+  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() {
     final cacheEngine = _cacheEngine;
-    if (cacheEngine != null) return cacheEngine.probeCacheCapabilities();
-    return PlaybackCacheEngineCapabilities.unsupported();
+    if (_disposeStarted || cacheEngine == null) {
+      return Future.value(PlaybackCacheEngineCapabilities.unsupported());
+    }
+    return _trackNativeOperation(cacheEngine.probeCacheCapabilities);
   }
 
   @override
   Future<PlaybackCacheApplyResult> configureCache(
     ResolvedPlaybackCacheProfile profile,
     PlaybackCacheEngineCapabilities capabilities,
-  ) async {
+  ) {
     final cacheEngine = _cacheEngine;
-    if (cacheEngine != null) {
-      return cacheEngine.configureCache(profile, capabilities);
+    if (!_disposeStarted && cacheEngine != null) {
+      return _trackNativeOperation(
+        () => cacheEngine.configureCache(profile, capabilities),
+      );
     }
-    return PlaybackCacheApplyResult(
-      requestedMode: profile.runtimeMode,
-      actualMode: PlaybackCacheRuntimeMode.unconfirmed,
-      fallbackReason: PlaybackCacheFallbackReason.engineCapabilityUnavailable,
-      requiresPlayerRecreation: false,
-      readBack: const {},
+    return Future.value(
+      PlaybackCacheApplyResult(
+        requestedMode: profile.runtimeMode,
+        actualMode: PlaybackCacheRuntimeMode.unconfirmed,
+        fallbackReason: PlaybackCacheFallbackReason.engineCapabilityUnavailable,
+        requiresPlayerRecreation: false,
+        readBack: const {},
+      ),
     );
   }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
-      _cacheEngine?.readCacheSnapshot() ?? Future.value();
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() {
+    final cacheEngine = _cacheEngine;
+    if (_disposeStarted || cacheEngine == null) return Future.value();
+    return _trackNativeOperation(cacheEngine.readCacheSnapshot);
+  }
 
   @override
   Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
     required PlaybackCacheReadIdentity identity,
     required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
-  }) =>
-      _cacheEngine?.readCacheSnapshotForIdentity(
+  }) {
+    final cacheEngine = _cacheEngine;
+    if (_disposeStarted || cacheEngine == null) return Future.value();
+    return _trackNativeOperation(
+      () => cacheEngine.readCacheSnapshotForIdentity(
         identity: identity,
         isIdentityCurrent: isIdentityCurrent,
-      ) ??
-      Future.value();
-
-  @override
-  Future<void> play() async {
-    if (_retiring || _lifecycleQuiesced) return;
-    final quiescenceEpoch = _quiescenceEpoch;
-    await player.play();
-    if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+      ),
+    );
   }
 
   @override
-  Future<void> pause() => player.pause();
+  Future<void> play() {
+    if (_retiring || _lifecycleQuiesced || _disposeStarted) {
+      return Future<void>.value();
+    }
+    final quiescenceEpoch = _quiescenceEpoch;
+    return _trackNativeOperation(() async {
+      await player.play();
+      if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+    });
+  }
+
+  @override
+  Future<void> pause() {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(player.pause);
+  }
 
   @override
   Future<void> quiesce() {
+    if (_disposeStarted) {
+      return _disposeOperation ?? Future<void>.value();
+    }
     _retiring = true;
     _quiescenceEpoch++;
     return _pauseOutput();
@@ -257,6 +296,9 @@ class MediaKitPlaybackEngine
 
   @override
   Future<void> quiesceForLifecycle() {
+    if (_disposeStarted) {
+      return _disposeOperation ?? Future<void>.value();
+    }
     _lifecycleQuiesced = true;
     _quiescenceEpoch++;
     return _pauseOutput();
@@ -264,17 +306,21 @@ class MediaKitPlaybackEngine
 
   @override
   Future<void> resumeFromLifecycleQuiescence() async {
-    if (_retiring) return;
+    if (_retiring || _disposeStarted) return;
     _lifecycleQuiesced = false;
     _quiescenceEpoch++;
   }
 
   @override
-  Future<void> seek(Duration position) async {
-    if (_retiring || _lifecycleQuiesced) return;
+  Future<void> seek(Duration position) {
+    if (_retiring || _lifecycleQuiesced || _disposeStarted) {
+      return Future<void>.value();
+    }
     final quiescenceEpoch = _quiescenceEpoch;
-    await player.seek(position);
-    if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+    return _trackNativeOperation(() async {
+      await player.seek(position);
+      if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+    });
   }
 
   bool _mustReassertQuiescence(int operationEpoch) =>
@@ -284,7 +330,7 @@ class MediaKitPlaybackEngine
     final existing = _pauseOutputOperation;
     if (existing != null) return existing;
     late final Future<void> operation;
-    operation = Future<void>.sync(player.pause).whenComplete(() {
+    operation = _pauseOutputSafely().whenComplete(() {
       if (identical(_pauseOutputOperation, operation)) {
         _pauseOutputOperation = null;
       }
@@ -293,30 +339,64 @@ class MediaKitPlaybackEngine
     return operation;
   }
 
-  @override
-  Future<void> selectAudioTrack(String trackId) async {
-    final track = player.state.tracks.audio
-        .where((candidate) => candidate.id == trackId)
-        .firstOrNull;
-    if (track == null) {
-      throw StateError('Audio track $trackId is unavailable');
+  Future<void> _pauseOutputSafely() async {
+    try {
+      await _outputQuiescer.pauseUrgently();
+    } catch (error) {
+      DiagnosticLog.instance.warning(
+        'player',
+        'event=playback_urgent_pause_failed '
+            'errorType=${error.runtimeType}',
+      );
     }
-    await player.setAudioTrack(track);
+  }
+
+  Future<T> _trackNativeOperation<T>(Future<T> Function() operation) {
+    final nativeOperation = Future<T>.sync(operation);
+    late final Future<void> completion;
+    completion = nativeOperation
+        .then<void>((_) {}, onError: (Object _, StackTrace _) {})
+        .whenComplete(() => _nativeOperations.remove(completion));
+    _nativeOperations.add(completion);
+    return nativeOperation;
+  }
+
+  Future<void> _waitForNativeOperations() async {
+    while (_nativeOperations.isNotEmpty) {
+      await Future.wait<void>(List<Future<void>>.of(_nativeOperations));
+    }
   }
 
   @override
-  Future<void> selectSubtitleTrack(String? trackId) async {
-    if (trackId == null) {
-      await player.setSubtitleTrack(SubtitleTrack.no());
-      return;
-    }
-    final track = player.state.tracks.subtitle
-        .where((candidate) => candidate.id == trackId)
-        .firstOrNull;
-    if (track == null) {
-      throw StateError('Subtitle track $trackId is unavailable');
-    }
-    await player.setSubtitleTrack(track);
+  Future<void> selectAudioTrack(String trackId) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(() async {
+      final track = player.state.tracks.audio
+          .where((candidate) => candidate.id == trackId)
+          .firstOrNull;
+      if (track == null) {
+        throw StateError('Audio track $trackId is unavailable');
+      }
+      await player.setAudioTrack(track);
+    });
+  }
+
+  @override
+  Future<void> selectSubtitleTrack(String? trackId) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(() async {
+      if (trackId == null) {
+        await player.setSubtitleTrack(SubtitleTrack.no());
+        return;
+      }
+      final track = player.state.tracks.subtitle
+          .where((candidate) => candidate.id == trackId)
+          .firstOrNull;
+      if (track == null) {
+        throw StateError('Subtitle track $trackId is unavailable');
+      }
+      await player.setSubtitleTrack(track);
+    });
   }
 
   @override
@@ -324,20 +404,36 @@ class MediaKitPlaybackEngine
     Uri uri, {
     String? title,
     String? language,
-  }) => player.setSubtitleTrack(
-    SubtitleTrack.uri(uri.toString(), title: title, language: language),
-  );
+  }) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(
+      () => player.setSubtitleTrack(
+        SubtitleTrack.uri(uri.toString(), title: title, language: language),
+      ),
+    );
+  }
 
   @override
-  Future<void> setRate(double rate) => player.setRate(rate);
+  Future<void> setRate(double rate) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(() => player.setRate(rate));
+  }
 
   @override
-  Future<void> setAudioDelay(Duration delay) =>
-      _setNativeProperty('audio-delay', _seconds(delay));
+  Future<void> setAudioDelay(Duration delay) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(
+      () => _setNativeProperty('audio-delay', _seconds(delay)),
+    );
+  }
 
   @override
-  Future<void> setSubtitleDelay(Duration delay) =>
-      _setNativeProperty('sub-delay', _seconds(delay));
+  Future<void> setSubtitleDelay(Duration delay) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(
+      () => _setNativeProperty('sub-delay', _seconds(delay)),
+    );
+  }
 
   @override
   Future<void> configureSubtitleStyle({
@@ -345,11 +441,14 @@ class MediaKitPlaybackEngine
     required int color,
     required int outlineColor,
     required int position,
-  }) async {
-    await _setNativeProperty('sub-font-size', fontSize.toStringAsFixed(1));
-    await _setNativeProperty('sub-color', _mpvColor(color));
-    await _setNativeProperty('sub-border-color', _mpvColor(outlineColor));
-    await _setNativeProperty('sub-pos', position.clamp(0, 100).toString());
+  }) {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(() async {
+      await _setNativeProperty('sub-font-size', fontSize.toStringAsFixed(1));
+      await _setNativeProperty('sub-color', _mpvColor(color));
+      await _setNativeProperty('sub-border-color', _mpvColor(outlineColor));
+      await _setNativeProperty('sub-pos', position.clamp(0, 100).toString());
+    });
   }
 
   Future<void> _setNativeProperty(String property, String value) async {
@@ -375,10 +474,31 @@ class MediaKitPlaybackEngine
       '#${value.toUnsigned(32).toRadixString(16).padLeft(8, '0').toUpperCase()}';
 
   @override
-  Future<void> stop() => player.stop();
+  Future<void> stop() {
+    if (_disposeStarted) return Future<void>.value();
+    return _trackNativeOperation(player.stop);
+  }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() {
+    final existing = _disposeOperation;
+    if (existing != null) return existing;
+    final wasRetiring = _retiring;
+    _disposeStarted = true;
+    if (!wasRetiring) {
+      _retiring = true;
+      _quiescenceEpoch++;
+    }
+    final quiescence =
+        _pauseOutputOperation ?? (wasRetiring ? null : _pauseOutput());
+    final operation = _dispose(quiescence);
+    _disposeOperation = operation;
+    return operation;
+  }
+
+  Future<void> _dispose(Future<void>? quiescence) async {
+    if (quiescence != null) await quiescence;
+    await _waitForNativeOperations();
     _cacheEngine?.dispose();
     await player.dispose();
   }
