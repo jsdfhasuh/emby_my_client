@@ -20,6 +20,9 @@ class LoginScreen extends StatefulWidget {
     this.capabilities,
     this.safeDiagnosticService,
     this.safeDiagnosticShareGateway,
+    this.addAccountMode = false,
+    this.initialServerUrl,
+    this.initialUsername,
   });
 
   final AppController controller;
@@ -27,6 +30,9 @@ class LoginScreen extends StatefulWidget {
   final PlatformCapabilities? capabilities;
   final SafeDiagnosticExportService? safeDiagnosticService;
   final SafeDiagnosticShareGateway? safeDiagnosticShareGateway;
+  final bool addAccountMode;
+  final String? initialServerUrl;
+  final String? initialUsername;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -36,8 +42,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   static const _compactHeightThreshold = 600.0;
 
   final _formKey = GlobalKey<FormState>();
-  final _serverController = TextEditingController();
-  final _usernameController = TextEditingController();
+  late final TextEditingController _serverController;
+  late final TextEditingController _usernameController;
   final _passwordController = TextEditingController();
   final _scrollController = ScrollController();
   final _serverFocusNode = FocusNode();
@@ -65,6 +71,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _serverController = TextEditingController(text: widget.initialServerUrl);
+    _usernameController = TextEditingController(text: widget.initialUsername);
     WidgetsBinding.instance.addObserver(this);
     _serverFocusNode.addListener(_handleFieldFocusChanged);
     _usernameFocusNode.addListener(_handleFieldFocusChanged);
@@ -244,11 +252,22 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
       _diagnosticCode = null;
     });
     try {
-      await widget.controller.signIn(
-        serverUrl: _serverController.text,
-        username: _usernameController.text,
-        password: _passwordController.text,
-      );
+      if (widget.addAccountMode) {
+        await widget.controller.addAccount(
+          serverUrl: _serverController.text,
+          username: _usernameController.text,
+          password: _passwordController.text,
+        );
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop(true);
+        }
+      } else {
+        await widget.controller.signIn(
+          serverUrl: _serverController.text,
+          username: _usernameController.text,
+          password: _passwordController.text,
+        );
+      }
     } on EmbyApiException catch (error) {
       final message =
           _capabilities.supportsLocalNetworkPermissionRecovery &&
@@ -271,7 +290,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     } catch (_) {
       if (mounted) {
         setState(() {
-          _error = '登录失败，请稍后重试';
+          _error = widget.addAccountMode ? '添加账户失败，请稍后重试' : '登录失败，请稍后重试';
           _diagnosticCode = _isIpadOS ? 'LOGIN-UNKNOWN' : null;
         });
       }
@@ -463,8 +482,18 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                                       color: Colors.black,
                                     ),
                                   )
-                                : const Icon(Icons.login),
-                            label: Text(_isSubmitting ? '正在连接' : '登录'),
+                                : Icon(
+                                    widget.addAccountMode
+                                        ? Icons.add_link
+                                        : Icons.login,
+                                  ),
+                            label: Text(
+                              _isSubmitting
+                                  ? '正在连接'
+                                  : widget.addAccountMode
+                                  ? '添加并切换'
+                                  : '登录',
+                            ),
                           ),
                         ],
                       ),
@@ -485,36 +514,64 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Container(
-              width: logoSize,
-              height: logoSize,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primary,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Icon(
-                Icons.play_arrow_rounded,
-                size: compact ? 28 : 38,
-                color: Colors.black,
-              ),
-            ),
-            if (_isIpadOS) ...[
-              const Spacer(),
-              TextButton.icon(
-                key: const ValueKey<String>('login-safe-diagnostics-button'),
-                onPressed: _openSafeDiagnostics,
-                icon: const Icon(Icons.security_outlined),
-                label: const Text('查看/导出安全诊断'),
-              ),
-            ],
-          ],
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final textScale = MediaQuery.textScalerOf(context).scale(1);
+            final useCompactDiagnostics =
+                constraints.maxWidth < 360 || textScale > 1.5;
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (widget.addAccountMode) ...[
+                  IconButton(
+                    key: const ValueKey<String>('login-back-button'),
+                    tooltip: '返回',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Container(
+                  width: logoSize,
+                  height: logoSize,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Icon(
+                    Icons.play_arrow_rounded,
+                    size: compact ? 28 : 38,
+                    color: Colors.black,
+                  ),
+                ),
+                if (_isIpadOS) ...[
+                  const Spacer(),
+                  if (useCompactDiagnostics)
+                    IconButton(
+                      key: const ValueKey<String>(
+                        'login-safe-diagnostics-button',
+                      ),
+                      tooltip: '查看/导出安全诊断',
+                      onPressed: _openSafeDiagnostics,
+                      icon: const Icon(Icons.security_outlined),
+                    )
+                  else
+                    TextButton.icon(
+                      key: const ValueKey<String>(
+                        'login-safe-diagnostics-button',
+                      ),
+                      onPressed: _openSafeDiagnostics,
+                      icon: const Icon(Icons.security_outlined),
+                      label: const Text('查看/导出安全诊断'),
+                    ),
+                ],
+              ],
+            );
+          },
         ),
         SizedBox(height: compact ? 10 : 24),
         Text(
-          'Emby 客户端',
+          widget.addAccountMode ? '添加服务器账户' : 'Emby 客户端',
           style:
               (compact
                       ? theme.textTheme.titleLarge
@@ -525,9 +582,9 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
         ),
         if (!compact) ...[
           const SizedBox(height: 8),
-          const Text(
-            '登录你的媒体服务器',
-            style: TextStyle(color: Color(0xFFADB5B7), fontSize: 16),
+          Text(
+            widget.addAccountMode ? '登录另一个媒体服务器' : '登录你的媒体服务器',
+            style: const TextStyle(color: Color(0xFFADB5B7), fontSize: 16),
           ),
         ],
       ],

@@ -183,7 +183,11 @@ void main() {
     );
 
     expect(storage.values, isNot(contains('emby_session_v1')));
-    expect(storage.deleteCalls, 0);
+    expect(
+      storage.values.keys,
+      isNot(contains(startsWith('emby_server_account_session_v1_'))),
+    );
+    expect(storage.deleteCalls, 1);
     expect(tracker.registry.scopes, isEmpty);
     expect(tracker.disposed, 1);
     expect(controller.session, isNull);
@@ -300,7 +304,12 @@ void main() {
       expect(controller.scope, ServerScope.fromSession(_session));
       expect(controller.api.session, same(_session));
       expect(notifications, 1);
-      expect(storage.writeCalls, 1);
+      expect(storage.writeCalls, 3);
+      expect(storage.values, contains('emby_server_accounts_v1'));
+      expect(
+        storage.values.keys,
+        contains(startsWith('emby_server_account_session_v1_')),
+      );
     },
   );
 

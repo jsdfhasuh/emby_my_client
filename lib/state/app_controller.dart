@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import '../accounts/server_account.dart';
+import '../accounts/server_account_repository.dart';
+import '../accounts/server_account_store.dart';
 import '../core/diagnostic_log.dart';
 import '../core/server_capabilities.dart';
 import '../core/server_scope.dart';
@@ -44,6 +47,19 @@ typedef SignInApiFactory =
 typedef DownloadServiceFactory =
     DownloadService Function(EmbyApi api, ServerScope scope);
 
+typedef _PreparedWorkspaceState = ({
+  ServerScope scope,
+  LibraryCategorySettings settings,
+  ServerCapabilities capabilities,
+});
+
+typedef _PreparedWorkspace = ({
+  ServerScope scope,
+  LibraryCategorySettings settings,
+  ServerCapabilities capabilities,
+  EmbyApi api,
+});
+
 Future<EmbySession> _defaultAuthenticate({
   required String serverUrl,
   required String username,
@@ -75,6 +91,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     SignInApiFactory? apiFactory,
     DownloadServiceFactory? downloadServiceFactory,
     LibraryScanServiceFactory? libraryScanServiceFactory,
+    ServerAccountRepository? serverAccountRepository,
   }) : _store = store ?? SessionStore(capabilities: capabilities),
        _database = database ?? LocalDatabase(),
        _libraryCategorySettingsStore = libraryCategorySettingsStore,
@@ -97,6 +114,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
            ClientRegistry<EmbyApi>(disposeClient: (api) => api.dispose()) {
     _capabilitiesRepository = ServerCapabilitiesRepository(_database);
     _downloadRepository = DownloadRepository(_database);
+    _accounts =
+        serverAccountRepository ??
+        ServerAccountRepository(store: ServerAccountStore(_store));
   }
 
   final SessionStore _store;
@@ -116,6 +136,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AccountDataCleanup? _accountDataCleanup;
   late final ServerCapabilitiesRepository _capabilitiesRepository;
   late final DownloadRepository _downloadRepository;
+  late final ServerAccountRepository _accounts;
+  Future<void> _accountTransitionTail = Future<void>.value();
   EmbySession? _session;
   ServerScope? _scope;
   ServerCapabilities? _serverCapabilities;
@@ -134,8 +156,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void>? _initialization;
   Future<void>? _accountDataDeletion;
   bool _signInInProgress = false;
+  bool _accountTransitionInProgress = false;
 
   EmbySession? get session => _session;
+  List<ServerAccount> get serverAccounts => _accounts.accounts;
+  String? get currentAccountId => _accounts.currentAccountId;
+  bool get hasServerAccounts => _accounts.accounts.isNotEmpty;
+  bool get isSwitchingServer => _accountTransitionInProgress;
   ServerScope? get scope => _scope;
   ServerCapabilities? get serverCapabilities => _serverCapabilities;
   DownloadService? get downloads => _downloads;
@@ -166,7 +193,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         event: SafeDiagnosticEvent.signInStageStart,
         stage: SignInStage.sessionRead,
       );
-      final session = await _store.loadSession();
+      await _accounts.initialize();
+      final session = _accounts.currentAccount?.session;
       _recordSafeStage(
         component: SafeDiagnosticComponent.storage,
         event: SafeDiagnosticEvent.signInStageSuccess,
@@ -212,7 +240,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       event: SafeDiagnosticEvent.signInStageStart,
       stage: SignInStage.preflight,
     );
-    if (_signInInProgress) {
+    if (_signInInProgress || _accountTransitionInProgress) {
       final failure = const SignInFailure(
         stage: SignInStage.preflight,
         reason: SignInFailureReason.alreadyInProgress,
@@ -242,7 +270,247 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return operation.whenComplete(() => _signInInProgress = false);
   }
 
+  Future<void> addAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) {
+    _recordSafeStage(
+      event: SafeDiagnosticEvent.signInStageStart,
+      stage: SignInStage.preflight,
+    );
+    if (_signInInProgress || _accountTransitionInProgress) {
+      final failure = const SignInFailure(
+        stage: SignInStage.preflight,
+        reason: SignInFailureReason.alreadyInProgress,
+      );
+      _recordSignInFailure(failure);
+      return Future<void>.error(failure);
+    }
+    _recordSafeStage(
+      event: SafeDiagnosticEvent.signInStageSuccess,
+      stage: SignInStage.preflight,
+    );
+    _signInInProgress = true;
+    final operation = _runAddAccount(
+      serverUrl: serverUrl,
+      username: username,
+      password: password,
+    );
+    return operation.whenComplete(() => _signInInProgress = false);
+  }
+
+  Future<void> _runAddAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final session = await _authenticateSession(
+      serverUrl: serverUrl,
+      username: username,
+      password: password,
+    );
+    final account = await _runSignInStage<ServerAccount>(
+      stage: SignInStage.sessionSave,
+      fallbackReason: SignInFailureReason.sessionSaveFailed,
+      action: () => _accounts.upsert(session),
+    );
+    await _runSignInStage<void>(
+      stage: SignInStage.activate,
+      fallbackReason: SignInFailureReason.activationFailed,
+      action: () => switchAccount(account.accountId, forceReload: true),
+    );
+  }
+
+  Future<void> switchAccount(String accountId, {bool forceReload = false}) {
+    if (_disposed) {
+      return Future<void>.error(StateError('AppController has been disposed'));
+    }
+    return _enqueueAccountTransition(
+      () => _switchAccount(accountId, forceReload: forceReload),
+    );
+  }
+
+  Future<void> _switchAccount(
+    String accountId, {
+    bool forceReload = false,
+  }) async {
+    await _accounts.initialize();
+    final targetAccount = _accounts.accountById(accountId);
+    if (targetAccount == null) throw StateError('找不到该服务器账户');
+    if (targetAccount.connectionState ==
+            ServerConnectionState.authenticationRequired &&
+        !forceReload) {
+      throw StateError('该服务器账户需要重新登录');
+    }
+    if (!forceReload &&
+        _accounts.currentAccountId == accountId &&
+        _session != null &&
+        _scope == targetAccount.scope) {
+      return;
+    }
+
+    _accountTransitionInProgress = true;
+    if (!_disposed) notifyListeners();
+    final previousAccountId = _accounts.currentAccountId;
+    final previousSession = _session;
+    final previousScope = _scope;
+    final previousApi = previousScope == null
+        ? null
+        : _clients.clientFor(previousScope);
+    _PreparedWorkspaceState? preparedState;
+    EmbyApi? preparedApi;
+    var targetRegistered = false;
+    var previousUnregistered = false;
+    try {
+      // Restore target metadata while A is still usable, but do not construct
+      // B's API until A's scan, downloads, realtime client, and Dio instance
+      // have fully shut down. This keeps one active server workspace at most.
+      preparedState = await _prepareWorkspaceState(targetAccount.session);
+      await _shutdownLibraryScanService();
+      await _shutdownDownloads(stopExecutor: true);
+      if (previousScope != null) {
+        await _clients.unregister(previousScope);
+        previousUnregistered = true;
+      }
+      _resetSessionState();
+      await _accounts.setCurrent(accountId);
+      preparedApi =
+          _apiFactory?.call(targetAccount.session, preparedState.scope) ??
+          _createApi(targetAccount.session, preparedState.scope);
+      _clients.register(preparedState.scope, preparedApi);
+      targetRegistered = true;
+      await _commitSignIn(
+        session: targetAccount.session,
+        scope: preparedState.scope,
+        settings: preparedState.settings,
+        capabilities: preparedState.capabilities,
+        api: preparedApi,
+      );
+    } catch (_) {
+      if (preparedApi != null && preparedState != null) {
+        if (targetRegistered) {
+          try {
+            await _clients.unregister(preparedState.scope);
+          } catch (_) {}
+        } else {
+          await _disposeAttemptApi(preparedApi);
+        }
+      }
+      try {
+        await _restoreWorkspaceAfterFailedSwitch(
+          previousAccountId: previousAccountId,
+          previousSession: previousSession,
+          previousScope: previousScope,
+          previousApi: previousApi,
+          previousUnregistered: previousUnregistered,
+        );
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'accounts',
+          'Failed to restore the previous server workspace',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        _resetSessionState();
+      }
+      rethrow;
+    } finally {
+      _accountTransitionInProgress = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> _restoreWorkspaceAfterFailedSwitch({
+    required String? previousAccountId,
+    required EmbySession? previousSession,
+    required ServerScope? previousScope,
+    required EmbyApi? previousApi,
+    required bool previousUnregistered,
+  }) async {
+    try {
+      await _accounts.setCurrent(previousAccountId);
+    } catch (_) {
+      // The original switch failure remains primary.
+    }
+    if (previousSession == null || previousScope == null) {
+      _resetSessionState();
+      return;
+    }
+    if (!previousUnregistered &&
+        previousApi != null &&
+        identical(_clients.clientFor(previousScope), previousApi)) {
+      _session = previousSession;
+      _scope = previousScope;
+      _serverCapabilities = await _restoreCapabilities(previousSession);
+      _libraryCategorySettings = await _restoreLibraryCategorySettings(
+        previousScope,
+      );
+      _activateLibraryScanService(previousApi, previousScope);
+      await _activateDownloads(previousApi, previousScope);
+      return;
+    }
+    _resetSessionState();
+    try {
+      await _activateSession(previousSession);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'accounts',
+        'Failed to restore previous server after switch failure',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      _resetSessionState();
+    }
+  }
+
   Future<void> _runSignIn({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final session = await _authenticateSession(
+      serverUrl: serverUrl,
+      username: username,
+      password: password,
+    );
+
+    final prepared = await _runSignInStage<_PreparedWorkspace>(
+      stage: SignInStage.sessionPrepare,
+      fallbackReason: SignInFailureReason.sessionPrepareFailed,
+      action: () async {
+        final prepared = await _prepareWorkspace(session, safeLogging: true);
+        try {
+          _clients.register(prepared.scope, prepared.api);
+        } catch (_) {
+          await _disposeAttemptApi(prepared.api);
+          rethrow;
+        }
+        return prepared;
+      },
+    );
+
+    try {
+      await _runSignInStage<void>(
+        stage: SignInStage.sessionSave,
+        fallbackReason: SignInFailureReason.sessionSaveFailed,
+        action: () => _accounts.upsert(session, makeCurrent: true),
+      );
+    } catch (_) {
+      await _rollbackSignInAttempt(prepared.scope, prepared.api);
+      rethrow;
+    }
+
+    await _commitSignIn(
+      session: session,
+      scope: prepared.scope,
+      settings: prepared.settings,
+      capabilities: prepared.capabilities,
+      api: prepared.api,
+    );
+  }
+
+  Future<EmbySession> _authenticateSession({
     required String serverUrl,
     required String username,
     required String password,
@@ -263,7 +531,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       );
     }
 
-    final session = await _runSignInStage<EmbySession>(
+    return _runSignInStage<EmbySession>(
       stage: SignInStage.authenticate,
       fallbackReason: SignInFailureReason.unknown,
       action: () => _authenticate(
@@ -274,63 +542,41 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         deviceName: _capabilities.embyDeviceName,
       ),
     );
+  }
 
-    final prepared =
-        await _runSignInStage<
-          ({
-            ServerScope scope,
-            LibraryCategorySettings settings,
-            ServerCapabilities capabilities,
-            EmbyApi api,
-          })
-        >(
-          stage: SignInStage.sessionPrepare,
-          fallbackReason: SignInFailureReason.sessionPrepareFailed,
-          action: () async {
-            final scope = ServerScope.fromSession(session);
-            final settings = await _restoreLibraryCategorySettings(
-              scope,
-              safeLogging: true,
-            );
-            final capabilities = await _restoreCapabilities(
-              session,
-              safeLogging: true,
-            );
-            final api =
-                _apiFactory?.call(session, scope) ?? _createApi(session, scope);
-            try {
-              _clients.register(scope, api);
-            } catch (_) {
-              await _disposeAttemptApi(api);
-              rethrow;
-            }
-            return (
-              scope: scope,
-              settings: settings,
-              capabilities: capabilities,
-              api: api,
-            );
-          },
-        );
-
-    try {
-      await _runSignInStage<void>(
-        stage: SignInStage.sessionSave,
-        fallbackReason: SignInFailureReason.sessionSaveFailed,
-        action: () => _store.saveSession(session),
-      );
-    } catch (_) {
-      await _rollbackSignInAttempt(prepared.scope, prepared.api);
-      rethrow;
-    }
-
-    await _commitSignIn(
-      session: session,
-      scope: prepared.scope,
-      settings: prepared.settings,
-      capabilities: prepared.capabilities,
-      api: prepared.api,
+  Future<_PreparedWorkspace> _prepareWorkspace(
+    EmbySession session, {
+    bool safeLogging = false,
+  }) async {
+    final state = await _prepareWorkspaceState(
+      session,
+      safeLogging: safeLogging,
     );
+    final api =
+        _apiFactory?.call(session, state.scope) ??
+        _createApi(session, state.scope);
+    return (
+      scope: state.scope,
+      settings: state.settings,
+      capabilities: state.capabilities,
+      api: api,
+    );
+  }
+
+  Future<_PreparedWorkspaceState> _prepareWorkspaceState(
+    EmbySession session, {
+    bool safeLogging = false,
+  }) async {
+    final scope = ServerScope.fromSession(session);
+    final settings = await _restoreLibraryCategorySettings(
+      scope,
+      safeLogging: safeLogging,
+    );
+    final capabilities = await _restoreCapabilities(
+      session,
+      safeLogging: safeLogging,
+    );
+    return (scope: scope, settings: settings, capabilities: capabilities);
   }
 
   Future<void> _commitSignIn({
@@ -346,7 +592,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _serverCapabilities = capabilities;
     _libraryCategorySettings = settings;
     _activateLibraryScanService(api, scope);
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    notifyListeners();
     unawaited(_activateDownloadsSafely(api, scope));
     unawaited(_startRealtimeSafely(api));
   }
@@ -495,42 +742,217 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> signOut() async {
-    _playbackDiagnosticsTestOverrides.clear();
-    final current = _session;
-    final currentScope = _scope;
-    final currentApi = currentScope == null
-        ? null
-        : _clients.clientFor(currentScope);
-    await _shutdownLibraryScanService();
-    await _shutdownDownloads(stopExecutor: true);
-    if (current != null) {
-      await _playbackSettingsRepository.deleteAccountSettings(current);
+    if (_disposed) return;
+    await _accounts.initialize();
+    final accountId = _accounts.currentAccountId;
+    if (accountId == null) {
+      await _store.clearSession();
+      _resetSessionState();
+      if (!_disposed) notifyListeners();
+      return;
     }
-    if (current != null) {
+    await _enqueueAccountTransition(
+      () => _removeAccount(
+        accountId,
+        remoteLogout: true,
+        deletePlaybackSettings: true,
+      ),
+    );
+  }
+
+  Future<void> removeAccount(String accountId, {bool deleteLocalData = false}) {
+    if (_disposed) {
+      return Future<void>.error(StateError('AppController has been disposed'));
+    }
+    return _enqueueAccountTransition(
+      () => _removeAccount(
+        accountId,
+        remoteLogout: true,
+        deleteLocalData: deleteLocalData,
+      ),
+    );
+  }
+
+  Future<void> _removeAccount(
+    String accountId, {
+    required bool remoteLogout,
+    bool deletePlaybackSettings = false,
+    bool deleteLocalData = false,
+  }) async {
+    await _accounts.initialize();
+    final account = _accounts.accountById(accountId);
+    if (account == null) return;
+    final isCurrent = _accounts.currentAccountId == accountId;
+    if (!isCurrent) {
+      var accountRemoved = false;
       try {
-        await currentApi?.logout();
+        await _accounts.remove(accountId);
+        accountRemoved = true;
+        if (deleteLocalData) {
+          await _deleteStoredAccountData(account);
+        } else {
+          await _clearRemovedAccountOnlineCache(account.scope);
+        }
       } catch (_) {
-        // Local sign-out must still succeed when the server is unavailable.
+        if (accountRemoved) {
+          await _restoreRemovedAccountAfterFailure(account, makeCurrent: false);
+        }
+        rethrow;
       }
+      if (!_disposed) notifyListeners();
+      return;
     }
-    if (currentScope != null) await _clients.unregister(currentScope);
-    await _store.clearSession();
-    _session = null;
-    _scope = null;
-    _serverCapabilities = null;
-    _libraryCategorySettings = const LibraryCategorySettings();
+
+    _accountTransitionInProgress = true;
     if (!_disposed) notifyListeners();
+    final currentApi = _clients.clientFor(account.scope);
+    var clientUnregistered = false;
+    var accountRemoved = false;
+    try {
+      _playbackDiagnosticsTestOverrides.clear();
+      await _shutdownLibraryScanService();
+      await _shutdownDownloads(stopExecutor: true);
+      await _accounts.remove(accountId);
+      accountRemoved = true;
+      if (deleteLocalData) {
+        await _deleteStoredAccountData(account);
+      } else {
+        if (deletePlaybackSettings) {
+          await _deleteRemovedAccountPlaybackSettings(account);
+        }
+        await _clearRemovedAccountOnlineCache(account.scope);
+      }
+      if (remoteLogout) {
+        try {
+          await currentApi?.logout();
+        } catch (_) {
+          // Removing a local account must work while its server is unavailable.
+        }
+      }
+      if (_clients.contains(account.scope)) {
+        await _clients.unregister(account.scope);
+        clientUnregistered = true;
+      }
+      _resetSessionState();
+      await _activateSelectedAccountSafely();
+    } catch (_) {
+      if (accountRemoved) {
+        await _restoreRemovedAccountAfterFailure(account, makeCurrent: true);
+      }
+      if (clientUnregistered && _accounts.accountById(accountId) != null) {
+        _resetSessionState();
+        try {
+          await _activateSession(account.session);
+        } catch (_) {}
+      } else if (currentApi != null &&
+          identical(_clients.clientFor(account.scope), currentApi)) {
+        _session = account.session;
+        _scope = account.scope;
+        _activateLibraryScanService(currentApi, account.scope);
+        await _activateDownloads(currentApi, account.scope);
+      }
+      rethrow;
+    } finally {
+      _accountTransitionInProgress = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> _restoreRemovedAccountAfterFailure(
+    ServerAccount account, {
+    required bool makeCurrent,
+  }) async {
+    if (_accounts.accountById(account.accountId) != null) return;
+    try {
+      await _accounts.upsert(
+        account.session,
+        makeCurrent: makeCurrent,
+        connectionState: account.connectionState,
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'accounts',
+        'Failed to restore an account after removal failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _deleteRemovedAccountPlaybackSettings(
+    ServerAccount account,
+  ) async {
+    try {
+      await _playbackSettingsRepository.deleteAccountSettings(account.session);
+    } catch (error, stackTrace) {
+      // The account and its credential are already gone. A stale local
+      // preference must not resurrect the account or make sign-out fail.
+      DiagnosticLog.instance.error(
+        'storage',
+        'Failed to clear removed account playback settings',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _deleteStoredAccountData(ServerAccount account) async {
+    try {
+      await _accountDataCleaner.delete(
+        scope: account.scope,
+        session: account.session,
+      );
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'storage',
+        'Failed to delete removed account data scope=${account.scope.logLabel}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> _clearRemovedAccountOnlineCache(ServerScope scope) async {
+    if (!_localDatabaseAvailable) return;
+    try {
+      await _capabilitiesRepository.remove(scope);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'storage',
+        'Failed to clear removed account online cache scope=${scope.logLabel}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _activateSelectedAccountSafely() async {
+    final next = _accounts.currentAccount;
+    if (next == null) return;
+    try {
+      await _activateSession(next.session);
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'accounts',
+        'Failed to activate the next saved server account',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      _resetSessionState();
+    }
   }
 
   Future<void> deleteCurrentAccountData() {
     final active = _accountDataDeletion;
     if (active != null) return active;
     late final Future<void> operation;
-    operation = _deleteCurrentAccountData().whenComplete(() {
-      if (identical(_accountDataDeletion, operation)) {
-        _accountDataDeletion = null;
-      }
-    });
+    operation = _enqueueAccountTransition(_deleteCurrentAccountData)
+        .whenComplete(() {
+          if (identical(_accountDataDeletion, operation)) {
+            _accountDataDeletion = null;
+          }
+        });
     _accountDataDeletion = operation;
     return operation;
   }
@@ -543,6 +965,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       throw StateError('当前没有已登录的 Emby 会话');
     }
     final currentApi = _clients.clientFor(currentScope);
+    final currentAccount = _accounts.accountForScope(currentScope);
     await _shutdownDownloads(stopExecutor: true, requireExecutorStopped: true);
     await _shutdownLibraryScanService();
     try {
@@ -580,46 +1003,142 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
     await _clients.unregister(currentScope);
     if (_scope != currentScope) return;
-    await _store.clearSession();
-    _session = null;
-    _scope = null;
-    _serverCapabilities = null;
-    _libraryCategorySettings = const LibraryCategorySettings();
+    try {
+      if (currentAccount == null) {
+        await _store.clearSession();
+      } else {
+        await _accounts.remove(currentAccount.accountId);
+      }
+    } catch (_) {
+      _resetSessionState();
+      try {
+        await _activateSession(currentSession);
+      } catch (_) {}
+      rethrow;
+    }
+    _resetSessionState();
+    await _activateSelectedAccountSafely();
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> _expireSession(ServerScope scope, EmbyApi source) async {
-    if (_scope != scope || !identical(_clients.clientFor(scope), source)) {
-      return;
-    }
-    _playbackDiagnosticsTestOverrides.clear();
-    await _shutdownLibraryScanService();
-    final expiredSession = _session;
-    if (expiredSession != null) {
-      await _playbackSettingsRepository.deleteAccountSettings(expiredSession);
-    }
-    _session = null;
-    _scope = null;
-    _serverCapabilities = null;
-    _libraryCategorySettings = const LibraryCategorySettings();
-    await _shutdownDownloads(stopExecutor: true);
-    await _clients.unregister(scope);
-    await _store.clearSession();
-    if (!_disposed) notifyListeners();
+  Future<void> _expireSession(ServerScope scope, EmbyApi source) {
+    if (_disposed) return Future<void>.value();
+    return _enqueueAccountTransition(() async {
+      if (_disposed) return;
+      if (_scope != scope || !identical(_clients.clientFor(scope), source)) {
+        return;
+      }
+      _accountTransitionInProgress = true;
+      if (!_disposed) notifyListeners();
+      try {
+        try {
+          final expired = _accounts.accountForScope(scope);
+          if (expired != null) {
+            await _accounts.markAuthenticationRequired(expired.accountId);
+          }
+        } catch (error, stackTrace) {
+          DiagnosticLog.instance.error(
+            'accounts',
+            'Failed to persist expired server account state',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+        try {
+          _playbackDiagnosticsTestOverrides.clear();
+          try {
+            await _shutdownLibraryScanService();
+          } catch (error, stackTrace) {
+            DiagnosticLog.instance.error(
+              'accounts',
+              'Failed to stop expired server library scan',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          }
+          try {
+            await _shutdownDownloads(stopExecutor: true);
+          } catch (error, stackTrace) {
+            DiagnosticLog.instance.error(
+              'accounts',
+              'Failed to stop expired server downloads',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          }
+          try {
+            await _clients.unregister(scope);
+          } catch (error, stackTrace) {
+            DiagnosticLog.instance.error(
+              'accounts',
+              'Failed to dispose expired server client',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          }
+        } finally {
+          // A 401 workspace is never restored, even if persistence or one of
+          // the best-effort shutdown steps failed.
+          _resetSessionState();
+        }
+        final next = _accounts.currentAccount;
+        if (next != null && next.scope != scope) {
+          await _activateSelectedAccountSafely();
+        }
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'accounts',
+          'Failed to activate a fallback after session expiration',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        _resetSessionState();
+      } finally {
+        _accountTransitionInProgress = false;
+        if (!_disposed) notifyListeners();
+      }
+    });
+  }
+
+  Future<T> _enqueueAccountTransition<T>(Future<T> Function() operation) {
+    final completer = Completer<T>();
+    final next = _accountTransitionTail.catchError((_) {}).then((_) async {
+      try {
+        completer.complete(await operation());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    _accountTransitionTail = next;
+    return completer.future;
   }
 
   Future<void> _activateSession(EmbySession session) async {
-    await _cleanupPlaybackCacheResidue();
-    final scope = ServerScope.fromSession(session);
-    final api = _apiFactory?.call(session, scope) ?? _createApi(session, scope);
-    _session = session;
-    _scope = scope;
-    _serverCapabilities = await _restoreCapabilities(session);
-    _libraryCategorySettings = await _restoreLibraryCategorySettings(scope);
-    _clients.register(scope, api);
-    _activateLibraryScanService(api, scope);
-    await _activateDownloads(api, scope, safeLogging: true);
-    unawaited(_startRealtimeSafely(api));
+    if (_disposed) throw StateError('AppController has been disposed');
+    final prepared = await _prepareWorkspace(session);
+    var registered = false;
+    try {
+      _clients.register(prepared.scope, prepared.api);
+      registered = true;
+      await _cleanupPlaybackCacheResidue();
+      _session = session;
+      _scope = prepared.scope;
+      _serverCapabilities = prepared.capabilities;
+      _libraryCategorySettings = prepared.settings;
+      _activateLibraryScanService(prepared.api, prepared.scope);
+      await _activateDownloads(prepared.api, prepared.scope, safeLogging: true);
+      if (!_disposed) unawaited(_startRealtimeSafely(prepared.api));
+    } catch (_) {
+      _resetSessionState();
+      if (registered) {
+        try {
+          await _clients.unregister(prepared.scope);
+        } catch (_) {}
+      } else {
+        await _disposeAttemptApi(prepared.api);
+      }
+      rethrow;
+    }
   }
 
   Future<void> _cleanupPlaybackCacheResidue() async {
@@ -976,6 +1495,11 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _disposeResources() async {
+    try {
+      await _accountTransitionTail;
+    } catch (_) {
+      // A failed user transition must not prevent final resource disposal.
+    }
     await _shutdownLibraryScanService();
     await _shutdownDownloads();
     await _clients.dispose();
