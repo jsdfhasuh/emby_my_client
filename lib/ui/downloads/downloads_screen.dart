@@ -9,7 +9,7 @@ import '../../downloads/download_service.dart';
 import '../player_screen.dart';
 import '../widgets/media_widgets.dart';
 
-class DownloadsScreen extends StatelessWidget {
+class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({
     super.key,
     required this.api,
@@ -20,20 +20,57 @@ class DownloadsScreen extends StatelessWidget {
   final DownloadService downloads;
 
   @override
+  State<DownloadsScreen> createState() => _DownloadsScreenState();
+}
+
+class _DownloadsScreenState extends State<DownloadsScreen> {
+  bool _maintenanceRunning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_checkCache(showResult: false));
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('离线下载')),
-      body: AnimatedBuilder(
-        animation: downloads,
-        builder: (context, _) {
-          final tasks = downloads.tasks;
-          return Column(
+    return AnimatedBuilder(
+      animation: widget.downloads,
+      builder: (context, _) {
+        final tasks = widget.downloads.tasks;
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('离线下载'),
+            actions: [
+              IconButton(
+                tooltip: '检查下载缓存',
+                onPressed: _maintenanceRunning
+                    ? null
+                    : () => unawaited(_checkCache(showResult: true)),
+                icon: _maintenanceRunning
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.fact_check_outlined),
+              ),
+              if (tasks.isNotEmpty)
+                IconButton(
+                  tooltip: '清空下载缓存',
+                  onPressed: _maintenanceRunning
+                      ? null
+                      : () => unawaited(_confirmClearCache()),
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                ),
+            ],
+          ),
+          body: Column(
             children: [
               SwitchListTile(
                 secondary: const Icon(Icons.wifi),
                 title: const Text('仅 Wi-Fi 下载'),
-                value: downloads.settings.wifiOnly,
-                onChanged: (value) => downloads.setWifiOnly(value),
+                value: widget.downloads.settings.wifiOnly,
+                onChanged: (value) => widget.downloads.setWifiOnly(value),
               ),
               const Divider(height: 1),
               if (tasks.isNotEmpty) ...[
@@ -53,24 +90,109 @@ class DownloadsScreen extends StatelessWidget {
                         separatorBuilder: (_, _) => const SizedBox(height: 8),
                         itemBuilder: (context, index) => _DownloadRow(
                           task: tasks[index],
-                          downloads: downloads,
+                          downloads: widget.downloads,
                           onPlay: () => _play(context, tasks[index]),
                           onDelete: () => _confirmDelete(context, tasks[index]),
                         ),
                       ),
               ),
             ],
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 
+  Future<void> _checkCache({required bool showResult}) async {
+    if (_maintenanceRunning) return;
+    if (showResult && mounted) {
+      setState(() => _maintenanceRunning = true);
+    }
+    try {
+      final completedBefore = widget.downloads.tasks
+          .where((task) => task.isComplete)
+          .length;
+      final available = await widget.downloads.offlineItems();
+      final cleanup = showResult
+          ? await widget.downloads.cleanupOrphans()
+          : null;
+      if (!showResult || !mounted) return;
+      final difference = completedBefore - available.length;
+      final invalidated = difference > 0 ? difference : 0;
+      final removedFiles = cleanup?.deletedFiles ?? 0;
+      final reclaimedBytes = cleanup?.reclaimedBytes ?? 0;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '缓存检查完成：${available.length} 个可用，'
+            '$invalidated 个需重新下载，清理 $removedFiles 个残留文件'
+            '${reclaimedBytes > 0 ? '（${_formatBytes(reclaimedBytes)}）' : ''}',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (showResult && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('下载缓存检查失败，请重试')));
+      }
+    } finally {
+      if (showResult && mounted) {
+        setState(() => _maintenanceRunning = false);
+      }
+    }
+  }
+
+  Future<void> _confirmClearCache() async {
+    final tasks = widget.downloads.tasks;
+    if (tasks.isEmpty || _maintenanceRunning) return;
+    final estimatedBytes = tasks.fold<int>(
+      0,
+      (total, task) => total + task.downloadedBytes,
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('清空下载缓存？'),
+        content: Text(
+          '将删除 ${tasks.length} 个离线文件或下载任务，'
+          '预计释放 ${_formatBytes(estimatedBytes)}。此操作无法撤销。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _maintenanceRunning = true);
+    try {
+      final report = await widget.downloads.clearCache();
+      if (!mounted) return;
+      final message = report.hasFailures
+          ? '已提交清理 ${report.requestedTasks} 项，'
+                '${report.failedTasks} 项失败'
+          : '已提交清理 ${report.requestedTasks} 项，'
+                '预计释放 ${_formatBytes(report.estimatedBytes)}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } finally {
+      if (mounted) setState(() => _maintenanceRunning = false);
+    }
+  }
+
   Future<void> _play(BuildContext context, DownloadTaskRecord task) async {
-    final item = await downloads.offlineItem(task.itemId);
+    final item = await widget.downloads.offlineItem(task.itemId);
     if (!context.mounted) return;
     if (item == null) {
-      final current = downloads.taskForItem(task.itemId);
+      final current = widget.downloads.taskForItem(task.itemId);
       final message = current?.requiresFreshDownload == true
           ? '${_friendlyError(current?.lastErrorCode)}，请重新下载'
           : '离线文件记录不存在';
@@ -82,10 +204,10 @@ class DownloadsScreen extends StatelessWidget {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
-          api: api,
+          api: widget.api,
           item: item.toEmbyItem(),
           offlineItem: item,
-          downloads: downloads,
+          downloads: widget.downloads,
         ),
       ),
     );
@@ -116,7 +238,7 @@ class DownloadsScreen extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed == true) unawaited(downloads.delete(task.id));
+    if (confirmed == true) unawaited(widget.downloads.delete(task.id));
   }
 }
 

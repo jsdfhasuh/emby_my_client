@@ -345,6 +345,22 @@ class DownloadSnapshot {
   final List<DownloadTaskRecord> tasks;
 }
 
+class DownloadCacheClearReport {
+  const DownloadCacheClearReport({
+    required this.totalTasks,
+    required this.requestedTasks,
+    required this.failedTasks,
+    required this.estimatedBytes,
+  });
+
+  final int totalTasks;
+  final int requestedTasks;
+  final int failedTasks;
+  final int estimatedBytes;
+
+  bool get hasFailures => failedTasks > 0;
+}
+
 String? _string(dynamic value) {
   final result = value?.toString();
   return result == null || result.isEmpty ? null : result;
