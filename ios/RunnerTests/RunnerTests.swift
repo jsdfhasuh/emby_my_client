@@ -1190,6 +1190,34 @@ final class RunnerTests: XCTestCase {
     XCTAssertFalse(result.filename.contains("\\"))
   }
 
+  func testFullReportAcceptsPlaybackCacheSessionSummary() throws {
+    let body =
+      "2026-08-27T08:34:46.163111 [INFO] [playback] " +
+      "event=playback_cache_session_summary eventSchemaVersion=1 " +
+      "settingsMode=fullReadAhead requestedMode=disk finalConfirmedMode=disk " +
+      "cacheEvidence=diskDataObserved telemetryStatusEver=available " +
+      "cacheCreateFailedObserved=false cacheSnapshotUnavailableObserved=false " +
+      "observedNonZeroFileCache=true peakFileCacheBytes=gt1GiB " +
+      "maxActualForward=gt300s maxActualBackward=gt300s safetyReopenReason=none " +
+      "runtimeRecovery=notAttempted cleanupResult=success " +
+      "cleanupAttemptCountBucket=one seekRequestedCount=145 " +
+      "seekExecutedCount=145 seekSupersededCount=0 seekFailedCount=0 " +
+      "seekCancelledCount=0 optionalTuningDegraded=false " +
+      "optionalTuningUnavailable=streamBufferSize testOverrideUsed=false " +
+      "readAheadStrategy=mediaEnd budgetPolicy=lowSpaceOnly " +
+      "sizeConfidence=serverDeclared fullReadAheadEligible=true " +
+      "fullReadAheadReachedEnd=false\n"
+    let data = Data(validFullBody(body).utf8)
+
+    let result = try FullDiagnosticExportValidator.validate(
+      content: data,
+      appVersion: "1.0.0",
+      buildNumber: "42"
+    )
+
+    XCTAssertEqual(result.data, data)
+  }
+
   func testFullReportHeaderOrderAndExactFieldsAreRequired() {
     let valid = String(data: validFullReport(), encoding: .utf8)!
     var lines = valid.split(separator: "\n", omittingEmptySubsequences: false)
@@ -1236,6 +1264,8 @@ final class RunnerTests: XCTestCase {
       "2001:db8::1",
       "example.test:8096",
       "/var/mobile/Containers/Data/file.json",
+      #"\Users\owner\cache"#,
+      #"encoded\nstack"#,
       "Session JSON",
       "request headers",
       "response body",

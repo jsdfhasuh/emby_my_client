@@ -114,11 +114,15 @@ class FullDiagnosticExportService {
   final SafeDiagnosticMetadataProvider _metadataProvider;
   final SafeDiagnosticMetadata? _metadata;
 
+  @visibleForTesting
+  static int get maxBytesForTesting => _maxFullDiagnosticBytes;
+
   Future<FullDiagnosticReport> buildReport({DateTime? generatedAtUtc}) async {
     final metadata = await _readMetadata();
     _validateMetadata(metadata);
 
     final rawLog = await _readRawLog();
+    final sourceTruncated = rawLog.contains(DiagnosticLog.truncationMarker);
     late final String redactedLog;
     try {
       redactedLog = FullDiagnosticRedactor.redact(DiagnosticLog.redact(rawLog));
@@ -150,7 +154,7 @@ class FullDiagnosticExportService {
     }
 
     final selected = lines.sublist(firstLine);
-    final truncated = firstLine > 0;
+    final truncated = sourceTruncated || firstLine > 0;
     final body = _encodeBody(selected);
     final content = _encodeReport(
       metadata: metadata,
@@ -330,6 +334,19 @@ class FullDiagnosticExportService {
 class FullDiagnosticRedactor {
   const FullDiagnosticRedactor._();
 
+  static final RegExp _nativeEndpointPattern = RegExp(
+    r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}|(?:localhost|emby):\d{2,5}|\[[0-9a-f:]+\]:\d{2,5}',
+    caseSensitive: false,
+  );
+  static final RegExp _backslashSensitivePathPattern = RegExp(
+    r'\\(?:users|private|var|tmp)\\[^\s\r\n]*',
+    caseSensitive: false,
+  );
+  static final RegExp _escapedControlSequencePattern = RegExp(
+    r'\\(?:r|n|t|u000[0-9a-f]{1,4})',
+    caseSensitive: false,
+  );
+
   static String redact(String value) {
     var result = value.replaceAll('<redacted-url>', '<redacted>');
     result = result.replaceAll('\r', '');
@@ -368,6 +385,7 @@ class FullDiagnosticRedactor {
       RegExp(r'\b[a-z0-9.-]+\.[a-z]{2,}:\d{2,5}\b', caseSensitive: false),
       '<redacted>',
     );
+    result = result.replaceAll(_nativeEndpointPattern, '<redacted>');
     result = result.replaceAll(
       RegExp(
         r'(?:[a-z]:[\\/]|[\\/](?:home|users|private|var|tmp|data|documents|library)[\\/])[^\s\r\n]*',
@@ -375,6 +393,8 @@ class FullDiagnosticRedactor {
       ),
       '<redacted>',
     );
+    result = result.replaceAll(_backslashSensitivePathPattern, '<redacted>');
+    result = result.replaceAll(_escapedControlSequencePattern, '<redacted>');
     result = result.replaceAll(
       RegExp(
         r'\"session(?:json|object|data)?\"\s*:|\bsession\s+(?:json|object|data)\b|\bsession\s*[:=]\s*[\{\[]',
@@ -401,7 +421,7 @@ class FullDiagnosticRedactor {
   static bool containsSensitiveContent(String value) {
     final patterns = <RegExp>[
       RegExp(
-        r'\b(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)\b',
+        r'(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9])',
         caseSensitive: false,
       ),
       RegExp(
@@ -411,10 +431,13 @@ class FullDiagnosticRedactor {
       RegExp(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)'),
       RegExp(r'\b(?:localhost|emby):\d{2,5}\b', caseSensitive: false),
       RegExp(r'\b[a-z0-9.-]+\.[a-z]{2,}:\d{2,5}\b', caseSensitive: false),
+      _nativeEndpointPattern,
       RegExp(
         r'(?:[a-z]:[\\/]|[\\/](?:home|users|private|var|tmp|data|documents|library)[\\/])',
         caseSensitive: false,
       ),
+      _backslashSensitivePathPattern,
+      _escapedControlSequencePattern,
       RegExp(
         r'\bsession\s*(?:json|object|data)\b|\bsession\s*[:=]\s*[\{\[]',
         caseSensitive: false,
