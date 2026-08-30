@@ -12,17 +12,53 @@ typedef DiagnosticSafeEventTestSink =
     void Function(SafeDiagnosticRecord record);
 
 class DiagnosticLog implements SafeDiagnosticEventSource {
-  DiagnosticLog._();
+  DiagnosticLog._({
+    int maxFileBytes = _maxFileBytes,
+    int retainedFileBytes = _retainedFileBytes,
+  }) : _fileByteLimit = _validateMaxFileBytes(maxFileBytes),
+       _retainedFileByteLimit = _validateRetainedFileBytes(
+         retainedFileBytes,
+         maxFileBytes,
+       );
 
   @visibleForTesting
-  DiagnosticLog.forTesting() : this._();
+  DiagnosticLog.forTesting({
+    int maxFileBytes = _maxFileBytes,
+    int? retainedFileBytes,
+  }) : this._(
+         maxFileBytes: maxFileBytes,
+         retainedFileBytes: retainedFileBytes ?? (maxFileBytes * 4 ~/ 5),
+       );
 
   static final DiagnosticLog instance = DiagnosticLog._();
   static const _fileName = 'emby_client_diagnostics.log';
   static const _safeFileName = 'emby_safe_diagnostics_v1.jsonl';
   static const _maxFileBytes = 750 * 1024;
+  static const _retainedFileBytes = 640 * 1024;
   static const _maxSafeEventBytes = 256 * 1024;
   static const _maxSafeEventRecords = 1000;
+  static const truncationMarker = 'event=diagnostic_log_truncated';
+
+  static int _validateMaxFileBytes(int value) {
+    if (value < 256) {
+      throw ArgumentError.value(value, 'maxFileBytes', 'must be at least 256');
+    }
+    return value;
+  }
+
+  static int _validateRetainedFileBytes(int value, int maxFileBytes) {
+    if (value <= 0 || value >= maxFileBytes) {
+      throw ArgumentError.value(
+        value,
+        'retainedFileBytes',
+        'must be greater than 0 and less than maxFileBytes',
+      );
+    }
+    return value;
+  }
+
+  final int _fileByteLimit;
+  final int _retainedFileByteLimit;
 
   File? _file;
   File? _safeFile;
@@ -36,15 +72,7 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
       final directory = await getApplicationSupportDirectory();
       await directory.create(recursive: true);
       final file = File('${directory.path}${Platform.pathSeparator}$_fileName');
-      if (await file.exists()) {
-        if (await file.length() > _maxFileBytes) {
-          await file.writeAsString('');
-        } else {
-          final existing = await file.readAsString();
-          final sanitized = redact(existing);
-          if (sanitized != existing) await file.writeAsString(sanitized);
-        }
-      }
+      await _prepareLogFile(file);
       _file = file;
       _safeFile = File(
         '${directory.path}${Platform.pathSeparator}$_safeFileName',
@@ -127,14 +155,31 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   Future<String> read() async {
     await _pendingWrite;
     final file = _file;
-    if (file == null || !await file.exists()) return '';
-    return redact(await file.readAsString());
+    if (file == null) return '';
+    await _recoverLogBackup(file);
+    if (!await file.exists()) return '';
+    final snapshot = await DiagnosticLogTailReader.read(
+      FileDiagnosticLogByteSource(file),
+      maxBytes: _fileByteLimit,
+    );
+    return redact(snapshot.content);
   }
 
   Future<void> clear() async {
-    await _pendingWrite;
     final file = _file;
-    if (file != null) await file.writeAsString('');
+    final clearOperation = _pendingWrite.then((_) async {
+      if (file != null) {
+        await _recoverLogBackup(file);
+        await file.writeAsString('');
+      }
+    });
+    _pendingWrite = clearOperation.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('[diagnostic] Failed to clear log');
+      },
+    );
+    await clearOperation;
     info('app', 'Diagnostic log cleared');
   }
 
@@ -160,6 +205,19 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
 
   @visibleForTesting
   void setTestSink(DiagnosticLogTestSink? sink) => _testSink = sink;
+
+  @visibleForTesting
+  Future<void> initializeFileForTesting(File file) async {
+    await file.parent.create(recursive: true);
+    await _prepareLogFile(file);
+    _file = file;
+  }
+
+  @visibleForTesting
+  static int get maxFileBytesForTesting => _maxFileBytes;
+
+  @visibleForTesting
+  static int get retainedFileBytesForTesting => _retainedFileBytes;
 
   @visibleForTesting
   void setSafeEventTestSink(DiagnosticSafeEventTestSink? sink) {
@@ -298,7 +356,13 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   void _write(String level, String component, String message) {
     final clean = redact(message).replaceAll('\r', '');
     final timestamp = DateTime.now().toIso8601String();
-    final line = '$timestamp [$level] [$component] $clean\n';
+    final candidate = '$timestamp [$level] [$component] $clean\n';
+    final candidateBytes = utf8.encode(candidate).length;
+    final line = candidateBytes <= _fileByteLimit
+        ? candidate
+        : '$timestamp [WARN] [diagnostic] '
+              'event=diagnostic_entry_dropped reason=oversized '
+              'bytes=$candidateBytes\n';
     debugPrint(line.trimRight());
     _testSink?.call(line.trimRight());
 
@@ -306,11 +370,107 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
     if (file == null) return;
     _pendingWrite = _pendingWrite.then((_) async {
       try {
+        await _recoverLogBackup(file);
         await file.writeAsString(line, mode: FileMode.append, flush: true);
+        if (await file.length() > _fileByteLimit) {
+          await _trimLogFile(file);
+        }
       } catch (error) {
         debugPrint('[diagnostic] Failed to write log: $error');
       }
     });
+  }
+
+  Future<void> _prepareLogFile(File file) async {
+    await _recoverLogBackup(file);
+    if (!await file.exists()) return;
+    try {
+      final source = FileDiagnosticLogByteSource(file);
+      if (await file.length() > _fileByteLimit) {
+        await _trimLogFile(file);
+        return;
+      }
+      final existing = await DiagnosticLogTailReader.read(
+        source,
+        maxBytes: _fileByteLimit,
+      );
+      final sanitized = redact(existing.content);
+      if (sanitized != existing.content) {
+        await _replaceLogFile(file, sanitized);
+      }
+    } on FormatException {
+      final marker =
+          '${DateTime.now().toIso8601String()} [WARN] [diagnostic] '
+          '$truncationMarker retainedBytes=0 reason=unreadable_content\n';
+      await _replaceLogFile(file, marker);
+    }
+  }
+
+  Future<void> _trimLogFile(File file) async {
+    final marker =
+        '${DateTime.now().toIso8601String()} [WARN] [diagnostic] '
+        '$truncationMarker retainedBytes=$_retainedFileByteLimit\n';
+    final markerBytes = utf8.encode(marker).length;
+    final tailBudget = _retainedFileByteLimit - markerBytes;
+    final tail = tailBudget <= 0
+        ? const DiagnosticLogTailSnapshot(
+            content: '',
+            sourceTruncated: true,
+            bytesRead: 0,
+          )
+        : await DiagnosticLogTailReader.read(
+            FileDiagnosticLogByteSource(file),
+            maxBytes: tailBudget,
+          );
+    await _replaceLogFile(file, '$marker${tail.content}');
+  }
+
+  Future<void> _replaceLogFile(File file, String content) async {
+    final temporary = File(
+      '${file.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    final backup = File('${file.path}.backup');
+    try {
+      await _recoverLogBackup(file);
+      await temporary.writeAsString(content, flush: true);
+      if (Platform.isWindows && await file.exists()) {
+        await file.rename(backup.path);
+        try {
+          await temporary.rename(file.path);
+        } catch (_) {
+          if (!await file.exists() && await backup.exists()) {
+            await backup.rename(file.path);
+          }
+          rethrow;
+        }
+        try {
+          await backup.delete();
+        } catch (_) {
+          // A stale backup is harmless and is reconciled on the next access.
+        }
+      } else {
+        await temporary.rename(file.path);
+      }
+    } finally {
+      if (await temporary.exists()) {
+        await temporary.delete();
+      }
+    }
+  }
+
+  Future<void> _recoverLogBackup(File file) async {
+    if (!Platform.isWindows) return;
+    final backup = File('${file.path}.backup');
+    if (!await backup.exists()) return;
+    if (!await file.exists()) {
+      await backup.rename(file.path);
+      return;
+    }
+    try {
+      await backup.delete();
+    } catch (_) {
+      // Keep the valid primary file; cleanup can be retried on the next access.
+    }
   }
 
   static String redact(String value) {
@@ -371,5 +531,111 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
       (match) => '${match[1]}<redacted>${match[2]}',
     );
     return result;
+  }
+}
+
+@visibleForTesting
+abstract interface class DiagnosticLogByteSource {
+  Future<int> length();
+
+  Future<Uint8List> read(int offset, int length);
+}
+
+final class FileDiagnosticLogByteSource implements DiagnosticLogByteSource {
+  const FileDiagnosticLogByteSource(this.file);
+
+  final File file;
+
+  @override
+  Future<int> length() => file.length();
+
+  @override
+  Future<Uint8List> read(int offset, int length) async {
+    final handle = await file.open();
+    try {
+      await handle.setPosition(offset);
+      return await handle.read(length);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+@immutable
+class DiagnosticLogTailSnapshot {
+  const DiagnosticLogTailSnapshot({
+    required this.content,
+    required this.sourceTruncated,
+    required this.bytesRead,
+  });
+
+  final String content;
+  final bool sourceTruncated;
+  final int bytesRead;
+}
+
+@visibleForTesting
+final class DiagnosticLogTailReader {
+  const DiagnosticLogTailReader._();
+
+  static Future<DiagnosticLogTailSnapshot> read(
+    DiagnosticLogByteSource source, {
+    required int maxBytes,
+  }) => _read(source, maxBytes: maxBytes, retryShortRead: true);
+
+  static Future<DiagnosticLogTailSnapshot> _read(
+    DiagnosticLogByteSource source, {
+    required int maxBytes,
+    required bool retryShortRead,
+  }) async {
+    if (maxBytes <= 0) {
+      throw ArgumentError.value(maxBytes, 'maxBytes', 'must be positive');
+    }
+    final sourceLength = await source.length();
+    if (sourceLength <= 0) {
+      return const DiagnosticLogTailSnapshot(
+        content: '',
+        sourceTruncated: false,
+        bytesRead: 0,
+      );
+    }
+    final bytesToRead = sourceLength < maxBytes ? sourceLength : maxBytes;
+    final offset = sourceLength - bytesToRead;
+    final bytes = await source.read(offset, bytesToRead);
+    if (bytes.length != bytesToRead) {
+      if (retryShortRead) {
+        return _read(source, maxBytes: maxBytes, retryShortRead: false);
+      }
+      throw const FormatException('Incomplete diagnostic log read');
+    }
+
+    var start = 0;
+    var end = bytes.length;
+    if (offset > 0) {
+      final firstNewline = bytes.indexOf(0x0a);
+      if (firstNewline < 0) {
+        return DiagnosticLogTailSnapshot(
+          content: '',
+          sourceTruncated: true,
+          bytesRead: bytes.length,
+        );
+      }
+      start = firstNewline + 1;
+    }
+    if (end > start && bytes[end - 1] != 0x0a) {
+      final lastNewline = bytes.lastIndexOf(0x0a, end - 1);
+      end = lastNewline < start ? start : lastNewline + 1;
+    }
+    final content = start >= end
+        ? ''
+        : utf8.decode(
+            Uint8List.sublistView(bytes, start, end),
+            allowMalformed: false,
+          );
+    return DiagnosticLogTailSnapshot(
+      content: content,
+      sourceTruncated: offset > 0,
+      bytesRead: bytes.length,
+    );
   }
 }
