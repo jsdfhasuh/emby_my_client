@@ -113,7 +113,24 @@ class EmbyWebSocketClient {
     if (!_canConnect(generation) || _connecting) return;
     _connecting = true;
     try {
-      final socket = await _connector(_socketUri()).timeout(connectionTimeout);
+      var connectionTimedOut = false;
+      final pendingSocket = _connector(_socketUri());
+      unawaited(
+        pendingSocket.then<void>((lateSocket) async {
+          if (!connectionTimedOut) return;
+          await _closeLateSocket(lateSocket);
+        }, onError: (Object _, StackTrace _) {}),
+      );
+      final socket = await pendingSocket.timeout(
+        connectionTimeout,
+        onTimeout: () {
+          connectionTimedOut = true;
+          throw TimeoutException(
+            'Emby WebSocket connection timed out',
+            connectionTimeout,
+          );
+        },
+      );
       if (!_canConnect(generation)) {
         await socket.close();
         return;
@@ -121,21 +138,22 @@ class EmbyWebSocketClient {
       await _releaseSocket(keepReconnectTimer: true);
       _socket = socket;
       _subscription = socket.messages.listen(
-        (raw) => _handleRawMessage(raw, generation),
+        (raw) => _handleRawMessage(raw, generation, socket),
         onError: (Object error, StackTrace stackTrace) {
+          if (!_isCurrentConnection(generation, socket)) return;
           DiagnosticLog.instance.error(
             'realtime',
             'Emby WebSocket stream error',
             error: error,
           );
-          _handleDisconnected(generation);
+          _handleDisconnected(generation, socket);
         },
-        onDone: () => _handleDisconnected(generation),
+        onDone: () => _handleDisconnected(generation, socket),
         cancelOnError: true,
       );
       _stableConnectionTimer?.cancel();
       _stableConnectionTimer = Timer(const Duration(seconds: 15), () {
-        if (_canConnect(generation) && _socket == socket) {
+        if (_isCurrentConnection(generation, socket)) {
           _reconnectAttempt = 0;
         }
       });
@@ -165,8 +183,21 @@ class EmbyWebSocketClient {
     }
   }
 
-  void _handleRawMessage(dynamic raw, int generation) {
-    if (!_canConnect(generation)) return;
+  Future<void> _closeLateSocket(EmbySocket socket) async {
+    try {
+      await socket.close();
+    } catch (error, stackTrace) {
+      DiagnosticLog.instance.error(
+        'realtime',
+        'Failed to close a late Emby WebSocket connection',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  void _handleRawMessage(dynamic raw, int generation, EmbySocket socket) {
+    if (!_isCurrentConnection(generation, socket)) return;
     final decoded = _decodeMap(raw);
     if (decoded == null) {
       DiagnosticLog.instance.warning(
@@ -199,13 +230,13 @@ class EmbyWebSocketClient {
           'Failed to send WebSocket KeepAlive',
           error: error,
         );
-        _handleDisconnected(_generation);
+        _handleDisconnected(_generation, socket);
       }
     });
   }
 
-  void _handleDisconnected(int generation) {
-    if (generation != _generation) return;
+  void _handleDisconnected(int generation, EmbySocket socket) {
+    if (!_isCurrentConnection(generation, socket)) return;
     unawaited(_releaseSocket(keepReconnectTimer: true));
     _scheduleReconnect(generation);
   }
@@ -248,6 +279,9 @@ class EmbyWebSocketClient {
       _started &&
       (_foreground || _backgroundConnectionRequired) &&
       generation == _generation;
+
+  bool _isCurrentConnection(int generation, EmbySocket socket) =>
+      _canConnect(generation) && identical(_socket, socket);
 
   Duration _defaultReconnectDelay(int attempt) {
     final cappedAttempt = min(attempt, 5);
