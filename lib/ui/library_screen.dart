@@ -1839,7 +1839,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     final service = widget.libraryScanService;
     final key = _activeScanKey;
     if (service == null || key == null) return;
-    final items = service.itemsFor(key, _state.localFilter);
+    final items = service
+        .itemsFor(key, _state.localFilter)
+        .where(
+          (item) => libraryItemMatchesServerMembership(_state, item.userData),
+        )
+        .toList(growable: false);
     setState(() {
       _scanSnapshot = snapshot;
       _items
@@ -1927,13 +1932,36 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       await _refreshPreservingPosition();
       return;
     }
-    final membershipChanged = userData.entries.any((entry) {
-      final item = loadedItems[entry.key];
-      return item != null &&
-          libraryItemMatchesServerMembership(state, item.userData) !=
-              libraryItemMatchesServerMembership(state, entry.value);
-    });
-    if (membershipChanged) {
+    final membershipChanges = userData.entries
+        .where((entry) {
+          final item = loadedItems[entry.key];
+          return item != null &&
+              libraryItemMatchesServerMembership(state, item.userData) !=
+                  libraryItemMatchesServerMembership(state, entry.value);
+        })
+        .toList(growable: false);
+    if (membershipChanges.isNotEmpty) {
+      final scanKey = _activeScanKey;
+      final scanService = widget.libraryScanService;
+      // A completed local scan already has every classified candidate, so an
+      // item leaving the active membership can be hidden without rescanning.
+      // During an active scan the server-side result may have shifted, and a
+      // restart remains necessary to avoid skipping a raw page item.
+      final canUpdateCompletedLocalScan =
+          _usesLocalScan &&
+          scanKey != null &&
+          scanService != null &&
+          scanService.snapshotFor(scanKey)?.status ==
+              LibraryScanStatus.complete &&
+          membershipChanges.every((entry) {
+            final item = loadedItems[entry.key]!;
+            return libraryItemMatchesServerMembership(state, item.userData) &&
+                !libraryItemMatchesServerMembership(state, entry.value);
+          });
+      if (canUpdateCompletedLocalScan) {
+        scanService.updateUserData(scanKey, userData);
+        return;
+      }
       await _refreshPreservingPosition();
       return;
     }
