@@ -140,6 +140,95 @@ void main() {
     await controller.shutdown();
   });
 
+  test(
+    'paused Start becomes unpaused Progress only after successful play',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final engine = _FakeEngine()..emitPlayingOnPlay = false;
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        resolver: _PlanResolver(_testPlan()),
+      );
+
+      await controller.start(playAfterReady: false);
+
+      final starts = requests.where(
+        (request) => request.path == '/Sessions/Playing',
+      );
+      expect(starts, hasLength(1));
+      expect((starts.single.data as Map)['IsPaused'], isTrue);
+      expect(
+        requests.where(
+          (request) => request.path == '/Sessions/Playing/Progress',
+        ),
+        isEmpty,
+      );
+
+      await controller.play();
+
+      final progress = requests.where(
+        (request) => request.path == '/Sessions/Playing/Progress',
+      );
+      expect(engine.playCalls, 1);
+      expect(controller.state.isPlaying, isFalse);
+      expect(progress, hasLength(1));
+      expect((progress.single.data as Map)['IsPaused'], isFalse);
+
+      await controller.shutdown();
+      expect(
+        requests.where(
+          (request) => request.path == '/Sessions/Playing/Stopped',
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('stale ready generation suppresses Start and cleans encoding', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: api,
+      engine: engine,
+      item: _plainItem,
+      resolver: _PlanResolver(_testPlan(method: PlayMethod.transcode)),
+    );
+    var retiredAtReady = false;
+    controller.addListener(() {
+      if (!retiredAtReady && controller.state.phase == PlaybackPhase.ready) {
+        retiredAtReady = true;
+        unawaited(controller.quiesce());
+      }
+    });
+
+    await controller.start();
+    await controller.shutdown();
+
+    expect(retiredAtReady, isTrue);
+    expect(
+      requests.where((request) => request.path == '/Sessions/Playing'),
+      isEmpty,
+    );
+    expect(
+      requests.where((request) => request.path == '/Sessions/Playing/Stopped'),
+      isEmpty,
+    );
+    expect(
+      requests.where((request) => request.path == '/Videos/ActiveEncodings'),
+      hasLength(1),
+    );
+  });
+
   test('pause stops a play request before playing state arrives', () async {
     final engine = _FakeEngine()..emitPlayingOnPlay = false;
     engine.onOpen = (_) {
@@ -2067,7 +2156,7 @@ class _BlockingReporter implements PlaybackReporter {
   }) async {}
 
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
 
   @override
   Future<void> stop(Duration position) {

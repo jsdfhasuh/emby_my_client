@@ -1728,7 +1728,7 @@ class _Reporter implements PlaybackReporter {
     required bool isPaused,
   }) async {}
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
   @override
   Future<void> stop(Duration position) async {}
   @override
@@ -1749,7 +1749,7 @@ class _TrackingReporter implements PlaybackReporter {
     required bool isPaused,
   }) async {}
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
   @override
   Future<void> stop(Duration position) async => stopCalls++;
   @override

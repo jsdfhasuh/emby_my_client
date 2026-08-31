@@ -361,8 +361,12 @@ class PlaybackController extends ChangeNotifier {
             clearStatus: true,
           ),
         );
+        _throwIfStale(token);
         try {
-          await reporter.reportStart(_state.position);
+          await reporter.reportStart(
+            _state.position,
+            isPaused: !playAfterReady,
+          );
         } catch (error) {
           DiagnosticLog.instance.warning(
             'playback',
@@ -689,25 +693,31 @@ class PlaybackController extends ChangeNotifier {
         _lifecycleSuspended) {
       return;
     }
+    final token = _generation;
+    final boundEngine = engine;
     _desiredPlaying = true;
+    var playSucceeded = _state.isPlaying;
     if (!_state.isPlaying) {
-      final boundEngine = engine;
       try {
         await _operationCoordinator.runTrackedNativeOperation(
           kind: PlaybackNativeOperationKind.play,
           operation: boundEngine.play,
           barrierTimeout: playPauseTimeout,
         );
+        playSucceeded = true;
       } on PlaybackNativeOperationTimedOut {
         _desiredPlaying = false;
         if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
         return;
       }
     }
-    if (_retiring || _lifecycleSuspended) {
+    if (!_isCurrent(token) ||
+        !identical(engine, boundEngine) ||
+        _lifecycleSuspended) {
       _setState(_state.copyWith(isPlaying: false));
+      return;
     }
-    await _reportProgress();
+    if (playSucceeded) await _reportProgress(isPaused: false);
   }
 
   Future<void> pause() async {
@@ -2904,11 +2914,11 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
-  Future<void> _reportProgress() async {
+  Future<void> _reportProgress({bool? isPaused}) async {
     try {
       await reporter.reportProgress(
         position: _state.position,
-        isPaused: !_state.isPlaying,
+        isPaused: isPaused ?? !_state.isPlaying,
       );
     } catch (error) {
       DiagnosticLog.instance.warning(

@@ -752,6 +752,7 @@ void main() {
         _item,
         plan,
         position: const Duration(seconds: 1),
+        isPaused: true,
       );
       await api.reportPlaybackProgress(
         _item,
@@ -775,6 +776,7 @@ void main() {
         '/Videos/ActiveEncodings',
       ]);
       expect((requests[0].data as Map)['PositionTicks'], 10000000);
+      expect((requests[0].data as Map)['IsPaused'], isTrue);
       expect((requests[1].data as Map)['IsPaused'], isTrue);
       expect((requests[2].data as Map)['PositionTicks'], 30000000);
       expect(requests[3].queryParameters['LiveStreamId'], 'live-1');
@@ -789,7 +791,7 @@ void main() {
       });
       final plan = _plan(method: PlayMethod.transcode, playSessionId: null);
 
-      await api.reportPlaybackStart(_item, plan);
+      await api.reportPlaybackStart(_item, plan, isPaused: false);
       await api.stopActiveEncoding(plan);
 
       expect(requests, hasLength(1));
@@ -831,7 +833,7 @@ void main() {
             liveStreamId: 'live-1',
           ),
         );
-      await reporter.reportStart(Duration.zero);
+      await reporter.reportStart(Duration.zero, isPaused: false);
 
       await Future.wait([
         reporter.stop(const Duration(seconds: 3)),
@@ -857,6 +859,75 @@ void main() {
         1,
       );
     });
+
+    test(
+      'serializes concurrent Start and cleans encoding during Start-Stop race',
+      () async {
+        final requests = <RequestOptions>[];
+        final startGate = Completer<void>();
+        final startSeen = Completer<void>();
+        final encodingSeen = Completer<void>();
+        final api = _api((options, handler) {
+          requests.add(options);
+          if (options.path == '/Sessions/Playing') {
+            if (!startSeen.isCompleted) startSeen.complete();
+            unawaited(
+              startGate.future.then(
+                (_) => handler.resolve(_response(options, const {})),
+              ),
+            );
+            return;
+          }
+          if (options.path == '/Videos/ActiveEncodings' &&
+              !encodingSeen.isCompleted) {
+            encodingSeen.complete();
+          }
+          handler.resolve(_response(options, const {}));
+        });
+        final reporter = PlaybackSessionReporter(api: api, item: _item)
+          ..activate(
+            _plan(
+              method: PlayMethod.transcode,
+              playSessionId: 'session-race',
+              liveStreamId: 'live-race',
+            ),
+          );
+
+        final firstStart = reporter.reportStart(Duration.zero, isPaused: false);
+        final secondStart = reporter.reportStart(
+          const Duration(seconds: 1),
+          isPaused: false,
+        );
+        await startSeen.future;
+        final stop = reporter.stop(const Duration(seconds: 2));
+
+        await encodingSeen.future;
+        expect(
+          requests.where((request) => request.path == '/Sessions/Playing'),
+          hasLength(1),
+        );
+        expect(
+          requests.where(
+            (request) => request.path == '/Videos/ActiveEncodings',
+          ),
+          hasLength(1),
+        );
+
+        startGate.complete();
+        await Future.wait([firstStart, secondStart, stop]);
+
+        expect(
+          requests.where(
+            (request) => request.path == '/Sessions/Playing/Stopped',
+          ),
+          hasLength(1),
+        );
+        expect(
+          requests.where((request) => request.path == '/LiveStreams/Close'),
+          hasLength(1),
+        );
+      },
+    );
 
     test('redacts encoded URL, headers and exception text', () {
       const token = 'super-secret-token';

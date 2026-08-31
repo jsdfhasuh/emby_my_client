@@ -1228,7 +1228,8 @@ class EmbyApi {
     EmbyItem item,
     PlaybackPlan plan, {
     Duration position = Duration.zero,
-  }) => _report('/Sessions/Playing', item, plan, position, false);
+    required bool isPaused,
+  }) => _report('/Sessions/Playing', item, plan, position, isPaused);
 
   Future<void> reportPlaybackProgress(
     EmbyItem item,

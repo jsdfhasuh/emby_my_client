@@ -21,7 +21,8 @@ class OfflinePlaybackReporter implements PlaybackReporter {
   void updatePlan(PlaybackPlan plan) {}
 
   @override
-  Future<void> reportStart(Duration position) => _save(position);
+  Future<void> reportStart(Duration position, {required bool isPaused}) =>
+      _save(position);
 
   @override
   Future<void> reportProgress({
