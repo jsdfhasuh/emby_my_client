@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_pagination_strategy.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
@@ -655,6 +656,107 @@ void main() {
     },
   );
 
+  testWidgets(
+    'identity viewer result replaces membership and restores its final media ID',
+    (tester) async {
+      tester.view.physicalSize = const Size(1024, 768);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _api((options, handler) {
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: {
+              'TotalRecordCount': 60,
+              'Items': [
+                for (var index = 0; index < 60; index++)
+                  {
+                    'Id': 'identity-item-$index',
+                    'Name': '身份图片 $index',
+                    'Type': 'Photo',
+                    'ImageTags': const <String, String>{},
+                    'BackdropImageTags': const <String>[],
+                    'Genres': const <String>[],
+                    'UserData': const <String, dynamic>{},
+                  },
+              ],
+            },
+          ),
+        );
+      });
+      addTearDown(api.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: LibraryBrowseScreen.root(
+            api: api,
+            view: _homeVideoLibrary,
+            initialState: const LibraryBrowseState(
+              sortBy: LibrarySortBy.playCount,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('身份图片 5'));
+      await tester.pumpAndSettle();
+
+      final viewer = tester.widget<PhotoViewerScreen>(
+        find.byType(PhotoViewerScreen),
+      );
+      expect(
+        viewer.source.paginationStrategy,
+        LibraryPaginationStrategy.identityRescan,
+      );
+      final target = viewer.source.initialItems.singleWhere(
+        (item) => item.id == 'identity-item-55',
+      );
+      final rescannedItems = [
+        ...viewer.source.initialItems.where(
+          (item) => item.id != 'identity-item-0' && item.id != target.id,
+        ),
+        target,
+      ];
+      Navigator.of(tester.element(find.byType(PhotoViewerScreen))).pop(
+        MediaViewerResult(
+          queryFingerprint: viewer.source.queryFingerprint,
+          rawItems: rescannedItems,
+          currentItemId: target.id,
+          nextStartIndex: 59,
+          totalCount: 59,
+          totalDirty: true,
+          hasMore: false,
+          paginationStrategy: LibraryPaginationStrategy.identityRescan,
+        ),
+      );
+      await _pumpFixedFrames(tester);
+
+      final state =
+          tester.state(find.byType(LibraryBrowseScreen))
+              as LibraryBrowseDebugState;
+      expect(state.debugLoadedItemIds, rescannedItems.map((item) => item.id));
+      expect(state.debugLoadedItemIds, isNot(contains('identity-item-0')));
+      expect(state.debugLoadedItemIds.last, target.id);
+      expect(state.debugNextStartIndex, 59);
+      expect(state.debugTotalCount, 59);
+      expect(state.debugTotalDirty, isTrue);
+      expect(state.debugHasMore, isFalse);
+      final targetFinder = find.byKey(
+        const ValueKey('library-item-identity-item-55'),
+      );
+      expect(targetFinder, findsOneWidget);
+      expect(
+        tester
+            .getRect(targetFinder)
+            .overlaps(tester.getRect(_verticalScrollable())),
+        isTrue,
+      );
+    },
+  );
+
   for (final delayedPageFails in [false, true]) {
     testWidgets(
       'late library page ${delayedPageFails ? 'failure' : 'response'} does not regress merged viewer state',
@@ -734,7 +836,7 @@ void main() {
           );
         } else {
           delayedPageHandler!.resolve(
-            _homeMediaPageResponse(delayedPageOptions!),
+            _homeMediaPageResponse(delayedPageOptions!, staleLastItem: true),
           );
         }
         await tester.pumpAndSettle();
@@ -744,6 +846,10 @@ void main() {
                 as LibraryBrowseDebugState;
         expect(debugState.debugLoadedItemIds, hasLength(120));
         expect(debugState.debugLoadedItemIds.toSet(), hasLength(120));
+        expect(
+          debugState.debugLoadedItemIds,
+          isNot(contains('stale-delayed-home-item')),
+        );
         expect(debugState.debugNextStartIndex, 120);
         expect(debugState.debugTotalCount, 180);
         expect(debugState.debugTotalDirty, isFalse);
@@ -965,19 +1071,27 @@ Future<void> _pumpFixedFrames(WidgetTester tester) async {
   }
 }
 
-Response<dynamic> _homeMediaPageResponse(RequestOptions options) {
+Response<dynamic> _homeMediaPageResponse(
+  RequestOptions options, {
+  bool staleLastItem = false,
+}) {
   final start = options.queryParameters['StartIndex'] as int;
   final limit = options.queryParameters['Limit'] as int;
+  final end = (start + limit).clamp(0, 180);
   return Response<dynamic>(
     requestOptions: options,
     statusCode: 200,
     data: {
       'TotalRecordCount': 180,
       'Items': [
-        for (var index = start; index < (start + limit).clamp(0, 180); index++)
+        for (var index = start; index < end; index++)
           {
-            'Id': 'home-item-$index',
-            'Name': '家庭图片 $index',
+            'Id': staleLastItem && index == end - 1
+                ? 'stale-delayed-home-item'
+                : 'home-item-$index',
+            'Name': staleLastItem && index == end - 1
+                ? '延迟过期图片'
+                : '家庭图片 $index',
             'Type': 'Photo',
             'ImageTags': const <String, String>{},
             'BackdropImageTags': const <String>[],

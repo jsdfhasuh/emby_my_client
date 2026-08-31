@@ -351,7 +351,7 @@ void main() {
         scrollable: scrollable,
       );
       await tester.pumpAndSettle();
-      expect(api.starts, [0, 60]);
+      expect(api.starts, [0, 0, 60]);
       final position = tester.state<ScrollableState>(scrollable).position;
       final previousOffset = position.pixels;
 
@@ -359,7 +359,7 @@ void main() {
       socket.emitUserData(['item-0']);
       await _pumpRealtime(tester);
 
-      expect(api.starts, [0, 60, 0, 60]);
+      expect(api.starts, [0, 0, 60, 0, 0, 60]);
       expect(position.pixels, closeTo(previousOffset, 1));
       position.jumpTo(0);
       await tester.pumpAndSettle();

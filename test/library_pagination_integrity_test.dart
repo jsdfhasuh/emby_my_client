@@ -4,12 +4,47 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
+import 'package:emby_my_client/library/library_pagination_strategy.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('mutable library queries select identity rescans', () {
+    expect(
+      libraryPaginationStrategyFor(const LibraryBrowseState()),
+      LibraryPaginationStrategy.stableOffset,
+    );
+    expect(
+      libraryPaginationStrategyFor(
+        const LibraryBrowseState(sortBy: LibrarySortBy.dateAdded),
+      ),
+      LibraryPaginationStrategy.stableOffset,
+    );
+    expect(
+      libraryPaginationStrategyFor(
+        const LibraryBrowseState(sortBy: LibrarySortBy.playCount),
+      ),
+      LibraryPaginationStrategy.identityRescan,
+    );
+    expect(
+      libraryPaginationStrategyFor(const LibraryBrowseState.favorites()),
+      LibraryPaginationStrategy.identityRescan,
+    );
+    for (final playedFilter in [
+      LibraryPlayedFilter.played,
+      LibraryPlayedFilter.unplayed,
+    ]) {
+      expect(
+        libraryPaginationStrategyFor(
+          LibraryBrowseState(playedFilter: playedFilter),
+        ),
+        LibraryPaginationStrategy.identityRescan,
+      );
+    }
+  });
+
   testWidgets('known-total empty page retries from its unchanged raw cursor', (
     tester,
   ) async {
@@ -112,6 +147,142 @@ void main() {
       find.byKey(const ValueKey('library-play-all-button')),
     );
     expect(playButton.onPressed, isNull);
+    await _dispose(tester, api);
+  });
+
+  testWidgets(
+    'play-count identity rescan preserves IDs across raw 59 60 and 61',
+    (tester) async {
+      var firstPageRequests = 0;
+      final api = _ScriptedLibraryApi((startIndex) async {
+        if (startIndex == 0 && firstPageRequests++ == 0) {
+          return EmbyItemPage(
+            items: [
+              for (var index = 0; index < 60; index++) _video('item-$index'),
+            ],
+            rawItemCount: 60,
+            totalRecordCount: 62,
+          );
+        }
+        if (startIndex == 0) {
+          return EmbyItemPage(
+            items: [
+              for (var index = 1; index <= 60; index++) _video('item-$index'),
+            ],
+            rawItemCount: 60,
+            totalRecordCount: 62,
+          );
+        }
+        expect(startIndex, 60);
+        return EmbyItemPage(
+          items: [_video('item-61'), _video('item-0')],
+          rawItemCount: 2,
+          totalRecordCount: 62,
+        );
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LibraryBrowseScreen.root(
+            api: api,
+            view: _library,
+            initialState: const LibraryBrowseState(
+              sortBy: LibrarySortBy.playCount,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(api.starts, [0]);
+
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('library-item-item-55')),
+        700,
+        scrollable: _verticalScrollable(),
+      );
+      await tester.pumpAndSettle();
+
+      final state =
+          tester.state(find.byType(LibraryBrowseScreen))
+              as LibraryBrowseDebugState;
+      expect(api.starts, [0, 0, 60]);
+      expect(state.debugLoadedItemIds, [
+        for (var index = 1; index <= 61; index++) 'item-$index',
+        'item-0',
+      ]);
+      expect(state.debugLoadedItemIds[58], 'item-59');
+      expect(state.debugLoadedItemIds[59], 'item-60');
+      expect(state.debugLoadedItemIds[60], 'item-61');
+      expect(state.debugNextStartIndex, 62);
+      expect(state.debugTotalCount, 62);
+      expect(state.debugTotalDirty, isTrue);
+      expect(state.debugHasMore, isFalse);
+      await _dispose(tester, api);
+    },
+  );
+
+  testWidgets('unplayed identity rescan removes a departed member', (
+    tester,
+  ) async {
+    var firstPageRequests = 0;
+    final api = _ScriptedLibraryApi((startIndex) async {
+      if (startIndex == 0 && firstPageRequests++ == 0) {
+        return EmbyItemPage(
+          items: [
+            for (var index = 0; index < 60; index++) _video('item-$index'),
+          ],
+          rawItemCount: 60,
+          totalRecordCount: 62,
+        );
+      }
+      if (startIndex == 0) {
+        return EmbyItemPage(
+          items: [
+            for (var index = 1; index <= 60; index++) _video('item-$index'),
+          ],
+          rawItemCount: 60,
+          totalRecordCount: 61,
+        );
+      }
+      expect(startIndex, 60);
+      return EmbyItemPage(
+        items: [_video('item-61')],
+        rawItemCount: 1,
+        totalRecordCount: 61,
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryBrowseScreen.root(
+          api: api,
+          view: _library,
+          initialState: const LibraryBrowseState(
+            playedFilter: LibraryPlayedFilter.unplayed,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('library-item-item-55')),
+      700,
+      scrollable: _verticalScrollable(),
+    );
+    await tester.pumpAndSettle();
+
+    final state =
+        tester.state(find.byType(LibraryBrowseScreen))
+            as LibraryBrowseDebugState;
+    expect(api.starts, [0, 0, 60]);
+    expect(state.debugLoadedItemIds, [
+      for (var index = 1; index <= 61; index++) 'item-$index',
+    ]);
+    expect(state.debugLoadedItemIds, isNot(contains('item-0')));
+    expect(state.debugNextStartIndex, 61);
+    expect(state.debugTotalCount, 61);
+    expect(state.debugTotalDirty, isTrue);
+    expect(state.debugHasMore, isFalse);
     await _dispose(tester, api);
   });
 

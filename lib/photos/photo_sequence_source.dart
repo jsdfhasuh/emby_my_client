@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../library/library_pagination_strategy.dart';
 import '../models/emby_models.dart';
 
 enum MediaViewerMode {
@@ -28,6 +29,7 @@ final class MediaViewerResult {
     required this.totalCount,
     required this.totalDirty,
     required this.hasMore,
+    this.paginationStrategy = LibraryPaginationStrategy.stableOffset,
   }) : assert(queryFingerprint != ''),
        assert(nextStartIndex >= 0),
        assert(totalCount == null || totalCount >= 0),
@@ -40,6 +42,7 @@ final class MediaViewerResult {
   final int? totalCount;
   final bool totalDirty;
   final bool hasMore;
+  final LibraryPaginationStrategy paginationStrategy;
 }
 
 @immutable
@@ -52,6 +55,8 @@ sealed class PhotoSequenceSource {
     required this.initialRawCursor,
     required this.initialTotalCount,
     required this.initialHasMore,
+    this.initialTotalDirty = false,
+    this.paginationStrategy = LibraryPaginationStrategy.stableOffset,
     required this.loadPage,
   }) : assert(queryFingerprint != ''),
        assert(initialRawCursor >= 0),
@@ -65,6 +70,8 @@ sealed class PhotoSequenceSource {
   final int initialRawCursor;
   final int? initialTotalCount;
   final bool initialHasMore;
+  final bool initialTotalDirty;
+  final LibraryPaginationStrategy paginationStrategy;
   final PhotoPageLoader loadPage;
 }
 
@@ -77,6 +84,8 @@ final class DirectoryPhotoSource extends PhotoSequenceSource {
     required super.initialRawCursor,
     required super.initialTotalCount,
     required super.initialHasMore,
+    super.initialTotalDirty,
+    super.paginationStrategy,
     required super.loadPage,
   });
 }
@@ -90,6 +99,8 @@ final class FilteredLibraryPhotoSource extends PhotoSequenceSource {
     required super.initialRawCursor,
     required super.initialTotalCount,
     required super.initialHasMore,
+    super.initialTotalDirty,
+    super.paginationStrategy,
     required super.loadPage,
   });
 }

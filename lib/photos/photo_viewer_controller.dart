@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../core/diagnostic_log.dart';
 import '../images/emby_image_request.dart';
 import '../images/photo_prefetcher.dart';
+import '../library/library_pagination_strategy.dart';
 import '../library/library_raw_page_cursor.dart';
 import '../models/emby_models.dart';
 import 'photo_sequence_source.dart';
@@ -24,7 +25,8 @@ class PhotoViewerController extends ChangeNotifier {
        _prefetcher = prefetcher,
        _hasMore = source.initialHasMore,
        _nextStartIndex = source.initialRawCursor,
-       _totalCount = source.initialTotalCount {
+       _totalCount = source.initialTotalCount,
+       _totalDirty = source.initialTotalDirty {
     _rawItems.addAll(
       source.initialItems.where((item) => _seenItemIds.add(item.id)),
     );
@@ -51,7 +53,7 @@ class PhotoViewerController extends ChangeNotifier {
   int _currentIndex = 0;
   int _nextStartIndex;
   int? _totalCount;
-  bool _totalDirty = false;
+  bool _totalDirty;
   bool _reportedTotalBelowLoaded = false;
   bool _hasMore;
   bool _loadingMore = false;
@@ -83,6 +85,7 @@ class PhotoViewerController extends ChangeNotifier {
     totalCount: _totalCount,
     totalDirty: _totalDirty,
     hasMore: _hasMore,
+    paginationStrategy: _source.paginationStrategy,
   );
 
   String get positionLabel {
@@ -117,38 +120,12 @@ class PhotoViewerController extends ChangeNotifier {
     _loadMoreError = null;
     _notify();
     try {
-      var addedMedia = 0;
-      do {
-        final startIndex = _nextStartIndex;
-        final page = await _source.loadPage(
-          startIndex: startIndex,
-          limit: pageSize,
-        );
-        if (_disposed) return;
-        final cursor = advanceLibraryRawPageCursor(
-          currentStartIndex: startIndex,
-          currentTotalCount: _totalCount,
-          reportedTotalCount: page.totalRecordCount,
-          rawItemCount: page.rawItemCount,
-          pageSize: pageSize,
-          dirty: _totalDirty,
-        );
-        final additions = page.items
-            .where((item) => _seenItemIds.add(item.id))
-            .toList();
-        _rawItems.addAll(additions);
-        final media = additions.where(_source.mode.accepts).toList();
-        _mediaItems.addAll(media);
-        addedMedia += media.length;
-        _nextStartIndex = cursor.nextStartIndex;
-        _totalCount = cursor.totalCount;
-        _totalDirty = cursor.dirty;
-        _hasMore = cursor.hasMore || cursor.paginationStalled;
-        _recordCursorDiagnostics(cursor);
-        if (cursor.paginationStalled) {
-          throw const LibraryPaginationStalled();
-        }
-      } while (_hasMore && addedMedia == 0);
+      if (_source.paginationStrategy ==
+          LibraryPaginationStrategy.identityRescan) {
+        await _loadIdentityRescan();
+      } else {
+        await _loadStableOffset();
+      }
       _schedulePrefetch();
     } catch (error, stackTrace) {
       if (!_disposed) {
@@ -166,6 +143,118 @@ class PhotoViewerController extends ChangeNotifier {
         _notify();
       }
     }
+  }
+
+  Future<void> _loadStableOffset() async {
+    var addedMedia = 0;
+    do {
+      final startIndex = _nextStartIndex;
+      final page = await _source.loadPage(
+        startIndex: startIndex,
+        limit: pageSize,
+      );
+      if (_disposed) return;
+      final cursor = advanceLibraryRawPageCursor(
+        currentStartIndex: startIndex,
+        currentTotalCount: _totalCount,
+        reportedTotalCount: page.totalRecordCount,
+        rawItemCount: page.rawItemCount,
+        pageSize: pageSize,
+        dirty: _totalDirty,
+      );
+      final additions = page.items
+          .where((item) => _seenItemIds.add(item.id))
+          .toList();
+      _rawItems.addAll(additions);
+      final media = additions.where(_source.mode.accepts).toList();
+      _mediaItems.addAll(media);
+      addedMedia += media.length;
+      _nextStartIndex = cursor.nextStartIndex;
+      _totalCount = cursor.totalCount;
+      _totalDirty = cursor.dirty;
+      _hasMore = cursor.hasMore || cursor.paginationStalled;
+      _recordCursorDiagnostics(cursor);
+      if (cursor.paginationStalled) {
+        throw const LibraryPaginationStalled();
+      }
+    } while (_hasMore && addedMedia == 0);
+  }
+
+  Future<void> _loadIdentityRescan() async {
+    final previousRawIds = _rawItems.map((item) => item.id).toList();
+    final previousMediaIds = _mediaItems.map((item) => item.id).toSet();
+    final previousCurrentItemId = currentItemId;
+    final previousCurrentIndex = _currentIndex;
+    final previousRawCursor = _nextStartIndex;
+    final rescannedItems = <EmbyItem>[];
+    final rescannedIds = <String>{};
+    var scanStartIndex = 0;
+    var scanTotalCount = _totalCount;
+    var scanDirty = _totalDirty;
+    var scanHasMore = true;
+    var foundNewMedia = false;
+
+    do {
+      final page = await _source.loadPage(
+        startIndex: scanStartIndex,
+        limit: pageSize,
+      );
+      if (_disposed) return;
+      final cursor = advanceLibraryRawPageCursor(
+        currentStartIndex: scanStartIndex,
+        currentTotalCount: scanTotalCount,
+        reportedTotalCount: page.totalRecordCount,
+        rawItemCount: page.rawItemCount,
+        pageSize: pageSize,
+        dirty: scanDirty,
+      );
+      for (final item in page.items) {
+        if (!rescannedIds.add(item.id)) continue;
+        rescannedItems.add(item);
+        if (_source.mode.accepts(item) && !previousMediaIds.contains(item.id)) {
+          foundNewMedia = true;
+        }
+      }
+      scanStartIndex = cursor.nextStartIndex;
+      scanTotalCount = cursor.totalCount;
+      scanDirty = cursor.dirty;
+      scanHasMore = cursor.hasMore || cursor.paginationStalled;
+      _recordCursorDiagnostics(cursor);
+      if (cursor.paginationStalled) {
+        throw const LibraryPaginationStalled();
+      }
+    } while (scanHasMore &&
+        (scanStartIndex <= previousRawCursor || !foundNewMedia));
+
+    scanDirty =
+        scanDirty ||
+        libraryIdentityPrefixChanged(
+          previousIds: previousRawIds,
+          rescannedIds: rescannedItems.map((item) => item.id),
+        );
+    _rawItems
+      ..clear()
+      ..addAll(rescannedItems);
+    _seenItemIds
+      ..clear()
+      ..addAll(rescannedIds);
+    _mediaItems
+      ..clear()
+      ..addAll(rescannedItems.where(_source.mode.accepts));
+    if (_mediaItems.isEmpty) {
+      _currentIndex = 0;
+    } else {
+      final restoredIndex = previousCurrentItemId == null
+          ? -1
+          : _mediaItems.indexWhere((item) => item.id == previousCurrentItemId);
+      _currentIndex = restoredIndex >= 0
+          ? restoredIndex
+          : previousCurrentIndex.clamp(0, _mediaItems.length - 1).toInt();
+    }
+    _nextStartIndex = scanStartIndex;
+    _totalCount = scanTotalCount;
+    _totalDirty = scanDirty;
+    _hasMore = scanHasMore;
   }
 
   void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {

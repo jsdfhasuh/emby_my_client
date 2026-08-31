@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:emby_my_client/images/emby_image_request.dart';
 import 'package:emby_my_client/images/photo_prefetcher.dart';
+import 'package:emby_my_client/library/library_pagination_strategy.dart';
 import 'package:emby_my_client/library/library_raw_page_cursor.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
@@ -344,6 +345,67 @@ void main() {
   });
 
   test(
+    'identity rescan removes a filtered item and keeps the final media ID',
+    () async {
+      final starts = <int>[];
+      final controller = PhotoViewerController(
+        source: _source(
+          paginationStrategy: LibraryPaginationStrategy.identityRescan,
+          initialItems: [
+            for (var index = 0; index < 60; index++)
+              _item('photo-$index', 'Photo'),
+          ],
+          initialItemId: 'photo-59',
+          initialRawCursor: 60,
+          initialTotalCount: 62,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) async {
+            starts.add(startIndex);
+            if (startIndex == 0) {
+              return EmbyItemPage(
+                items: [
+                  for (var index = 0; index < 59; index++)
+                    _item('photo-$index', 'Photo'),
+                  _item('photo-60', 'Photo'),
+                ],
+                rawItemCount: 60,
+                totalRecordCount: 61,
+              );
+            }
+            expect(startIndex, 60);
+            return EmbyItemPage(
+              items: [_item('photo-61', 'Photo')],
+              rawItemCount: 1,
+              totalRecordCount: 61,
+            );
+          },
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+
+      await _waitForViewerLoad(controller);
+
+      expect(starts, [0, 60]);
+      expect(controller.mediaItems.map((item) => item.id), [
+        for (var index = 0; index < 59; index++) 'photo-$index',
+        'photo-60',
+        'photo-61',
+      ]);
+      expect(controller.currentIndex, 59);
+      expect(controller.currentItemId, 'photo-60');
+      expect(controller.nextStartIndex, 61);
+      expect(controller.totalCount, 61);
+      expect(controller.totalDirty, isTrue);
+      expect(
+        controller.result.paginationStrategy,
+        LibraryPaginationStrategy.identityRescan,
+      );
+      controller.dispose();
+    },
+  );
+
+  test(
     'a page response arriving after dispose cannot update the viewer',
     () async {
       final started = Completer<void>();
@@ -456,6 +518,9 @@ Future<EmbyItemPage> _emptyLoader({
 
 DirectoryPhotoSource _source({
   MediaViewerMode mode = MediaViewerMode.photosOnly,
+  LibraryPaginationStrategy paginationStrategy =
+      LibraryPaginationStrategy.stableOffset,
+  bool initialTotalDirty = false,
   required List<EmbyItem> initialItems,
   required String initialItemId,
   required int initialRawCursor,
@@ -470,6 +535,8 @@ DirectoryPhotoSource _source({
   initialRawCursor: initialRawCursor,
   initialTotalCount: initialTotalCount,
   initialHasMore: initialHasMore,
+  initialTotalDirty: initialTotalDirty,
+  paginationStrategy: paginationStrategy,
   loadPage: loadPage,
 );
 
