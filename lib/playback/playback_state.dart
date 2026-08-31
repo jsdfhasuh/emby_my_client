@@ -61,6 +61,7 @@ class SubtitleSelection {
 enum SubtitleSelectionStatus {
   notApplied,
   applying,
+  waitingForTracks,
   appliedNone,
   appliedEmbedded,
   appliedExternal,

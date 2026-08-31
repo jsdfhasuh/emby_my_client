@@ -37,6 +37,12 @@ class PlaybackSubtitleOptions extends StatelessWidget {
   Widget build(BuildContext context) => ListView(
     children: [
       if (playbackState.subtitleSelectionStatus ==
+          SubtitleSelectionStatus.waitingForTracks)
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Text('字幕轨道仍在加载，视频可继续播放'),
+        ),
+      if (playbackState.subtitleSelectionStatus ==
           SubtitleSelectionStatus.failed)
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),

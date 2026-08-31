@@ -378,6 +378,74 @@ void main() {
     },
   );
 
+  test(
+    'enters ready while waiting and applies a late embedded subtitle',
+    () async {
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([], defaultSubtitleStreamIndex: 3),
+        engine: engine,
+        item: _plainItem,
+        trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+      );
+
+      await controller.start();
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      expect(engine.selectedSubtitleTrackIds, isEmpty);
+
+      engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+      await _waitUntil(
+        () =>
+            controller.state.subtitleSelectionStatus ==
+            SubtitleSelectionStatus.appliedEmbedded,
+      );
+
+      expect(engine.selectedSubtitleTrackIds, ['3']);
+      expect(controller.state.appliedSubtitleStreamIndex, 3);
+      await controller.shutdown();
+    },
+  );
+
+  test('disabling subtitles invalidates a stale late-track event', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([], defaultSubtitleStreamIndex: 3),
+      engine: engine,
+      item: _plainItem,
+      trackWaitTimeout: const Duration(milliseconds: 10),
+      lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+    );
+
+    await controller.start();
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.waitingForTracks,
+    );
+
+    await controller.selectSubtitleStream(null);
+    engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(engine.selectedSubtitleTrackIds, [null]);
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.disabled,
+    );
+    await controller.shutdown();
+  });
+
   test('does not select a subtitle when the plan has no default', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -412,10 +480,16 @@ void main() {
         engine: engine,
         item: _plainItem,
         trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(milliseconds: 20),
         diagnostics: _diagnostics(diagnostics),
       );
 
       await controller.start();
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.failed,
@@ -520,6 +594,62 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.appliedExternal,
       );
+      expect(controller.state.appliedSubtitleStreamIndex, 4);
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'enters ready while waiting and applies a late external subtitle once',
+    () async {
+      final externalLoad = Completer<void>();
+      final engine = _FakeEngine(
+        externalSubtitleOperation: externalLoad.future,
+      );
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final resolver = _PlanResolver(
+        _testPlan(
+          subtitleStreamIndex: 4,
+          mediaStreams: const [
+            {
+              'Index': 4,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Chinese',
+              'Language': 'chi',
+              'IsExternal': true,
+              'DeliveryUrl': '/subtitles/4.srt',
+            },
+          ],
+        ),
+      );
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        resolver: resolver,
+        trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+      );
+
+      await controller.start();
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+
+      externalLoad.complete();
+      await _waitUntil(
+        () =>
+            controller.state.subtitleSelectionStatus ==
+            SubtitleSelectionStatus.appliedExternal,
+      );
+
+      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
       expect(controller.state.appliedSubtitleStreamIndex, 4);
       await controller.shutdown();
     },
@@ -1345,6 +1475,7 @@ PlaybackController _controller({
   required EmbyItem item,
   Duration readyTimeout = const Duration(seconds: 1),
   Duration trackWaitTimeout = const Duration(seconds: 2),
+  Duration lateSubtitleTrackWaitTimeout = const Duration(seconds: 8),
   PlaybackDiagnostics? diagnostics,
   PlaybackItemSession? session,
   PlaybackStreamResolver? resolver,
@@ -1357,6 +1488,7 @@ PlaybackController _controller({
   playbackHeaders: api.playbackHeaders,
   readyTimeout: readyTimeout,
   trackWaitTimeout: trackWaitTimeout,
+  lateSubtitleTrackWaitTimeout: lateSubtitleTrackWaitTimeout,
   diagnostics: diagnostics,
   session: session,
   resumeVerificationTimeout: const Duration(milliseconds: 100),
@@ -1510,6 +1642,7 @@ class _FakeEngine implements PlaybackEngine {
     this.stopOperation,
     this.disposeOperation,
     this.seekOperation,
+    this.externalSubtitleOperation,
   });
 
   final Future<void>? openOperation;
@@ -1517,6 +1650,7 @@ class _FakeEngine implements PlaybackEngine {
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
   final Future<void>? seekOperation;
+  final Future<void>? externalSubtitleOperation;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -1670,6 +1804,7 @@ class _FakeEngine implements PlaybackEngine {
   }) async {
     externalSubtitleUris.add(uri);
     if (externalSubtitleError != null) throw externalSubtitleError!;
+    await externalSubtitleOperation;
   }
 
   @override

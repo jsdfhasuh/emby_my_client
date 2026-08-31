@@ -51,11 +51,14 @@ class PlaybackController extends ChangeNotifier {
     this.cacheCleanupTimeout = const Duration(seconds: 3),
     this.progressInterval = const Duration(seconds: 10),
     this.trackWaitTimeout = const Duration(seconds: 2),
+    this.lateSubtitleTrackWaitTimeout = const Duration(seconds: 8),
     this.cacheStatePollInterval = const Duration(seconds: 1),
     this.cacheSpacePollInterval = const Duration(seconds: 10),
     this.recoveryPolicy = const PlaybackRecoveryPolicy(),
     PlaybackClock? clock,
-  }) : _engine = engine,
+  }) : assert(trackWaitTimeout > Duration.zero),
+       assert(lateSubtitleTrackWaitTimeout > Duration.zero),
+       _engine = engine,
        session = session ?? PlaybackItemSession.create(),
        cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
        _diagnostics = diagnostics ?? PlaybackDiagnostics(),
@@ -89,6 +92,7 @@ class PlaybackController extends ChangeNotifier {
   final Duration cacheCleanupTimeout;
   final Duration progressInterval;
   final Duration trackWaitTimeout;
+  final Duration lateSubtitleTrackWaitTimeout;
   final Duration cacheStatePollInterval;
   final Duration cacheSpacePollInterval;
   final PlaybackRecoveryPolicy recoveryPolicy;
@@ -114,6 +118,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void>? _subtitleApplication;
   SubtitleSelection? _subtitleApplicationSelection;
   int? _subtitleApplicationGeneration;
+  _LateSubtitleTask? _lateSubtitleTask;
   final Set<Completer<void>> _subtitleTrackWaitCancellations = {};
   int _maxStreamingBitrate;
   int _generation = 0;
@@ -948,6 +953,7 @@ class PlaybackController extends ChangeNotifier {
     final boundEngine = engine;
     final token = _generation;
     if (_isSubtitleApplied(selection, token, boundEngine)) return;
+    _cancelLateSubtitleTask();
     _desiredSubtitleSelection = selection;
     _setState(
       _state.copyWith(
@@ -1125,6 +1131,7 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _bindEngine(int token) async {
     final pendingSubtitleApplication = _subtitleApplication;
+    _cancelLateSubtitleTask();
     _cancelSubtitleTrackWaits();
     if (pendingSubtitleApplication != null) {
       await _awaitSubtitleApplication(pendingSubtitleApplication);
@@ -2044,6 +2051,25 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
+  void _markSubtitleWaitingForTracks({
+    required SubtitleSelection selection,
+    required int token,
+    required PlaybackEngine boundEngine,
+  }) {
+    if (!_isCurrentSubtitleSelection(selection, token, boundEngine)) return;
+    _appliedSubtitleEngine = null;
+    _setState(
+      _state.copyWith(
+        desiredSubtitleSelection: selection,
+        subtitleSelectionStatus: SubtitleSelectionStatus.waitingForTracks,
+        appliedSubtitleKind: AppliedSubtitleKind.none,
+        clearAppliedSubtitleStreamIndex: true,
+        subtitleApplicationGeneration: token,
+        clearSubtitleSelectionError: true,
+      ),
+    );
+  }
+
   void _markServerSubtitleApplied(
     PlaybackPlan plan,
     int token,
@@ -2111,6 +2137,31 @@ class PlaybackController extends ChangeNotifier {
             subtitleDisabled: false,
           );
     reporter.updatePlan(updated);
+  }
+
+  void _markExternalSubtitleApplied({
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int streamIndex,
+    required int token,
+    required PlaybackEngine boundEngine,
+  }) {
+    _markSubtitleApplied(
+      selection: selection,
+      status: SubtitleSelectionStatus.appliedExternal,
+      kind: AppliedSubtitleKind.external,
+      streamIndex: streamIndex,
+      token: token,
+      boundEngine: boundEngine,
+    );
+    if (!_isSubtitleApplied(selection, token, boundEngine)) return;
+    _diagnostics.subtitleApplied(
+      selectionSource: selection.source.name,
+      subtitleKind: 'external',
+      streamIndex: streamIndex,
+      generation: token,
+    );
+    _updateReporterSubtitlePlan(plan, selection, streamIndex);
   }
 
   Future<void> _applySelectedDirectPlayTracks(
@@ -2245,35 +2296,72 @@ class PlaybackController extends ChangeNotifier {
       );
       if (track?.isExternal == true && track?.deliveryUrl != null) {
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-        await boundEngine.loadExternalSubtitle(
+        final externalLoad = boundEngine.loadExternalSubtitle(
           resolver.resolveExternalUrl(track!.deliveryUrl!),
           title: track.title,
           language: track.language,
         );
+        try {
+          await externalLoad.timeout(
+            trackWaitTimeout,
+            onTimeout: () {
+              _diagnostics.operationTimeout(
+                PlaybackOperationTimeoutKind.subtitleTrackWait,
+              );
+              throw const _InitialSubtitleWaitTimedOut();
+            },
+          );
+        } on _InitialSubtitleWaitTimedOut {
+          _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+          _markSubtitleWaitingForTracks(
+            selection: selection,
+            token: token,
+            boundEngine: boundEngine,
+          );
+          _scheduleLateExternalSubtitle(
+            plan: plan,
+            selection: selection,
+            streamIndex: resolvedSubtitleIndex,
+            token: token,
+            boundEngine: boundEngine,
+            externalLoad: externalLoad,
+          );
+          return;
+        }
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-        _markSubtitleApplied(
+        _markExternalSubtitleApplied(
+          plan: plan,
           selection: selection,
-          status: SubtitleSelectionStatus.appliedExternal,
-          kind: AppliedSubtitleKind.external,
           streamIndex: resolvedSubtitleIndex,
           token: token,
           boundEngine: boundEngine,
         );
-        _diagnostics.subtitleApplied(
-          selectionSource: selection.source.name,
-          subtitleKind: 'external',
-          streamIndex: resolvedSubtitleIndex,
-          generation: token,
-        );
-        _updateReporterSubtitlePlan(plan, selection, resolvedSubtitleIndex);
         return;
       }
 
-      final tracks = await _waitForTracks(
-        audio: false,
-        token: token,
-        boundEngine: boundEngine,
-      );
+      late final List<EngineTrack> tracks;
+      try {
+        tracks = await _waitForTracks(
+          audio: false,
+          token: token,
+          boundEngine: boundEngine,
+        );
+      } on TimeoutException {
+        _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+        _markSubtitleWaitingForTracks(
+          selection: selection,
+          token: token,
+          boundEngine: boundEngine,
+        );
+        _scheduleLateEmbeddedSubtitle(
+          plan: plan,
+          selection: selection,
+          streamIndex: resolvedSubtitleIndex,
+          token: token,
+          boundEngine: boundEngine,
+        );
+        return;
+      }
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
       final engineId = track == null
           ? null
@@ -2318,17 +2406,210 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  void _scheduleLateEmbeddedSubtitle({
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int streamIndex,
+    required int token,
+    required PlaybackEngine boundEngine,
+  }) {
+    final task = _beginLateSubtitleTask(
+      plan: plan,
+      selection: selection,
+      resolvedStreamIndex: streamIndex,
+      token: token,
+      boundEngine: boundEngine,
+    );
+    _observeLateSubtitleTask(
+      task,
+      _continueLateEmbeddedSubtitle(
+        task: task,
+        plan: plan,
+        selection: selection,
+        token: token,
+        boundEngine: boundEngine,
+      ),
+    );
+  }
+
+  void _scheduleLateExternalSubtitle({
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int streamIndex,
+    required int token,
+    required PlaybackEngine boundEngine,
+    required Future<void> externalLoad,
+  }) {
+    final task = _beginLateSubtitleTask(
+      plan: plan,
+      selection: selection,
+      resolvedStreamIndex: streamIndex,
+      token: token,
+      boundEngine: boundEngine,
+    );
+    _observeLateSubtitleTask(
+      task,
+      _continueLateExternalSubtitle(
+        task: task,
+        plan: plan,
+        selection: selection,
+        streamIndex: streamIndex,
+        token: token,
+        boundEngine: boundEngine,
+        externalLoad: externalLoad,
+      ),
+    );
+  }
+
+  _LateSubtitleTask _beginLateSubtitleTask({
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int resolvedStreamIndex,
+    required int token,
+    required PlaybackEngine boundEngine,
+  }) {
+    _cancelLateSubtitleTask();
+    final task = _LateSubtitleTask(
+      identity: _LateSubtitleTaskIdentity(
+        itemId: item.id,
+        playbackItemSessionId: session.id,
+        playbackSessionId: plan.playSessionId,
+        controllerGeneration: token,
+        engineIdentity: boundEngine,
+        selection: selection,
+        resolvedStreamIndex: resolvedStreamIndex,
+      ),
+    );
+    _lateSubtitleTask = task;
+    return task;
+  }
+
+  void _observeLateSubtitleTask(
+    _LateSubtitleTask task,
+    Future<void> operation,
+  ) {
+    unawaited(
+      operation.whenComplete(() {
+        if (identical(_lateSubtitleTask, task)) _lateSubtitleTask = null;
+      }),
+    );
+  }
+
+  Future<void> _continueLateEmbeddedSubtitle({
+    required _LateSubtitleTask task,
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int token,
+    required PlaybackEngine boundEngine,
+  }) async {
+    try {
+      await _waitForTracks(
+        audio: false,
+        token: token,
+        boundEngine: boundEngine,
+        timeout: lateSubtitleTrackWaitTimeout,
+        cancellationSignal: task.cancellation,
+      );
+      if (!_isCurrentLateSubtitleTask(task)) return;
+      await Future<void>.delayed(Duration.zero);
+      if (!_isCurrentLateSubtitleTask(task)) return;
+      await _applySubtitleSelection(plan, token, boundEngine);
+    } on _PlaybackCancelled {
+      return;
+    } on TimeoutException catch (error) {
+      _markLateSubtitleFailed(task, error);
+    } catch (error) {
+      _markLateSubtitleFailed(task, error);
+    }
+  }
+
+  Future<void> _continueLateExternalSubtitle({
+    required _LateSubtitleTask task,
+    required PlaybackPlan plan,
+    required SubtitleSelection selection,
+    required int streamIndex,
+    required int token,
+    required PlaybackEngine boundEngine,
+    required Future<void> externalLoad,
+  }) async {
+    try {
+      await Future.any<void>([
+        externalLoad,
+        task.cancellation.future.then<void>((_) {
+          throw const _PlaybackCancelled();
+        }),
+      ]).timeout(
+        lateSubtitleTrackWaitTimeout,
+        onTimeout: () {
+          _diagnostics.operationTimeout(
+            PlaybackOperationTimeoutKind.subtitleTrackWait,
+          );
+          throw TimeoutException(
+            'External subtitle did not arrive within the remaining '
+            '$lateSubtitleTrackWaitTimeout',
+          );
+        },
+      );
+      if (!_isCurrentLateSubtitleTask(task)) return;
+      _markExternalSubtitleApplied(
+        plan: plan,
+        selection: selection,
+        streamIndex: streamIndex,
+        token: token,
+        boundEngine: boundEngine,
+      );
+    } on _PlaybackCancelled {
+      return;
+    } on TimeoutException catch (error) {
+      _markLateSubtitleFailed(task, error);
+    } catch (error) {
+      _markLateSubtitleFailed(task, error);
+    }
+  }
+
+  void _markLateSubtitleFailed(_LateSubtitleTask task, Object error) {
+    if (!_isCurrentLateSubtitleTask(task)) return;
+    final identity = task.identity;
+    _markSubtitleFailed(
+      selection: identity.selection,
+      token: identity.controllerGeneration,
+      boundEngine: identity.engineIdentity,
+      streamIndex: identity.resolvedStreamIndex,
+      error: error,
+    );
+  }
+
+  bool _isCurrentLateSubtitleTask(_LateSubtitleTask task) {
+    final identity = task.identity;
+    return identical(_lateSubtitleTask, task) &&
+        item.id == identity.itemId &&
+        identical(session.id, identity.playbackItemSessionId) &&
+        _state.plan?.playSessionId == identity.playbackSessionId &&
+        _generation == identity.controllerGeneration &&
+        identical(engine, identity.engineIdentity) &&
+        _desiredSubtitleSelection == identity.selection &&
+        _isCurrent(identity.controllerGeneration);
+  }
+
+  void _cancelLateSubtitleTask() {
+    final task = _lateSubtitleTask;
+    _lateSubtitleTask = null;
+    task?.cancel();
+  }
+
   Future<List<EngineTrack>> _waitForTracks({
     required bool audio,
     required int token,
     required PlaybackEngine boundEngine,
+    Duration? timeout,
+    Completer<void>? cancellationSignal,
   }) async {
     final existing = audio ? _state.audioTracks : _state.subtitleTracks;
     if (existing.isNotEmpty) return existing;
     _throwIfCurrentEngine(token, boundEngine);
 
     final completer = Completer<List<EngineTrack>>();
-    final cancellation = Completer<void>();
+    final cancellation = cancellationSignal ?? Completer<void>();
     _subtitleTrackWaitCancellations.add(cancellation);
     final stream = audio
         ? boundEngine.audioTracksStream
@@ -2357,13 +2638,14 @@ class PlaybackController extends ChangeNotifier {
           throw const _PlaybackCancelled();
         }),
       ]).timeout(
-        trackWaitTimeout,
+        timeout ?? trackWaitTimeout,
         onTimeout: () {
           _diagnostics.operationTimeout(
             PlaybackOperationTimeoutKind.subtitleTrackWait,
           );
           throw TimeoutException(
-            'Subtitle track list did not arrive within $trackWaitTimeout',
+            'Subtitle track list did not arrive within '
+            '${timeout ?? trackWaitTimeout}',
           );
         },
       );
@@ -2492,6 +2774,7 @@ class PlaybackController extends ChangeNotifier {
 
   int _advanceGeneration() {
     _generation++;
+    _cancelLateSubtitleTask();
     _cancelSubtitleTrackWaits();
     return _generation;
   }
@@ -2885,6 +3168,41 @@ class PlaybackController extends ChangeNotifier {
 
 class _PlaybackCancelled implements Exception {
   const _PlaybackCancelled();
+}
+
+class _LateSubtitleTaskIdentity {
+  const _LateSubtitleTaskIdentity({
+    required this.itemId,
+    required this.playbackItemSessionId,
+    required this.playbackSessionId,
+    required this.controllerGeneration,
+    required this.engineIdentity,
+    required this.selection,
+    required this.resolvedStreamIndex,
+  });
+
+  final String itemId;
+  final PlaybackItemSessionId playbackItemSessionId;
+  final String? playbackSessionId;
+  final int controllerGeneration;
+  final PlaybackEngine engineIdentity;
+  final SubtitleSelection selection;
+  final int resolvedStreamIndex;
+}
+
+class _LateSubtitleTask {
+  _LateSubtitleTask({required this.identity});
+
+  final _LateSubtitleTaskIdentity identity;
+  final Completer<void> cancellation = Completer<void>();
+
+  void cancel() {
+    if (!cancellation.isCompleted) cancellation.complete();
+  }
+}
+
+class _InitialSubtitleWaitTimedOut implements Exception {
+  const _InitialSubtitleWaitTimedOut();
 }
 
 class _PlaybackOperationTimedOut implements Exception {
