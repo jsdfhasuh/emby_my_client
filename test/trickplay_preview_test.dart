@@ -159,7 +159,7 @@ void main() {
 
       final firstRequest = controller.request(
         request: first,
-        load: (_) => firstLoad.future,
+        load: (_) => TrickplayPreviewLoad.future(firstLoad.future),
       );
       await Future<void>.delayed(Duration.zero);
       firstLoad.complete('sheet-a');
@@ -169,7 +169,7 @@ void main() {
 
       final secondRequest = controller.request(
         request: second,
-        load: (_) => secondLoad.future,
+        load: (_) => TrickplayPreviewLoad.future(secondLoad.future),
       );
       expect(controller.state.status, TrickplayPreviewStatus.loading);
       expect(controller.state.sheet, isNull);
@@ -189,12 +189,12 @@ void main() {
 
       final oldRequest = controller.request(
         request: _request(sheetIndex: 0, tileIndex: 0),
-        load: (_) => oldLoad.future,
+        load: (_) => TrickplayPreviewLoad.future(oldLoad.future),
       );
       final newFrame = _request(sheetIndex: 1, tileIndex: 0);
       final newRequest = controller.request(
         request: newFrame,
-        load: (_) => newLoad.future,
+        load: (_) => TrickplayPreviewLoad.future(newLoad.future),
       );
 
       newLoad.complete('new-sheet');
@@ -211,7 +211,7 @@ void main() {
       final load = Completer<String>();
       final request = controller.request(
         request: _request(sheetIndex: 0, tileIndex: 0),
-        load: (_) => load.future,
+        load: (_) => TrickplayPreviewLoad.future(load.future),
       );
 
       controller.beginScrubSession();
@@ -231,7 +231,7 @@ void main() {
         controller.addListener((_) => notifications++);
         final request = controller.request(
           request: _request(sheetIndex: 0, tileIndex: 0),
-          load: (_) => load.future,
+          load: (_) => TrickplayPreviewLoad.future(load.future),
         );
         controller.resetResource();
         final afterReset = notifications;
@@ -254,14 +254,18 @@ void main() {
           request: _request(sheetIndex: 0, tileIndex: 0),
           load: (_) {
             attempts++;
-            return Future<String>.error(StateError('decode failure'));
+            return TrickplayPreviewLoad.future(
+              Future<String>.error(StateError('decode failure')),
+            );
           },
         );
         await controller.request(
           request: _request(sheetIndex: 0, tileIndex: 1),
           load: (_) {
             attempts++;
-            return Future<String>.error(StateError('decode failure'));
+            return TrickplayPreviewLoad.future(
+              Future<String>.error(StateError('decode failure')),
+            );
           },
         );
 
@@ -275,12 +279,95 @@ void main() {
           request: _request(sheetIndex: 0, tileIndex: 2),
           load: (_) {
             attempts++;
-            return Future<String>.error(StateError('decode failure'));
+            return TrickplayPreviewLoad.future(
+              Future<String>.error(StateError('decode failure')),
+            );
           },
         );
         expect(attempts, 2);
       },
     );
+
+    test('classifies timeout, network, and decode failures', () async {
+      final timeoutController = TrickplayPreviewController<String>(
+        requestTimeout: const Duration(milliseconds: 5),
+      );
+      var timeoutCancelled = 0;
+      await timeoutController.request(
+        request: _request(sheetIndex: 0, tileIndex: 0),
+        load: (_) => TrickplayPreviewLoad(
+          future: Completer<String>().future,
+          cancel: () => timeoutCancelled++,
+        ),
+      );
+      expect(
+        timeoutController.state.failureReason,
+        TrickplayPreviewFailureReason.requestTimeout,
+      );
+      expect(timeoutCancelled, 1);
+
+      final networkController = TrickplayPreviewController<String>();
+      await networkController.request(
+        request: _request(sheetIndex: 0, tileIndex: 0),
+        load: (_) => TrickplayPreviewLoad.future(
+          Future<String>.error(
+            const TrickplayPreviewLoadException(
+              TrickplayPreviewFailureReason.networkFailure,
+            ),
+          ),
+        ),
+      );
+      expect(
+        networkController.state.failureReason,
+        TrickplayPreviewFailureReason.networkFailure,
+      );
+
+      final decodeController = TrickplayPreviewController<String>();
+      await decodeController.request(
+        request: _request(sheetIndex: 0, tileIndex: 0),
+        load: (_) => TrickplayPreviewLoad.future(
+          Future<String>.error(StateError('bad image bytes')),
+        ),
+      );
+      expect(
+        decodeController.state.failureReason,
+        TrickplayPreviewFailureReason.decodeFailure,
+      );
+    });
+
+    test('every resource invalidation cancels its image load handle', () async {
+      Future<void> verify(
+        void Function(TrickplayPreviewController<String>) invalidate,
+      ) async {
+        final controller = TrickplayPreviewController<String>();
+        final pending = Completer<String>();
+        var cancellations = 0;
+        final request = controller.request(
+          request: _request(sheetIndex: 0, tileIndex: 0),
+          load: (_) => TrickplayPreviewLoad(
+            future: pending.future,
+            cancel: () {
+              cancellations++;
+              if (!pending.isCompleted) {
+                pending.completeError(StateError('cancelled'));
+              }
+            },
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        invalidate(controller);
+        await request;
+
+        expect(cancellations, 1);
+        controller.dispose();
+      }
+
+      await verify((controller) => controller.beginScrubSession());
+      await verify((controller) => controller.resetResource());
+      await verify((controller) => controller.invalidate());
+      await verify((controller) => controller.dispose());
+    });
 
     test('sheet identity distinguishes complete grid metadata', () {
       final base = _identity();
@@ -452,46 +539,81 @@ void main() {
     final api = EmbyApi(_session, dio: Dio());
     addTearDown(api.dispose);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Stack(
-            children: [
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: TrickplaySeekPreviewOverlay(
-                  api: api,
-                  item: _plainItem,
-                  plan: null,
-                  playerItemGeneration: 'item-generation',
-                  startPosition: Duration.zero,
-                  targetPosition: const Duration(seconds: 5),
-                  duration: const Duration(minutes: 1),
-                  buffer: const Duration(seconds: 30),
-                  cacheRuntimeMode: null,
-                  cacheSnapshot: null,
-                  previewDisabled: false,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_trickplayOverlayApp(api, _plainItem, null));
     await tester.pump();
 
     expect(find.text('前进 5 秒'), findsOneWidget);
     expect(find.text('00:05 / 01:00'), findsOneWidget);
-    expect(find.text('暂无可用画面'), findsOneWidget);
+    expect(find.text('服务器未生成 Trickplay，仅显示时间与进度'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('horizontal-seek-preview-timeline')),
       findsOneWidget,
     );
     expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
   });
+
+  testWidgets('distinguishes source mismatch and invalid metadata', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    addTearDown(api.dispose);
+
+    await tester.pumpWidget(
+      _trickplayOverlayApp(api, _detailItem, _playbackPlan('source-2')),
+    );
+    await tester.pump();
+    expect(find.text('当前媒体源没有 Trickplay，仅显示时间与进度'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _trickplayOverlayApp(
+        api,
+        _invalidTrickplayItem,
+        _playbackPlan('source-1'),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('服务器缩略图信息无效，仅显示时间与进度'), findsOneWidget);
+  });
 }
+
+Widget _trickplayOverlayApp(EmbyApi api, EmbyItem item, PlaybackPlan? plan) =>
+    MaterialApp(
+      home: Scaffold(
+        body: Stack(
+          children: [
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: TrickplaySeekPreviewOverlay(
+                api: api,
+                item: item,
+                plan: plan,
+                playerItemGeneration: 'item-generation',
+                startPosition: Duration.zero,
+                targetPosition: const Duration(seconds: 5),
+                duration: const Duration(minutes: 1),
+                buffer: const Duration(seconds: 30),
+                cacheRuntimeMode: null,
+                cacheSnapshot: null,
+                previewDisabled: false,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+PlaybackPlan _playbackPlan(String mediaSourceId) => PlaybackPlan(
+  uri: Uri.parse('https://emby.example.test/video'),
+  mediaSourceId: mediaSourceId,
+  playSessionId: 'play-session',
+  method: PlayMethod.directPlay,
+  usesServerAuthentication: true,
+  mediaStreams: const [],
+  transcodingReasons: const [],
+  availableMediaSources: const [],
+);
 
 TrickplayFrame _frame({
   required int sheetIndex,
@@ -655,6 +777,27 @@ const _detailItem = EmbyItem(
     'source-1': [
       EmbyTrickplayResolution(
         width: 320,
+        height: 180,
+        tileColumns: 2,
+        tileRows: 2,
+        intervalMilliseconds: 10000,
+      ),
+    ],
+  }),
+);
+
+const _invalidTrickplayItem = EmbyItem(
+  id: 'item-1',
+  name: 'Item',
+  type: 'Movie',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+  trickplay: EmbyTrickplay({
+    'source-1': [
+      EmbyTrickplayResolution(
+        width: 0,
         height: 180,
         tileColumns: 2,
         tileRows: 2,

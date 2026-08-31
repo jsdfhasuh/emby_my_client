@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -127,9 +128,20 @@ class _TrickplaySeekPreviewOverlayState
 
   void _requestFrame() {
     final plan = widget.plan;
-    final selection = widget.item.trickplay?.selectionFor(plan?.mediaSourceId);
-    if (plan == null || selection == null) {
-      _previewController.showUnavailable();
+    final trickplay = widget.item.trickplay;
+    if (plan == null || trickplay == null || trickplay.sources.isEmpty) {
+      _previewController.showUnavailable(
+        TrickplayPreviewFailureReason.metadataUnavailable,
+      );
+      return;
+    }
+    final selection = trickplay.selectionFor(plan.mediaSourceId);
+    if (selection == null ||
+        plan.mediaSourceId.isNotEmpty &&
+            selection.sourceMatch != EmbyTrickplaySourceMatch.exact) {
+      _previewController.showUnavailable(
+        TrickplayPreviewFailureReason.sourceMismatch,
+      );
       return;
     }
 
@@ -139,8 +151,10 @@ class _TrickplaySeekPreviewOverlayState
       duration: widget.duration,
       resolution: resolution,
     );
-    if (frame == null) {
-      _previewController.showUnavailable();
+    if (resolution.width <= 0 || resolution.height <= 0 || frame == null) {
+      _previewController.showUnavailable(
+        TrickplayPreviewFailureReason.invalidMetadata,
+      );
       return;
     }
 
@@ -175,26 +189,34 @@ class _TrickplaySeekPreviewOverlayState
     );
   }
 
-  Future<ImageProvider> _loadImage(ImageProvider image) async {
-    await _resolveImage(image);
-    return image;
-  }
-
-  Future<void> _resolveImage(ImageProvider image) {
-    final completer = Completer<void>();
+  TrickplayPreviewLoad<ImageProvider> _loadImage(ImageProvider image) {
+    final completer = Completer<ImageProvider>();
     final stream = image.resolve(createLocalImageConfiguration(context));
     late final ImageStreamListener listener;
+    var listenerAttached = false;
+
+    void removeListener() {
+      if (!listenerAttached) return;
+      listenerAttached = false;
+      stream.removeListener(listener);
+    }
 
     void completeSuccess() {
       if (completer.isCompleted) return;
-      stream.removeListener(listener);
-      completer.complete();
+      removeListener();
+      completer.complete(image);
     }
 
     void completeFailure(Object error, StackTrace stackTrace) {
       if (completer.isCompleted) return;
-      stream.removeListener(listener);
-      completer.completeError(error, stackTrace);
+      removeListener();
+      final reason = _isNetworkImageFailure(error)
+          ? TrickplayPreviewFailureReason.networkFailure
+          : TrickplayPreviewFailureReason.decodeFailure;
+      completer.completeError(
+        TrickplayPreviewLoadException(reason, cause: error),
+        stackTrace,
+      );
     }
 
     listener = ImageStreamListener(
@@ -203,9 +225,25 @@ class _TrickplaySeekPreviewOverlayState
         completeFailure(error, stackTrace ?? StackTrace.empty);
       },
     );
-    stream.addListener(listener);
-    return completer.future;
+    listenerAttached = true;
+    try {
+      stream.addListener(listener);
+    } catch (error, stackTrace) {
+      completeFailure(error, stackTrace);
+    }
+    return TrickplayPreviewLoad(
+      future: completer.future,
+      cancel: () {
+        removeListener();
+        if (!completer.isCompleted) {
+          completer.completeError(const _TrickplayImageLoadCancelled());
+        }
+      },
+    );
   }
+
+  bool _isNetworkImageFailure(Object error) =>
+      error is NetworkImageLoadException || error is IOException;
 
   @override
   Widget build(BuildContext context) {
@@ -245,6 +283,7 @@ class _TrickplaySeekPreviewOverlayState
       previewUnavailable:
           !widget.previewDisabled &&
           state.status == TrickplayPreviewStatus.unavailable,
+      previewFailureReason: state.failureReason,
       preview: preview,
       isLoading:
           !widget.previewDisabled &&
@@ -264,6 +303,7 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
     required this.cacheSnapshot,
     required this.previewDisabled,
     required this.previewUnavailable,
+    this.previewFailureReason,
     this.preview,
     this.isLoading = false,
   }) : assert(!(previewDisabled && previewUnavailable));
@@ -276,6 +316,7 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
   final PlaybackCacheEngineSnapshot? cacheSnapshot;
   final bool previewDisabled;
   final bool previewUnavailable;
+  final TrickplayPreviewFailureReason? previewFailureReason;
   final Widget? preview;
   final bool isLoading;
 
@@ -394,13 +435,14 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
               child: preview,
             )
           else if (showUnavailablePlaceholder)
-            const SizedBox(
-              key: ValueKey('horizontal-seek-preview-unavailable'),
+            SizedBox(
+              key: const ValueKey('horizontal-seek-preview-unavailable'),
               height: 124,
               child: Center(
                 child: Text(
-                  '暂无可用画面',
-                  style: TextStyle(color: Color(0xFFD0D5D6)),
+                  _previewFailureMessage(previewFailureReason),
+                  style: const TextStyle(color: Color(0xFFD0D5D6)),
+                  textAlign: TextAlign.center,
                 ),
               ),
             ),
@@ -441,4 +483,21 @@ class HorizontalSeekPreviewOverlay extends StatelessWidget {
     final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
     return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
   }
+
+  String _previewFailureMessage(TrickplayPreviewFailureReason? reason) =>
+      switch (reason) {
+        TrickplayPreviewFailureReason.metadataUnavailable =>
+          '服务器未生成 Trickplay，仅显示时间与进度',
+        TrickplayPreviewFailureReason.sourceMismatch =>
+          '当前媒体源没有 Trickplay，仅显示时间与进度',
+        TrickplayPreviewFailureReason.invalidMetadata => '服务器缩略图信息无效，仅显示时间与进度',
+        TrickplayPreviewFailureReason.requestTimeout => '服务器缩略图请求超时，仅显示时间与进度',
+        TrickplayPreviewFailureReason.networkFailure => '服务器缩略图网络加载失败，仅显示时间与进度',
+        TrickplayPreviewFailureReason.decodeFailure => '服务器缩略图解码失败，仅显示时间与进度',
+        null => '暂无可用画面',
+      };
+}
+
+class _TrickplayImageLoadCancelled implements Exception {
+  const _TrickplayImageLoadCancelled();
 }

@@ -51,7 +51,7 @@ void main() {
     expect(restored.cache.reservedFreeBytes, 3 * 1024 * 1024 * 1024);
   });
 
-  test('old v1 settings without cache migrate to automatic defaults', () {
+  test('old v1 settings without cache migrate to server Trickplay', () {
     final restored = PlaybackSettings.fromJson({
       'maxStreamingBitrate': 10000000,
       'playbackRate': 1.5,
@@ -65,7 +65,7 @@ void main() {
       restored.horizontalSwipeSeekSpanSeconds,
       defaultHorizontalSwipeSeekSpanSeconds,
     );
-    expect(restored.seekPreviewMode, SeekPreviewMode.automatic);
+    expect(restored.seekPreviewMode, SeekPreviewMode.serverOnly);
     expect(restored.cache.mode, PlaybackCacheMode.automatic);
     expect(
       restored.cache.customSessionTargetBytes,
@@ -173,7 +173,7 @@ void main() {
       restored.horizontalSwipeSeekSpanSeconds,
       defaultHorizontalSwipeSeekSpanSeconds,
     );
-    expect(restored.seekPreviewMode, SeekPreviewMode.automatic);
+    expect(restored.seekPreviewMode, SeekPreviewMode.serverOnly);
 
     const directlyConstructed = PlaybackSettings(
       horizontalSwipeSeekSpanSeconds: 91,
@@ -218,13 +218,31 @@ void main() {
     expect(target, const Duration(minutes: 15));
   });
 
-  test('all seek preview modes use stable serialized names', () {
-    for (final mode in SeekPreviewMode.values) {
-      final restored = PlaybackSettings.fromJson(
-        PlaybackSettings(seekPreviewMode: mode).toJson(),
+  test('legacy preview modes normalize to server Trickplay', () {
+    for (final mode in [
+      SeekPreviewMode.automatic,
+      SeekPreviewMode.serverOnly,
+    ]) {
+      final json = PlaybackSettings(seekPreviewMode: mode).toJson();
+      expect(json['seekPreviewMode'], SeekPreviewMode.serverOnly.name);
+      expect(
+        PlaybackSettings.fromJson(json).seekPreviewMode,
+        SeekPreviewMode.serverOnly,
       );
-      expect(restored.seekPreviewMode, mode);
     }
+
+    expect(
+      PlaybackSettings.fromJson(const {
+        'seekPreviewMode': 'automatic',
+      }).seekPreviewMode,
+      SeekPreviewMode.serverOnly,
+    );
+    expect(
+      PlaybackSettings.fromJson(const {
+        'seekPreviewMode': 'off',
+      }).seekPreviewMode,
+      SeekPreviewMode.off,
+    );
   });
 
   test('full read-ahead mode round-trips without changing defaults', () {

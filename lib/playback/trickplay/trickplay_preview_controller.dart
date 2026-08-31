@@ -1,6 +1,45 @@
+import 'dart:async';
+
 import 'trickplay_frame_resolver.dart';
 
 enum TrickplayPreviewStatus { idle, loading, ready, unavailable }
+
+enum TrickplayPreviewFailureReason {
+  metadataUnavailable,
+  sourceMismatch,
+  invalidMetadata,
+  requestTimeout,
+  networkFailure,
+  decodeFailure,
+}
+
+class TrickplayPreviewLoadException implements Exception {
+  const TrickplayPreviewLoadException(this.reason, {this.cause});
+
+  final TrickplayPreviewFailureReason reason;
+  final Object? cause;
+
+  @override
+  String toString() => 'TrickplayPreviewLoadException($reason, $cause)';
+}
+
+class TrickplayPreviewLoad<T> {
+  TrickplayPreviewLoad({required this.future, required void Function() cancel})
+    : _cancel = cancel;
+
+  factory TrickplayPreviewLoad.future(Future<T> future) =>
+      TrickplayPreviewLoad(future: future, cancel: () {});
+
+  final Future<T> future;
+  final void Function() _cancel;
+  bool _cancelled = false;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    _cancel();
+  }
+}
 
 class TrickplaySheetIdentity {
   const TrickplaySheetIdentity({
@@ -69,30 +108,39 @@ class TrickplayPreviewState<T> {
     this.sheet,
     this.sheetIdentity,
     this.frame,
+    this.failureReason,
   });
 
   const TrickplayPreviewState.idle()
     : status = TrickplayPreviewStatus.idle,
       sheet = null,
       sheetIdentity = null,
-      frame = null;
+      frame = null,
+      failureReason = null;
 
   final TrickplayPreviewStatus status;
   final T? sheet;
   final TrickplaySheetIdentity? sheetIdentity;
   final TrickplayFrame? frame;
+  final TrickplayPreviewFailureReason? failureReason;
 }
 
 typedef TrickplayPreviewListener<T> =
     void Function(TrickplayPreviewState<T> state);
 
 class TrickplayPreviewController<T> {
-  TrickplayPreviewController({TrickplayPreviewListener<T>? onChanged})
-    : _listeners = {?onChanged};
+  TrickplayPreviewController({
+    TrickplayPreviewListener<T>? onChanged,
+    Duration requestTimeout = const Duration(seconds: 3),
+  }) : assert(requestTimeout > Duration.zero),
+       _requestTimeout = requestTimeout,
+       _listeners = {?onChanged};
 
+  final Duration _requestTimeout;
   final Set<TrickplayPreviewListener<T>> _listeners;
-  final Map<TrickplaySheetIdentity, Future<T>> _loads = {};
-  final Set<TrickplaySheetIdentity> _failedSheets = {};
+  final Map<TrickplaySheetIdentity, _TrickplayLoadEntry<T>> _loads = {};
+  final Map<TrickplaySheetIdentity, TrickplayPreviewFailureReason>
+  _failedSheets = {};
   TrickplayPreviewState<T> _state = const TrickplayPreviewState.idle();
   TrickplayPreviewRequest? _latestRequest;
   int _generation = 0;
@@ -112,6 +160,7 @@ class TrickplayPreviewController<T> {
     _generation++;
     _latestRequest = null;
     _failedSheets.clear();
+    _cancelLoads();
     _setState(const TrickplayPreviewState.idle());
   }
 
@@ -119,20 +168,27 @@ class TrickplayPreviewController<T> {
     _generation++;
     _latestRequest = null;
     _failedSheets.clear();
+    _cancelLoads();
     _setState(const TrickplayPreviewState.idle());
   }
 
-  void showUnavailable() {
+  void showUnavailable(TrickplayPreviewFailureReason reason) {
     if (_disposed) return;
+    _generation++;
     _latestRequest = null;
+    _cancelLoads();
     _setState(
-      const TrickplayPreviewState(status: TrickplayPreviewStatus.unavailable),
+      TrickplayPreviewState(
+        status: TrickplayPreviewStatus.unavailable,
+        failureReason: reason,
+      ),
     );
   }
 
   Future<void> request({
     required TrickplayPreviewRequest request,
-    required Future<T> Function(TrickplaySheetIdentity identity) load,
+    required TrickplayPreviewLoad<T> Function(TrickplaySheetIdentity identity)
+    load,
   }) async {
     if (_disposed) return;
     final requestGeneration = _generation;
@@ -156,23 +212,24 @@ class TrickplayPreviewController<T> {
       const TrickplayPreviewState(status: TrickplayPreviewStatus.loading),
     );
 
-    if (_failedSheets.contains(request.identity)) {
+    final priorFailure = _failedSheets[request.identity];
+    if (priorFailure != null) {
       _setState(
-        const TrickplayPreviewState(status: TrickplayPreviewStatus.unavailable),
+        TrickplayPreviewState(
+          status: TrickplayPreviewStatus.unavailable,
+          failureReason: priorFailure,
+        ),
       );
       return;
     }
 
-    final sheet = _loads.putIfAbsent(request.identity, () async {
-      try {
-        return await load(request.identity);
-      } finally {
-        _loads.remove(request.identity);
-      }
-    });
+    final entry = _loads.putIfAbsent(
+      request.identity,
+      () => _createLoadEntry(request.identity, load),
+    );
 
     try {
-      final loadedSheet = await sheet;
+      final loadedSheet = await entry.future;
       if (!_isCurrent(requestGeneration, request.identity)) return;
       final latest = _latestRequest;
       if (latest == null || latest.identity != request.identity) return;
@@ -184,11 +241,18 @@ class TrickplayPreviewController<T> {
           frame: latest.frame,
         ),
       );
-    } catch (_) {
+    } catch (error) {
       if (!_isCurrent(requestGeneration, request.identity)) return;
-      _failedSheets.add(request.identity);
+      final failure = error is TrickplayPreviewLoadException
+          ? error.reason
+          : TrickplayPreviewFailureReason.decodeFailure;
+      entry.load.cancel();
+      _failedSheets[request.identity] = failure;
       _setState(
-        const TrickplayPreviewState(status: TrickplayPreviewStatus.unavailable),
+        TrickplayPreviewState(
+          status: TrickplayPreviewStatus.unavailable,
+          failureReason: failure,
+        ),
       );
     }
   }
@@ -198,6 +262,7 @@ class TrickplayPreviewController<T> {
     _generation++;
     _latestRequest = null;
     _failedSheets.clear();
+    _cancelLoads();
     _setState(const TrickplayPreviewState.idle());
   }
 
@@ -206,8 +271,40 @@ class TrickplayPreviewController<T> {
     _disposed = true;
     _generation++;
     _latestRequest = null;
+    _cancelLoads();
     _listeners.clear();
     _state = const TrickplayPreviewState.idle();
+  }
+
+  _TrickplayLoadEntry<T> _createLoadEntry(
+    TrickplaySheetIdentity identity,
+    TrickplayPreviewLoad<T> Function(TrickplaySheetIdentity identity) load,
+  ) {
+    final handle = load(identity);
+    late final _TrickplayLoadEntry<T> entry;
+    final future = handle.future
+        .timeout(
+          _requestTimeout,
+          onTimeout: () {
+            handle.cancel();
+            throw const TrickplayPreviewLoadException(
+              TrickplayPreviewFailureReason.requestTimeout,
+            );
+          },
+        )
+        .whenComplete(() {
+          if (identical(_loads[identity], entry)) _loads.remove(identity);
+        });
+    entry = _TrickplayLoadEntry(load: handle, future: future);
+    return entry;
+  }
+
+  void _cancelLoads() {
+    final loads = _loads.values.toList(growable: false);
+    _loads.clear();
+    for (final entry in loads) {
+      entry.load.cancel();
+    }
   }
 
   bool _isCurrent(int requestGeneration, TrickplaySheetIdentity identity) =>
@@ -222,4 +319,11 @@ class TrickplayPreviewController<T> {
       listener(state);
     }
   }
+}
+
+class _TrickplayLoadEntry<T> {
+  const _TrickplayLoadEntry({required this.load, required this.future});
+
+  final TrickplayPreviewLoad<T> load;
+  final Future<T> future;
 }

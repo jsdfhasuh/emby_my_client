@@ -45,8 +45,7 @@ const _subtitlePositionOptions = <(int, String)>[
   (100, '底部'),
 ];
 const _seekPreviewModeOptions = <(SeekPreviewMode, String)>[
-  (SeekPreviewMode.automatic, '自动（推荐）'),
-  (SeekPreviewMode.serverOnly, '仅服务器缩略图'),
+  (SeekPreviewMode.serverOnly, '服务器缩略图'),
   (SeekPreviewMode.off, '关闭画面预览'),
 ];
 
@@ -288,8 +287,9 @@ class _PlaybackPreferencesScreenState extends State<PlaybackPreferencesScreen> {
                             key: const ValueKey('playback-seek-preview-mode'),
                             label: '滑动预览画面',
                             icon: Icons.photo_library_outlined,
-                            value: _settings.seekPreviewMode,
+                            value: _settings.seekPreviewMode.normalized,
                             options: _seekPreviewModeOptions,
+                            helperText: '服务器未生成 Trickplay 时，仅显示时间与进度。',
                             onChanged: (value) => _update(
                               _settings.copyWith(seekPreviewMode: value),
                             ),
@@ -421,6 +421,7 @@ class _PlaybackPreferencesScreenState extends State<PlaybackPreferencesScreen> {
     required T value,
     required List<(T, String)> options,
     required ValueChanged<T> onChanged,
+    String? helperText,
   }) {
     final hasCurrentValue = options.any((option) => option.$1 == value);
     return DropdownButtonFormField<T>(
@@ -429,6 +430,7 @@ class _PlaybackPreferencesScreenState extends State<PlaybackPreferencesScreen> {
       isExpanded: true,
       decoration: InputDecoration(
         labelText: label,
+        helperText: helperText,
         prefixIcon: Icon(icon),
         border: const OutlineInputBorder(),
       ),
