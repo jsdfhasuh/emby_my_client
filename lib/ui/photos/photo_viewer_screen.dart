@@ -45,11 +45,15 @@ abstract interface class PhotoViewerDebugState {
 class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     with WidgetsBindingObserver
     implements PhotoViewerDebugState {
+  static const _inlineShutdownTimeout = Duration(seconds: 3);
+  static const _systemUiRestoreTimeout = Duration(seconds: 1);
+
   late PhotoViewerController _controller;
   late PageController _pageController;
   bool _initialized = false;
   bool _currentPageZoomed = false;
   bool _seekInteractionActive = false;
+  bool _closing = false;
   bool _didPop = false;
   int _viewerDimension = 1920;
   InlinePlaybackCoordinator? _inlineCoordinator;
@@ -133,11 +137,13 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
+    if (_closing) return;
     unawaited(_inlineCoordinator?.handleAppLifecycleState(state));
   }
 
   @override
   void didHaveMemoryPressure() {
+    if (_closing) return;
     unawaited(_inlineCoordinator?.handleMemoryPressure());
   }
 
@@ -147,9 +153,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     final inlineCoordinator = _inlineCoordinator;
     inlineCoordinator?.removeListener(_handleInlinePlaybackChanged);
     if (inlineCoordinator != null) {
-      unawaited(
-        inlineCoordinator.shutdown().whenComplete(inlineCoordinator.dispose),
-      );
+      unawaited(_shutdownInlineCoordinator(inlineCoordinator));
+      inlineCoordinator.dispose();
     }
     if (_initialized) {
       _pageController.dispose();
@@ -169,6 +174,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
       widget.api.imageRequest(item, maxWidth: 512, maxHeight: 512);
 
   void _onPageChanged(int index) {
+    if (_closing) return;
     if (_currentPageZoomed || _seekInteractionActive) {
       setState(() {
         _currentPageZoomed = false;
@@ -180,7 +186,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   void _setZoomed(int index, bool zoomed) {
-    if (index != _controller.currentIndex ||
+    if (_closing ||
+        index != _controller.currentIndex ||
         _currentPageZoomed == zoomed ||
         !mounted) {
       return;
@@ -189,7 +196,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   void _setSeekInteractionActive(bool active) {
-    if (!mounted || _seekInteractionActive == active) return;
+    if (_closing || !mounted || _seekInteractionActive == active) return;
     setState(() => _seekInteractionActive = active);
     if (active) _controller.showControlsTemporarily();
   }
@@ -224,7 +231,9 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   Future<void> _syncCurrentPlayback() {
-    if (!_initialized || widget.source.mode != MediaViewerMode.homeMedia) {
+    if (_closing ||
+        !_initialized ||
+        widget.source.mode != MediaViewerMode.homeMedia) {
       return Future<void>.value();
     }
     if (_controller.mediaItems.isEmpty) return Future<void>.value();
@@ -234,18 +243,48 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   void _handleInlinePlaybackChanged() {
-    if (mounted) setState(() {});
+    if (mounted && !_closing) setState(() {});
   }
 
-  Future<void> _closeViewer() => _closeOperation ??= _closeViewerOnce();
+  Future<void> _closeViewer() {
+    final existing = _closeOperation;
+    if (existing != null) return existing;
+    _closing = true;
+    _currentPageZoomed = false;
+    _seekInteractionActive = false;
+    if (mounted) setState(() {});
+    return _closeOperation = _closeViewerOnce();
+  }
 
   Future<void> _closeViewerOnce() async {
     final result = _controller.result;
-    await _inlineCoordinator?.shutdown();
-    await _restoreSystemUiSafely();
-    if (!mounted || _didPop) return;
-    _didPop = true;
-    Navigator.of(context).pop(result);
+    try {
+      final inlineCoordinator = _inlineCoordinator;
+      if (inlineCoordinator != null) {
+        await _shutdownInlineCoordinator(inlineCoordinator);
+      }
+    } finally {
+      try {
+        await _restoreSystemUiSafely().timeout(_systemUiRestoreTimeout);
+      } catch (_) {
+        // Route exit remains bounded even if the platform UI call never ends.
+      } finally {
+        if (mounted && !_didPop) {
+          _didPop = true;
+          Navigator.of(context).pop(result);
+        }
+      }
+    }
+  }
+
+  Future<void> _shutdownInlineCoordinator(
+    InlinePlaybackCoordinator coordinator,
+  ) async {
+    try {
+      await coordinator.shutdown().timeout(_inlineShutdownTimeout);
+    } catch (_) {
+      coordinator.detachAndQuarantine();
+    }
   }
 
   Future<void> _restoreSystemUi() => _restoreSystemUiOperation ??=
@@ -260,7 +299,9 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   Future<void> _goTo(int index) async {
-    if (index < 0 || index >= _controller.mediaItems.length) return;
+    if (_closing || index < 0 || index >= _controller.mediaItems.length) {
+      return;
+    }
     await _pageController.animateToPage(
       index,
       duration: const Duration(milliseconds: 220),
@@ -279,92 +320,110 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
       child: Scaffold(
         key: const Key('photo-viewer'),
         backgroundColor: Colors.black,
-        body: ListenableBuilder(
-          listenable: _controller,
-          builder: (context, _) {
-            final mediaItems = _controller.mediaItems;
-            if (mediaItems.isEmpty) {
-              return const Center(
-                child: Icon(
-                  Icons.broken_image_outlined,
-                  size: 64,
-                  color: Colors.white54,
+        body: IgnorePointer(
+          ignoring: _closing,
+          child: ListenableBuilder(
+            listenable: _controller,
+            builder: (context, _) {
+              final mediaItems = _controller.mediaItems;
+              if (mediaItems.isEmpty) {
+                return const Center(
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    size: 64,
+                    color: Colors.white54,
+                  ),
+                );
+              }
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _controller.toggleControls,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    PageView.builder(
+                      controller: _pageController,
+                      physics: _currentPageZoomed || _seekInteractionActive
+                          ? const NeverScrollableScrollPhysics()
+                          : const PageScrollPhysics(),
+                      itemCount: mediaItems.length,
+                      onPageChanged: _onPageChanged,
+                      itemBuilder: (context, index) {
+                        final item = mediaItems[index];
+                        if (item.isPlayable) {
+                          final coordinatorState = _inlineCoordinator?.state;
+                          final playbackState =
+                              coordinatorState?.itemId == item.id
+                              ? coordinatorState!
+                              : InlinePlaybackState(itemId: item.id);
+                          return InlineVideoPage(
+                            key: ValueKey('video-page-${item.id}'),
+                            itemId: item.id,
+                            coverRequest: _viewerRequest(item),
+                            isActive: index == _controller.currentIndex,
+                            state: playbackState,
+                            onPlay: _playInline,
+                            onPause: _pauseInline,
+                            onSeek: _seekInline,
+                            onRetry: _retryInline,
+                            onSeekInteractionChanged: _setSeekInteractionActive,
+                          );
+                        }
+                        return ZoomablePhotoPage(
+                          key: ValueKey('photo-page-${item.id}'),
+                          request: _viewerRequest(item),
+                          thumbnailRequest: _thumbnailRequest(item),
+                          isActive: index == _controller.currentIndex,
+                          onZoomChanged: (zoomed) => _setZoomed(index, zoomed),
+                        );
+                      },
+                    ),
+                    _ViewerControls(
+                      visible: _controller.controlsVisible,
+                      title: mediaItems[_controller.currentIndex].name,
+                      positionLabel: _controller.positionLabel,
+                      canGoPrevious: _controller.canGoPrevious,
+                      canGoNext: _controller.canGoNext,
+                      loadingMore: _controller.isLoadingMore,
+                      loadMoreError: _controller.loadMoreError,
+                      onBack: () => unawaited(_closeViewer()),
+                      onPrevious: () => _goTo(_controller.currentIndex - 1),
+                      onNext: () => _goTo(_controller.currentIndex + 1),
+                      onRetryLoadMore: _retryLoadMore,
+                    ),
+                  ],
                 ),
               );
-            }
-            return GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _controller.toggleControls,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  PageView.builder(
-                    controller: _pageController,
-                    physics: _currentPageZoomed || _seekInteractionActive
-                        ? const NeverScrollableScrollPhysics()
-                        : const PageScrollPhysics(),
-                    itemCount: mediaItems.length,
-                    onPageChanged: _onPageChanged,
-                    itemBuilder: (context, index) {
-                      final item = mediaItems[index];
-                      if (item.isPlayable) {
-                        final coordinatorState = _inlineCoordinator?.state;
-                        final playbackState =
-                            coordinatorState?.itemId == item.id
-                            ? coordinatorState!
-                            : InlinePlaybackState(itemId: item.id);
-                        return InlineVideoPage(
-                          key: ValueKey('video-page-${item.id}'),
-                          itemId: item.id,
-                          coverRequest: _viewerRequest(item),
-                          isActive: index == _controller.currentIndex,
-                          state: playbackState,
-                          onPlay: () => unawaited(
-                            _inlineCoordinator?.play() ?? Future<void>.value(),
-                          ),
-                          onPause: () => unawaited(
-                            _inlineCoordinator?.pause() ?? Future<void>.value(),
-                          ),
-                          onSeek: (position) => unawaited(
-                            _inlineCoordinator?.seek(position) ??
-                                Future<void>.value(),
-                          ),
-                          onRetry: () => unawaited(
-                            _inlineCoordinator?.retry() ?? Future<void>.value(),
-                          ),
-                          onSeekInteractionChanged: _setSeekInteractionActive,
-                        );
-                      }
-                      return ZoomablePhotoPage(
-                        key: ValueKey('photo-page-${item.id}'),
-                        request: _viewerRequest(item),
-                        thumbnailRequest: _thumbnailRequest(item),
-                        isActive: index == _controller.currentIndex,
-                        onZoomChanged: (zoomed) => _setZoomed(index, zoomed),
-                      );
-                    },
-                  ),
-                  _ViewerControls(
-                    visible: _controller.controlsVisible,
-                    title: mediaItems[_controller.currentIndex].name,
-                    positionLabel: _controller.positionLabel,
-                    canGoPrevious: _controller.canGoPrevious,
-                    canGoNext: _controller.canGoNext,
-                    loadingMore: _controller.isLoadingMore,
-                    loadMoreError: _controller.loadMoreError,
-                    onBack: () => unawaited(_closeViewer()),
-                    onPrevious: () => _goTo(_controller.currentIndex - 1),
-                    onNext: () => _goTo(_controller.currentIndex + 1),
-                    onRetryLoadMore: () =>
-                        _controller.loadMoreIfNeeded(force: true),
-                  ),
-                ],
-              ),
-            );
-          },
+            },
+          ),
         ),
       ),
     );
+  }
+
+  void _playInline() {
+    if (_closing) return;
+    unawaited(_inlineCoordinator?.play() ?? Future<void>.value());
+  }
+
+  void _pauseInline() {
+    if (_closing) return;
+    unawaited(_inlineCoordinator?.pause() ?? Future<void>.value());
+  }
+
+  void _seekInline(Duration position) {
+    if (_closing) return;
+    unawaited(_inlineCoordinator?.seek(position) ?? Future<void>.value());
+  }
+
+  void _retryInline() {
+    if (_closing) return;
+    unawaited(_inlineCoordinator?.retry() ?? Future<void>.value());
+  }
+
+  void _retryLoadMore() {
+    if (_closing) return;
+    unawaited(_controller.loadMoreIfNeeded(force: true));
   }
 }
 

@@ -361,6 +361,148 @@ void main() {
     },
   );
 
+  testWidgets(
+    'blocked shutdown detaches after three seconds and disables controls',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (_) async => null,
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      final api = EmbyApi(_session, dio: Dio());
+      final harness = _ViewerSessionHarness();
+      final shutdownGate = Completer<void>();
+      final navigatorObserver = _CountingNavigatorObserver();
+      harness.nextShutdownGate = shutdownGate;
+      addTearDown(api.dispose);
+      MediaViewerResult? returnedResult;
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [navigatorObserver],
+          home: Builder(
+            builder: (context) => FilledButton(
+              onPressed: () async {
+                returnedResult = await Navigator.of(context)
+                    .push<MediaViewerResult>(
+                      MaterialPageRoute<MediaViewerResult>(
+                        builder: (_) => PhotoViewerScreen(
+                          api: api,
+                          source: _viewerSource(
+                            mode: MediaViewerMode.homeMedia,
+                            items: const [_video1, _photo1],
+                            initialItemId: _video1.id,
+                          ),
+                          inlineSessionFactory: harness.create,
+                        ),
+                      ),
+                    );
+              },
+              child: const Text('打开有界退出查看器'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开有界退出查看器'));
+      await tester.pumpAndSettle();
+      final debugState =
+          tester.state(find.byType(PhotoViewerScreen)) as PhotoViewerDebugState;
+      final coordinator = debugState.debugInlineCoordinator!;
+      final session = harness.sessions.single;
+      final videoPage = tester.widget<InlineVideoPage>(
+        find.byType(InlineVideoPage).first,
+      );
+      final playCalls = session.playCalls;
+
+      await tester.binding.handlePopRoute();
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      videoPage.onPlay();
+      videoPage.onSeek(const Duration(seconds: 30));
+      videoPage.onRetry();
+      await tester.drag(
+        find.byType(PageView),
+        const Offset(-600, 0),
+        warnIfMissed: false,
+      );
+      await tester.pump(const Duration(milliseconds: 260));
+
+      expect(find.byKey(const Key('photo-viewer')), findsOneWidget);
+      expect(session.playCalls, playCalls);
+      expect(session.seekCalls, 0);
+      expect(harness.sessions, hasLength(1));
+      expect(returnedResult, isNull);
+
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+
+      expect(coordinator.detachedAndQuarantined, isTrue);
+      expect(session.shutdownCalls, 1);
+      expect(returnedResult?.currentItemId, _video1.id);
+      expect(navigatorObserver.popCount, 1);
+      expect(find.text('打开有界退出查看器'), findsOneWidget);
+    },
+  );
+
+  testWidgets('system UI restore timeout cannot strand viewer exit', (
+    tester,
+  ) async {
+    final restoreSystemUiGate = Completer<void>();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'SystemChrome.setEnabledSystemUIMode' &&
+          call.arguments == SystemUiMode.edgeToEdge.toString()) {
+        await restoreSystemUiGate.future;
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final api = EmbyApi(_session, dio: Dio());
+    addTearDown(api.dispose);
+    MediaViewerResult? returnedResult;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => FilledButton(
+            onPressed: () async {
+              returnedResult = await Navigator.of(context)
+                  .push<MediaViewerResult>(
+                    MaterialPageRoute<MediaViewerResult>(
+                      builder: (_) => PhotoViewerScreen(
+                        api: api,
+                        source: _viewerSource(
+                          items: const [_photo1],
+                          initialItemId: _photo1.id,
+                        ),
+                      ),
+                    ),
+                  );
+            },
+            child: const Text('打开恢复超时查看器'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开恢复超时查看器'));
+    await tester.pumpAndSettle();
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(find.byType(PhotoViewerScreen), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+
+    expect(returnedResult?.currentItemId, _photo1.id);
+    expect(find.text('打开恢复超时查看器'), findsOneWidget);
+  });
+
   testWidgets('video slider seeks without changing the PageView page', (
     tester,
   ) async {
@@ -838,6 +980,16 @@ class _ViewerSessionHarness {
         ? activeSessions
         : maxActiveSessions;
     return session;
+  }
+}
+
+class _CountingNavigatorObserver extends NavigatorObserver {
+  int popCount = 0;
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    popCount++;
+    super.didPop(route, previousRoute);
   }
 }
 

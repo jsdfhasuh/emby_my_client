@@ -29,12 +29,14 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
   VoidCallback? _sessionListener;
   EmbyItem? _targetItem;
   final Queue<_QueuedInlineOperation> _operations = Queue();
+  _QueuedInlineOperation? _activeOperation;
   bool _operationRunning = false;
   Future<void>? _targetOperation;
   Future<void>? _shutdownOperation;
   int _generation = 0;
   int _lifecycleRevision = 0;
   bool _shuttingDown = false;
+  bool _detachedAndQuarantined = false;
   bool _disposed = false;
   bool _lifecycleSuspended;
   bool _sessionLifecycleSuspended = false;
@@ -55,6 +57,9 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
 
   @visibleForTesting
   bool get lifecycleSuspended => _lifecycleSuspended;
+
+  @visibleForTesting
+  bool get detachedAndQuarantined => _detachedAndQuarantined;
 
   Future<void> activate(EmbyItem item) {
     if (_shuttingDown || _disposed) return Future<void>.value();
@@ -309,6 +314,45 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
         await _retireSession(session, quiescence: quiescence);
       }
     });
+  }
+
+  void detachAndQuarantine() {
+    if (_detachedAndQuarantined) return;
+    _detachedAndQuarantined = true;
+    _shuttingDown = true;
+    ++_generation;
+    _targetItem = null;
+    _targetOperation = null;
+    _clearLifecycleResumeIdentity();
+
+    final session = _session;
+    if (session != null) {
+      _savePosition(session);
+      final listener = _sessionListener;
+      if (listener != null) session.removeListener(listener);
+    }
+    _sessionListener = null;
+    _session = null;
+    _sessionLifecycleSuspended = false;
+    _lifecycleQuiescedSessions.clear();
+    _lifecycleResumingSessions.clear();
+    _retiringSessions.clear();
+    _mutedSessionNotifications.clear();
+    _quiescences.clear();
+    _retirements.clear();
+
+    final activeOperation = _activeOperation;
+    if (activeOperation != null && !activeOperation.completer.isCompleted) {
+      activeOperation.completer.complete();
+    }
+    while (_operations.isNotEmpty) {
+      final queued = _operations.removeFirst();
+      if (!queued.completer.isCompleted) queued.completer.complete();
+    }
+    _shutdownOperation ??= Future<void>.value();
+    if (_state.phase != InlinePlaybackPhase.inactive || _state.itemId != null) {
+      _publish(const InlinePlaybackState());
+    }
   }
 
   Future<void> _activateCurrent(
@@ -712,11 +756,15 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     if (_operationRunning || _operations.isEmpty) return;
     _operationRunning = true;
     final queued = _operations.removeFirst();
+    _activeOperation = queued;
     late final Future<void> operation;
     try {
       operation = queued.operation();
     } catch (error, stackTrace) {
-      queued.completer.completeError(error, stackTrace);
+      if (!queued.completer.isCompleted) {
+        queued.completer.completeError(error, stackTrace);
+      }
+      if (identical(_activeOperation, queued)) _activeOperation = null;
       _operationRunning = false;
       _drainOperations();
       return;
@@ -724,12 +772,16 @@ class InlinePlaybackCoordinator extends ChangeNotifier {
     unawaited(
       operation.then<void>(
         (_) {
-          queued.completer.complete();
+          if (!queued.completer.isCompleted) queued.completer.complete();
+          if (identical(_activeOperation, queued)) _activeOperation = null;
           _operationRunning = false;
           _drainOperations();
         },
         onError: (Object error, StackTrace stackTrace) {
-          queued.completer.completeError(error, stackTrace);
+          if (!queued.completer.isCompleted) {
+            queued.completer.completeError(error, stackTrace);
+          }
+          if (identical(_activeOperation, queued)) _activeOperation = null;
           _operationRunning = false;
           _drainOperations();
         },

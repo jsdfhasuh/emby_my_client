@@ -174,6 +174,40 @@ void main() {
     coordinator.dispose();
   });
 
+  test('detach and quarantine releases a blocked logical shutdown', () async {
+    final harness = _SessionHarness();
+    final shutdownGate = Completer<void>();
+    harness.nextShutdownGate = shutdownGate;
+    final coordinator = InlinePlaybackCoordinator(factory: harness.create);
+    await coordinator.activate(_video('a'));
+    final session = harness.sessions.single;
+    var notifications = 0;
+    coordinator.addListener(() => notifications++);
+
+    final shutdown = coordinator.shutdown();
+    await _waitUntil(() => session.shutdownCalls == 1);
+    final notificationsAfterShutdown = notifications;
+    coordinator.detachAndQuarantine();
+
+    await shutdown.timeout(const Duration(milliseconds: 100));
+    expect(coordinator.detachedAndQuarantined, isTrue);
+    expect(coordinator.state.phase, InlinePlaybackPhase.inactive);
+
+    session.setPosition(const Duration(seconds: 42));
+    await coordinator.play();
+    await coordinator.seek(const Duration(seconds: 12));
+    await coordinator.retry();
+    await coordinator.activate(_video('b'));
+    expect(session.playCalls, 1);
+    expect(session.seekCalls, 0);
+    expect(harness.sessions, hasLength(1));
+    expect(notifications, notificationsAfterShutdown);
+
+    shutdownGate.complete();
+    await Future<void>.delayed(Duration.zero);
+    coordinator.dispose();
+  });
+
   test('lifecycle resumes only the same session that was playing', () async {
     final harness = _SessionHarness();
     final coordinator = InlinePlaybackCoordinator(factory: harness.create);
