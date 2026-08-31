@@ -26,6 +26,7 @@ import 'track_mapper.dart';
 typedef PlaybackEngineRecreator =
     Future<PlaybackEngine> Function(PlaybackItemSession session);
 typedef PlaybackClock = DateTime Function();
+typedef PlaybackEngineDisposalUnconfirmed = void Function();
 
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
@@ -45,6 +46,11 @@ class PlaybackController extends ChangeNotifier {
     this.openTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
     this.seekCallTimeout = const Duration(seconds: 8),
+    this.playPauseTimeout = const Duration(seconds: 3),
+    this.propertyWriteTimeout = const Duration(seconds: 2),
+    this.lifecycleQuiesceTimeout = const Duration(seconds: 2),
+    this.retirementQuiesceTimeout = const Duration(seconds: 3),
+    this.shutdownBarrierTimeout = const Duration(seconds: 5),
     this.stopTimeout = const Duration(seconds: 5),
     this.disposeTimeout = const Duration(seconds: 5),
     this.reporterTimeout = const Duration(seconds: 3),
@@ -55,6 +61,7 @@ class PlaybackController extends ChangeNotifier {
     this.cacheStatePollInterval = const Duration(seconds: 1),
     this.cacheSpacePollInterval = const Duration(seconds: 10),
     this.recoveryPolicy = const PlaybackRecoveryPolicy(),
+    this.onEngineDisposalUnconfirmed,
     PlaybackClock? clock,
   }) : assert(trackWaitTimeout > Duration.zero),
        assert(lateSubtitleTrackWaitTimeout > Duration.zero),
@@ -86,6 +93,11 @@ class PlaybackController extends ChangeNotifier {
   final Duration openTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
+  final Duration playPauseTimeout;
+  final Duration propertyWriteTimeout;
+  final Duration lifecycleQuiesceTimeout;
+  final Duration retirementQuiesceTimeout;
+  final Duration shutdownBarrierTimeout;
   final Duration stopTimeout;
   final Duration disposeTimeout;
   final Duration reporterTimeout;
@@ -96,6 +108,7 @@ class PlaybackController extends ChangeNotifier {
   final Duration cacheStatePollInterval;
   final Duration cacheSpacePollInterval;
   final PlaybackRecoveryPolicy recoveryPolicy;
+  final PlaybackEngineDisposalUnconfirmed? onEngineDisposalUnconfirmed;
   final PlaybackClock _clock;
   final TrackMapper _trackMapper = const TrackMapper();
 
@@ -127,7 +140,8 @@ class PlaybackController extends ChangeNotifier {
   bool _disposed = false;
   bool _shuttingDown = false;
   bool _engineDisposed = false;
-  bool _retiring = false;
+  PlaybackRetirementState _retirementState = PlaybackRetirementState.active;
+  bool _engineDisposalUnconfirmedReported = false;
   PlaybackCacheSession? _cacheSession;
   PlaybackCacheCoordinator? _cacheCoordinator;
   PlaybackCacheFallbackReason? _forcedCacheFallbackReason;
@@ -168,6 +182,9 @@ class PlaybackController extends ChangeNotifier {
   PlaybackEngine get engine => _engine;
   int get maxStreamingBitrate => _maxStreamingBitrate;
   PlaybackItemSessionId get sessionId => session.id;
+  PlaybackRetirementState get retirementState => _retirementState;
+
+  bool get _retiring => _retirementState != PlaybackRetirementState.active;
 
   Future<void> start({
     String? mediaSourceId,
@@ -177,6 +194,9 @@ class PlaybackController extends ChangeNotifier {
     Duration? resumePosition,
     bool playAfterReady = true,
   }) {
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) {
+      return Future<void>.value();
+    }
     _selectedMediaSourceId = mediaSourceId;
     _selectedAudioStreamIndex = audioStreamIndex;
     _desiredSubtitleSelection = subtitleDisabled
@@ -267,7 +287,8 @@ class PlaybackController extends ChangeNotifier {
           final openingPlan = plan;
           await _withDeadline(
             _operationCoordinator.runTrackedNativeOperation(
-              () => boundEngine.open(
+              kind: PlaybackNativeOperationKind.open,
+              operation: () => boundEngine.open(
                 openingPlan.uri,
                 headers: openingPlan.usesServerAuthentication
                     ? playbackHeaders
@@ -279,6 +300,17 @@ class PlaybackController extends ChangeNotifier {
             openTimeout,
             PlaybackOperationTimeoutKind.engineOpen,
           );
+        } on PlaybackNativeOperationTimedOut catch (error) {
+          if (error.kind == PlaybackNativeOperationKind.open) {
+            engineOpenTimedOut = true;
+            _diagnostics.operationTimeout(
+              PlaybackOperationTimeoutKind.engineOpen,
+            );
+            throw const _PlaybackOperationTimedOut(
+              PlaybackOperationTimeoutKind.engineOpen,
+            );
+          }
+          rethrow;
         } on _PlaybackOperationTimedOut catch (error) {
           engineOpenTimedOut =
               error.kind == PlaybackOperationTimeoutKind.engineOpen;
@@ -314,7 +346,9 @@ class PlaybackController extends ChangeNotifier {
           if (playAfterReady) {
             final boundEngine = engine;
             await _operationCoordinator.runTrackedNativeOperation(
-              boundEngine.play,
+              kind: PlaybackNativeOperationKind.play,
+              operation: boundEngine.play,
+              barrierTimeout: playPauseTimeout,
             );
           }
         }
@@ -658,7 +692,17 @@ class PlaybackController extends ChangeNotifier {
     _desiredPlaying = true;
     if (!_state.isPlaying) {
       final boundEngine = engine;
-      await _operationCoordinator.runTrackedNativeOperation(boundEngine.play);
+      try {
+        await _operationCoordinator.runTrackedNativeOperation(
+          kind: PlaybackNativeOperationKind.play,
+          operation: boundEngine.play,
+          barrierTimeout: playPauseTimeout,
+        );
+      } on PlaybackNativeOperationTimedOut {
+        _desiredPlaying = false;
+        if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
+        return;
+      }
     }
     if (_retiring || _lifecycleSuspended) {
       _setState(_state.copyWith(isPlaying: false));
@@ -671,7 +715,16 @@ class PlaybackController extends ChangeNotifier {
     _desiredPlaying = false;
     if (shouldPause && !_engineDisposed && !_shuttingDown) {
       final boundEngine = engine;
-      await _operationCoordinator.runTrackedNativeOperation(boundEngine.pause);
+      try {
+        await _operationCoordinator.runTrackedNativeOperation(
+          kind: PlaybackNativeOperationKind.pause,
+          operation: boundEngine.pause,
+          barrierTimeout: playPauseTimeout,
+        );
+      } on PlaybackNativeOperationTimedOut {
+        // Logical pause state still wins; a late native completion cannot
+        // restore playing state through a retired generation.
+      }
     }
     if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
     await _reportProgress();
@@ -681,17 +734,38 @@ class PlaybackController extends ChangeNotifier {
     final existing = _retirementQuiescenceOperation;
     if (existing != null) return existing;
 
-    _retiring = true;
+    if (_retirementState == PlaybackRetirementState.active) {
+      _retirementState = PlaybackRetirementState.quiescing;
+    }
     _desiredPlaying = false;
     _advanceGeneration();
     _cacheCoordinator?.pause();
     if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
     if (_engineDisposed) {
+      if (_retirementState != PlaybackRetirementState.quarantined) {
+        _retirementState = PlaybackRetirementState.closed;
+      }
       return _retirementQuiescenceOperation = Future<void>.value();
     }
     final boundEngine = engine;
-    return _retirementQuiescenceOperation = _operationCoordinator
-        .beginQuiescence(boundEngine.quiesce);
+    final operation = _operationCoordinator.beginQuiescence(
+      kind: PlaybackNativeOperationKind.retirementQuiesce,
+      operation: boundEngine.quiesce,
+      barrierTimeout: retirementQuiesceTimeout,
+      onTimeout: () {
+        _retirementState = PlaybackRetirementState.quarantined;
+      },
+    );
+    return _retirementQuiescenceOperation = operation.then<void>(
+      (_) {
+        if (_retirementState == PlaybackRetirementState.quiescing) {
+          _retirementState = PlaybackRetirementState.retiring;
+        }
+      },
+      onError: (Object _, StackTrace _) {
+        _retirementState = PlaybackRetirementState.quarantined;
+      },
+    );
   }
 
   Future<void> quiesceForLifecycle() {
@@ -708,7 +782,9 @@ class PlaybackController extends ChangeNotifier {
 
     final boundEngine = engine;
     final operation = _operationCoordinator.beginQuiescence(
-      boundEngine.quiesceForLifecycle,
+      kind: PlaybackNativeOperationKind.lifecycleQuiesce,
+      operation: boundEngine.quiesceForLifecycle,
+      barrierTimeout: lifecycleQuiesceTimeout,
     );
     _lifecycleQuiescenceOperation = operation;
     unawaited(
@@ -746,12 +822,16 @@ class PlaybackController extends ChangeNotifier {
 
     final boundEngine = engine;
     await _operationCoordinator.runTrackedNativeOperation(
-      boundEngine.resumeFromLifecycleQuiescence,
+      kind: PlaybackNativeOperationKind.lifecycleQuiesce,
+      operation: boundEngine.resumeFromLifecycleQuiescence,
+      barrierTimeout: lifecycleQuiesceTimeout,
     );
     if (!_canResumeLifecycle(revision)) {
       if (!_retiring && identical(engine, boundEngine)) {
         await _operationCoordinator.beginQuiescence(
-          boundEngine.quiesceForLifecycle,
+          kind: PlaybackNativeOperationKind.lifecycleQuiesce,
+          operation: boundEngine.quiesceForLifecycle,
+          barrierTimeout: lifecycleQuiesceTimeout,
         );
       }
       return;
@@ -762,7 +842,9 @@ class PlaybackController extends ChangeNotifier {
       _cacheCoordinator?.pause();
       if (!_retiring && identical(engine, boundEngine)) {
         await _operationCoordinator.beginQuiescence(
-          boundEngine.quiesceForLifecycle,
+          kind: PlaybackNativeOperationKind.lifecycleQuiesce,
+          operation: boundEngine.quiesceForLifecycle,
+          barrierTimeout: lifecycleQuiesceTimeout,
         );
       }
       return;
@@ -917,7 +999,10 @@ class PlaybackController extends ChangeNotifier {
             ? null
             : _trackMapper.engineTrackId(serverTrack, tracks);
         if (engineTrackId != null) {
-          await boundEngine.selectAudioTrack(engineTrackId);
+          await _runPropertyWrite(
+            boundEngine,
+            () => boundEngine.selectAudioTrack(engineTrackId),
+          );
           _throwIfCurrentEngine(token, boundEngine);
           _markAudioApplied(streamIndex, token, boundEngine);
           reporter.updatePlan(plan.copyWith(audioStreamIndex: streamIndex));
@@ -988,19 +1073,31 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> setPlaybackRate(double rate) async {
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) return;
     final safeRate = rate.clamp(0.25, 3.0).toDouble();
-    await engine.setRate(safeRate);
+    final boundEngine = engine;
+    await _runPropertyWrite(boundEngine, () => boundEngine.setRate(safeRate));
     _desiredPlaybackRate = safeRate;
     _setState(_state.copyWith(playbackRate: safeRate));
   }
 
   Future<void> setAudioDelay(Duration delay) async {
-    await engine.setAudioDelay(delay);
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) return;
+    final boundEngine = engine;
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.setAudioDelay(delay),
+    );
     _desiredAudioDelay = delay;
   }
 
   Future<void> setSubtitleDelay(Duration delay) async {
-    await engine.setSubtitleDelay(delay);
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) return;
+    final boundEngine = engine;
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.setSubtitleDelay(delay),
+    );
     _desiredSubtitleDelay = delay;
   }
 
@@ -1010,11 +1107,16 @@ class PlaybackController extends ChangeNotifier {
     required int outlineColor,
     required int position,
   }) async {
-    await engine.configureSubtitleStyle(
-      fontSize: fontSize,
-      color: color,
-      outlineColor: outlineColor,
-      position: position,
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) return;
+    final boundEngine = engine;
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.configureSubtitleStyle(
+        fontSize: fontSize,
+        color: color,
+        outlineColor: outlineColor,
+        position: position,
+      ),
     );
     _desiredSubtitleStyle = _SubtitleStyle(
       fontSize: fontSize,
@@ -1032,10 +1134,17 @@ class PlaybackController extends ChangeNotifier {
     int? maxStreamingBitrate,
     bool forceTranscode = false,
   }) {
+    if (_retiring || _shuttingDown || _disposed || _engineDisposed) {
+      return Future<void>.value();
+    }
     return _operationCoordinator.runControlOperation(
       priority: PlaybackControlOperationPriority.userReconfigure,
       operation: (lease) async {
-        if (_disposed || _shuttingDown || _engineDisposed || !lease.isCurrent) {
+        if (_retiring ||
+            _disposed ||
+            _shuttingDown ||
+            _engineDisposed ||
+            !lease.isCurrent) {
           return;
         }
         final position = _state.position;
@@ -1095,31 +1204,54 @@ class PlaybackController extends ChangeNotifier {
     Future<void> quiescence,
     Future<void> nativeBarrier,
   ) async {
+    final nativeBudget = _ShutdownNativeBarrierBudget(shutdownBarrierTimeout);
     _advanceGeneration();
     _pendingRecoveryFingerprint = null;
-    await _awaitQuiescenceSafely(quiescence);
-    await nativeBarrier;
-    await _waitForSeekBookkeeping();
-    _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
     _progressTimer?.cancel();
-    await _stopCacheCoordinator(flushEvidence: false);
-    _setState(_state.copyWith(phase: PlaybackPhase.stopping));
+    _setState(
+      _state.copyWith(
+        phase: PlaybackPhase.stopping,
+        isPlaying: false,
+        isBuffering: false,
+      ),
+    );
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(const _PlaybackCancelled());
     }
     await _cancelSubscriptions();
+    await _stopCacheCoordinator(flushEvidence: false);
     final pendingSubtitleApplication = _subtitleApplication;
     if (pendingSubtitleApplication != null) {
       await _awaitSubtitleApplication(pendingSubtitleApplication);
     }
+    await _waitForSeekBookkeeping();
+    _frozenSeekStatistics ??= _diagnostics.snapshotSeekStatistics();
+
+    final initialNativeBarrier = Future.wait<void>([
+      _awaitQuiescenceSafely(quiescence),
+      nativeBarrier,
+    ]);
+    if (!await nativeBudget.wait(initialNativeBarrier)) {
+      _retirementState = PlaybackRetirementState.quarantined;
+      DiagnosticLog.instance.warning(
+        'player',
+        'event=playback_shutdown_barrier_timeout phase=quiescence',
+      );
+    }
 
     DiagnosticLog.instance.info('player', 'event=playback_closing');
-    await _stopEngine();
+    await _stopEngine(timeout: nativeBudget.remaining);
     await _stopReporterSafely();
-    await _disposeEngine();
+    final disposalConfirmed = await _disposeEngine(
+      timeout: nativeBudget.remaining,
+    );
     await _cleanupCacheSessionSafely();
     _writeTerminalSummaries();
+    if (disposalConfirmed &&
+        _retirementState != PlaybackRetirementState.quarantined) {
+      _retirementState = PlaybackRetirementState.closed;
+    }
     _setState(
       _state.copyWith(
         phase: PlaybackPhase.idle,
@@ -1565,7 +1697,8 @@ class PlaybackController extends ChangeNotifier {
     try {
       await _withDeadline(
         _operationCoordinator.runTrackedNativeOperation(
-          engine.stop,
+          kind: PlaybackNativeOperationKind.stop,
+          operation: engine.stop,
           barrierTimeout: stopTimeout,
         ),
         stopTimeout,
@@ -1579,20 +1712,47 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  Future<void> _runPropertyWrite(
+    PlaybackEngine boundEngine,
+    PlaybackEngineOperation operation,
+  ) {
+    if (!identical(engine, boundEngine) || _engineDisposed || _retiring) {
+      return Future<void>.value();
+    }
+    return _operationCoordinator.runTrackedNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: operation,
+      barrierTimeout: propertyWriteTimeout,
+    );
+  }
+
   Future<void> _restoreEnginePresentation(int token) async {
-    await engine.setRate(_desiredPlaybackRate);
+    final boundEngine = engine;
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.setRate(_desiredPlaybackRate),
+    );
     _throwIfStale(token);
-    await engine.setAudioDelay(_desiredAudioDelay);
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.setAudioDelay(_desiredAudioDelay),
+    );
     _throwIfStale(token);
-    await engine.setSubtitleDelay(_desiredSubtitleDelay);
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.setSubtitleDelay(_desiredSubtitleDelay),
+    );
     _throwIfStale(token);
     final style = _desiredSubtitleStyle;
     if (style == null) return;
-    await engine.configureSubtitleStyle(
-      fontSize: style.fontSize,
-      color: style.color,
-      outlineColor: style.outlineColor,
-      position: style.position,
+    await _runPropertyWrite(
+      boundEngine,
+      () => boundEngine.configureSubtitleStyle(
+        fontSize: style.fontSize,
+        color: style.color,
+        outlineColor: style.outlineColor,
+        position: style.position,
+      ),
     );
     _throwIfStale(token);
   }
@@ -1867,6 +2027,18 @@ class PlaybackController extends ChangeNotifier {
           identical(candidate, session.id) && !_disposed && !_shuttingDown,
       seekCallTimeout: seekCallTimeout,
       seekSettleTimeout: resumeVerificationTimeout,
+      nativeOperationTimeouts: PlaybackNativeOperationTimeouts(
+        open: openTimeout,
+        play: playPauseTimeout,
+        pause: playPauseTimeout,
+        seek: seekCallTimeout,
+        stop: stopTimeout,
+        propertyWrite: propertyWriteTimeout,
+        lifecycleQuiesce: lifecycleQuiesceTimeout,
+        retirementQuiesce: retirementQuiesceTimeout,
+        dispose: disposeTimeout,
+        shutdownBarrier: shutdownBarrierTimeout,
+      ),
     );
   }
 
@@ -2184,7 +2356,10 @@ class PlaybackController extends ChangeNotifier {
       if (engineId == null) {
         throw StateError('Unable to map Emby audio track $audioIndex');
       }
-      await boundEngine.selectAudioTrack(engineId);
+      await _runPropertyWrite(
+        boundEngine,
+        () => boundEngine.selectAudioTrack(engineId),
+      );
       _throwIfCurrentEngine(token, boundEngine);
       _markAudioApplied(audioIndex, token, boundEngine);
     } else if (_isCurrent(token)) {
@@ -2255,7 +2430,10 @@ class PlaybackController extends ChangeNotifier {
       );
 
       if (selection.isDisabled) {
-        await boundEngine.selectSubtitleTrack(null);
+        await _runPropertyWrite(
+          boundEngine,
+          () => boundEngine.selectSubtitleTrack(null),
+        );
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
         _markSubtitleApplied(
           selection: selection,
@@ -2375,7 +2553,10 @@ class PlaybackController extends ChangeNotifier {
         );
         throw StateError('Unable to map Emby subtitle track');
       }
-      await boundEngine.selectSubtitleTrack(engineId);
+      await _runPropertyWrite(
+        boundEngine,
+        () => boundEngine.selectSubtitleTrack(engineId),
+      );
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
       _markSubtitleApplied(
         selection: selection,
@@ -2796,30 +2977,35 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
-  Future<void> _disposeEngine() async {
-    if (_engineDisposed) return;
+  Future<bool> _disposeEngine({Duration? timeout}) async {
+    if (_engineDisposed) {
+      return _retirementState == PlaybackRetirementState.closed;
+    }
     _engineDisposed = true;
     try {
       await _withDeadline(
         engine.dispose(),
-        disposeTimeout,
+        _minimumDuration(disposeTimeout, timeout),
         PlaybackOperationTimeoutKind.engineDispose,
       );
+      return true;
     } catch (error) {
+      _markEngineDisposalUnconfirmed();
       DiagnosticLog.instance.warning(
         'player',
         'event=playback_engine_dispose_failed '
             'errorType=${error.runtimeType}',
       );
+      return false;
     }
   }
 
-  Future<void> _stopEngine() async {
+  Future<void> _stopEngine({Duration? timeout}) async {
     if (_engineDisposed) return;
     try {
       await _withDeadline(
         engine.stop(),
-        stopTimeout,
+        _minimumDuration(stopTimeout, timeout),
         PlaybackOperationTimeoutKind.engineStop,
       );
     } catch (error) {
@@ -2829,6 +3015,18 @@ class PlaybackController extends ChangeNotifier {
             'errorType=${error.runtimeType}',
       );
     }
+  }
+
+  void _markEngineDisposalUnconfirmed() {
+    _retirementState = PlaybackRetirementState.quarantined;
+    if (_engineDisposalUnconfirmedReported) return;
+    _engineDisposalUnconfirmedReported = true;
+    onEngineDisposalUnconfirmed?.call();
+  }
+
+  static Duration _minimumDuration(Duration configured, Duration? remaining) {
+    if (remaining == null || configured <= remaining) return configured;
+    return remaining;
   }
 
   Future<void> _stopReporterSafely() async {
@@ -2886,7 +3084,9 @@ class PlaybackController extends ChangeNotifier {
     if (recreate == null) throw const _PlaybackEngineRecreationRequired();
     final retiringEngine = engine;
     final quiescence = _operationCoordinator.beginQuiescence(
-      retiringEngine.quiesce,
+      kind: PlaybackNativeOperationKind.retirementQuiesce,
+      operation: retiringEngine.quiesce,
+      barrierTimeout: retirementQuiesceTimeout,
     );
     await _awaitQuiescenceSafely(quiescence);
     await _operationCoordinator.waitForNativeOperations();
@@ -3203,6 +3403,30 @@ class _LateSubtitleTask {
 
 class _InitialSubtitleWaitTimedOut implements Exception {
   const _InitialSubtitleWaitTimedOut();
+}
+
+class _ShutdownNativeBarrierBudget {
+  _ShutdownNativeBarrierBudget(this.timeout)
+    : _stopwatch = Stopwatch()..start();
+
+  final Duration timeout;
+  final Stopwatch _stopwatch;
+
+  Duration get remaining {
+    final value = timeout - _stopwatch.elapsed;
+    return value > Duration.zero ? value : Duration.zero;
+  }
+
+  Future<bool> wait(Future<void> operation) async {
+    final allowance = remaining;
+    if (allowance <= Duration.zero) return false;
+    try {
+      await operation.timeout(allowance);
+      return true;
+    } on TimeoutException {
+      return false;
+    }
+  }
 }
 
 class _PlaybackOperationTimedOut implements Exception {

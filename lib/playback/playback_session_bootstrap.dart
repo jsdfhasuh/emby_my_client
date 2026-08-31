@@ -17,6 +17,9 @@ abstract final class PlaybackSessionBootstrap {
     required PlaybackItemSession session,
     required PlaybackSettings settings,
     PlaybackEngineRecreator? engineRecreator,
+    PlaybackEngineDisposalUnconfirmed? onEngineDisposalUnconfirmed,
+    PlaybackNativeOperationTimeouts nativeOperationTimeouts =
+        const PlaybackNativeOperationTimeouts(),
     PlaybackCacheStorage? cacheStorage,
     PlaybackDiagnosticsTestOverrides? testOverrides,
   }) => PlaybackController(
@@ -26,11 +29,21 @@ abstract final class PlaybackSessionBootstrap {
     reporter: PlaybackSessionReporter(api: api, item: item),
     playbackHeaders: api.playbackHeaders,
     engineRecreator: engineRecreator,
+    onEngineDisposalUnconfirmed: onEngineDisposalUnconfirmed,
     session: session,
     cacheSettings: settings.cache,
     cacheStorage: cacheStorage,
     testOverrides: testOverrides,
     maxStreamingBitrate: settings.maxStreamingBitrate,
+    openTimeout: nativeOperationTimeouts.open,
+    seekCallTimeout: nativeOperationTimeouts.seek,
+    playPauseTimeout: nativeOperationTimeouts.play,
+    propertyWriteTimeout: nativeOperationTimeouts.propertyWrite,
+    lifecycleQuiesceTimeout: nativeOperationTimeouts.lifecycleQuiesce,
+    retirementQuiesceTimeout: nativeOperationTimeouts.retirementQuiesce,
+    shutdownBarrierTimeout: nativeOperationTimeouts.shutdownBarrier,
+    stopTimeout: nativeOperationTimeouts.stop,
+    disposeTimeout: nativeOperationTimeouts.dispose,
   );
 
   static Future<void> configureAndStart({

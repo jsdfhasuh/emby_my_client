@@ -5,6 +5,22 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('PlaybackOperationCoordinator', () {
+    test('native operation budgets match the shutdown contract', () {
+      const timeouts = PlaybackNativeOperationTimeouts();
+
+      expect(timeouts.urgentMute, const Duration(milliseconds: 750));
+      expect(timeouts.play, const Duration(seconds: 3));
+      expect(timeouts.pause, const Duration(seconds: 3));
+      expect(timeouts.lifecycleQuiesce, const Duration(seconds: 2));
+      expect(timeouts.retirementQuiesce, const Duration(seconds: 3));
+      expect(timeouts.seek, const Duration(seconds: 8));
+      expect(timeouts.stop, const Duration(seconds: 5));
+      expect(timeouts.open, const Duration(seconds: 18));
+      expect(timeouts.propertyWrite, const Duration(seconds: 2));
+      expect(timeouts.dispose, const Duration(seconds: 5));
+      expect(timeouts.shutdownBarrier, const Duration(seconds: 5));
+    });
+
     test('100 requests execute first and latest with no concurrency', () async {
       final firstGate = Completer<void>();
       final calls = <Duration>[];
@@ -284,9 +300,12 @@ void main() {
           source: SeekSource.progressBar,
         );
         await seekStarted.future;
-        final quiescence = coordinator.beginQuiescence(() async {
-          quiescenceStarted.complete();
-        });
+        final quiescence = coordinator.beginQuiescence(
+          kind: PlaybackNativeOperationKind.retirementQuiesce,
+          operation: () async {
+            quiescenceStarted.complete();
+          },
+        );
 
         await quiescenceStarted.future;
         final result = await seek;
@@ -318,15 +337,21 @@ void main() {
         seekEngine: (_) async {},
       );
 
-      final play = coordinator.runTrackedNativeOperation(() async {
-        playStarted.complete();
-        await playGate.future;
-      });
+      final play = coordinator.runTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.play,
+        operation: () async {
+          playStarted.complete();
+          await playGate.future;
+        },
+      );
       await playStarted.future;
-      final quiescence = coordinator.beginQuiescence(() async {
-        quiescenceStarted.complete();
-        await quiescenceGate.future;
-      });
+      final quiescence = coordinator.beginQuiescence(
+        kind: PlaybackNativeOperationKind.retirementQuiesce,
+        operation: () async {
+          quiescenceStarted.complete();
+          await quiescenceGate.future;
+        },
+      );
 
       await quiescenceStarted.future;
       var shutdownCompleted = false;
@@ -352,19 +377,51 @@ void main() {
         seekEngine: (_) async {},
       );
 
-      final nativeOperation = coordinator.runTrackedNativeOperation(
-        () => nativeGate.future,
+      final nativeOperation = coordinator.startTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.play,
+        operation: () => nativeGate.future,
         barrierTimeout: const Duration(milliseconds: 10),
       );
 
       await coordinator.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(
+        (await nativeOperation.barrierFuture).disposition,
+        PlaybackNativeBarrierDisposition.timedOut,
+      );
+      await expectLater(
+        nativeOperation.logicalFuture,
+        throwsA(isA<PlaybackNativeOperationTimedOut>()),
+      );
       var nativeCompleted = false;
-      nativeOperation.then<void>((_) => nativeCompleted = true);
+      nativeOperation.nativeFuture.then<void>((_) => nativeCompleted = true);
       await Future<void>.delayed(Duration.zero);
       expect(nativeCompleted, isFalse);
 
       nativeGate.complete();
-      await nativeOperation;
+      await nativeOperation.nativeFuture;
+    });
+
+    test('shutdown has one overall barrier for a never-ending open', () async {
+      final nativeGate = Completer<void>();
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('shutdown-total-barrier'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+        nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+          open: Duration(hours: 1),
+          shutdownBarrier: Duration(milliseconds: 10),
+        ),
+      );
+      final nativeOperation = coordinator.startTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.open,
+        operation: () => nativeGate.future,
+      );
+
+      await coordinator.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(coordinator.isShutdown, isTrue);
+
+      nativeGate.complete();
+      await nativeOperation.nativeFuture;
     });
 
     test('control operations use the frozen priority order', () async {

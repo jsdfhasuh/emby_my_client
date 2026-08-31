@@ -1,6 +1,194 @@
 import 'dart:async';
 import 'dart:math';
 
+enum PlaybackNativeOperationKind {
+  urgentMute,
+  open,
+  play,
+  pause,
+  seek,
+  stop,
+  propertyWrite,
+  lifecycleQuiesce,
+  retirementQuiesce,
+  dispose,
+}
+
+enum PlaybackRetirementState {
+  active,
+  quiescing,
+  retiring,
+  quarantined,
+  closed,
+}
+
+class PlaybackNativeOperationTimeouts {
+  const PlaybackNativeOperationTimeouts({
+    this.urgentMute = const Duration(milliseconds: 750),
+    this.open = const Duration(seconds: 18),
+    this.play = const Duration(seconds: 3),
+    this.pause = const Duration(seconds: 3),
+    this.seek = const Duration(seconds: 8),
+    this.stop = const Duration(seconds: 5),
+    this.propertyWrite = const Duration(seconds: 2),
+    this.lifecycleQuiesce = const Duration(seconds: 2),
+    this.retirementQuiesce = const Duration(seconds: 3),
+    this.dispose = const Duration(seconds: 5),
+    this.shutdownBarrier = const Duration(seconds: 5),
+  });
+
+  final Duration urgentMute;
+  final Duration open;
+  final Duration play;
+  final Duration pause;
+  final Duration seek;
+  final Duration stop;
+  final Duration propertyWrite;
+  final Duration lifecycleQuiesce;
+  final Duration retirementQuiesce;
+  final Duration dispose;
+  final Duration shutdownBarrier;
+
+  Duration forKind(PlaybackNativeOperationKind kind) => switch (kind) {
+    PlaybackNativeOperationKind.urgentMute => urgentMute,
+    PlaybackNativeOperationKind.open => open,
+    PlaybackNativeOperationKind.play => play,
+    PlaybackNativeOperationKind.pause => pause,
+    PlaybackNativeOperationKind.seek => seek,
+    PlaybackNativeOperationKind.stop => stop,
+    PlaybackNativeOperationKind.propertyWrite => propertyWrite,
+    PlaybackNativeOperationKind.lifecycleQuiesce => lifecycleQuiesce,
+    PlaybackNativeOperationKind.retirementQuiesce => retirementQuiesce,
+    PlaybackNativeOperationKind.dispose => dispose,
+  };
+}
+
+enum PlaybackNativeBarrierDisposition { completed, failed, timedOut }
+
+class PlaybackNativeBarrierResult {
+  const PlaybackNativeBarrierResult._(
+    this.disposition, {
+    this.error,
+    this.stackTrace,
+  });
+
+  const PlaybackNativeBarrierResult.completed()
+    : this._(PlaybackNativeBarrierDisposition.completed);
+
+  const PlaybackNativeBarrierResult.failed(Object error, StackTrace stackTrace)
+    : this._(
+        PlaybackNativeBarrierDisposition.failed,
+        error: error,
+        stackTrace: stackTrace,
+      );
+
+  const PlaybackNativeBarrierResult.timedOut()
+    : this._(PlaybackNativeBarrierDisposition.timedOut);
+
+  final PlaybackNativeBarrierDisposition disposition;
+  final Object? error;
+  final StackTrace? stackTrace;
+
+  bool get timedOut => disposition == PlaybackNativeBarrierDisposition.timedOut;
+}
+
+class PlaybackNativeOperationTimedOut implements Exception {
+  const PlaybackNativeOperationTimedOut({
+    required this.kind,
+    required this.timeout,
+  });
+
+  final PlaybackNativeOperationKind kind;
+  final Duration timeout;
+
+  @override
+  String toString() =>
+      'Native playback operation ${kind.name} exceeded $timeout';
+}
+
+class PlaybackNativeOperation {
+  PlaybackNativeOperation._({
+    required this.kind,
+    required this.timeout,
+    required this.nativeFuture,
+    required this.barrierFuture,
+    required this.logicalFuture,
+  });
+
+  factory PlaybackNativeOperation.start({
+    required PlaybackNativeOperationKind kind,
+    required Duration timeout,
+    required PlaybackEngineOperation operation,
+    void Function()? onTimeout,
+  }) {
+    assert(timeout > Duration.zero);
+    final nativeFuture = Future<void>.sync(operation);
+    final barrierCompleter = Completer<PlaybackNativeBarrierResult>();
+    final timer = Timer(timeout, () {
+      if (barrierCompleter.isCompleted) return;
+      onTimeout?.call();
+      barrierCompleter.complete(const PlaybackNativeBarrierResult.timedOut());
+    });
+    nativeFuture.then<void>(
+      (_) {
+        if (barrierCompleter.isCompleted) return;
+        timer.cancel();
+        barrierCompleter.complete(
+          const PlaybackNativeBarrierResult.completed(),
+        );
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (barrierCompleter.isCompleted) return;
+        timer.cancel();
+        barrierCompleter.complete(
+          PlaybackNativeBarrierResult.failed(error, stackTrace),
+        );
+      },
+    );
+    final barrierFuture = barrierCompleter.future;
+    final logicalFuture = barrierFuture.then<void>((result) {
+      switch (result.disposition) {
+        case PlaybackNativeBarrierDisposition.completed:
+          return;
+        case PlaybackNativeBarrierDisposition.failed:
+          Error.throwWithStackTrace(result.error!, result.stackTrace!);
+        case PlaybackNativeBarrierDisposition.timedOut:
+          throw PlaybackNativeOperationTimedOut(kind: kind, timeout: timeout);
+      }
+    });
+    unawaited(
+      logicalFuture.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+    );
+    return PlaybackNativeOperation._(
+      kind: kind,
+      timeout: timeout,
+      nativeFuture: nativeFuture,
+      barrierFuture: barrierFuture,
+      logicalFuture: logicalFuture,
+    );
+  }
+
+  factory PlaybackNativeOperation.completed(PlaybackNativeOperationKind kind) {
+    final nativeFuture = Future<void>.value();
+    final barrierFuture = Future<PlaybackNativeBarrierResult>.value(
+      const PlaybackNativeBarrierResult.completed(),
+    );
+    return PlaybackNativeOperation._(
+      kind: kind,
+      timeout: Duration.zero,
+      nativeFuture: nativeFuture,
+      barrierFuture: barrierFuture,
+      logicalFuture: nativeFuture,
+    );
+  }
+
+  final PlaybackNativeOperationKind kind;
+  final Duration timeout;
+  final Future<void> nativeFuture;
+  final Future<PlaybackNativeBarrierResult> barrierFuture;
+  final Future<void> logicalFuture;
+}
+
 enum SeekDisposition { executed, superseded, cancelled, failed }
 
 enum SeekFailureKind {
@@ -135,6 +323,7 @@ class PlaybackOperationCoordinator {
     this.seekCallTimeout = const Duration(seconds: 8),
     this.seekSettleTimeout = const Duration(seconds: 2),
     this.seekTolerance = const Duration(seconds: 2),
+    this.nativeOperationTimeouts = const PlaybackNativeOperationTimeouts(),
   }) : _seekEngine = seekEngine,
        _clampTarget = clampTarget,
        _onRequestedPositionChanged = onRequestedPositionChanged,
@@ -150,6 +339,7 @@ class PlaybackOperationCoordinator {
   final Duration seekCallTimeout;
   final Duration seekSettleTimeout;
   final Duration seekTolerance;
+  final PlaybackNativeOperationTimeouts nativeOperationTimeouts;
 
   Duration _committedPosition = Duration.zero;
   Duration? _requestedPosition;
@@ -217,18 +407,51 @@ class PlaybackOperationCoordinator {
     _seekEngine = seekEngine;
   }
 
-  Future<void> runTrackedNativeOperation(
-    PlaybackEngineOperation operation, {
+  PlaybackNativeOperation startTrackedNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
     Duration? barrierTimeout,
+    void Function()? onTimeout,
   }) {
-    if (_shutdown) return Future<void>.value();
-    return _trackNativeOperation(operation, barrierTimeout: barrierTimeout);
+    if (_shutdown) return PlaybackNativeOperation.completed(kind);
+    return _trackNativeOperation(
+      kind: kind,
+      operation: operation,
+      barrierTimeout: barrierTimeout,
+      onTimeout: onTimeout,
+    );
   }
 
-  Future<void> beginQuiescence(PlaybackEngineOperation operation) {
+  Future<void> runTrackedNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
+    Duration? barrierTimeout,
+    void Function()? onTimeout,
+  }) => startTrackedNativeOperation(
+    kind: kind,
+    operation: operation,
+    barrierTimeout: barrierTimeout,
+    onTimeout: onTimeout,
+  ).logicalFuture;
+
+  Future<void> beginQuiescence({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
+    Duration? barrierTimeout,
+    void Function()? onTimeout,
+  }) {
+    assert(
+      kind == PlaybackNativeOperationKind.lifecycleQuiesce ||
+          kind == PlaybackNativeOperationKind.retirementQuiesce,
+    );
     if (_shutdown) return Future<void>.value();
     invalidateForHigherPriorityOperation();
-    return _trackNativeOperation(operation);
+    return _trackNativeOperation(
+      kind: kind,
+      operation: operation,
+      barrierTimeout: barrierTimeout,
+      onTimeout: onTimeout,
+    ).logicalFuture;
   }
 
   Future<void> waitForNativeOperations() async {
@@ -301,7 +524,10 @@ class PlaybackOperationCoordinator {
       }
       _controlPending.clear();
     }
-    return _shutdownOperation = waitForNativeOperations();
+    return _shutdownOperation = waitForNativeOperations().timeout(
+      nativeOperationTimeouts.shutdownBarrier,
+      onTimeout: () {},
+    );
   }
 
   Future<void> _drainControlOperations() async {
@@ -421,11 +647,15 @@ class PlaybackOperationCoordinator {
       return;
     }
 
-    late final Future<void> nativeCall;
+    late final PlaybackNativeOperation nativeOperation;
     try {
-      nativeCall = _trackNativeOperation(() => _seekEngine(request.target));
-      await nativeCall.timeout(seekCallTimeout);
-    } on TimeoutException {
+      nativeOperation = _trackNativeOperation(
+        kind: PlaybackNativeOperationKind.seek,
+        operation: () => _seekEngine(request.target),
+        barrierTimeout: seekCallTimeout,
+      );
+      await nativeOperation.logicalFuture;
+    } on PlaybackNativeOperationTimedOut {
       _nativeSeekOutstanding = true;
       _operationGeneration++;
       _complete(
@@ -440,7 +670,7 @@ class PlaybackOperationCoordinator {
       );
       _refreshRequestedPosition();
       unawaited(
-        nativeCall.then<void>(
+        nativeOperation.nativeFuture.then<void>(
           (_) => _nativeSeekCompleted(),
           onError: (_) => _nativeSeekCompleted(),
         ),
@@ -504,18 +734,19 @@ class PlaybackOperationCoordinator {
     if (!_shutdown) unawaited(_drain());
   }
 
-  Future<void> _trackNativeOperation(
-    PlaybackEngineOperation operation, {
+  PlaybackNativeOperation _trackNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
     Duration? barrierTimeout,
+    void Function()? onTimeout,
   }) {
-    final nativeOperation = Future<void>.sync(operation);
-    final completion = nativeOperation.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
+    final nativeOperation = PlaybackNativeOperation.start(
+      kind: kind,
+      timeout: barrierTimeout ?? nativeOperationTimeouts.forKind(kind),
+      operation: operation,
+      onTimeout: onTimeout,
     );
-    final barrier = barrierTimeout == null
-        ? completion
-        : completion.timeout(barrierTimeout, onTimeout: () {});
+    final barrier = nativeOperation.barrierFuture.then<void>((_) {});
     _nativeOperations.add(barrier);
     unawaited(
       barrier.whenComplete(() {

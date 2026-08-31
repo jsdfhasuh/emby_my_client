@@ -1,6 +1,9 @@
 import 'dart:async';
 
+import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
+import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_output_quiescer.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
@@ -195,6 +198,89 @@ void main() {
       },
     );
 
+    test('never-ending urgent mute releases retirement barrier', () async {
+      final platform = _FakePlatformPlayer();
+      final output = _FakePlaybackOutputQuiescer();
+      output.gates[1] = Completer<void>();
+      final engine = _createEngine(
+        platform,
+        output,
+        nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+          urgentMute: Duration(milliseconds: 10),
+        ),
+      );
+
+      expect(engine.retirementState, PlaybackRetirementState.active);
+      await engine.quiesce().timeout(const Duration(milliseconds: 200));
+      expect(engine.retirementState, PlaybackRetirementState.retiring);
+      expect(output.pauseCalls, 1);
+
+      await engine.dispose().timeout(const Duration(milliseconds: 200));
+      expect(engine.retirementState, PlaybackRetirementState.closed);
+    });
+
+    test('never-ending property write has a typed logical deadline', () async {
+      final platform = _FakePlatformPlayer();
+      final output = _FakePlaybackOutputQuiescer();
+      final propertyGate = Completer<void>();
+      final engine = MediaKitPlaybackEngine(
+        Player(platformPlayer: platform),
+        outputQuiescer: output,
+        nativePropertyWriter: (_, _) => propertyGate.future,
+        nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+          propertyWrite: Duration(milliseconds: 10),
+        ),
+      );
+
+      await expectLater(
+        engine.setAudioDelay(const Duration(milliseconds: 250)),
+        throwsA(
+          isA<PlaybackNativeOperationTimedOut>().having(
+            (error) => error.kind,
+            'kind',
+            PlaybackNativeOperationKind.propertyWrite,
+          ),
+        ),
+      );
+
+      propertyGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      await engine.dispose();
+    });
+
+    test(
+      'never-ending dispose quarantines and cannot transition late',
+      () async {
+        final platform = _FakePlatformPlayer();
+        final disposeGate = Completer<void>();
+        platform.disposeGate = disposeGate;
+        final output = _FakePlaybackOutputQuiescer();
+        final engine = _createEngine(
+          platform,
+          output,
+          nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+            dispose: Duration(milliseconds: 10),
+          ),
+        );
+
+        await expectLater(
+          engine.dispose(),
+          throwsA(
+            isA<PlaybackNativeOperationTimedOut>().having(
+              (error) => error.kind,
+              'kind',
+              PlaybackNativeOperationKind.dispose,
+            ),
+          ),
+        );
+        expect(engine.retirementState, PlaybackRetirementState.quarantined);
+
+        disposeGate.complete();
+        await Future<void>.delayed(Duration.zero);
+        expect(engine.retirementState, PlaybackRetirementState.quarantined);
+      },
+    );
+
     test(
       'dispose waits for native operation and late urgent re-pause',
       () async {
@@ -232,6 +318,37 @@ void main() {
       },
     );
 
+    test(
+      'never-ending auxiliary cache operation releases dispose barrier',
+      () async {
+        final platform = _FakePlatformPlayer();
+        final output = _FakePlaybackOutputQuiescer();
+        final cacheAccess = _NeverCompletingCacheAccess();
+        final engine = MediaKitPlaybackEngine(
+          Player(platformPlayer: platform),
+          outputQuiescer: output,
+          cacheEngine: NativePlaybackCacheEngine(
+            access: cacheAccess,
+            hasOpenedMedia: () => false,
+          ),
+          nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+            propertyWrite: Duration(milliseconds: 10),
+          ),
+        );
+
+        final probe = engine.probeCacheCapabilities();
+        await cacheAccess.started.future;
+
+        await engine.dispose().timeout(const Duration(milliseconds: 200));
+        expect(engine.retirementState, PlaybackRetirementState.closed);
+        expect(platform.disposeCalls, 1);
+
+        // The barrier deadline does not cancel or replace the caller-visible
+        // native result.
+        expect(probe, doesNotComplete);
+      },
+    );
+
     test('non-native output quiescer falls back to Player.pause', () async {
       final platform = _FakePlatformPlayer();
       final player = Player(platformPlayer: platform);
@@ -246,10 +363,13 @@ void main() {
 
 MediaKitPlaybackEngine _createEngine(
   _FakePlatformPlayer platform,
-  PlaybackOutputQuiescer output,
-) => MediaKitPlaybackEngine(
+  PlaybackOutputQuiescer output, {
+  PlaybackNativeOperationTimeouts nativeOperationTimeouts =
+      const PlaybackNativeOperationTimeouts(),
+}) => MediaKitPlaybackEngine(
   Player(platformPlayer: platform),
   outputQuiescer: output,
+  nativeOperationTimeouts: nativeOperationTimeouts,
 );
 
 class _FakePlatformPlayer extends PlatformPlayer {
@@ -260,6 +380,7 @@ class _FakePlatformPlayer extends PlatformPlayer {
   Completer<void>? openGate;
   Completer<void>? playGate;
   Completer<void>? seekGate;
+  Completer<void>? disposeGate;
   final Completer<void> openStarted = Completer<void>();
   final Completer<void> playStarted = Completer<void>();
   final Completer<void> seekStarted = Completer<void>();
@@ -308,6 +429,7 @@ class _FakePlatformPlayer extends PlatformPlayer {
   Future<void> dispose() async {
     disposeCalls++;
     events.add('dispose');
+    await disposeGate?.future;
     await super.dispose();
   }
 }
@@ -347,4 +469,30 @@ class _PauseCallWaiter {
 
   final int count;
   final Completer<void> completer = Completer<void>();
+}
+
+class _NeverCompletingCacheAccess implements NativePlaybackPropertyAccess {
+  final Completer<void> started = Completer<void>();
+  final Completer<bool> _result = Completer<bool>();
+
+  @override
+  Future<bool> hasOption(String name) {
+    if (!started.isCompleted) started.complete();
+    return _result.future;
+  }
+
+  @override
+  Future<void> command(List<String> command) => Future<void>.value();
+
+  @override
+  Future<Object?> getNative(String name) => Future<Object?>.value();
+
+  @override
+  Future<String?> getString(String name) => Future<String?>.value();
+
+  @override
+  Future<bool> hasProperty(String name) => Future<bool>.value(false);
+
+  @override
+  Future<void> setString(String name, String value) => Future<void>.value();
 }

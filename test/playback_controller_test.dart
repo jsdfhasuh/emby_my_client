@@ -5,6 +5,7 @@ import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/media_kit_inline_playback_session.dart';
+import 'package:emby_my_client/playback/inline_playback_resource_lease.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
@@ -235,6 +236,154 @@ void main() {
       expect(shutdownCompleted, isTrue);
       expect(engine.stopCalls, 1);
       expect(engine.disposeCalls, 1);
+    },
+  );
+
+  test(
+    'never-ending play exits logically and cannot revive UI state',
+    () async {
+      final engine = _FakeEngine(playOperation: Completer<void>().future);
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        playPauseTimeout: const Duration(milliseconds: 10),
+        retirementQuiesceTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 30),
+      );
+      await controller.start(playAfterReady: false);
+
+      await controller.play().timeout(const Duration(milliseconds: 200));
+
+      expect(engine.playCalls, 1);
+      expect(controller.state.isPlaying, isFalse);
+      await controller.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(controller.retirementState, PlaybackRetirementState.closed);
+    },
+  );
+
+  test('never-ending pause exits logically during shutdown', () async {
+    final engine = _FakeEngine(pauseOperation: Completer<void>().future);
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      playPauseTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start();
+
+    await controller.pause().timeout(const Duration(milliseconds: 200));
+    expect(engine.pauseCalls, 1);
+    expect(controller.state.isPlaying, isFalse);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test('never-ending lifecycle quiesce has a bounded logical exit', () async {
+    final engine = _FakeEngine(
+      lifecycleQuiesceOperation: Completer<void>().future,
+    );
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      lifecycleQuiesceTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start(playAfterReady: false);
+
+    await expectLater(
+      controller.quiesceForLifecycle(),
+      throwsA(
+        isA<PlaybackNativeOperationTimedOut>().having(
+          (error) => error.kind,
+          'kind',
+          PlaybackNativeOperationKind.lifecycleQuiesce,
+        ),
+      ),
+    );
+    expect(controller.state.isPlaying, isFalse);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test('never-ending seek times out without blocking shutdown', () async {
+    final engine = _FakeEngine(seekOperation: Completer<void>().future);
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      seekCallTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start(playAfterReady: false);
+
+    final result = await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.progressBar,
+    );
+    expect(result.failureKind, SeekFailureKind.callTimeout);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test(
+    'quiescing rejects new playback, seek, reconfiguration and resume work',
+    () async {
+      final engine = _FakeEngine(quiesceOperation: Completer<void>().future);
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        retirementQuiesceTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 30),
+      );
+      await controller.start(playAfterReady: false);
+      final openCount = engine.openPlayValues.length;
+      final rateWriteCount = engine.rateValues.length;
+
+      controller.quiesce();
+      expect(controller.retirementState, PlaybackRetirementState.quiescing);
+      await controller.play();
+      final seek = await controller.seekAbsolute(
+        const Duration(minutes: 3),
+        source: SeekSource.progressBar,
+      );
+      await controller.setPlaybackRate(1.5);
+      await controller.reconfigure(maxStreamingBitrate: 10000000);
+      await controller.resumeForLifecycle();
+
+      expect(engine.playCalls, 0);
+      expect(engine.seekValues, isEmpty);
+      expect(seek.disposition, SeekDisposition.cancelled);
+      expect(engine.rateValues, hasLength(rateWriteCount));
+      expect(engine.openPlayValues, hasLength(openCount));
+      expect(engine.lifecycleQuiescenceResumeCalls, 0);
+
+      await controller.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(controller.retirementState, PlaybackRetirementState.quarantined);
     },
   );
 
@@ -1244,6 +1393,7 @@ void main() {
     'shutdown deadlines do not leave the controller route-blocking',
     () async {
       final diagnostics = <String>[];
+      var disposalUnconfirmed = 0;
       final engine = _FakeEngine(
         stopOperation: Completer<void>().future,
         disposeOperation: Completer<void>().future,
@@ -1257,8 +1407,10 @@ void main() {
         playbackHeaders: const {},
         stopTimeout: const Duration(milliseconds: 10),
         disposeTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 40),
         reporterTimeout: const Duration(milliseconds: 10),
         diagnostics: _diagnostics(diagnostics),
+        onEngineDisposalUnconfirmed: () => disposalUnconfirmed++,
       );
 
       await controller.shutdown().timeout(const Duration(milliseconds: 200));
@@ -1267,6 +1419,8 @@ void main() {
       expect(engine.disposeCalls, 1);
       expect(reporter.stopCalls, 1);
       expect(controller.state.phase, PlaybackPhase.idle);
+      expect(controller.retirementState, PlaybackRetirementState.quarantined);
+      expect(disposalUnconfirmed, 1);
       expect(
         diagnostics,
         contains('event=playback_operation_timeout kind=reporter_stop'),
@@ -1280,6 +1434,35 @@ void main() {
         contains('event=playback_operation_timeout kind=engine_dispose'),
       );
       controller.dispose();
+    },
+  );
+
+  test(
+    'poisoned inline lease rejects creation before Player allocation',
+    () async {
+      final lease = InlinePlaybackResourceLease();
+      final handle = lease.acquire();
+      lease.poison(handle);
+      var playerFactoryCalls = 0;
+      final api = _api([]);
+      addTearDown(api.dispose);
+
+      await expectLater(
+        MediaKitInlinePlaybackSession.create(
+          api: api,
+          item: _plainItem,
+          settings: const PlaybackSettings(),
+          resourceLease: lease,
+          playerFactory: () {
+            playerFactoryCalls++;
+            throw StateError('Player factory must not run');
+          },
+        ),
+        throwsStateError,
+      );
+
+      expect(lease.isPoisoned, isTrue);
+      expect(playerFactoryCalls, 0);
     },
   );
 
@@ -1476,6 +1659,15 @@ PlaybackController _controller({
   Duration readyTimeout = const Duration(seconds: 1),
   Duration trackWaitTimeout = const Duration(seconds: 2),
   Duration lateSubtitleTrackWaitTimeout = const Duration(seconds: 8),
+  Duration seekCallTimeout = const Duration(seconds: 8),
+  Duration playPauseTimeout = const Duration(seconds: 3),
+  Duration propertyWriteTimeout = const Duration(seconds: 2),
+  Duration lifecycleQuiesceTimeout = const Duration(seconds: 2),
+  Duration retirementQuiesceTimeout = const Duration(seconds: 3),
+  Duration shutdownBarrierTimeout = const Duration(seconds: 5),
+  Duration stopTimeout = const Duration(seconds: 5),
+  Duration disposeTimeout = const Duration(seconds: 5),
+  PlaybackEngineDisposalUnconfirmed? onEngineDisposalUnconfirmed,
   PlaybackDiagnostics? diagnostics,
   PlaybackItemSession? session,
   PlaybackStreamResolver? resolver,
@@ -1489,6 +1681,15 @@ PlaybackController _controller({
   readyTimeout: readyTimeout,
   trackWaitTimeout: trackWaitTimeout,
   lateSubtitleTrackWaitTimeout: lateSubtitleTrackWaitTimeout,
+  seekCallTimeout: seekCallTimeout,
+  playPauseTimeout: playPauseTimeout,
+  propertyWriteTimeout: propertyWriteTimeout,
+  lifecycleQuiesceTimeout: lifecycleQuiesceTimeout,
+  retirementQuiesceTimeout: retirementQuiesceTimeout,
+  shutdownBarrierTimeout: shutdownBarrierTimeout,
+  stopTimeout: stopTimeout,
+  disposeTimeout: disposeTimeout,
+  onEngineDisposalUnconfirmed: onEngineDisposalUnconfirmed,
   diagnostics: diagnostics,
   session: session,
   resumeVerificationTimeout: const Duration(milliseconds: 100),
@@ -1639,6 +1840,9 @@ class _FakeEngine implements PlaybackEngine {
   _FakeEngine({
     this.openOperation,
     this.playOperation,
+    this.pauseOperation,
+    this.quiesceOperation,
+    this.lifecycleQuiesceOperation,
     this.stopOperation,
     this.disposeOperation,
     this.seekOperation,
@@ -1647,6 +1851,9 @@ class _FakeEngine implements PlaybackEngine {
 
   final Future<void>? openOperation;
   final Future<void>? playOperation;
+  final Future<void>? pauseOperation;
+  final Future<void>? quiesceOperation;
+  final Future<void>? lifecycleQuiesceOperation;
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
   final Future<void>? seekOperation;
@@ -1751,6 +1958,7 @@ class _FakeEngine implements PlaybackEngine {
   Future<void> pause() async {
     pauseCalls++;
     playingController.add(false);
+    await pauseOperation;
   }
 
   @override
@@ -1759,6 +1967,7 @@ class _FakeEngine implements PlaybackEngine {
     _retiring = true;
     _quiescenceEpoch++;
     playingController.add(false);
+    await quiesceOperation;
   }
 
   @override
@@ -1767,6 +1976,7 @@ class _FakeEngine implements PlaybackEngine {
     _lifecycleQuiesced = true;
     _quiescenceEpoch++;
     playingController.add(false);
+    await lifecycleQuiesceOperation;
   }
 
   @override

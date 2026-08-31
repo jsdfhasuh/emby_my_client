@@ -8,12 +8,15 @@ import '../data/emby_api.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_storage.dart';
 import 'inline_playback_session.dart';
+import 'inline_playback_resource_lease.dart';
 import 'playback_controller.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_session_bootstrap.dart';
 import 'playback_settings.dart';
+
+typedef InlinePlayerFactory = Player Function();
 
 class MediaKitInlinePlaybackSession extends ChangeNotifier
     implements InlinePlaybackSession {
@@ -23,10 +26,18 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
     required VideoController? videoController,
     required PlaybackController controller,
     required PlaybackSettings settings,
+    required InlinePlaybackResourceLease? resourceLease,
+    required InlinePlaybackResourceLeaseHandle? resourceLeaseHandle,
+    required InlinePlayerFactory playerFactory,
+    required PlaybackNativeOperationTimeouts nativeOperationTimeouts,
   }) : _itemSession = itemSession,
        _videoController = videoController,
        _controller = controller,
        _settings = settings,
+       _resourceLease = resourceLease,
+       _resourceLeaseHandle = resourceLeaseHandle,
+       _playerFactory = playerFactory,
+       _nativeOperationTimeouts = nativeOperationTimeouts,
        _state = InlinePlaybackState(
          itemId: itemId,
          videoController: videoController,
@@ -44,6 +55,10 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
          videoController: null,
          controller: controller,
          settings: const PlaybackSettings(),
+         resourceLease: null,
+         resourceLeaseHandle: null,
+         playerFactory: _createPlayer,
+         nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(),
        );
 
   static Future<MediaKitInlinePlaybackSession> create({
@@ -52,19 +67,38 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
     required PlaybackSettings settings,
     PlaybackCacheStorage? cacheStorage,
     PlaybackDiagnosticsTestOverrides? testOverrides,
+    InlinePlaybackResourceLease? resourceLease,
+    InlinePlayerFactory? playerFactory,
+    PlaybackNativeOperationTimeouts nativeOperationTimeouts =
+        const PlaybackNativeOperationTimeouts(),
   }) async {
+    final lease = resourceLease ?? InlinePlaybackResourceLease.application;
+    final leaseHandle = lease.acquire();
+    leaseHandle.ensureCanCreatePlayer();
+    final createPlayer = playerFactory ?? _createPlayer;
     final itemSession = PlaybackItemSession.create();
-    final player = _createPlayer();
+    late final Player player;
+    try {
+      player = createPlayer();
+    } catch (_) {
+      lease.release(leaseHandle);
+      rethrow;
+    }
     try {
       final videoController = VideoController(player);
       late final MediaKitInlinePlaybackSession result;
       final controller = PlaybackSessionBootstrap.createOnlineController(
         api: api,
         item: item,
-        engine: MediaKitPlaybackEngine(player),
+        engine: MediaKitPlaybackEngine(
+          player,
+          nativeOperationTimeouts: nativeOperationTimeouts,
+        ),
         engineRecreator: (_) => result._recreateEngine(),
+        onEngineDisposalUnconfirmed: () => lease.poison(leaseHandle),
         session: itemSession,
         settings: settings,
+        nativeOperationTimeouts: nativeOperationTimeouts,
         cacheStorage: cacheStorage,
         testOverrides: testOverrides,
       );
@@ -74,10 +108,20 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
         videoController: videoController,
         controller: controller,
         settings: settings,
+        resourceLease: lease,
+        resourceLeaseHandle: leaseHandle,
+        playerFactory: createPlayer,
+        nativeOperationTimeouts: nativeOperationTimeouts,
       );
       return result;
     } catch (_) {
-      await player.dispose();
+      await _disposeUncommittedPlayer(
+        player: player,
+        lease: lease,
+        leaseHandle: leaseHandle,
+        nativeOperationTimeouts: nativeOperationTimeouts,
+        releaseOnSuccess: true,
+      );
       rethrow;
     }
   }
@@ -87,6 +131,10 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
   final PlaybackItemSession _itemSession;
   final PlaybackSettings _settings;
   final PlaybackController _controller;
+  final InlinePlaybackResourceLease? _resourceLease;
+  final InlinePlaybackResourceLeaseHandle? _resourceLeaseHandle;
+  final InlinePlayerFactory _playerFactory;
+  final PlaybackNativeOperationTimeouts _nativeOperationTimeouts;
   VideoController? _videoController;
   InlinePlaybackState _state;
   Future<void>? _shutdownOperation;
@@ -151,6 +199,16 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
       await _controller.shutdown();
     } finally {
       _controller.dispose();
+      final lease = _resourceLease;
+      final leaseHandle = _resourceLeaseHandle;
+      if (lease != null && leaseHandle != null) {
+        if (_controller.retirementState == PlaybackRetirementState.closed &&
+            !leaseHandle.isPoisoned) {
+          lease.release(leaseHandle);
+        } else {
+          lease.poison(leaseHandle);
+        }
+      }
       if (!_disposed) {
         _disposed = true;
         super.dispose();
@@ -165,14 +223,30 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
     if (_controller.sessionId != _itemSession.id) {
       throw StateError('Inline playback item session is stale');
     }
-    final player = _createPlayer();
+    final leaseHandle = _resourceLeaseHandle;
+    leaseHandle?.ensureCanCreatePlayer();
+    final player = _playerFactory();
     try {
       final videoController = VideoController(player);
       _videoController = videoController;
       _setState(_state.copyWith(videoController: videoController));
-      return MediaKitPlaybackEngine(player);
+      return MediaKitPlaybackEngine(
+        player,
+        nativeOperationTimeouts: _nativeOperationTimeouts,
+      );
     } catch (_) {
-      await player.dispose();
+      final lease = _resourceLease;
+      if (lease != null && leaseHandle != null) {
+        await _disposeUncommittedPlayer(
+          player: player,
+          lease: lease,
+          leaseHandle: leaseHandle,
+          nativeOperationTimeouts: _nativeOperationTimeouts,
+          releaseOnSuccess: false,
+        );
+      } else {
+        await player.dispose();
+      }
       rethrow;
     }
   }
@@ -217,4 +291,24 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
   static Player _createPlayer() => Player(
     configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
   );
+
+  static Future<void> _disposeUncommittedPlayer({
+    required Player player,
+    required InlinePlaybackResourceLease lease,
+    required InlinePlaybackResourceLeaseHandle leaseHandle,
+    required PlaybackNativeOperationTimeouts nativeOperationTimeouts,
+    required bool releaseOnSuccess,
+  }) async {
+    final disposal = PlaybackNativeOperation.start(
+      kind: PlaybackNativeOperationKind.dispose,
+      timeout: nativeOperationTimeouts.dispose,
+      operation: player.dispose,
+    );
+    try {
+      await disposal.logicalFuture;
+      if (releaseOnSuccess) lease.release(leaseHandle);
+    } catch (_) {
+      lease.poison(leaseHandle);
+    }
+  }
 }
