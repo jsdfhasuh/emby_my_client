@@ -8,10 +8,7 @@ enum MediaViewerMode {
 
   bool accepts(EmbyItem item) => switch (this) {
     MediaViewerMode.photosOnly => item.isPhoto,
-    MediaViewerMode.homeMedia => switch (item.type) {
-      'Photo' || 'Movie' || 'Video' || 'Episode' => true,
-      _ => false,
-    },
+    MediaViewerMode.homeMedia => item.isPhoto || item.isPlayable,
   };
 }
 

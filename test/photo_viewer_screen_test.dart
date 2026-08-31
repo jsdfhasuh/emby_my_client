@@ -692,6 +692,42 @@ void main() {
     expect(find.text('Video 2'), findsOneWidget);
   });
 
+  testWidgets('active custom video updates without rebuilding the viewer', (
+    tester,
+  ) async {
+    final api = EmbyApi(_session, dio: Dio());
+    final harness = _ViewerSessionHarness();
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            mode: MediaViewerMode.homeMedia,
+            items: const [_customVideo, _video2],
+            initialItemId: _customVideo.id,
+          ),
+          inlineSessionFactory: harness.create,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final debugState =
+        tester.state(find.byType(PhotoViewerScreen)) as PhotoViewerDebugState;
+    final viewerBuildCount = debugState.debugBuildCount;
+    final session = harness.sessions.single;
+
+    session._update(
+      session.state.copyWith(position: const Duration(seconds: 45)),
+    );
+    await tester.pump();
+
+    expect(session.itemId, _customVideo.id);
+    expect(find.byType(InlineVideoPage), findsOneWidget);
+    expect(find.text('00:45'), findsOneWidget);
+    expect(debugState.debugBuildCount, viewerBuildCount);
+  });
+
   testWidgets('rapid loading video to photo to video drops stale autoplay', (
     tester,
   ) async {
@@ -1186,6 +1222,17 @@ const _video2 = EmbyItem(
   id: 'video-2',
   name: 'Video 2',
   type: 'Video',
+  mediaType: 'Video',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _customVideo = EmbyItem(
+  id: 'custom-video',
+  name: 'Custom Video',
+  type: 'CustomVideo',
   mediaType: 'Video',
   imageTags: {},
   backdropImageTags: [],

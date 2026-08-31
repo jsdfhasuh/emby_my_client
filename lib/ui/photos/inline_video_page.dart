@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../images/emby_image_request.dart';
+import '../../playback/inline_playback_coordinator.dart';
 import '../../playback/inline_playback_session.dart';
 import '../widgets/media_widgets.dart';
 
@@ -12,6 +13,7 @@ class InlineVideoPage extends StatefulWidget {
     required this.coverRequest,
     required this.isActive,
     required this.state,
+    this.coordinator,
     required this.onPlay,
     required this.onPause,
     required this.onSeek,
@@ -23,6 +25,7 @@ class InlineVideoPage extends StatefulWidget {
   final EmbyImageRequest? coverRequest;
   final bool isActive;
   final InlinePlaybackState state;
+  final InlinePlaybackCoordinator? coordinator;
   final VoidCallback onPlay;
   final VoidCallback onPause;
   final ValueChanged<Duration> onSeek;
@@ -37,9 +40,9 @@ class _InlineVideoPageState extends State<InlineVideoPage> {
   bool _seeking = false;
   Duration _previewPosition = Duration.zero;
 
-  InlinePlaybackState get _activeState =>
-      widget.isActive && widget.state.itemId == widget.itemId
-      ? widget.state
+  InlinePlaybackState _activeState(InlinePlaybackState state) =>
+      widget.isActive && state.itemId == widget.itemId
+      ? state
       : InlinePlaybackState(itemId: widget.itemId);
 
   @override
@@ -52,7 +55,18 @@ class _InlineVideoPageState extends State<InlineVideoPage> {
 
   @override
   Widget build(BuildContext context) {
-    final state = _activeState;
+    final coordinator = widget.isActive ? widget.coordinator : null;
+    if (coordinator != null) {
+      return ListenableBuilder(
+        listenable: coordinator,
+        builder: (context, _) =>
+            _buildPage(context, _activeState(coordinator.state)),
+      );
+    }
+    return _buildPage(context, _activeState(widget.state));
+  }
+
+  Widget _buildPage(BuildContext context, InlinePlaybackState state) {
     return ColoredBox(
       key: ValueKey('inline-video-page-${widget.itemId}'),
       color: Colors.black,
@@ -84,16 +98,19 @@ class _InlineVideoPageState extends State<InlineVideoPage> {
 
   Widget _buildVideoSurface(InlinePlaybackState state) {
     final controller = state.videoController;
-    return ColoredBox(
-      key: ValueKey('inline-video-surface-${widget.itemId}'),
-      color: Colors.black,
-      child: controller == null
-          ? const SizedBox.expand()
-          : Video(
-              controller: controller,
-              fit: BoxFit.contain,
-              controls: NoVideoControls,
-            ),
+    return RepaintBoundary(
+      key: ValueKey('inline-video-surface-boundary-${widget.itemId}'),
+      child: ColoredBox(
+        key: ValueKey('inline-video-surface-${widget.itemId}'),
+        color: Colors.black,
+        child: controller == null
+            ? const SizedBox.expand()
+            : Video(
+                controller: controller,
+                fit: BoxFit.contain,
+                controls: NoVideoControls,
+              ),
+      ),
     );
   }
 

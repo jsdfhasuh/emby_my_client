@@ -40,6 +40,7 @@ class PhotoViewerScreen extends StatefulWidget {
 @visibleForTesting
 abstract interface class PhotoViewerDebugState {
   InlinePlaybackCoordinator? get debugInlineCoordinator;
+  int get debugBuildCount;
 }
 
 class _PhotoViewerScreenState extends State<PhotoViewerScreen>
@@ -55,6 +56,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   bool _seekInteractionActive = false;
   bool _closing = false;
   bool _didPop = false;
+  int _buildCount = 0;
   int _viewerDimension = 1920;
   InlinePlaybackCoordinator? _inlineCoordinator;
   Future<void>? _closeOperation;
@@ -63,6 +65,9 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
 
   @override
   InlinePlaybackCoordinator? get debugInlineCoordinator => _inlineCoordinator;
+
+  @override
+  int get debugBuildCount => _buildCount;
 
   @override
   void initState() {
@@ -151,7 +156,6 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     final inlineCoordinator = _inlineCoordinator;
-    inlineCoordinator?.removeListener(_handleInlinePlaybackChanged);
     if (inlineCoordinator != null) {
       unawaited(_shutdownInlineCoordinator(inlineCoordinator));
       inlineCoordinator.dispose();
@@ -225,8 +229,9 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     final coordinator = InlinePlaybackCoordinator(
       factory: factory,
       initialLifecycleState: _lifecycleState,
-    )..addListener(_handleInlinePlaybackChanged);
+    );
     _inlineCoordinator = coordinator;
+    if (mounted && !_closing) setState(() {});
     return coordinator;
   }
 
@@ -240,10 +245,6 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     final item = _controller.mediaItems[_controller.currentIndex];
     if (item.isPlayable) return _ensureInlineCoordinator().activate(item);
     return _inlineCoordinator?.deactivate() ?? Future<void>.value();
-  }
-
-  void _handleInlinePlaybackChanged() {
-    if (mounted && !_closing) setState(() {});
   }
 
   Future<void> _closeViewer() {
@@ -311,6 +312,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
 
   @override
   Widget build(BuildContext context) {
+    _buildCount++;
     if (!_initialized) return const SizedBox.shrink();
     return PopScope(
       canPop: false,
@@ -351,17 +353,15 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
                       itemBuilder: (context, index) {
                         final item = mediaItems[index];
                         if (item.isPlayable) {
-                          final coordinatorState = _inlineCoordinator?.state;
-                          final playbackState =
-                              coordinatorState?.itemId == item.id
-                              ? coordinatorState!
-                              : InlinePlaybackState(itemId: item.id);
                           return InlineVideoPage(
                             key: ValueKey('video-page-${item.id}'),
                             itemId: item.id,
                             coverRequest: _viewerRequest(item),
                             isActive: index == _controller.currentIndex,
-                            state: playbackState,
+                            state: InlinePlaybackState(itemId: item.id),
+                            coordinator: index == _controller.currentIndex
+                                ? _inlineCoordinator
+                                : null,
                             onPlay: _playInline,
                             onPause: _pauseInline,
                             onSeek: _seekInline,

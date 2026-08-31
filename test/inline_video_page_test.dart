@@ -57,6 +57,10 @@ void main() {
         find.byKey(const Key('inline-video-surface-video-1')),
         findsOneWidget,
       );
+      expect(
+        find.byKey(const Key('inline-video-surface-boundary-video-1')),
+        findsOneWidget,
+      );
       expect(find.byTooltip('播放'), findsWidgets);
       await tester.tap(
         find.byKey(const Key('inline-video-center-play-video-1')),
@@ -123,5 +127,36 @@ void main() {
     expect(locks, [true, false]);
     expect(seeks, hasLength(1));
     expect(seeks.single, greaterThan(const Duration(minutes: 1)));
+  });
+
+  testWidgets('inactive adjacent video stays cover-only', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InlineVideoPage(
+            itemId: 'video-2',
+            coverRequest: null,
+            isActive: false,
+            state: const InlinePlaybackState(
+              itemId: 'video-2',
+              phase: InlinePlaybackPhase.ready,
+              duration: Duration(minutes: 4),
+              isPlaying: true,
+            ),
+            onPlay: () {},
+            onPause: () {},
+            onSeek: (_) {},
+            onRetry: () {},
+            onSeekInteractionChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      find.byKey(const Key('inline-video-inactive-video-2')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('inline-video-surface-video-2')), findsNothing);
   });
 }

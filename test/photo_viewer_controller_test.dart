@@ -16,10 +16,11 @@ void main() {
           _item('photo-1', 'Photo'),
           _item('video-1', 'Video', mediaType: 'Video'),
           _item('movie-1', 'Movie', mediaType: 'Video'),
+          _item('custom-video', 'CustomVideo', mediaType: 'Video'),
         ],
         initialItemId: 'photo-1',
-        initialRawCursor: 3,
-        initialTotalCount: 3,
+        initialRawCursor: 4,
+        initialTotalCount: 4,
         initialHasMore: false,
         loadPage: _emptyLoader,
       ),
@@ -40,19 +41,20 @@ void main() {
         source: _source(
           mode: MediaViewerMode.homeMedia,
           initialItems: [
-            _item('folder', 'Folder', mediaType: 'Video'),
-            _item('collection', 'CollectionFolder', mediaType: 'Video'),
+            _item('folder', 'Folder'),
+            _item('collection', 'CollectionFolder'),
             _item('photo-1', 'Photo'),
             _item('video-1', 'Video', mediaType: 'Video'),
-            _item('album', 'PhotoAlbum', mediaType: 'Video'),
+            _item('custom-video', 'CustomVideo', mediaType: 'Video'),
+            _item('album', 'PhotoAlbum'),
             _item('movie-1', 'Movie', mediaType: 'Video'),
-            _item('series', 'Series', mediaType: 'Video'),
+            _item('series', 'Series'),
             _item('episode-1', 'Episode', mediaType: 'Video'),
             _item('photo-2', 'Photo'),
           ],
           initialItemId: 'video-1',
-          initialRawCursor: 9,
-          initialTotalCount: 9,
+          initialRawCursor: 10,
+          initialTotalCount: 10,
           initialHasMore: false,
           loadPage: _emptyLoader,
         ),
@@ -65,18 +67,19 @@ void main() {
       expect(controller.mediaItems.map((item) => item.id), [
         'photo-1',
         'video-1',
+        'custom-video',
         'movie-1',
         'episode-1',
         'photo-2',
       ]);
       expect(controller.currentIndex, 1);
       expect(controller.currentItemId, 'video-1');
-      expect(controller.positionLabel, '2 / 5');
+      expect(controller.positionLabel, '2 / 6');
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
       expect(
         loaded,
-        containsAll(['photo-1', 'video-1', 'movie-1', 'episode-1']),
+        containsAll(['photo-1', 'video-1', 'custom-video', 'movie-1']),
       );
       expect(loaded, isNot(contains('photo-2')));
       controller.dispose();
