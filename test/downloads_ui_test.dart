@@ -68,6 +68,8 @@ void main() {
     expect(find.text('媒体文件占用 12 B'), findsOneWidget);
     expect(find.text('1 个可离线播放'), findsOneWidget);
     expect(find.byTooltip('离线播放'), findsOneWidget);
+    expect(find.byTooltip('检查下载缓存'), findsOneWidget);
+    expect(find.byTooltip('清空下载缓存'), findsOneWidget);
 
     await tester.tap(find.byTooltip('删除离线文件'));
     await tester.pump();
@@ -80,6 +82,79 @@ void main() {
     expect(find.text('删除离线文件？'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'downloads screen clears all cached downloads after confirmation',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(480, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      late final _UiHarness harness;
+      await tester.runAsync(() async {
+        harness = await _UiHarness.create(withCompletedDownload: true);
+      });
+      addTearDown(harness.dispose);
+      final mediaFile = File(harness.service.tasks.single.finalPath);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: DownloadsScreen(api: harness.api, downloads: harness.service),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('清空下载缓存'));
+      await tester.pumpAndSettle();
+      expect(find.text('清空下载缓存？'), findsOneWidget);
+      expect(find.textContaining('预计释放 12 B'), findsOneWidget);
+
+      final confirmButton = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, '清空'),
+      );
+      confirmButton.onPressed!();
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (harness.service.tasks.isEmpty ||
+            harness.service.tasks.single.status == DownloadStatus.cancelling) {
+          break;
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(
+        harness.service.tasks.isEmpty ||
+            harness.service.tasks.single.status == DownloadStatus.cancelling,
+        isTrue,
+      );
+      for (
+        var attempt = 0;
+        attempt < 100 && harness.service.tasks.isNotEmpty;
+        attempt++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)),
+        );
+        await tester.pump();
+      }
+      for (
+        var attempt = 0;
+        attempt < 20 && find.textContaining('已提交清理 1 项').evaluate().isEmpty;
+        attempt++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)),
+        );
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(harness.service.tasks, isEmpty);
+      final mediaExists = await tester.runAsync(mediaFile.exists);
+      expect(mediaExists, isFalse);
+      expect(find.text('还没有离线内容'), findsOneWidget);
+      expect(find.textContaining('已提交清理 1 项'), findsOneWidget);
+      expect(find.byTooltip('清空下载缓存'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('downloads screen presents a pausable Wi-Fi waiting state', (
     tester,

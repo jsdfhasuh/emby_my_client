@@ -1193,6 +1193,63 @@ void main() {
   );
 
   test(
+    'offlineItems invalidates a completed file removed at runtime',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final completed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.completed,
+      );
+      await File(completed.finalPath).delete();
+
+      final offline = await harness.service.offlineItems();
+
+      final failed = harness.service.taskForItem(_item.id);
+      expect(offline, isEmpty);
+      expect(failed?.status, DownloadStatus.failed);
+      expect(failed?.lastErrorCode, 'missingFile');
+      expect(failed?.downloadedBytes, 0);
+      expect(failed?.requiresFreshDownload, isTrue);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'clears cached downloads and reports estimated released bytes',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final completed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.completed,
+      );
+
+      final report = await harness.service.clearCache();
+
+      expect(report.totalTasks, 1);
+      expect(report.requestedTasks, 1);
+      expect(report.failedTasks, 0);
+      expect(report.estimatedBytes, _mediaBytes.length);
+      expect(report.hasFailures, isFalse);
+      expect(harness.service.tasks, isEmpty);
+      expect(await harness.repository.listTasks(_scope), isEmpty);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+      expect(await File(completed.finalPath).exists(), isFalse);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
     'redownloads corrupt local media from zero after explicit action',
     () async {
       final digest = _digest(sha256, _mediaBytes);

@@ -1,8 +1,57 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../core/full_diagnostic_export.dart';
 import '../core/safe_diagnostic_export.dart';
 import '../platform/platform_capabilities.dart';
+
+const fullDiagnosticPreviewMaxBytes = 64 * 1024;
+const _fullDiagnosticPreviewOmission = '……已省略较早日志；导出文件仍包含完整的有界快照……';
+
+String buildFullDiagnosticPreview(
+  String content, {
+  int maxBytes = fullDiagnosticPreviewMaxBytes,
+}) {
+  if (maxBytes <= 0) {
+    throw ArgumentError.value(maxBytes, 'maxBytes', 'must be positive');
+  }
+  if (utf8.encode(content).length <= maxBytes) return content;
+
+  final lines = content.split('\n');
+  final headerCount = lines.length < 8 ? lines.length : 8;
+  final header = lines.take(headerCount).join('\n');
+  final prefix = '$header\n$_fullDiagnosticPreviewOmission\n';
+  final prefixBytes = utf8.encode(prefix).length;
+  if (prefixBytes > maxBytes) {
+    return _takeUtf8Prefix(_fullDiagnosticPreviewOmission, maxBytes);
+  }
+
+  final reversedTail = <String>[];
+  var tailBytes = 0;
+  for (var index = lines.length - 1; index >= headerCount; index--) {
+    final line = lines[index];
+    final additionalBytes =
+        utf8.encode(line).length + (reversedTail.isEmpty ? 0 : 1);
+    if (prefixBytes + tailBytes + additionalBytes > maxBytes) break;
+    reversedTail.add(line);
+    tailBytes += additionalBytes;
+  }
+  return '$prefix${reversedTail.reversed.join('\n')}';
+}
+
+String _takeUtf8Prefix(String value, int maxBytes) {
+  final result = StringBuffer();
+  var byteLength = 0;
+  for (final rune in value.runes) {
+    final character = String.fromCharCode(rune);
+    final characterBytes = utf8.encode(character).length;
+    if (byteLength + characterBytes > maxBytes) break;
+    result.write(character);
+    byteLength += characterBytes;
+  }
+  return result.toString();
+}
 
 class FullDiagnosticExportScreen extends StatefulWidget {
   const FullDiagnosticExportScreen({
@@ -31,9 +80,11 @@ class _FullDiagnosticExportScreenState
       widget.capabilities ?? PlatformCapabilities.current();
   final _exportButtonKey = GlobalKey();
   FullDiagnosticReport? _report;
+  String? _previewContent;
   String? _errorCode;
   bool _loading = true;
   bool _sharing = false;
+  bool _previewTruncated = false;
 
   @override
   void initState() {
@@ -45,6 +96,8 @@ class _FullDiagnosticExportScreenState
     if (mounted) {
       setState(() {
         _loading = true;
+        _previewContent = null;
+        _previewTruncated = false;
         _errorCode = null;
       });
     }
@@ -52,6 +105,7 @@ class _FullDiagnosticExportScreenState
       if (!mounted) return;
       setState(() {
         _report = null;
+        _previewContent = null;
         _errorCode = FullDiagnosticExportException.unsafe;
         _loading = false;
       });
@@ -59,15 +113,19 @@ class _FullDiagnosticExportScreenState
     }
     try {
       final report = await _service.buildReport();
+      final preview = buildFullDiagnosticPreview(report.content);
       if (!mounted) return;
       setState(() {
         _report = report;
+        _previewContent = preview;
+        _previewTruncated = preview != report.content;
         _loading = false;
       });
     } on FullDiagnosticExportException catch (error) {
       if (!mounted) return;
       setState(() {
         _report = null;
+        _previewContent = null;
         _errorCode = _normalizeErrorCode(error.code);
         _loading = false;
       });
@@ -75,6 +133,7 @@ class _FullDiagnosticExportScreenState
       if (!mounted) return;
       setState(() {
         _report = null;
+        _previewContent = null;
         _errorCode = FullDiagnosticExportException.unsafe;
         _loading = false;
       });
@@ -181,6 +240,7 @@ class _FullDiagnosticExportScreenState
       appBar: AppBar(
         title: const Text('完整调试日志'),
         actions: [
+          _buildExportAction(),
           IconButton(
             tooltip: '刷新',
             onPressed: _loading ? null : _load,
@@ -189,6 +249,25 @@ class _FullDiagnosticExportScreenState
         ],
       ),
       body: _buildBody(),
+    );
+  }
+
+  Widget _buildExportAction() {
+    final canShare =
+        !_loading &&
+        _errorCode == null &&
+        (_report?.lineCount ?? 0) > 0 &&
+        !_sharing;
+    return IconButton(
+      key: _exportButtonKey,
+      tooltip: '导出完整调试日志',
+      onPressed: canShare ? _shareReport : null,
+      icon: _sharing
+          ? const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.ios_share),
     );
   }
 
@@ -249,9 +328,13 @@ class _FullDiagnosticExportScreenState
               '完整日志预览',
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
+            if (_previewTruncated) ...[
+              const SizedBox(height: 6),
+              const Text('为避免超长文本卡顿，页面仅预览最近 64 KiB；导出文件内容不受影响。'),
+            ],
             const SizedBox(height: 8),
             SelectableText(
-              report.content,
+              _previewContent ?? '',
               key: const ValueKey<String>('full-diagnostic-preview'),
               style: const TextStyle(
                 fontFamily: 'monospace',
@@ -260,18 +343,6 @@ class _FullDiagnosticExportScreenState
               ),
             ),
           ],
-          const SizedBox(height: 22),
-          FilledButton.icon(
-            key: _exportButtonKey,
-            onPressed: report.lineCount == 0 || _sharing ? null : _shareReport,
-            icon: _sharing
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.ios_share),
-            label: const Text('导出完整调试日志'),
-          ),
         ],
       ),
     );
