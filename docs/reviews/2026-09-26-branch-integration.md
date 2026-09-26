@@ -106,3 +106,26 @@ the Quality and Android job. Do not infer readiness from the earlier run.
 
 Local iOS build: NOT_RUN (Windows; no Xcode).
 `DEVICE_ACCEPTANCE=PENDING`; automation and simulator checks do not satisfy it.
+
+### CI follow-up: fixed ldid installation lifetime
+
+Candidate `74ceeba` passed Quality and Android (1199 Linux tests, plus 26
+cache-safety tests, APKs and native/emulator probes). The first iOS attempt
+failed the unchanged active-context loopback XCTest. The same-head second
+attempt passed that test and the unsigned device build; its later packaging
+prerequisite exposed a separate Homebrew compatibility failure.
+
+The installer verified locked ldid `2.1.5_1` successfully, then its EXIT trap
+removed `local/ldid-lock`. The workflow's subsequent independent verification
+reported `not installed` because current Homebrew no longer resolves that
+untapped formula by short name. The original installer reproduces the exact
+failure with an offline Homebrew lifecycle fixture. Keep the verified tap after
+a successful install; continue cleaning it on failure. Version, formula hash,
+source revision, allowed provider and all packaging gates remain unchanged.
+
+`test_ldid_installation.sh` proves post-install verification, incorrect-version
+rejection, failed-install cleanup and altered-formula hash rejection. It runs
+from the existing packaging negative-gates step. This is a required CI repair,
+not a dependency upgrade or release. Baseline main `23dea38` in run
+`36213946285` passed native XCTest and the device build, then reproduced the
+same ldid verification failure. Final candidate outcomes remain in the live PR record.
