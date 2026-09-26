@@ -96,8 +96,8 @@ the Quality and Android job. Do not infer readiness from the earlier run.
 | Photo/video/photo, rapid switches, close and system UI restoration | photo_viewer_screen, inline_playback_coordinator |
 | Never-ending play/seek/pause/quiesce/dispose; bounded logical exit | playback_controller, playback_operation_coordinator, photo_viewer_screen |
 | Late default subtitles, disable or switch during track wait | playback_controller |
-| Trickplay timeout, source changes and late frames | trickplay_preview, seek_preview_controller |
-| Prepared-but-paused Start; serialized Progress and exactly-once Stop | playback_controller, playback_session_reporter |
+| Trickplay timeout, source changes and late frames | trickplay_preview, horizontal_seek_preview_overlay |
+| Prepared-but-paused Start; serialized Progress and exactly-once Stop | playback_controller, emby_api_playback |
 | Raw 59/60/61 boundaries, stable offset and identity rescan | photo_viewer_controller, library_pagination_integrity |
 | PlayCount reorder, played/unplayed membership, return position | library_user_data_membership, library_position_integration, library_pagination_integrity |
 | A/B and reauthentication route isolation, same item ID | new photo_viewer_screen cases |
