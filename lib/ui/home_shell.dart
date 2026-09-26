@@ -12,6 +12,7 @@ import '../platform/platform_capabilities.dart';
 import '../realtime/emby_event.dart';
 import '../realtime/realtime_refresh_binding.dart';
 import '../state/app_controller.dart';
+import 'accounts/server_accounts_screen.dart';
 import 'diagnostic_log_screen.dart';
 import 'downloads/downloads_screen.dart';
 import 'home_screen.dart';
@@ -189,6 +190,8 @@ class _HomeShellState extends State<HomeShell> {
     Navigator.of(context).popUntil((route) => route.isFirst);
     await Future<void>.delayed(Duration.zero);
     if (!mounted) return;
+    final session = widget.controller.session;
+    if (session == null) return;
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -198,11 +201,12 @@ class _HomeShellState extends State<HomeShell> {
           children: [
             ListTile(
               leading: const Icon(Icons.account_circle_outlined),
-              title: Text(widget.controller.session!.username),
-              subtitle: Text(widget.controller.session!.serverName),
+              title: Text(session.username),
+              subtitle: Text(session.serverName),
             ),
             const Divider(height: 1),
             for (final item in const [
+              ('servers', Icons.dns_outlined, '服务器管理'),
               ('settings', Icons.settings_outlined, '设置'),
               ('logs', Icons.description_outlined, '诊断日志'),
               ('clear-image-cache', Icons.delete_sweep_outlined, '清理图片缓存'),
@@ -222,7 +226,20 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _handleAccountAction(String value) async {
     if (value == 'logout') {
-      await widget.controller.signOut();
+      try {
+        await widget.controller.signOut();
+      } catch (error, stackTrace) {
+        DiagnosticLog.instance.error(
+          'accounts',
+          'Failed to sign out the current server account',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('退出登录失败，请稍后重试')));
+      }
       return;
     }
     if (value == 'logs') {
@@ -236,13 +253,23 @@ class _HomeShellState extends State<HomeShell> {
       );
       return;
     }
+    if (value == 'servers') {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ServerAccountsScreen(controller: widget.controller),
+        ),
+      );
+      return;
+    }
     if (value == 'settings') {
+      final session = widget.controller.session;
+      if (session == null) return;
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => SettingsScreen(
             settings: widget.controller.libraryCategorySettings,
-            accountName: widget.controller.session!.username,
-            session: widget.controller.session!,
+            accountName: session.username,
+            session: session,
             playbackSettingsRepository:
                 widget.controller.playbackSettingsRepository,
             playbackCacheStorage: widget.controller.playbackCacheStorage,
@@ -276,6 +303,8 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    final session = widget.controller.session;
+    if (session == null) return const SizedBox.shrink();
     final api = widget.controller.api;
     final downloads = widget.controller.downloads;
     final pages = [
@@ -353,11 +382,11 @@ class _HomeShellState extends State<HomeShell> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.controller.session!.username,
+                      session.username,
                       style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
                     Text(
-                      widget.controller.session!.serverName,
+                      session.serverName,
                       style: const TextStyle(
                         fontSize: 12,
                         color: Color(0xFF9DA6A9),
@@ -367,6 +396,14 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'servers',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.dns_outlined),
+                  title: Text('服务器管理'),
+                ),
+              ),
               const PopupMenuItem(
                 value: 'settings',
                 child: ListTile(

@@ -4,6 +4,7 @@ import 'playback/cache/playback_cache_storage_scope.dart';
 import 'playback/playback_diagnostics_test_overrides_scope.dart';
 import 'playback/playback_settings_scope.dart';
 import 'state/app_controller.dart';
+import 'ui/accounts/server_accounts_screen.dart';
 import 'ui/home_shell.dart';
 import 'ui/home_shell_navigation.dart';
 import 'ui/login_screen.dart';
@@ -36,9 +37,18 @@ class EmbyClientApp extends StatelessWidget {
         builder: (context, _) {
           if (controller.isInitializing) return const _BootScreen();
           if (!controller.isSignedIn) {
+            if (controller.hasServerAccounts) {
+              return ServerAccountsScreen(
+                controller: controller,
+                rootMode: true,
+              );
+            }
             return LoginScreen(controller: controller);
           }
-          return HomeShell(controller: controller);
+          return HomeShell(
+            key: ValueKey(controller.api),
+            controller: controller,
+          );
         },
       ),
     );

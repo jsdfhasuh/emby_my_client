@@ -216,6 +216,32 @@ void main() {
   );
 
   testWidgets(
+    'narrow scaled iPad add-account header uses compact diagnostics',
+    (tester) async {
+      final controller = _FakeLoginController(
+        capabilities: PlatformCapabilities.ipad,
+      );
+      final viewport = ValueNotifier<_ViewportConfig>(
+        const _ViewportConfig(size: Size(320, 640), textScale: 2),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(viewport.dispose);
+      await _pumpLogin(tester, controller, viewport, addAccountMode: true);
+
+      expect(
+        find.byKey(const ValueKey<String>('login-back-button')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('login-safe-diagnostics-button')),
+        findsOneWidget,
+      );
+      expect(find.text('查看/导出安全诊断'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'rotating a focused password from portrait to landscape preserves the field',
     (tester) async {
       final controller = _FakeLoginController(
@@ -588,6 +614,7 @@ Future<void> _pumpLogin(
   _FakeLoginController controller,
   ValueNotifier<_ViewportConfig> viewport, {
   EmbyServerDiscovery? discovery,
+  bool addAccountMode = false,
 }) async {
   await tester.binding.setSurfaceSize(viewport.value.size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -608,6 +635,7 @@ Future<void> _pumpLogin(
         controller: controller,
         capabilities: controller.capabilities,
         discovery: discovery ?? _EmptyDiscovery(),
+        addAccountMode: addAccountMode,
       ),
     ),
   );

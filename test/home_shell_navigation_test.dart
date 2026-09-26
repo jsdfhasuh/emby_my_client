@@ -7,6 +7,7 @@ import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
+import 'package:emby_my_client/ui/accounts/server_accounts_screen.dart';
 import 'package:emby_my_client/ui/home_shell.dart';
 import 'package:emby_my_client/ui/settings_screen.dart';
 import 'package:flutter/foundation.dart';
@@ -58,7 +59,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Test Server'), findsOneWidget);
       expect(find.text('诊断日志'), findsOneWidget);
-      await tester.tapAt(const Offset(4, 4));
+      expect(find.text('服务器管理'), findsOneWidget);
+      await tester.tap(find.text('服务器管理'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ServerAccountsScreen), findsOneWidget);
+      await tester.pageBack();
       await tester.pumpAndSettle();
       expect(_selectedShellTab(tester), 1);
 
@@ -76,6 +81,37 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  testWidgets('logout failure is reported without an unhandled async error', (
+    tester,
+  ) async {
+    final preferences = SharedPreferencesAsyncTestBackend.install();
+    addTearDown(preferences.restore);
+    final api = _ShellApi();
+    final controller = _ShellController(
+      api,
+      signOutFailure: StateError('fixture sign-out failure'),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(api.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomeShell(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('账号'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('退出登录'));
+    await tester.pumpAndSettle();
+
+    expect(controller.signOutCalls, 1);
+    expect(find.text('退出登录失败，请稍后重试'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }
 
@@ -101,19 +137,27 @@ Future<void> _openCurrentLibrary(WidgetTester tester) async {
 }
 
 class _ShellController extends AppController {
-  _ShellController(this._shellApi)
+  _ShellController(this._shellApi, {this.signOutFailure})
     : super(
         capabilities: PlatformCapabilities.ipad,
         libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
       );
 
   final EmbyApi _shellApi;
+  final Object? signOutFailure;
+  int signOutCalls = 0;
 
   @override
   EmbyApi get api => _shellApi;
 
   @override
   EmbySession? get session => _session;
+
+  @override
+  Future<void> signOut() async {
+    signOutCalls++;
+    if (signOutFailure != null) throw signOutFailure!;
+  }
 }
 
 class _ShellApi extends EmbyApi {

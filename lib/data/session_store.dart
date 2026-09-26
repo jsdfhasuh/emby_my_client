@@ -46,6 +46,8 @@ class SessionStore {
 
   static const _sessionKey = 'emby_session_v1';
   static const _deviceIdKey = 'emby_device_id_v1';
+  static const _accountsIndexKey = 'emby_server_accounts_v1';
+  static const _accountSessionPrefix = 'emby_server_account_session_v1_';
 
   final SessionStorage _storage;
   final PlatformCapabilities _capabilities;
@@ -116,6 +118,50 @@ class SessionStore {
 
   Future<void> clearSession() => deleteSession();
 
+  Future<String?> readAccountsIndex() =>
+      _guard(SecureStorageOperation.readAccounts, () {
+        return _storage.read(_accountsIndexKey);
+      });
+
+  Future<void> writeAccountsIndex(String value) =>
+      _guard(SecureStorageOperation.writeAccounts, () {
+        return _storage.write(_accountsIndexKey, value);
+      });
+
+  Future<EmbySession?> loadAccountSession(String accountId) async {
+    final key = _accountSessionKey(accountId);
+    final value = await _guard(
+      SecureStorageOperation.readAccounts,
+      () => _storage.read(key),
+    );
+    if (value == null || value.isEmpty) return null;
+    try {
+      return EmbySession.fromJson(
+        Map<String, dynamic>.from(jsonDecode(value) as Map),
+      );
+    } catch (_) {
+      await _guard(
+        SecureStorageOperation.deleteAccount,
+        () => _storage.delete(key),
+      );
+      return null;
+    }
+  }
+
+  Future<void> writeAccountSession(String accountId, EmbySession session) =>
+      _guard(
+        SecureStorageOperation.writeAccounts,
+        () => _storage.write(
+          _accountSessionKey(accountId),
+          jsonEncode(session.toJson()),
+        ),
+      );
+
+  Future<void> deleteAccountSession(String accountId) => _guard(
+    SecureStorageOperation.deleteAccount,
+    () => _storage.delete(_accountSessionKey(accountId)),
+  );
+
   Future<String> getOrCreateDeviceId() async {
     final existing = await readDeviceId();
     if (existing != null && existing.isNotEmpty) return existing;
@@ -126,6 +172,13 @@ class SessionStore {
 
   String generateDeviceId() =>
       '${_capabilities.deviceIdPrefix}${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}';
+
+  static String _accountSessionKey(String accountId) {
+    if (!RegExp(r'^[a-zA-Z0-9_-]{1,96}$').hasMatch(accountId)) {
+      throw const FormatException('Invalid server account ID');
+    }
+    return '$_accountSessionPrefix$accountId';
+  }
 
   Future<T> _guard<T>(
     SecureStorageOperation operation,
