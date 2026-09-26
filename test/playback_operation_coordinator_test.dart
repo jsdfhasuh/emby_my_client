@@ -5,6 +5,22 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('PlaybackOperationCoordinator', () {
+    test('native operation budgets match the shutdown contract', () {
+      const timeouts = PlaybackNativeOperationTimeouts();
+
+      expect(timeouts.urgentMute, const Duration(milliseconds: 750));
+      expect(timeouts.play, const Duration(seconds: 3));
+      expect(timeouts.pause, const Duration(seconds: 3));
+      expect(timeouts.lifecycleQuiesce, const Duration(seconds: 2));
+      expect(timeouts.retirementQuiesce, const Duration(seconds: 3));
+      expect(timeouts.seek, const Duration(seconds: 8));
+      expect(timeouts.stop, const Duration(seconds: 5));
+      expect(timeouts.open, const Duration(seconds: 18));
+      expect(timeouts.propertyWrite, const Duration(seconds: 2));
+      expect(timeouts.dispose, const Duration(seconds: 5));
+      expect(timeouts.shutdownBarrier, const Duration(seconds: 5));
+    });
+
     test('100 requests execute first and latest with no concurrency', () async {
       final firstGate = Completer<void>();
       final calls = <Duration>[];
@@ -178,44 +194,55 @@ void main() {
         );
         expect(blocked.failureKind, SeekFailureKind.higherPriorityOperation);
         nativeGate.complete();
+        await coordinator.shutdown();
       },
     );
 
-    test('settle timeout is failed and shutdown cancels immediately', () async {
-      final coordinator = PlaybackOperationCoordinator(
-        sessionId: const PlaybackItemSessionId('session'),
-        clampTarget: _clamp,
-        seekSettleTimeout: const Duration(milliseconds: 10),
-        seekEngine: (_) async {},
-      );
+    test(
+      'settle timeout fails and shutdown waits for the native seek barrier',
+      () async {
+        final coordinator = PlaybackOperationCoordinator(
+          sessionId: const PlaybackItemSessionId('session'),
+          clampTarget: _clamp,
+          seekSettleTimeout: const Duration(milliseconds: 10),
+          seekEngine: (_) async {},
+        );
 
-      final timeout = await coordinator.seekAbsolute(
-        const Duration(minutes: 1),
-        source: SeekSource.progressBar,
-      );
-      expect(timeout.disposition, SeekDisposition.failed);
-      expect(timeout.failureKind, SeekFailureKind.settleTimeout);
+        final timeout = await coordinator.seekAbsolute(
+          const Duration(minutes: 1),
+          source: SeekSource.progressBar,
+        );
+        expect(timeout.disposition, SeekDisposition.failed);
+        expect(timeout.failureKind, SeekFailureKind.settleTimeout);
 
-      final nativeGate = Completer<void>();
-      final shutdownCoordinator = PlaybackOperationCoordinator(
-        sessionId: const PlaybackItemSessionId('shutdown'),
-        clampTarget: _clamp,
-        seekEngine: (_) => nativeGate.future,
-      );
-      final inFlight = shutdownCoordinator.seekAbsolute(
-        const Duration(minutes: 2),
-        source: SeekSource.remote,
-      );
-      final pending = shutdownCoordinator.seekAbsolute(
-        const Duration(minutes: 3),
-        source: SeekSource.remote,
-      );
-      shutdownCoordinator.shutdown();
+        final nativeGate = Completer<void>();
+        final shutdownCoordinator = PlaybackOperationCoordinator(
+          sessionId: const PlaybackItemSessionId('shutdown'),
+          clampTarget: _clamp,
+          seekEngine: (_) => nativeGate.future,
+        );
+        final inFlight = shutdownCoordinator.seekAbsolute(
+          const Duration(minutes: 2),
+          source: SeekSource.remote,
+        );
+        final pending = shutdownCoordinator.seekAbsolute(
+          const Duration(minutes: 3),
+          source: SeekSource.remote,
+        );
+        var shutdownCompleted = false;
+        final shutdown = shutdownCoordinator.shutdown().then(
+          (_) => shutdownCompleted = true,
+        );
 
-      expect((await inFlight).disposition, SeekDisposition.cancelled);
-      expect((await pending).disposition, SeekDisposition.cancelled);
-      nativeGate.complete();
-    });
+        expect((await inFlight).disposition, SeekDisposition.cancelled);
+        expect((await pending).disposition, SeekDisposition.cancelled);
+        await Future<void>.delayed(Duration.zero);
+        expect(shutdownCompleted, isFalse);
+        nativeGate.complete();
+        await shutdown;
+        expect(shutdownCompleted, isTrue);
+      },
+    );
 
     test(
       'higher-priority operations cancel pending and in-flight seeks',
@@ -249,8 +276,153 @@ void main() {
           everyElement(SeekFailureKind.higherPriorityOperation),
         );
         nativeGate.complete();
+        await coordinator.shutdown();
       },
     );
+
+    test(
+      'quiescence cancels logical seek before the native seek completes',
+      () async {
+        final seekStarted = Completer<void>();
+        final nativeSeekGate = Completer<void>();
+        final quiescenceStarted = Completer<void>();
+        final coordinator = PlaybackOperationCoordinator(
+          sessionId: const PlaybackItemSessionId('quiesce-seek'),
+          clampTarget: _clamp,
+          seekEngine: (_) async {
+            seekStarted.complete();
+            await nativeSeekGate.future;
+          },
+        );
+
+        final seek = coordinator.seekAbsolute(
+          const Duration(minutes: 1),
+          source: SeekSource.progressBar,
+        );
+        await seekStarted.future;
+        final quiescence = coordinator.beginQuiescence(
+          kind: PlaybackNativeOperationKind.retirementQuiesce,
+          operation: () async {
+            quiescenceStarted.complete();
+          },
+        );
+
+        await quiescenceStarted.future;
+        final result = await seek;
+        expect(result.disposition, SeekDisposition.cancelled);
+        expect(result.failureKind, SeekFailureKind.higherPriorityOperation);
+
+        var shutdownCompleted = false;
+        final shutdown = coordinator.shutdown().then(
+          (_) => shutdownCompleted = true,
+        );
+        await quiescence;
+        await Future<void>.delayed(Duration.zero);
+        expect(shutdownCompleted, isFalse);
+
+        nativeSeekGate.complete();
+        await shutdown;
+        expect(shutdownCompleted, isTrue);
+      },
+    );
+
+    test('quiescence starts while a tracked native play is blocked', () async {
+      final playStarted = Completer<void>();
+      final playGate = Completer<void>();
+      final quiescenceStarted = Completer<void>();
+      final quiescenceGate = Completer<void>();
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('quiesce-play'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+      );
+
+      final play = coordinator.runTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.play,
+        operation: () async {
+          playStarted.complete();
+          await playGate.future;
+        },
+      );
+      await playStarted.future;
+      final quiescence = coordinator.beginQuiescence(
+        kind: PlaybackNativeOperationKind.retirementQuiesce,
+        operation: () async {
+          quiescenceStarted.complete();
+          await quiescenceGate.future;
+        },
+      );
+
+      await quiescenceStarted.future;
+      var shutdownCompleted = false;
+      final shutdown = coordinator.shutdown().then(
+        (_) => shutdownCompleted = true,
+      );
+      quiescenceGate.complete();
+      await quiescence;
+      await Future<void>.delayed(Duration.zero);
+      expect(shutdownCompleted, isFalse);
+
+      playGate.complete();
+      await play;
+      await shutdown;
+      expect(shutdownCompleted, isTrue);
+    });
+
+    test('bounded native barriers release shutdown after timeout', () async {
+      final nativeGate = Completer<void>();
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('bounded-native-barrier'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+      );
+
+      final nativeOperation = coordinator.startTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.play,
+        operation: () => nativeGate.future,
+        barrierTimeout: const Duration(milliseconds: 10),
+      );
+
+      await coordinator.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(
+        (await nativeOperation.barrierFuture).disposition,
+        PlaybackNativeBarrierDisposition.timedOut,
+      );
+      await expectLater(
+        nativeOperation.logicalFuture,
+        throwsA(isA<PlaybackNativeOperationTimedOut>()),
+      );
+      var nativeCompleted = false;
+      nativeOperation.nativeFuture.then<void>((_) => nativeCompleted = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(nativeCompleted, isFalse);
+
+      nativeGate.complete();
+      await nativeOperation.nativeFuture;
+    });
+
+    test('shutdown has one overall barrier for a never-ending open', () async {
+      final nativeGate = Completer<void>();
+      final coordinator = PlaybackOperationCoordinator(
+        sessionId: const PlaybackItemSessionId('shutdown-total-barrier'),
+        clampTarget: _clamp,
+        seekEngine: (_) async {},
+        nativeOperationTimeouts: const PlaybackNativeOperationTimeouts(
+          open: Duration(hours: 1),
+          shutdownBarrier: Duration(milliseconds: 10),
+        ),
+      );
+      final nativeOperation = coordinator.startTrackedNativeOperation(
+        kind: PlaybackNativeOperationKind.open,
+        operation: () => nativeGate.future,
+      );
+
+      await coordinator.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(coordinator.isShutdown, isTrue);
+
+      nativeGate.complete();
+      await nativeOperation.nativeFuture;
+    });
 
     test('control operations use the frozen priority order', () async {
       final events = <String>[];
@@ -309,9 +481,10 @@ void main() {
         operation: (_) async => pendingRan = true,
       );
 
-      coordinator.shutdown();
+      final shutdown = coordinator.shutdown();
 
       await Future.wait([active, pending]);
+      await shutdown;
       expect(pendingRan, isFalse);
     });
 

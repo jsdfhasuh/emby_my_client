@@ -18,6 +18,7 @@ import '../library/library_local_media_scan_cache.dart';
 import '../library/library_local_media_scan_service.dart';
 import '../library/library_navigation_context.dart';
 import '../library/library_playback_queue.dart';
+import '../library/library_pagination_strategy.dart';
 import '../library/library_raw_page_cursor.dart';
 import '../library/library_result_statistics.dart';
 import '../library/library_scroll_position_controller.dart';
@@ -62,6 +63,20 @@ class LibraryScreen extends StatefulWidget {
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+@visibleForTesting
+abstract interface class LibraryBrowseDebugState {
+  List<String> get debugLoadedItemIds;
+  int get debugNextStartIndex;
+  int? get debugTotalCount;
+  bool get debugTotalDirty;
+  bool get debugHasMore;
+  bool get debugLoadFailed;
+  bool get debugLoading;
+  int get debugGeneration;
+  String get debugQueryFingerprint;
+  Future<void> debugRefresh();
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
@@ -1118,8 +1133,10 @@ class _LibraryFacetCard extends StatelessWidget {
   }
 }
 
-class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
+class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
+    implements LibraryBrowseDebugState {
   static const _pageSize = 60;
+  static const _scrollTolerance = 0.5;
 
   final _controller = ScrollController();
   final List<EmbyItem> _items = [];
@@ -1143,11 +1160,46 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool _resultTotalDirty = false;
   bool _reportedTotalBelowLoaded = false;
   int _generation = 0;
+  int _paginationRevision = 0;
   int _positionGeneration = 0;
+  int _scrollSuppressionGeneration = 0;
   bool _suppressPositionNotifications = false;
+  SliverConstraints? _latestGridConstraints;
+  LibraryGridGeometry? _latestGridGeometry;
   LibraryScanKey? _activeScanKey;
   LibraryLocalScanSnapshot? _scanSnapshot;
   bool _preparingPlaybackQueue = false;
+
+  @override
+  List<String> get debugLoadedItemIds =>
+      List<String>.unmodifiable(_items.map((item) => item.id));
+
+  @override
+  int get debugNextStartIndex => _nextStartIndex;
+
+  @override
+  int? get debugTotalCount => _totalCount;
+
+  @override
+  bool get debugTotalDirty => _resultTotalDirty;
+
+  @override
+  bool get debugHasMore => _hasMore;
+
+  @override
+  bool get debugLoadFailed => _loadFailed;
+
+  @override
+  bool get debugLoading => _loading;
+
+  @override
+  int get debugGeneration => _generation;
+
+  @override
+  String get debugQueryFingerprint => _photoQueryFingerprint(_state);
+
+  @override
+  Future<void> debugRefresh() => _refresh();
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
@@ -1178,6 +1230,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   bool get _usesLocalScan => _state.localFilter != LibraryLocalMediaFilter.all;
 
   bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
+
+  LibraryPaginationStrategy get _paginationStrategy =>
+      libraryPaginationStrategyFor(_state);
 
   bool get _positionEnabled => _items.isNotEmpty;
 
@@ -1402,9 +1457,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
   }
 
   void _onScroll() {
-    if (_usesLocalScan || _isReloadingCurrentGeneration || _loadFailed) return;
+    if (_suppressPositionNotifications ||
+        _usesLocalScan ||
+        _isReloadingCurrentGeneration ||
+        _loadFailed) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
+          _suppressPositionNotifications ||
           !_controller.hasClients ||
           _usesLocalScan ||
           _isReloadingCurrentGeneration ||
@@ -1461,6 +1522,56 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     _positionController.clear();
   }
 
+  void _scheduleViewerPositionRestore(String? mediaId) {
+    if (mediaId == null || mediaId.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final targetIndex = _items.indexWhere((item) => item.id == mediaId);
+      final constraints = _latestGridConstraints;
+      final geometry = _latestGridGeometry;
+      if (targetIndex < 0 || constraints == null || geometry == null) return;
+
+      final targetGeometry = geometry
+          .getLayout(constraints)
+          .getGeometryForChildIndex(targetIndex);
+      final visibleStart = constraints.scrollOffset;
+      final visibleEnd = visibleStart + constraints.remainingPaintExtent;
+      final targetStart = targetGeometry.scrollOffset;
+      final targetEnd = targetStart + targetGeometry.mainAxisExtent;
+      final overlapsVisibleRange =
+          targetEnd > visibleStart + _scrollTolerance &&
+          targetStart < visibleEnd - _scrollTolerance;
+      if (overlapsVisibleRange) return;
+
+      final gridGlobalOrigin = constraints.precedingScrollExtent;
+      final targetOffset = (gridGlobalOrigin + targetStart)
+          .clamp(
+            _controller.position.minScrollExtent,
+            _controller.position.maxScrollExtent,
+          )
+          .toDouble();
+      if ((targetOffset - _controller.offset).abs() <= _scrollTolerance) {
+        return;
+      }
+      final suppressionGeneration = ++_scrollSuppressionGeneration;
+      _suppressPositionNotifications = true;
+      try {
+        _controller.jumpTo(targetOffset);
+      } catch (_) {
+        if (suppressionGeneration == _scrollSuppressionGeneration) {
+          _suppressPositionNotifications = false;
+        }
+        rethrow;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || suppressionGeneration != _scrollSuppressionGeneration) {
+          return;
+        }
+        _suppressPositionNotifications = false;
+      });
+    });
+  }
+
   Future<void> _loadMore({int? expectedGeneration}) {
     final generation = expectedGeneration ?? _generation;
     if (!mounted || generation != _generation || !_hasMore) {
@@ -1478,6 +1589,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
 
   Future<void> _performLoadMore(int generation) async {
     if (_usesLocalScan) return;
+    if (_paginationStrategy == LibraryPaginationStrategy.identityRescan) {
+      await _performIdentityRescanLoad(generation);
+      return;
+    }
+    await _performStableOffsetLoad(generation);
+  }
+
+  Future<void> _performStableOffsetLoad(int generation) async {
+    final revision = _paginationRevision;
     final startIndex = _nextStartIndex;
     setState(() {
       _loading = true;
@@ -1486,6 +1606,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     try {
       final page = await _requestPage(startIndex);
       if (!mounted || generation != _generation) return;
+      if (revision != _paginationRevision) {
+        setState(() => _loading = false);
+        return;
+      }
       final cursor = advanceLibraryRawPageCursor(
         currentStartIndex: startIndex,
         currentTotalCount: _totalCount,
@@ -1494,21 +1618,31 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
         pageSize: _pageSize,
         dirty: _resultTotalDirty,
       );
+      final staleCursor = startIndex < _nextStartIndex;
       setState(() {
-        _nextStartIndex = cursor.nextStartIndex;
-        _totalCount = cursor.totalCount;
-        _resultTotalDirty = cursor.dirty;
         for (final item in page.items) {
           if (!_seenItemIds.add(item.id)) continue;
           _items.add(item);
         }
-        _hasMore = cursor.hasMore || cursor.paginationStalled;
-        _loadFailed = cursor.paginationStalled;
+        if (staleCursor) {
+          _mergeNonRegressingTotal(cursor.totalCount, cursor.dirty);
+        } else {
+          _nextStartIndex = cursor.nextStartIndex;
+          _totalCount = cursor.totalCount;
+          _resultTotalDirty = cursor.dirty;
+          _hasMore = cursor.hasMore || cursor.paginationStalled;
+          _loadFailed = cursor.paginationStalled;
+        }
         _loading = false;
       });
       _recordCursorDiagnostics(cursor);
     } catch (error, stackTrace) {
       if (!mounted || generation != _generation) return;
+      if (revision != _paginationRevision) {
+        setState(() => _loading = false);
+        return;
+      }
+      final staleCursor = startIndex < _nextStartIndex;
       DiagnosticLog.instance.error(
         'library',
         'Library page load failed scope=${_state.scope.name}',
@@ -1517,9 +1651,119 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       );
       setState(() {
         _loading = false;
+        if (!staleCursor) _loadFailed = true;
+      });
+    }
+  }
+
+  Future<void> _performIdentityRescanLoad(int generation) async {
+    final revision = _paginationRevision;
+    final previousIds = _items.map((item) => item.id).toList();
+    final previousIdSet = previousIds.toSet();
+    final previousRawCursor = _nextStartIndex;
+    final rescannedItems = <EmbyItem>[];
+    final rescannedIds = <String>{};
+    var scanStartIndex = 0;
+    var scanTotalCount = _totalCount;
+    var scanDirty = _resultTotalDirty;
+    var scanHasMore = true;
+    var foundNewIdentity = false;
+    setState(() {
+      _loading = true;
+      _loadFailed = false;
+    });
+    try {
+      do {
+        final page = await _requestPage(scanStartIndex);
+        if (!mounted || generation != _generation) return;
+        final cursor = advanceLibraryRawPageCursor(
+          currentStartIndex: scanStartIndex,
+          currentTotalCount: scanTotalCount,
+          reportedTotalCount: page.totalRecordCount,
+          rawItemCount: page.rawItemCount,
+          pageSize: _pageSize,
+          dirty: scanDirty,
+        );
+        for (final item in page.items) {
+          if (!rescannedIds.add(item.id)) continue;
+          rescannedItems.add(item);
+          if (!previousIdSet.contains(item.id)) foundNewIdentity = true;
+        }
+        scanStartIndex = cursor.nextStartIndex;
+        scanTotalCount = cursor.totalCount;
+        scanDirty = cursor.dirty;
+        scanHasMore = cursor.hasMore || cursor.paginationStalled;
+        _recordCursorDiagnostics(cursor);
+        if (cursor.paginationStalled) {
+          throw const LibraryPaginationStalled();
+        }
+      } while (scanHasMore &&
+          (scanStartIndex <= previousRawCursor || !foundNewIdentity));
+      if (!mounted || generation != _generation) return;
+      if (revision != _paginationRevision) {
+        setState(() => _loading = false);
+        return;
+      }
+      scanDirty =
+          scanDirty ||
+          libraryIdentityPrefixChanged(
+            previousIds: previousIds,
+            rescannedIds: rescannedItems.map((item) => item.id),
+          );
+      setState(() {
+        _items
+          ..clear()
+          ..addAll(rescannedItems);
+        _seenItemIds
+          ..clear()
+          ..addAll(rescannedIds);
+        _nextStartIndex = scanStartIndex;
+        _totalCount = scanTotalCount;
+        _resultTotalDirty = scanDirty;
+        _hasMore = scanHasMore;
+        _loading = false;
+        _loadFailed = false;
+      });
+    } catch (error, stackTrace) {
+      if (!mounted || generation != _generation) return;
+      if (revision != _paginationRevision) {
+        setState(() => _loading = false);
+        return;
+      }
+      DiagnosticLog.instance.error(
+        'library',
+        'Library identity rescan failed scope=${_state.scope.name}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      setState(() {
+        _loading = false;
         _loadFailed = true;
       });
     }
+  }
+
+  void _mergeNonRegressingTotal(int? incomingTotal, bool incomingDirty) {
+    final currentTotal = _totalCount;
+    final totalsDiffer =
+        currentTotal != null &&
+        incomingTotal != null &&
+        currentTotal != incomingTotal;
+    _resultTotalDirty = _resultTotalDirty || incomingDirty || totalsDiffer;
+    if (incomingTotal == null) return;
+    if (currentTotal == null || incomingTotal > currentTotal) {
+      _totalCount = incomingTotal;
+    }
+  }
+
+  void _mergeAuthoritativeTotal(int? incomingTotal, bool incomingDirty) {
+    final currentTotal = _totalCount;
+    final totalsDiffer =
+        currentTotal != null &&
+        incomingTotal != null &&
+        currentTotal != incomingTotal;
+    _resultTotalDirty = _resultTotalDirty || incomingDirty || totalsDiffer;
+    if (incomingTotal != null) _totalCount = incomingTotal;
   }
 
   void _recordCursorDiagnostics(LibraryRawPageCursorUpdate cursor) {
@@ -1714,7 +1958,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     final service = widget.libraryScanService;
     final key = _activeScanKey;
     if (service == null || key == null) return;
-    final items = service.itemsFor(key, _state.localFilter);
+    final items = service
+        .itemsFor(key, _state.localFilter)
+        .where(
+          (item) => libraryItemMatchesServerMembership(_state, item.userData),
+        )
+        .toList(growable: false);
     setState(() {
       _scanSnapshot = snapshot;
       _items
@@ -1802,13 +2051,36 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       await _refreshPreservingPosition();
       return;
     }
-    final membershipChanged = userData.entries.any((entry) {
-      final item = loadedItems[entry.key];
-      return item != null &&
-          libraryItemMatchesServerMembership(state, item.userData) !=
-              libraryItemMatchesServerMembership(state, entry.value);
-    });
-    if (membershipChanged) {
+    final membershipChanges = userData.entries
+        .where((entry) {
+          final item = loadedItems[entry.key];
+          return item != null &&
+              libraryItemMatchesServerMembership(state, item.userData) !=
+                  libraryItemMatchesServerMembership(state, entry.value);
+        })
+        .toList(growable: false);
+    if (membershipChanges.isNotEmpty) {
+      final scanKey = _activeScanKey;
+      final scanService = widget.libraryScanService;
+      // A completed local scan already has every classified candidate, so an
+      // item leaving the active membership can be hidden without rescanning.
+      // During an active scan the server-side result may have shifted, and a
+      // restart remains necessary to avoid skipping a raw page item.
+      final canUpdateCompletedLocalScan =
+          _usesLocalScan &&
+          scanKey != null &&
+          scanService != null &&
+          scanService.snapshotFor(scanKey)?.status ==
+              LibraryScanStatus.complete &&
+          membershipChanges.every((entry) {
+            final item = loadedItems[entry.key]!;
+            return libraryItemMatchesServerMembership(state, item.userData) &&
+                !libraryItemMatchesServerMembership(state, entry.value);
+          });
+      if (canUpdateCompletedLocalScan) {
+        scanService.updateUserData(scanKey, userData);
+        return;
+      }
       await _refreshPreservingPosition();
       return;
     }
@@ -2145,11 +2417,18 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
     }
   }
 
+  String _photoQueryFingerprint(LibraryBrowseState state) =>
+      'library:${Object.hash(widget.view.id, state, widget.profile.kind).toUnsigned(32)}';
+
   PhotoSequenceSource _photoSequenceSource(EmbyItem initialItem) {
     final state = _state;
     final api = widget.api;
     final viewId = widget.view.id;
     final profile = widget.profile;
+    final viewerMode =
+        profile.kind == LibraryContentProfileKind.homeVideosAndPhotos
+        ? MediaViewerMode.homeMedia
+        : MediaViewerMode.photosOnly;
     Future<EmbyItemPage> loadPage({
       required int startIndex,
       required int limit,
@@ -2186,28 +2465,97 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       ),
     };
 
-    final fingerprint =
-        'library:${Object.hash(viewId, state, profile.kind).toUnsigned(32)}';
+    final fingerprint = _photoQueryFingerprint(state);
     final initialItems = List<EmbyItem>.of(_items);
+    final paginationStrategy = libraryPaginationStrategyFor(state);
     return state.scope == LibraryBrowseScope.directory
         ? DirectoryPhotoSource(
+            mode: viewerMode,
             queryFingerprint: fingerprint,
             initialItems: initialItems,
             initialItemId: initialItem.id,
             initialRawCursor: _nextStartIndex,
             initialTotalCount: _totalCount,
             initialHasMore: _hasMore,
+            initialTotalDirty: _resultTotalDirty,
+            paginationStrategy: paginationStrategy,
             loadPage: loadPage,
           )
         : FilteredLibraryPhotoSource(
+            mode: viewerMode,
             queryFingerprint: fingerprint,
             initialItems: initialItems,
             initialItemId: initialItem.id,
             initialRawCursor: _nextStartIndex,
             initialTotalCount: _totalCount,
             initialHasMore: _hasMore,
+            initialTotalDirty: _resultTotalDirty,
+            paginationStrategy: paginationStrategy,
             loadPage: loadPage,
           );
+  }
+
+  bool _mergeViewerResult(
+    MediaViewerResult result, {
+    required int expectedGeneration,
+    required String expectedFingerprint,
+  }) {
+    if (_usesLocalScan ||
+        expectedGeneration != _generation ||
+        result.queryFingerprint != expectedFingerprint ||
+        result.queryFingerprint != _photoQueryFingerprint(_state) ||
+        result.paginationStrategy != _paginationStrategy) {
+      return false;
+    }
+    _paginationRevision++;
+    final previousCursor = _nextStartIndex;
+    final resultAdvancesCursor = result.nextStartIndex > previousCursor;
+    final resultItems = <EmbyItem>[];
+    final resultIds = <String>{};
+    for (final item in result.rawItems) {
+      if (resultIds.add(item.id)) resultItems.add(item);
+    }
+    setState(() {
+      if (result.paginationStrategy ==
+          LibraryPaginationStrategy.identityRescan) {
+        final identityChanged = libraryIdentityPrefixChanged(
+          previousIds: _items.map((item) => item.id),
+          rescannedIds: resultItems.map((item) => item.id),
+        );
+        _items
+          ..clear()
+          ..addAll(resultItems);
+        _seenItemIds
+          ..clear()
+          ..addAll(resultIds);
+        _nextStartIndex = result.nextStartIndex;
+        _hasMore = result.hasMore;
+        _loadFailed = false;
+        _mergeAuthoritativeTotal(
+          result.totalCount,
+          result.totalDirty || identityChanged,
+        );
+      } else {
+        for (final item in resultItems) {
+          if (!_seenItemIds.add(item.id)) continue;
+          _items.add(item);
+        }
+        if (resultAdvancesCursor) {
+          _nextStartIndex = result.nextStartIndex;
+          _hasMore = result.hasMore;
+          _loadFailed = false;
+        } else if (result.nextStartIndex == previousCursor) {
+          _hasMore = _hasMore && result.hasMore;
+        }
+        _mergeNonRegressingTotal(result.totalCount, result.totalDirty);
+      }
+      final total = _totalCount;
+      if (total != null && total < _items.length) {
+        _resultTotalDirty = true;
+        _reportedTotalBelowLoaded = true;
+      }
+    });
+    return true;
   }
 
   Future<void> _open(EmbyItem item) async {
@@ -2274,14 +2622,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
           _reportUserDataRefreshFailure(error, stackTrace);
         }
       case LibraryEntryAction.openPhoto:
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => PhotoViewerScreen(
-              api: widget.api,
-              source: _photoSequenceSource(item),
-            ),
+        final generation = _generation;
+        final source = _photoSequenceSource(item);
+        final result = await Navigator.of(context).push<MediaViewerResult>(
+          MaterialPageRoute<MediaViewerResult>(
+            builder: (_) => PhotoViewerScreen(api: widget.api, source: source),
           ),
         );
+        if (!mounted || result == null) return;
+        final merged = _mergeViewerResult(
+          result,
+          expectedGeneration: generation,
+          expectedFingerprint: source.queryFingerprint,
+        );
+        if (merged) _scheduleViewerPositionRestore(result.currentItemId);
       case LibraryEntryAction.unsupported:
         DiagnosticLog.instance.warning(
           'library',
@@ -2348,6 +2702,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen> {
       padding: geometry.padding,
       sliver: SliverLayoutBuilder(
         builder: (context, constraints) {
+          _latestGridConstraints = constraints;
+          _latestGridGeometry = geometry;
           _schedulePositionUpdate(constraints: constraints, geometry: geometry);
           return grid;
         },

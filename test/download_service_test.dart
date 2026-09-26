@@ -23,6 +23,63 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   setUpAll(sqfliteFfiInit);
 
+  test('late A transfer is drained before B downloads the same item', () async {
+    final responseGate = Completer<DownloadResponse>();
+    final transportA = _FakeTransport(handler: (_) => responseGate.future);
+    final harness = await _Harness.create(transportA);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    await _waitUntil(() => transportA.calls.isNotEmpty);
+    var stopped = false;
+    final shutdown = harness.service.shutdown().then((_) => stopped = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(transportA.calls.single.cancelToken.isCancelled, isTrue);
+    expect(stopped, isFalse);
+    responseGate.complete(_response(_mediaBytes));
+    await shutdown;
+
+    const sessionB = EmbySession(
+      serverUrl: 'https://b.example.test',
+      serverName: 'B',
+      serverId: 'server-b',
+      userId: 'user-1',
+      username: 'tester',
+      accessToken: 'fixture-b',
+      deviceId: 'device-1',
+    );
+    final apiB = EmbyApi(sessionB, dio: Dio());
+    final scopeB = ServerScope.fromSession(sessionB);
+    final serviceB = DownloadService(
+      api: apiB,
+      scope: scopeB,
+      repository: harness.repository,
+      transport: _FakeTransport(
+        handler: (_) async => _response(_otherMediaBytes),
+      ),
+      directoryResolver: (_) async => Directory('${harness.directory.path}/b'),
+    );
+    addTearDown(() async {
+      await serviceB.shutdown();
+      serviceB.dispose();
+      await apiB.dispose();
+    });
+    await serviceB.initialize();
+    expect(serviceB.taskForItem(_item.id), isNull);
+    await serviceB.enqueue(_item);
+    final completedB = await _waitForTask(
+      serviceB,
+      (task) => task.status == DownloadStatus.completed,
+    );
+    expect(await File(completedB.finalPath).readAsBytes(), _otherMediaBytes);
+    expect((await harness.repository.listTasks(scopeB)).single.scope, scopeB);
+    expect(
+      (await harness.repository.listTasks(_scope)).single.status,
+      DownloadStatus.paused,
+    );
+    expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+    expect(await harness.repository.listOfflineItems(scopeB), hasLength(1));
+  });
+
   test('downloads and commits an original media file atomically', () async {
     final transport = _FakeTransport(
       handler: (call) async => _response(
@@ -1188,6 +1245,63 @@ void main() {
       expect(failed?.lastErrorCode, 'localMediaCorrupt');
       expect(failed?.downloadedBytes, 4);
       expect(await File(completed.finalPath).length(), 4);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'offlineItems invalidates a completed file removed at runtime',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final completed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.completed,
+      );
+      await File(completed.finalPath).delete();
+
+      final offline = await harness.service.offlineItems();
+
+      final failed = harness.service.taskForItem(_item.id);
+      expect(offline, isEmpty);
+      expect(failed?.status, DownloadStatus.failed);
+      expect(failed?.lastErrorCode, 'missingFile');
+      expect(failed?.downloadedBytes, 0);
+      expect(failed?.requiresFreshDownload, isTrue);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'clears cached downloads and reports estimated released bytes',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final completed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.completed,
+      );
+
+      final report = await harness.service.clearCache();
+
+      expect(report.totalTasks, 1);
+      expect(report.requestedTasks, 1);
+      expect(report.failedTasks, 0);
+      expect(report.estimatedBytes, _mediaBytes.length);
+      expect(report.hasFailures, isFalse);
+      expect(harness.service.tasks, isEmpty);
+      expect(await harness.repository.listTasks(_scope), isEmpty);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+      expect(await File(completed.finalPath).exists(), isFalse);
       expect(transport.calls, hasLength(1));
     },
   );

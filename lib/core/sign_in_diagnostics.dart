@@ -32,6 +32,9 @@ enum SecureStorageOperation {
   readSession,
   writeSession,
   deleteSession,
+  readAccounts,
+  writeAccounts,
+  deleteAccount,
 }
 
 extension SecureStorageOperationCode on SecureStorageOperation {
@@ -41,6 +44,9 @@ extension SecureStorageOperationCode on SecureStorageOperation {
     SecureStorageOperation.readSession => 'read_session',
     SecureStorageOperation.writeSession => 'write_session',
     SecureStorageOperation.deleteSession => 'delete_session',
+    SecureStorageOperation.readAccounts => 'read_accounts',
+    SecureStorageOperation.writeAccounts => 'write_accounts',
+    SecureStorageOperation.deleteAccount => 'delete_account',
   };
 }
 

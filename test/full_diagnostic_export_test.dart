@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/core/full_diagnostic_export.dart';
 import 'package:emby_my_client/core/safe_diagnostic_export.dart';
 import 'package:emby_my_client/ui/diagnostic_log_screen.dart';
@@ -11,6 +12,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('full diagnostic export budget remains 750 KiB', () {
+    expect(FullDiagnosticExportService.maxBytesForTesting, 750 * 1024);
+  });
+
+  test('full diagnostic preview honors tiny UTF-8 byte budgets', () {
+    final content = 'header=value\n${'x' * 200}';
+
+    for (final budget in <int>[1, 2, 3, 4, 8, 16]) {
+      final preview = buildFullDiagnosticPreview(content, maxBytes: budget);
+
+      expect(utf8.encode(preview).length, lessThanOrEqualTo(budget));
+      expect(utf8.decode(utf8.encode(preview)), preview);
+    }
+  });
+
   test('full report contains fixed playback and orientation events', () async {
     final report = await _service(
       '''2026-08-07T01:00:00.000Z [INFO] [player] event=player_route_enter orientationPolicy=landscape_playback
@@ -65,6 +81,21 @@ request headers: {"Authorization":"Bearer fixture"}
     },
   );
 
+  test('full report sanitizes native-only unsafe sequences', () async {
+    final report = await _service(
+      r'event=fixture escaped=\n windowsPath=\Users\owner\cache peer=_fixture.example:443',
+    ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
+
+    expect(report.content, isNot(contains(r'\n')));
+    expect(report.content, isNot(contains(r'\Users\owner')));
+    expect(report.content, isNot(contains('fixture.example:443')));
+    expect(
+      FullDiagnosticRedactor.containsSensitiveContent(r'event=foo_token'),
+      isTrue,
+    );
+    FullDiagnosticExportService.validateSnapshot(report.content);
+  });
+
   test('read failure maps to the fixed read code', () async {
     await expectLater(
       _service(
@@ -109,6 +140,37 @@ request headers: {"Authorization":"Bearer fixture"}
     expect(utf8.encode(report.content).length, lessThanOrEqualTo(750 * 1024));
     expect(report.content, contains('index=11999'));
     expect(report.content, isNot(contains('index=0 ')));
+    FullDiagnosticExportService.validateSnapshot(report.content);
+  });
+
+  test(
+    'storage rollover marker propagates to report truncation metadata',
+    () async {
+      final report = await _service(
+        '${DiagnosticLog.truncationMarker}\n'
+        'event=player_route_enter\n',
+      ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
+
+      expect(report.truncated, isTrue);
+      expect(report.content, contains('truncated=true'));
+      FullDiagnosticExportService.validateSnapshot(report.content);
+    },
+  );
+
+  test('large multibyte logs retain valid complete UTF-8 lines', () async {
+    final log = List<String>.generate(
+      12000,
+      (index) =>
+          'event=orientation_metrics_changed count=$index glyph=界🙂 ${'文' * 24}',
+    ).join('\n');
+    final report = await _service(
+      log,
+    ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
+
+    expect(report.truncated, isTrue);
+    expect(utf8.encode(report.content).length, lessThanOrEqualTo(750 * 1024));
+    expect(report.content, contains('count=11999'));
+    expect(report.content, isNot(contains('\uFFFD')));
     FullDiagnosticExportService.validateSnapshot(report.content);
   });
 
@@ -195,12 +257,89 @@ request headers: {"Authorization":"Bearer fixture"}
       find.byKey(const ValueKey<String>('full-diagnostic-preview')),
     );
     final snapshot = preview.data!;
-    await tester.tap(find.text('导出完整调试日志'));
+    await tester.tap(find.byTooltip('导出完整调试日志'));
     await tester.pump(const Duration(milliseconds: 500));
     await tester.tap(find.text('导出'));
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(gateway.report?.content, snapshot);
+  });
+
+  testWidgets('large report preview is bounded without shrinking export', (
+    tester,
+  ) async {
+    final gateway = _CapturingGateway();
+    final log = List<String>.generate(
+      5000,
+      (index) => 'event=orientation_metrics_changed count=$index ${'x' * 48}',
+    ).join('\n');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FullDiagnosticExportScreen(
+          service: _service(log),
+          shareGateway: gateway,
+          capabilities: PlatformCapabilities.ipad,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final preview = tester.widget<SelectableText>(
+      find.byKey(const ValueKey<String>('full-diagnostic-preview')),
+    );
+    final previewContent = preview.data!;
+    expect(
+      utf8.encode(previewContent).length,
+      lessThanOrEqualTo(fullDiagnosticPreviewMaxBytes),
+    );
+    expect(previewContent, contains('已省略较早日志'));
+    expect(previewContent, contains('count=4999'));
+    expect(find.textContaining('页面仅预览最近 64 KiB'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('导出完整调试日志'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.text('导出'));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(gateway.report, isNotNull);
+    expect(
+      utf8.encode(gateway.report!.content).length,
+      greaterThan(utf8.encode(previewContent).length),
+    );
+    expect(gateway.report!.content, contains('count=4999'));
+  });
+
+  testWidgets('full export action stays visible for a long preview', (
+    tester,
+  ) async {
+    final log = List<String>.generate(
+      600,
+      (index) => 'event=player_route_enter count=$index',
+    ).join('\n');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FullDiagnosticExportScreen(
+          service: _service(log),
+          shareGateway: _CapturingGateway(),
+          capabilities: PlatformCapabilities.ipad,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final action = find.byTooltip('导出完整调试日志');
+    final initialTop = tester.getTopLeft(action).dy;
+    expect(action.hitTestable(), findsOneWidget);
+    expect(initialTop, lessThan(100));
+
+    await tester.drag(
+      find.byType(SingleChildScrollView),
+      const Offset(0, -700),
+    );
+    await tester.pumpAndSettle();
+
+    expect(action.hitTestable(), findsOneWidget);
+    expect(tester.getTopLeft(action).dy, closeTo(initialTop, 0.1));
   });
 
   testWidgets('cancelled full export does not call native share', (
@@ -217,7 +356,7 @@ request headers: {"Authorization":"Bearer fixture"}
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('导出完整调试日志'));
+    await tester.tap(find.byTooltip('导出完整调试日志'));
     await tester.pump(const Duration(milliseconds: 500));
     await tester.tap(find.text('取消'));
     await tester.pump(const Duration(milliseconds: 500));
@@ -236,10 +375,10 @@ request headers: {"Authorization":"Bearer fixture"}
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('导出完整调试日志'));
+    await tester.tap(find.byTooltip('导出完整调试日志'));
     await tester.pump();
     expect(find.text('导出完整调试日志？'), findsOneWidget);
-    await tester.tap(find.text('导出完整调试日志'), warnIfMissed: false);
+    await tester.tap(find.byTooltip('导出完整调试日志'), warnIfMissed: false);
     await tester.pump();
     expect(find.text('导出完整调试日志？'), findsOneWidget);
     await tester.tap(find.text('导出'));

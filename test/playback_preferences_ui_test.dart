@@ -38,6 +38,13 @@ void main() {
       find.byKey(const ValueKey('playback-seek-preview-mode')),
       findsOneWidget,
     );
+    expect(find.text('服务器未生成 Trickplay 时，仅显示时间与进度。'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('playback-seek-preview-mode')));
+    await tester.pumpAndSettle();
+    expect(find.text('服务器缩略图'), findsOneWidget);
+    expect(find.text('自动（推荐）'), findsNothing);
+    await tester.tap(find.text('关闭画面预览').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('playback-seek-forward')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('60 秒').last);

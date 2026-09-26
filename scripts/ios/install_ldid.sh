@@ -13,9 +13,10 @@ fi
 formula_file="$(mktemp "${TMPDIR:-/tmp}/ldid-formula.XXXXXX")"
 tap_name='local/ldid-lock'
 tap_repo=''
+installation_verified=false
 cleanup() {
   rm -f "$formula_file"
-  if [[ -n "$tap_repo" ]]; then
+  if [[ -n "$tap_repo" && "$installation_verified" != true ]]; then
     HOMEBREW_NO_AUTO_UPDATE=1 brew untap --force "$tap_name" >/dev/null 2>&1 || true
   fi
 }
@@ -28,7 +29,10 @@ grep -Fq "revision: \"$SOURCE_REVISION\"" "$formula_file"
 grep -Fq "revision $FORMULA_REVISION" "$formula_file"
 
 # Homebrew rejects a standalone .rb path, so install the already-verified
-# Homebrew Core formula through an ephemeral local tap. No alternate ldid
+# Homebrew Core formula through a local tap. Keep the verified tap available
+# for subsequent verification and packaging: newer Homebrew cannot resolve an
+# installed formula by its short name after its owning tap is removed.
+# Failed installations still clean up the temporary tap. No alternate ldid
 # implementation is selected when this formula is unavailable.
 HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$tap_name"
 tap_repo="$(brew --repository "$tap_name")"
@@ -36,3 +40,4 @@ mkdir -p "$tap_repo/Formula"
 cp "$formula_file" "$tap_repo/Formula/ldid.rb"
 HOMEBREW_NO_AUTO_UPDATE=1 brew install --formula "$tap_name/ldid"
 "$ROOT_DIR/scripts/ios/verify_ldid.sh"
+installation_verified=true

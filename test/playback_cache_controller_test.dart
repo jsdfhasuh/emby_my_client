@@ -1589,6 +1589,15 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void> play() async => playingController.add(true);
 
   @override
+  Future<void> quiesce() async => playingController.add(false);
+
+  @override
+  Future<void> quiesceForLifecycle() async => playingController.add(false);
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {}
+
+  @override
   Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
     events.add('probe');
     return _capabilities();
@@ -1719,7 +1728,7 @@ class _Reporter implements PlaybackReporter {
     required bool isPaused,
   }) async {}
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
   @override
   Future<void> stop(Duration position) async {}
   @override
@@ -1740,7 +1749,7 @@ class _TrackingReporter implements PlaybackReporter {
     required bool isPaused,
   }) async {}
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
   @override
   Future<void> stop(Duration position) async => stopCalls++;
   @override

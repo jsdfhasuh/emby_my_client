@@ -127,6 +127,8 @@ chmod +x "$TEMP_DIR/fake-bin/brew"
 assert_fails env PATH="$TEMP_DIR/fake-bin:$PATH" \
   "$ROOT_DIR/scripts/ios/verify_ldid.sh"
 
+bash "$ROOT_DIR/scripts/ios/test_ldid_installation.sh"
+
 checksum_artifacts="$TEMP_DIR/checksum-artifacts"
 mkdir -p "$checksum_artifacts"
 printf '%s\n' 'fake ipa payload' >"$checksum_artifacts/example.ipa"

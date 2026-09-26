@@ -72,6 +72,60 @@ void main() {
   });
 
   group('Emby WebSocket lifecycle', () {
+    test(
+      'server B ignores late A callbacks for an identical item ID',
+      () async {
+        final socketA = _ManualCallbackSocket();
+        final socketB = _ManualCallbackSocket();
+        final clientA = EmbyWebSocketClient(
+          _session,
+          connector: (_) async => socketA,
+        );
+        final clientB = EmbyWebSocketClient(
+          const EmbySession(
+            serverUrl: 'https://b.example.test',
+            serverName: 'B',
+            serverId: 'server-b',
+            userId: 'user-1',
+            username: 'tester',
+            accessToken: 'fixture-b',
+            deviceId: 'device-1',
+          ),
+          connector: (_) async => socketB,
+        );
+        addTearDown(socketA.disposeStream);
+        addTearDown(socketB.disposeStream);
+        addTearDown(clientB.dispose);
+        final receivedA = <EmbyEvent>[];
+        final receivedB = <EmbyEvent>[];
+        clientA.events.listen(receivedA.add);
+        clientB.events.listen(receivedB.add);
+        await clientA.start();
+        await clientA.dispose();
+        await clientB.start();
+        final message = jsonEncode({
+          'MessageType': 'UserDataChanged',
+          'Data': {
+            'UserId': 'user-1',
+            'UserDataList': [
+              {'ItemId': 'same-item'},
+            ],
+          },
+        });
+        socketA.emit(message);
+        socketA.emitDone();
+        socketB.emit(message);
+        await Future<void>.delayed(Duration.zero);
+        expect(receivedA, isEmpty);
+        expect(receivedB, hasLength(1));
+        expect((receivedB.single as EmbyUserDataChanged).itemIds, [
+          'same-item',
+        ]);
+        expect(clientB.isConnected, isTrue);
+        expect(socketB.closed, isFalse);
+      },
+    );
+
     test('connects with the Emby endpoint and honors ForceKeepAlive', () async {
       final socket = _FakeSocket();
       Uri? connectedUri;
@@ -199,6 +253,81 @@ void main() {
       await client.dispose();
     });
 
+    test('closes a socket that resolves after connection timeout', () async {
+      final pendingSocket = Completer<EmbySocket>();
+      final lateSocket = _FakeSocket();
+      var attempts = 0;
+      final client = EmbyWebSocketClient(
+        _session,
+        connector: (_) {
+          attempts++;
+          return pendingSocket.future;
+        },
+        connectionTimeout: const Duration(milliseconds: 5),
+        reconnectDelay: (_) => const Duration(days: 1),
+      );
+      addTearDown(client.dispose);
+
+      await client.start();
+      pendingSocket.complete(lateSocket);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(attempts, 1);
+      expect(client.isConnected, isFalse);
+      expect(lateSocket.closed, isTrue);
+    });
+
+    test('ignores callbacks from a replaced socket', () async {
+      final staleSocket = _ManualCallbackSocket();
+      final replacementSocket = _FakeSocket();
+      final replacementRequested = Completer<void>();
+      final events = <EmbyEvent>[];
+      var attempts = 0;
+      final client = EmbyWebSocketClient(
+        _session,
+        connector: (_) async {
+          attempts++;
+          if (attempts == 1) return staleSocket;
+          if (!replacementRequested.isCompleted) {
+            replacementRequested.complete();
+          }
+          return replacementSocket;
+        },
+        reconnectDelay: (_) => Duration.zero,
+      );
+      final eventSubscription = client.events.listen(events.add);
+      addTearDown(() async {
+        await eventSubscription.cancel();
+        await client.dispose();
+        await staleSocket.disposeStream();
+      });
+
+      await client.start();
+      staleSocket.emitDone();
+      await replacementRequested.future;
+      await Future<void>.delayed(Duration.zero);
+      expect(client.isConnected, isTrue);
+
+      staleSocket.emit(
+        jsonEncode({
+          'MessageType': 'UserDataChanged',
+          'Data': {
+            'UserId': 'stale-user',
+            'UserDataList': [
+              {'ItemId': 'stale-item'},
+            ],
+          },
+        }),
+      );
+      staleSocket.emitDone();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(events, isEmpty);
+      expect(attempts, 2);
+      expect(client.isConnected, isTrue);
+      expect(replacementSocket.closed, isFalse);
+    });
+
     test('runs the connected callback again after reconnecting', () async {
       final sockets = <_FakeSocket>[];
       var connectedCallbacks = 0;
@@ -247,6 +376,89 @@ class _FakeSocket implements EmbySocket {
     closed = true;
     await _controller.close();
   }
+}
+
+class _ManualCallbackSocket implements EmbySocket {
+  final _ManualCallbackStream _stream = _ManualCallbackStream();
+  final List<String> sent = [];
+  bool closed = false;
+
+  @override
+  Stream<dynamic> get messages => _stream;
+
+  void emit(String data) => _stream.emit(data);
+
+  void emitDone() => _stream.emitDone();
+
+  Future<void> disposeStream() => _stream.dispose();
+
+  @override
+  void add(String data) => sent.add(data);
+
+  @override
+  Future<void> close() async {
+    closed = true;
+  }
+}
+
+class _ManualCallbackStream extends Stream<dynamic> {
+  final StreamController<dynamic> _controller =
+      StreamController<dynamic>.broadcast(sync: true);
+  void Function()? _doneHandler;
+
+  void emit(dynamic data) => _controller.add(data);
+
+  void emitDone() => _doneHandler?.call();
+
+  Future<void> dispose() => _controller.close();
+
+  @override
+  StreamSubscription<dynamic> listen(
+    void Function(dynamic event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) {
+    _doneHandler = onDone;
+    return _NonCancellingSubscription<dynamic>(
+      _controller.stream.listen(
+        onData,
+        onError: onError,
+        cancelOnError: cancelOnError,
+      ),
+    );
+  }
+}
+
+class _NonCancellingSubscription<T> implements StreamSubscription<T> {
+  const _NonCancellingSubscription(this._delegate);
+
+  final StreamSubscription<T> _delegate;
+
+  @override
+  Future<void> cancel() async {}
+
+  @override
+  Future<E> asFuture<E>([E? futureValue]) => _delegate.asFuture<E>(futureValue);
+
+  @override
+  bool get isPaused => _delegate.isPaused;
+
+  @override
+  void onData(void Function(T data)? handleData) =>
+      _delegate.onData(handleData);
+
+  @override
+  void onDone(void Function()? handleDone) => _delegate.onDone(handleDone);
+
+  @override
+  void onError(Function? handleError) => _delegate.onError(handleError);
+
+  @override
+  void pause([Future<void>? resumeSignal]) => _delegate.pause(resumeSignal);
+
+  @override
+  void resume() => _delegate.resume();
 }
 
 class SocketExceptionForTest implements Exception {

@@ -7,7 +7,7 @@ import '../models/emby_models.dart';
 abstract interface class PlaybackReporter {
   void activate(PlaybackPlan plan);
   void updatePlan(PlaybackPlan plan);
-  Future<void> reportStart(Duration position);
+  Future<void> reportStart(Duration position, {required bool isPaused});
   Future<void> reportProgress({
     required Duration position,
     required bool isPaused,
@@ -22,33 +22,50 @@ class PlaybackSessionReporter implements PlaybackReporter {
   final EmbyApi api;
   final EmbyItem item;
 
-  PlaybackPlan? _plan;
-  bool _started = false;
-  bool _stopped = false;
-  Future<void>? _stopOperation;
+  _PlaybackReportingCycle? _cycle;
 
-  PlaybackPlan? get plan => _plan;
-  bool get hasStarted => _started;
+  PlaybackPlan? get plan => _cycle?.plan;
+  bool get hasStarted => _cycle?.started ?? false;
 
   @override
   void activate(PlaybackPlan plan) {
-    _plan = plan;
-    _started = false;
-    _stopped = false;
-    _stopOperation = null;
+    _cycle = _PlaybackReportingCycle(plan);
   }
 
   @override
   void updatePlan(PlaybackPlan plan) {
-    _plan = plan;
+    final cycle = _cycle;
+    if (cycle != null) cycle.plan = plan;
   }
 
   @override
-  Future<void> reportStart(Duration position) async {
-    final plan = _plan;
-    if (plan == null || _started || _stopped) return;
-    await api.reportPlaybackStart(item, plan, position: position);
-    _started = true;
+  Future<void> reportStart(Duration position, {required bool isPaused}) {
+    final cycle = _cycle;
+    if (cycle == null || cycle.started || cycle.stopped) {
+      return Future<void>.value();
+    }
+    final existing = cycle.startOperation;
+    if (existing != null) return existing;
+    cycle.startAttempted = true;
+    final plan = cycle.plan;
+    late final Future<void> operation;
+    operation = (() async {
+      try {
+        await api.reportPlaybackStart(
+          item,
+          plan,
+          position: position,
+          isPaused: isPaused,
+        );
+        cycle.started = true;
+      } finally {
+        if (identical(cycle.startOperation, operation)) {
+          cycle.startOperation = null;
+        }
+      }
+    })();
+    cycle.startOperation = operation;
+    return operation;
   }
 
   @override
@@ -56,11 +73,11 @@ class PlaybackSessionReporter implements PlaybackReporter {
     required Duration position,
     required bool isPaused,
   }) async {
-    final plan = _plan;
-    if (plan == null || !_started || _stopped) return;
+    final cycle = _cycle;
+    if (cycle == null || !cycle.started || cycle.stopped) return;
     await api.reportPlaybackProgress(
       item,
-      plan,
+      cycle.plan,
       position: position,
       isPaused: isPaused,
     );
@@ -68,35 +85,55 @@ class PlaybackSessionReporter implements PlaybackReporter {
 
   @override
   Future<void> stop(Duration position) {
-    final existing = _stopOperation;
+    final cycle = _cycle;
+    if (cycle == null) return Future<void>.value();
+    final existing = cycle.stopOperation;
     if (existing != null) return existing;
-    final operation = _stop(position);
-    _stopOperation = operation;
+    final operation = _stop(cycle, position);
+    cycle.stopOperation = operation;
     return operation;
   }
 
-  Future<void> _stop(Duration position) async {
-    if (_stopped) return;
-    _stopped = true;
-    final plan = _plan;
-    if (plan == null) return;
-
-    if (_started) {
+  Future<void> _stop(_PlaybackReportingCycle cycle, Duration position) async {
+    if (cycle.stopped) return;
+    cycle.stopped = true;
+    final plan = cycle.plan;
+    final cleanupOperation = cleanup(plan);
+    final startOperation = cycle.startOperation;
+    if (startOperation != null) {
       try {
-        await api.reportPlaybackStopped(item, plan, position: position);
-      } catch (error) {
-        DiagnosticLog.instance.warning(
-          'playback',
-          'event=playback_stopped_report_failed '
-              'errorType=${error.runtimeType}',
-        );
+        await startOperation;
+      } catch (_) {
+        // A failed Start is still followed by a conservative Stopped report;
+        // the server may have accepted the request before the client failed.
       }
     }
-    await cleanup(plan);
+    try {
+      if (cycle.startAttempted) {
+        try {
+          await api.reportPlaybackStopped(item, plan, position: position);
+        } catch (error) {
+          DiagnosticLog.instance.warning(
+            'playback',
+            'event=playback_stopped_report_failed '
+                'errorType=${error.runtimeType}',
+          );
+        }
+      }
+    } finally {
+      await cleanupOperation;
+    }
   }
 
   @override
   Future<void> cleanup(PlaybackPlan plan) async {
+    await Future.wait<void>([
+      _closeLiveStreamSafely(plan),
+      _stopActiveEncodingSafely(plan),
+    ]);
+  }
+
+  Future<void> _closeLiveStreamSafely(PlaybackPlan plan) async {
     try {
       await api.closeLiveStream(plan);
     } catch (error) {
@@ -106,6 +143,9 @@ class PlaybackSessionReporter implements PlaybackReporter {
             'errorType=${error.runtimeType}',
       );
     }
+  }
+
+  Future<void> _stopActiveEncodingSafely(PlaybackPlan plan) async {
     try {
       await api.stopActiveEncoding(plan);
     } catch (error) {
@@ -116,4 +156,15 @@ class PlaybackSessionReporter implements PlaybackReporter {
       );
     }
   }
+}
+
+class _PlaybackReportingCycle {
+  _PlaybackReportingCycle(this.plan);
+
+  PlaybackPlan plan;
+  bool startAttempted = false;
+  bool started = false;
+  bool stopped = false;
+  Future<void>? startOperation;
+  Future<void>? stopOperation;
 }

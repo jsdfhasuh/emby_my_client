@@ -2,11 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/library/library_alphabet_filter.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
+import 'package:emby_my_client/library/library_pagination_strategy.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/photos/photo_sequence_source.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'library_filter_test_helpers.dart';
@@ -513,8 +516,16 @@ void main() {
           requestOptions: options,
           statusCode: 200,
           data: {
-            'TotalRecordCount': 1,
+            'TotalRecordCount': 2,
             'Items': [
+              {
+                'Id': 'video-1',
+                'Name': '媒体库视频',
+                'Type': 'Video',
+                'MediaType': 'Video',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
               {
                 'Id': 'photo-1',
                 'Name': '媒体库图片',
@@ -543,6 +554,507 @@ void main() {
     await tester.tap(find.text('媒体库图片'));
     await tester.pumpAndSettle();
     expect(find.byType(PhotoViewerScreen), findsOneWidget);
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    expect(viewer.source.mode, MediaViewerMode.homeMedia);
+    expect(viewer.source.initialItems.map((item) => item.id), [
+      'video-1',
+      'photo-1',
+    ]);
+  });
+
+  testWidgets(
+    'viewer alone loads page 60 and restores media 70 into the library',
+    (tester) async {
+      tester.view.physicalSize = const Size(1024, 4200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (_) async => null,
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      final browseStarts = <int>[];
+      final api = _api((options, handler) {
+        final start = options.queryParameters['StartIndex'] as int;
+        browseStarts.add(start);
+        handler.resolve(_homeMediaPageResponse(options));
+      });
+      addTearDown(api.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(browseStarts, [0]);
+      expect(find.text('家庭图片 55'), findsOneWidget);
+      final scrollable = _verticalScrollable();
+      const targetKey = ValueKey('library-item-home-item-70');
+      expect(find.byKey(targetKey), findsNothing);
+
+      await tester.tap(find.text('家庭图片 55'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PhotoViewerScreen), findsOneWidget);
+      final viewer = tester.widget<PhotoViewerScreen>(
+        find.byType(PhotoViewerScreen),
+      );
+      expect(viewer.source.initialItems, hasLength(60));
+      expect(viewer.source.initialRawCursor, 60);
+      expect(viewer.source.initialHasMore, isTrue);
+      expect(browseStarts, [0, 60]);
+
+      tester.view.physicalSize = const Size(1024, 768);
+      await tester.pump();
+
+      for (var index = 0; index < 15; index++) {
+        await tester.drag(find.byType(PageView), const Offset(-600, 0));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('家庭图片 70'), findsOneWidget);
+      expect(find.text('71 / 120+'), findsOneWidget);
+
+      await tester.binding.handlePopRoute();
+      await _pumpFixedFrames(tester);
+
+      expect(find.byType(PhotoViewerScreen), findsNothing);
+      final debugState =
+          tester.state(find.byType(LibraryBrowseScreen))
+              as LibraryBrowseDebugState;
+      expect(debugState.debugLoadedItemIds, hasLength(120));
+      expect(debugState.debugLoadedItemIds.toSet(), hasLength(120));
+      expect(debugState.debugNextStartIndex, 120);
+      expect(debugState.debugTotalCount, 180);
+      expect(debugState.debugTotalDirty, isFalse);
+      expect(debugState.debugHasMore, isTrue);
+      expect(debugState.debugLoadFailed, isFalse);
+      final target = find.byKey(targetKey);
+      expect(target, findsOneWidget);
+      final targetRect = tester.getRect(target);
+      expect(targetRect.overlaps(tester.getRect(scrollable)), isTrue);
+
+      await tester.scrollUntilVisible(
+        find.text('家庭图片 110'),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(browseStarts, [0, 60, 120]);
+      expect(
+        find.byKey(const ValueKey('library-item-home-item-110')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'identity viewer result replaces membership and restores its final media ID',
+    (tester) async {
+      tester.view.physicalSize = const Size(1024, 768);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _api((options, handler) {
+        handler.resolve(
+          Response<dynamic>(
+            requestOptions: options,
+            statusCode: 200,
+            data: {
+              'TotalRecordCount': 60,
+              'Items': [
+                for (var index = 0; index < 60; index++)
+                  {
+                    'Id': 'identity-item-$index',
+                    'Name': '身份图片 $index',
+                    'Type': 'Photo',
+                    'ImageTags': const <String, String>{},
+                    'BackdropImageTags': const <String>[],
+                    'Genres': const <String>[],
+                    'UserData': const <String, dynamic>{},
+                  },
+              ],
+            },
+          ),
+        );
+      });
+      addTearDown(api.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: LibraryBrowseScreen.root(
+            api: api,
+            view: _homeVideoLibrary,
+            initialState: const LibraryBrowseState(
+              sortBy: LibrarySortBy.playCount,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('身份图片 5'));
+      await tester.pumpAndSettle();
+
+      final viewer = tester.widget<PhotoViewerScreen>(
+        find.byType(PhotoViewerScreen),
+      );
+      expect(
+        viewer.source.paginationStrategy,
+        LibraryPaginationStrategy.identityRescan,
+      );
+      final target = viewer.source.initialItems.singleWhere(
+        (item) => item.id == 'identity-item-55',
+      );
+      final rescannedItems = [
+        ...viewer.source.initialItems.where(
+          (item) => item.id != 'identity-item-0' && item.id != target.id,
+        ),
+        target,
+      ];
+      Navigator.of(tester.element(find.byType(PhotoViewerScreen))).pop(
+        MediaViewerResult(
+          queryFingerprint: viewer.source.queryFingerprint,
+          rawItems: rescannedItems,
+          currentItemId: target.id,
+          nextStartIndex: 59,
+          totalCount: 59,
+          totalDirty: true,
+          hasMore: false,
+          paginationStrategy: LibraryPaginationStrategy.identityRescan,
+        ),
+      );
+      await _pumpFixedFrames(tester);
+
+      final state =
+          tester.state(find.byType(LibraryBrowseScreen))
+              as LibraryBrowseDebugState;
+      expect(state.debugLoadedItemIds, rescannedItems.map((item) => item.id));
+      expect(state.debugLoadedItemIds, isNot(contains('identity-item-0')));
+      expect(state.debugLoadedItemIds.last, target.id);
+      expect(state.debugNextStartIndex, 59);
+      expect(state.debugTotalCount, 59);
+      expect(state.debugTotalDirty, isTrue);
+      expect(state.debugHasMore, isFalse);
+      final targetFinder = find.byKey(
+        const ValueKey('library-item-identity-item-55'),
+      );
+      expect(targetFinder, findsOneWidget);
+      expect(
+        tester
+            .getRect(targetFinder)
+            .overlaps(tester.getRect(_verticalScrollable())),
+        isTrue,
+      );
+    },
+  );
+
+  for (final delayedPageFails in [false, true]) {
+    testWidgets(
+      'late library page ${delayedPageFails ? 'failure' : 'response'} does not regress merged viewer state',
+      (tester) async {
+        tester.view.physicalSize = const Size(1024, 768);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (_) async => null,
+        );
+        addTearDown(
+          () =>
+              messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+        );
+        final browseStarts = <int>[];
+        RequestOptions? delayedPageOptions;
+        RequestInterceptorHandler? delayedPageHandler;
+        var pageSixtyRequests = 0;
+        final api = _api((options, handler) {
+          final start = options.queryParameters['StartIndex'] as int;
+          browseStarts.add(start);
+          if (start == 60 && pageSixtyRequests++ == 0) {
+            delayedPageOptions = options;
+            delayedPageHandler = handler;
+            return;
+          }
+          handler.resolve(_homeMediaPageResponse(options));
+        });
+        addTearDown(api.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData.dark(useMaterial3: true),
+            home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final scrollable = _verticalScrollable();
+        await tester.scrollUntilVisible(
+          find.text('家庭图片 55'),
+          700,
+          scrollable: scrollable,
+        );
+        await _pumpFixedFrames(tester);
+        expect(browseStarts, [0, 60]);
+
+        await tester.tap(find.text('家庭图片 55'));
+        await tester.pumpAndSettle();
+        expect(browseStarts, [0, 60, 60]);
+        for (var index = 0; index < 15; index++) {
+          await tester.drag(find.byType(PageView), const Offset(-600, 0));
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('家庭图片 70'), findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await _pumpFixedFrames(tester);
+        var debugState =
+            tester.state(find.byType(LibraryBrowseScreen))
+                as LibraryBrowseDebugState;
+        expect(debugState.debugLoadedItemIds, hasLength(120));
+        expect(debugState.debugNextStartIndex, 120);
+        expect(debugState.debugLoading, isTrue);
+
+        if (delayedPageFails) {
+          delayedPageHandler!.reject(
+            DioException(
+              requestOptions: delayedPageOptions!,
+              type: DioExceptionType.connectionError,
+              error: 'delayed page failed',
+            ),
+          );
+        } else {
+          delayedPageHandler!.resolve(
+            _homeMediaPageResponse(delayedPageOptions!, staleLastItem: true),
+          );
+        }
+        await tester.pumpAndSettle();
+
+        debugState =
+            tester.state(find.byType(LibraryBrowseScreen))
+                as LibraryBrowseDebugState;
+        expect(debugState.debugLoadedItemIds, hasLength(120));
+        expect(debugState.debugLoadedItemIds.toSet(), hasLength(120));
+        expect(
+          debugState.debugLoadedItemIds,
+          isNot(contains('stale-delayed-home-item')),
+        );
+        expect(debugState.debugNextStartIndex, 120);
+        expect(debugState.debugTotalCount, 180);
+        expect(debugState.debugTotalDirty, isFalse);
+        expect(debugState.debugHasMore, isTrue);
+        expect(debugState.debugLoadFailed, isFalse);
+        expect(debugState.debugLoading, isFalse);
+        expect(
+          find.byKey(const ValueKey('library-item-home-item-70')),
+          findsOneWidget,
+        );
+      },
+    );
+  }
+
+  testWidgets('query generation change rejects a stale viewer snapshot', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1024, 768);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    Map<String, dynamic> responseItem(int index) => {
+      'Id': 'stable-item-$index',
+      'Name': '稳定图片 $index',
+      'Type': 'Photo',
+      'ImageTags': const <String, String>{},
+      'BackdropImageTags': const <String>[],
+      'Genres': const <String>[],
+      'UserData': const <String, dynamic>{},
+    };
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 60,
+            'Items': [
+              for (var index = 0; index < 60; index++) responseItem(index),
+            ],
+          },
+        ),
+      );
+    });
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('稳定图片 5'));
+    await tester.pumpAndSettle();
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    const staleItem = EmbyItem(
+      id: 'viewer-only-stale',
+      name: '陈旧查看器项目',
+      type: 'Photo',
+      imageTags: {},
+      backdropImageTags: [],
+      genres: [],
+      userData: EmbyUserData(),
+    );
+    final staleResult = MediaViewerResult(
+      queryFingerprint: viewer.source.queryFingerprint,
+      rawItems: [...viewer.source.initialItems, staleItem],
+      currentItemId: staleItem.id,
+      nextStartIndex: 61,
+      totalCount: 61,
+      totalDirty: false,
+      hasMore: false,
+    );
+
+    final libraryState =
+        tester.state(find.byType(LibraryBrowseScreen, skipOffstage: false))
+            as LibraryBrowseDebugState;
+    final generationBeforeRefresh = libraryState.debugGeneration;
+    final fingerprintBeforeRefresh = libraryState.debugQueryFingerprint;
+    final refresh = libraryState.debugRefresh();
+    await _pumpFixedFrames(tester);
+    await refresh;
+    expect(libraryState.debugGeneration, generationBeforeRefresh + 1);
+    expect(libraryState.debugQueryFingerprint, fingerprintBeforeRefresh);
+    expect(viewer.source.queryFingerprint, fingerprintBeforeRefresh);
+    Navigator.of(
+      tester.element(find.byType(PhotoViewerScreen)),
+    ).pop(staleResult);
+    await tester.pumpAndSettle();
+
+    expect(libraryState.debugLoadedItemIds, isNot(contains(staleItem.id)));
+    expect(libraryState.debugNextStartIndex, 60);
+    expect(libraryState.debugTotalCount, 60);
+    expect(find.text('陈旧查看器项目'), findsNothing);
+  });
+
+  testWidgets('query fingerprint change rejects a stale viewer snapshot', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [
+              {
+                'Id': 'fingerprint-item',
+                'Name': '指纹图片',
+                'Type': 'Photo',
+                'ImageTags': const <String, String>{},
+                'BackdropImageTags': const <String>[],
+                'Genres': const <String>[],
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+    });
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.root(api: api, view: _homeVideoLibrary),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('指纹图片'));
+    await tester.pumpAndSettle();
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    const staleItem = EmbyItem(
+      id: 'fingerprint-stale',
+      name: '错误指纹项目',
+      type: 'Photo',
+      imageTags: {},
+      backdropImageTags: [],
+      genres: [],
+      userData: EmbyUserData(),
+    );
+
+    Navigator.of(tester.element(find.byType(PhotoViewerScreen))).pop(
+      MediaViewerResult(
+        queryFingerprint: '${viewer.source.queryFingerprint}-stale',
+        rawItems: [...viewer.source.initialItems, staleItem],
+        currentItemId: staleItem.id,
+        nextStartIndex: 2,
+        totalCount: 2,
+        totalDirty: false,
+        hasMore: false,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final debugState =
+        tester.state(find.byType(LibraryBrowseScreen))
+            as LibraryBrowseDebugState;
+    expect(debugState.debugLoadedItemIds, ['fingerprint-item']);
+    expect(debugState.debugNextStartIndex, 1);
+    expect(find.text('错误指纹项目'), findsNothing);
+  });
+
+  testWidgets('generic mixed library photo viewer remains photos-only', (
+    tester,
+  ) async {
+    final api = _api((options, handler) {
+      handler.resolve(
+        Response<dynamic>(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'TotalRecordCount': 1,
+            'Items': [
+              {
+                'Id': 'photo-1',
+                'Name': '普通混合图片',
+                'Type': 'Photo',
+                'ImageTags': const <String, String>{},
+                'UserData': const <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: LibraryBrowseScreen.root(api: api, view: _mixedLibrary),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('普通混合图片'));
+    await tester.pumpAndSettle();
+
+    final viewer = tester.widget<PhotoViewerScreen>(
+      find.byType(PhotoViewerScreen),
+    );
+    expect(viewer.source.mode, MediaViewerMode.photosOnly);
   });
 }
 
@@ -552,6 +1064,44 @@ Finder _verticalScrollable() => find.byWidgetPredicate(
       (widget.axisDirection == AxisDirection.down ||
           widget.axisDirection == AxisDirection.up),
 );
+
+Future<void> _pumpFixedFrames(WidgetTester tester) async {
+  for (var frame = 0; frame < 12; frame++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
+Response<dynamic> _homeMediaPageResponse(
+  RequestOptions options, {
+  bool staleLastItem = false,
+}) {
+  final start = options.queryParameters['StartIndex'] as int;
+  final limit = options.queryParameters['Limit'] as int;
+  final end = (start + limit).clamp(0, 180);
+  return Response<dynamic>(
+    requestOptions: options,
+    statusCode: 200,
+    data: {
+      'TotalRecordCount': 180,
+      'Items': [
+        for (var index = start; index < end; index++)
+          {
+            'Id': staleLastItem && index == end - 1
+                ? 'stale-delayed-home-item'
+                : 'home-item-$index',
+            'Name': staleLastItem && index == end - 1
+                ? '延迟过期图片'
+                : '家庭图片 $index',
+            'Type': 'Photo',
+            'ImageTags': const <String, String>{},
+            'BackdropImageTags': const <String>[],
+            'Genres': const <String>[],
+            'UserData': const <String, dynamic>{},
+          },
+      ],
+    },
+  );
+}
 
 EmbyApi _api(
   void Function(RequestOptions options, RequestInterceptorHandler handler)
@@ -645,6 +1195,17 @@ const _homeVideoLibrary = EmbyItem(
   name: '家庭视频和照片',
   type: 'CollectionFolder',
   collectionType: 'homevideos',
+  imageTags: {},
+  backdropImageTags: [],
+  genres: [],
+  userData: EmbyUserData(),
+);
+
+const _mixedLibrary = EmbyItem(
+  id: 'mixed-library',
+  name: '普通混合媒体',
+  type: 'CollectionFolder',
+  collectionType: 'mixed',
   imageTags: {},
   backdropImageTags: [],
   genres: [],

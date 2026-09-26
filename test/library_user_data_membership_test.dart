@@ -294,6 +294,63 @@ void main() {
     await _disposeLibrary(tester, api, scanService: scanService);
   });
 
+  testWidgets(
+    'completed unplayed regular scan removes a played item without restarting and keeps position',
+    (tester) async {
+      _setCompactView(tester);
+      final socket = _FakeEmbySocket();
+      final api = _MembershipApi(
+        socket: socket,
+        items: [
+          for (var index = 0; index < 125; index++)
+            _item(
+              'item-$index',
+              userData: const EmbyUserData(),
+              isRegular: true,
+            ),
+        ],
+      );
+      final scanService = LibraryLocalMediaScanService(
+        api: api,
+        scope: ServerScope.fromSession(api.session),
+        delay: (_) => Future<void>.value(),
+      );
+      await _pumpLibrary(
+        tester,
+        api,
+        const LibraryBrowseState(
+          mediaType: LibraryMediaType.movie,
+          localFilter: LibraryLocalMediaFilter.regular,
+          playedFilter: LibraryPlayedFilter.unplayed,
+        ),
+        scanService: scanService,
+      );
+      final initialScanCalls = api.localScanCalls;
+      expect(initialScanCalls, greaterThan(0));
+      expect(scanService.debugCompletedCacheCount, 1);
+
+      final scrollable = _verticalScrollable();
+      await tester.scrollUntilVisible(
+        _itemFinder('item-70'),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      final position = tester.state<ScrollableState>(scrollable).position;
+      final previousOffset = position.pixels;
+
+      api.updateUserData('item-70', const EmbyUserData(isPlayed: true));
+      socket.emitUserData(['item-70']);
+      await _pumpRealtime(tester);
+
+      expect(_itemFinder('item-70'), findsNothing);
+      expect(api.userDataCalls, 1);
+      expect(api.localScanCalls, initialScanCalls);
+      expect(position.pixels, closeTo(previousOffset, 1));
+      await _disposeLibrary(tester, api, scanService: scanService);
+    },
+  );
+
   for (final entry in const [
     (
       'an unloaded item entering favorites',
@@ -351,7 +408,7 @@ void main() {
         scrollable: scrollable,
       );
       await tester.pumpAndSettle();
-      expect(api.starts, [0, 60]);
+      expect(api.starts, [0, 0, 60]);
       final position = tester.state<ScrollableState>(scrollable).position;
       final previousOffset = position.pixels;
 
@@ -359,7 +416,7 @@ void main() {
       socket.emitUserData(['item-0']);
       await _pumpRealtime(tester);
 
-      expect(api.starts, [0, 60, 0, 60]);
+      expect(api.starts, [0, 0, 60, 0, 0, 60]);
       expect(position.pixels, closeTo(previousOffset, 1));
       position.jumpTo(0);
       await tester.pumpAndSettle();
@@ -745,6 +802,7 @@ EmbyItem _item(
   String id, {
   required EmbyUserData userData,
   bool isStrm = false,
+  bool isRegular = false,
 }) => EmbyItem(
   id: id,
   name: id,
@@ -754,8 +812,16 @@ EmbyItem _item(
   backdropImageTags: const [],
   genres: const [],
   userData: userData,
-  path: isStrm ? '/media/$id.strm' : null,
-  container: isStrm ? 'strm' : null,
+  path: isStrm
+      ? '/media/$id.strm'
+      : isRegular
+      ? '/media/$id.mkv'
+      : null,
+  container: isStrm
+      ? 'strm'
+      : isRegular
+      ? 'mkv'
+      : null,
 );
 
 List<String> _visibleItemIds(WidgetTester tester) => tester

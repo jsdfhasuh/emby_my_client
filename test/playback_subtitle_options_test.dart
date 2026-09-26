@@ -80,6 +80,26 @@ void main() {
     expect(tester.widget<ListTile>(trackTile().first).onTap, isNull);
   });
 
+  testWidgets('late-track waiting is visible and subtitles can be disabled', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildMenu(
+        const PlaybackState(
+          desiredSubtitleSelection: SubtitleSelection.explicitStream(3),
+          subtitleSelectionStatus: SubtitleSelectionStatus.waitingForTracks,
+        ),
+      ),
+    );
+
+    expect(find.text('字幕轨道仍在加载，视频可继续播放'), findsOneWidget);
+    expect(
+      tester.widget<ListTile>(find.widgetWithText(ListTile, '关闭字幕')).onTap,
+      isNotNull,
+    );
+    expect(tester.widget<ListTile>(trackTile().first).onTap, isNotNull);
+  });
+
   testWidgets('subtitle failure is visible and leaves retry enabled', (
     tester,
   ) async {

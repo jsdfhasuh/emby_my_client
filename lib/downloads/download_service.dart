@@ -579,6 +579,44 @@ class DownloadService extends ChangeNotifier {
     await _removeTaskAndFiles(deleting);
   }
 
+  Future<DownloadCacheClearReport> clearCache() async {
+    _ensureActive();
+    final pending = tasks;
+    final estimatedBytes = pending.fold<int>(
+      0,
+      (total, task) => total + max(0, task.downloadedBytes),
+    );
+    var requestedTasks = 0;
+    var failedTasks = 0;
+    for (final task in pending) {
+      try {
+        await delete(task.id);
+        requestedTasks++;
+      } catch (error, stackTrace) {
+        failedTasks++;
+        DiagnosticLog.instance.error(
+          'download',
+          'Failed to clear cached download task=${task.id}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    if (pending.isNotEmpty) {
+      DiagnosticLog.instance.info(
+        'download',
+        'Download cache clear requested=$requestedTasks '
+            'failed=$failedTasks estimatedBytes=$estimatedBytes',
+      );
+    }
+    return DownloadCacheClearReport(
+      totalTasks: pending.length,
+      requestedTasks: requestedTasks,
+      failedTasks: failedTasks,
+      estimatedBytes: estimatedBytes,
+    );
+  }
+
   Future<OfflineMediaItem?> offlineItem(String itemId) async {
     final item = await _repository.offlineItem(scope, itemId);
     if (item == null) return null;
@@ -591,8 +629,31 @@ class DownloadService extends ChangeNotifier {
     return null;
   }
 
-  Future<List<OfflineMediaItem>> offlineItems() =>
-      _repository.listOfflineItems(scope);
+  Future<List<OfflineMediaItem>> offlineItems() async {
+    final stored = await _repository.listOfflineItems(scope);
+    final available = <OfflineMediaItem>[];
+    for (final item in stored) {
+      final task = _tasks.values
+          .where(
+            (candidate) =>
+                candidate.itemId == item.itemId &&
+                candidate.mediaSourceId == item.mediaSourceId,
+          )
+          .firstOrNull;
+      if (task == null || task.status != DownloadStatus.completed) continue;
+      final file = File(task.finalPath);
+      final errorCode = await _completedFileError(task, file);
+      if (errorCode == null) {
+        available.add(item);
+        continue;
+      }
+      final current = _tasks[task.id];
+      if (current != null && current.status == DownloadStatus.completed) {
+        await _invalidateCompletedFile(current, file, errorCode);
+      }
+    }
+    return List.unmodifiable(available);
+  }
 
   Future<void> recordOfflineProgress(
     OfflineMediaItem item,

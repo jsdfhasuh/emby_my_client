@@ -4,11 +4,15 @@ import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
+import 'package:emby_my_client/playback/media_kit_inline_playback_session.dart';
+import 'package:emby_my_client/playback/inline_playback_resource_lease.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
+import 'package:emby_my_client/playback/playback_session_bootstrap.dart';
+import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -91,6 +95,442 @@ void main() {
       await controller.shutdown();
     },
   );
+
+  test('explicit resume position overrides the Emby item position', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _resumeItem,
+    );
+
+    await controller.start(resumePosition: const Duration(minutes: 5));
+
+    expect(engine.openPlayValues, [false]);
+    expect(engine.seekValues, [const Duration(minutes: 5)]);
+    expect(engine.playCalls, 1);
+    expect(controller.state.position, const Duration(minutes: 5));
+    await controller.shutdown();
+  });
+
+  test('playAfterReady false leaves initial playback paused', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+
+    await controller.start(playAfterReady: false);
+
+    expect(engine.openPlayValues, [false]);
+    expect(engine.playCalls, 0);
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.isPlaying, isFalse);
+    await controller.shutdown();
+  });
+
+  test(
+    'paused Start becomes unpaused Progress only after successful play',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests);
+      final engine = _FakeEngine()..emitPlayingOnPlay = false;
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        resolver: _PlanResolver(_testPlan()),
+      );
+
+      await controller.start(playAfterReady: false);
+
+      final starts = requests.where(
+        (request) => request.path == '/Sessions/Playing',
+      );
+      expect(starts, hasLength(1));
+      expect((starts.single.data as Map)['IsPaused'], isTrue);
+      expect(
+        requests.where(
+          (request) => request.path == '/Sessions/Playing/Progress',
+        ),
+        isEmpty,
+      );
+
+      await controller.play();
+
+      final progress = requests.where(
+        (request) => request.path == '/Sessions/Playing/Progress',
+      );
+      expect(engine.playCalls, 1);
+      expect(controller.state.isPlaying, isFalse);
+      expect(progress, hasLength(1));
+      expect((progress.single.data as Map)['IsPaused'], isFalse);
+
+      await controller.shutdown();
+      expect(
+        requests.where(
+          (request) => request.path == '/Sessions/Playing/Stopped',
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('stale ready generation suppresses Start and cleans encoding', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: api,
+      engine: engine,
+      item: _plainItem,
+      resolver: _PlanResolver(_testPlan(method: PlayMethod.transcode)),
+    );
+    var retiredAtReady = false;
+    controller.addListener(() {
+      if (!retiredAtReady && controller.state.phase == PlaybackPhase.ready) {
+        retiredAtReady = true;
+        unawaited(controller.quiesce());
+      }
+    });
+
+    await controller.start();
+    await controller.shutdown();
+
+    expect(retiredAtReady, isTrue);
+    expect(
+      requests.where((request) => request.path == '/Sessions/Playing'),
+      isEmpty,
+    );
+    expect(
+      requests.where((request) => request.path == '/Sessions/Playing/Stopped'),
+      isEmpty,
+    );
+    expect(
+      requests.where((request) => request.path == '/Videos/ActiveEncodings'),
+      hasLength(1),
+    );
+  });
+
+  test('pause stops a play request before playing state arrives', () async {
+    final engine = _FakeEngine()..emitPlayingOnPlay = false;
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+    await controller.start(playAfterReady: false);
+
+    await controller.play();
+    expect(controller.state.isPlaying, isFalse);
+    await controller.pause();
+
+    expect(engine.playCalls, 1);
+    expect(engine.pauseCalls, 1);
+    await controller.shutdown();
+  });
+
+  test('quiescence starts while native play is blocked', () async {
+    final playGate = Completer<void>();
+    final engine = _FakeEngine(playOperation: playGate.future);
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+    );
+    await controller.start(playAfterReady: false);
+
+    final play = controller.play();
+    await _waitUntil(() => engine.playCalls == 1);
+    final quiescence = controller.quiesce();
+    await _waitUntil(() => engine.quiesceCalls == 1);
+
+    expect(engine.playCalls, 1);
+    expect(engine.quiesceCalls, 1);
+    expect(controller.state.isPlaying, isFalse);
+
+    playGate.complete();
+    await Future.wait([play, quiescence]);
+    expect(controller.state.isPlaying, isFalse);
+    await controller.shutdown();
+  });
+
+  test(
+    'quiescence cancels logical seek and shutdown waits native seek',
+    () async {
+      final seekGate = Completer<void>();
+      final engine = _FakeEngine(seekOperation: seekGate.future);
+      engine.onOpen = (_) {
+        engineLater(
+          () => engine.durationController.add(const Duration(hours: 1)),
+        );
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+      );
+      await controller.start(playAfterReady: false);
+
+      final seek = controller.seekAbsolute(
+        const Duration(minutes: 10),
+        source: SeekSource.progressBar,
+      );
+      await _waitUntil(() => engine.seekValues.isNotEmpty);
+      await controller.quiesce();
+
+      final result = await seek;
+      expect(result.disposition, SeekDisposition.cancelled);
+      expect(result.failureKind, SeekFailureKind.higherPriorityOperation);
+      expect(engine.quiesceCalls, 1);
+
+      var shutdownCompleted = false;
+      final shutdown = controller.shutdown().then(
+        (_) => shutdownCompleted = true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(shutdownCompleted, isFalse);
+      expect(engine.stopCalls, 0);
+      expect(engine.disposeCalls, 0);
+
+      seekGate.complete();
+      await shutdown;
+      expect(shutdownCompleted, isTrue);
+      expect(engine.stopCalls, 1);
+      expect(engine.disposeCalls, 1);
+    },
+  );
+
+  test(
+    'never-ending play exits logically and cannot revive UI state',
+    () async {
+      final engine = _FakeEngine(playOperation: Completer<void>().future);
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        playPauseTimeout: const Duration(milliseconds: 10),
+        retirementQuiesceTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 30),
+      );
+      await controller.start(playAfterReady: false);
+
+      await controller.play().timeout(const Duration(milliseconds: 200));
+
+      expect(engine.playCalls, 1);
+      expect(controller.state.isPlaying, isFalse);
+      await controller.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(controller.retirementState, PlaybackRetirementState.closed);
+    },
+  );
+
+  test('never-ending pause exits logically during shutdown', () async {
+    final engine = _FakeEngine(pauseOperation: Completer<void>().future);
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      playPauseTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start();
+
+    await controller.pause().timeout(const Duration(milliseconds: 200));
+    expect(engine.pauseCalls, 1);
+    expect(controller.state.isPlaying, isFalse);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test('never-ending lifecycle quiesce has a bounded logical exit', () async {
+    final engine = _FakeEngine(
+      lifecycleQuiesceOperation: Completer<void>().future,
+    );
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      lifecycleQuiesceTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start(playAfterReady: false);
+
+    await expectLater(
+      controller.quiesceForLifecycle(),
+      throwsA(
+        isA<PlaybackNativeOperationTimedOut>().having(
+          (error) => error.kind,
+          'kind',
+          PlaybackNativeOperationKind.lifecycleQuiesce,
+        ),
+      ),
+    );
+    expect(controller.state.isPlaying, isFalse);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test('never-ending seek times out without blocking shutdown', () async {
+    final engine = _FakeEngine(seekOperation: Completer<void>().future);
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([]),
+      engine: engine,
+      item: _plainItem,
+      seekCallTimeout: const Duration(milliseconds: 10),
+      retirementQuiesceTimeout: const Duration(milliseconds: 10),
+      shutdownBarrierTimeout: const Duration(milliseconds: 30),
+    );
+    await controller.start(playAfterReady: false);
+
+    final result = await controller.seekAbsolute(
+      const Duration(minutes: 5),
+      source: SeekSource.progressBar,
+    );
+    expect(result.failureKind, SeekFailureKind.callTimeout);
+
+    await controller.shutdown().timeout(const Duration(milliseconds: 200));
+    expect(controller.state.phase, PlaybackPhase.idle);
+  });
+
+  test(
+    'quiescing rejects new playback, seek, reconfiguration and resume work',
+    () async {
+      final engine = _FakeEngine(quiesceOperation: Completer<void>().future);
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        retirementQuiesceTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 30),
+      );
+      await controller.start(playAfterReady: false);
+      final openCount = engine.openPlayValues.length;
+      final rateWriteCount = engine.rateValues.length;
+
+      controller.quiesce();
+      expect(controller.retirementState, PlaybackRetirementState.quiescing);
+      await controller.play();
+      final seek = await controller.seekAbsolute(
+        const Duration(minutes: 3),
+        source: SeekSource.progressBar,
+      );
+      await controller.setPlaybackRate(1.5);
+      await controller.reconfigure(maxStreamingBitrate: 10000000);
+      await controller.resumeForLifecycle();
+
+      expect(engine.playCalls, 0);
+      expect(engine.seekValues, isEmpty);
+      expect(seek.disposition, SeekDisposition.cancelled);
+      expect(engine.rateValues, hasLength(rateWriteCount));
+      expect(engine.openPlayValues, hasLength(openCount));
+      expect(engine.lifecycleQuiescenceResumeCalls, 0);
+
+      await controller.shutdown().timeout(const Duration(milliseconds: 200));
+      expect(controller.retirementState, PlaybackRetirementState.quarantined);
+    },
+  );
+
+  test('shared online bootstrap applies settings and start options', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests);
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engineLater(
+        () => engine.durationController.add(const Duration(hours: 1)),
+      );
+    };
+    const settings = PlaybackSettings(
+      maxStreamingBitrate: 20000000,
+      playbackRate: 1.5,
+      audioDelayMilliseconds: 250,
+      subtitleDelayMilliseconds: -500,
+      subtitleFontSize: 52,
+      subtitleColor: 0xFFFFFF00,
+      subtitleOutlineColor: 0xFF404040,
+      subtitlePosition: 88,
+    );
+    final controller = PlaybackSessionBootstrap.createOnlineController(
+      api: api,
+      item: _plainItem,
+      engine: engine,
+      session: PlaybackItemSession.forTest('bootstrap-session'),
+      settings: settings,
+    );
+
+    await PlaybackSessionBootstrap.configureAndStart(
+      controller: controller,
+      settings: settings,
+      resumePosition: const Duration(minutes: 4),
+      playAfterReady: false,
+    );
+
+    expect(engine.rateValues, isNotEmpty);
+    expect(engine.rateValues, everyElement(1.5));
+    expect(
+      engine.audioDelayValues,
+      everyElement(const Duration(milliseconds: 250)),
+    );
+    expect(
+      engine.subtitleDelayValues,
+      everyElement(const Duration(milliseconds: -500)),
+    );
+    expect(engine.subtitleStyleValues, isNotEmpty);
+    expect(engine.subtitleStyleValues.last, (52.0, 0xFFFFFF00, 0xFF404040, 88));
+    expect(engine.openPlayValues, [false]);
+    expect(engine.seekValues, [const Duration(minutes: 4)]);
+    expect(engine.playCalls, 0);
+    final playbackInfo = requests.singleWhere(
+      (request) => request.path.endsWith('/PlaybackInfo'),
+    );
+    expect((playbackInfo.data as Map)['MaxStreamingBitrate'], 20000000);
+    await controller.shutdown();
+  });
 
   test(
     'applies the server-resolved default subtitle during initial DirectPlay',
@@ -176,6 +616,74 @@ void main() {
     },
   );
 
+  test(
+    'enters ready while waiting and applies a late embedded subtitle',
+    () async {
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final controller = _controller(
+        api: _api([], defaultSubtitleStreamIndex: 3),
+        engine: engine,
+        item: _plainItem,
+        trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+      );
+
+      await controller.start();
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      expect(engine.selectedSubtitleTrackIds, isEmpty);
+
+      engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+      await _waitUntil(
+        () =>
+            controller.state.subtitleSelectionStatus ==
+            SubtitleSelectionStatus.appliedEmbedded,
+      );
+
+      expect(engine.selectedSubtitleTrackIds, ['3']);
+      expect(controller.state.appliedSubtitleStreamIndex, 3);
+      await controller.shutdown();
+    },
+  );
+
+  test('disabling subtitles invalidates a stale late-track event', () async {
+    final engine = _FakeEngine();
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(hours: 1));
+    };
+    final controller = _controller(
+      api: _api([], defaultSubtitleStreamIndex: 3),
+      engine: engine,
+      item: _plainItem,
+      trackWaitTimeout: const Duration(milliseconds: 10),
+      lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+    );
+
+    await controller.start();
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.waitingForTracks,
+    );
+
+    await controller.selectSubtitleStream(null);
+    engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(engine.selectedSubtitleTrackIds, [null]);
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.disabled,
+    );
+    await controller.shutdown();
+  });
+
   test('does not select a subtitle when the plan has no default', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -210,10 +718,16 @@ void main() {
         engine: engine,
         item: _plainItem,
         trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(milliseconds: 20),
         diagnostics: _diagnostics(diagnostics),
       );
 
       await controller.start();
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.failed,
@@ -318,6 +832,62 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.appliedExternal,
       );
+      expect(controller.state.appliedSubtitleStreamIndex, 4);
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'enters ready while waiting and applies a late external subtitle once',
+    () async {
+      final externalLoad = Completer<void>();
+      final engine = _FakeEngine(
+        externalSubtitleOperation: externalLoad.future,
+      );
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+      };
+      final resolver = _PlanResolver(
+        _testPlan(
+          subtitleStreamIndex: 4,
+          mediaStreams: const [
+            {
+              'Index': 4,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Chinese',
+              'Language': 'chi',
+              'IsExternal': true,
+              'DeliveryUrl': '/subtitles/4.srt',
+            },
+          ],
+        ),
+      );
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        resolver: resolver,
+        trackWaitTimeout: const Duration(milliseconds: 10),
+        lateSubtitleTrackWaitTimeout: const Duration(seconds: 1),
+      );
+
+      await controller.start();
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+
+      externalLoad.complete();
+      await _waitUntil(
+        () =>
+            controller.state.subtitleSelectionStatus ==
+            SubtitleSelectionStatus.appliedExternal,
+      );
+
+      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
       expect(controller.state.appliedSubtitleStreamIndex, 4);
       await controller.shutdown();
     },
@@ -912,6 +1482,7 @@ void main() {
     'shutdown deadlines do not leave the controller route-blocking',
     () async {
       final diagnostics = <String>[];
+      var disposalUnconfirmed = 0;
       final engine = _FakeEngine(
         stopOperation: Completer<void>().future,
         disposeOperation: Completer<void>().future,
@@ -925,8 +1496,10 @@ void main() {
         playbackHeaders: const {},
         stopTimeout: const Duration(milliseconds: 10),
         disposeTimeout: const Duration(milliseconds: 10),
+        shutdownBarrierTimeout: const Duration(milliseconds: 40),
         reporterTimeout: const Duration(milliseconds: 10),
         diagnostics: _diagnostics(diagnostics),
+        onEngineDisposalUnconfirmed: () => disposalUnconfirmed++,
       );
 
       await controller.shutdown().timeout(const Duration(milliseconds: 200));
@@ -935,6 +1508,8 @@ void main() {
       expect(engine.disposeCalls, 1);
       expect(reporter.stopCalls, 1);
       expect(controller.state.phase, PlaybackPhase.idle);
+      expect(controller.retirementState, PlaybackRetirementState.quarantined);
+      expect(disposalUnconfirmed, 1);
       expect(
         diagnostics,
         contains('event=playback_operation_timeout kind=reporter_stop'),
@@ -948,6 +1523,35 @@ void main() {
         contains('event=playback_operation_timeout kind=engine_dispose'),
       );
       controller.dispose();
+    },
+  );
+
+  test(
+    'poisoned inline lease rejects creation before Player allocation',
+    () async {
+      final lease = InlinePlaybackResourceLease();
+      final handle = lease.acquire();
+      lease.poison(handle);
+      var playerFactoryCalls = 0;
+      final api = _api([]);
+      addTearDown(api.dispose);
+
+      await expectLater(
+        MediaKitInlinePlaybackSession.create(
+          api: api,
+          item: _plainItem,
+          settings: const PlaybackSettings(),
+          resourceLease: lease,
+          playerFactory: () {
+            playerFactoryCalls++;
+            throw StateError('Player factory must not run');
+          },
+        ),
+        throwsStateError,
+      );
+
+      expect(lease.isPoisoned, isTrue);
+      expect(playerFactoryCalls, 0);
     },
   );
 
@@ -1004,11 +1608,21 @@ void main() {
       source: SeekSource.remote,
     );
     await Future<void>.delayed(Duration.zero);
-    final shutdown = controller.shutdown();
+    var shutdownCompleted = false;
+    final shutdown = controller.shutdown().then(
+      (_) => shutdownCompleted = true,
+    );
     final result = await seek;
-    await shutdown;
 
     expect(result.disposition, SeekDisposition.cancelled);
+    await Future<void>.delayed(Duration.zero);
+    expect(shutdownCompleted, isFalse);
+    expect(engine.stopCalls, 0);
+    expect(engine.disposeCalls, 0);
+
+    seekGate.complete();
+    await shutdown;
+    expect(shutdownCompleted, isTrue);
     expect(diagnostics, contains('event=playback_seek_cancelled count=1'));
     expect(
       diagnostics,
@@ -1020,8 +1634,6 @@ void main() {
         ),
       ),
     );
-    seekGate.complete();
-    await Future<void>.delayed(Duration.zero);
     expect(controller.state.phase, PlaybackPhase.idle);
   });
 
@@ -1063,6 +1675,70 @@ void main() {
       );
     },
   );
+
+  test(
+    'inline media kit session forwards quiescence APIs distinctly',
+    () async {
+      final controller = _LifecycleSpyPlaybackController();
+      final session = MediaKitInlinePlaybackSession.forTesting(
+        itemId: _plainItem.id,
+        controller: controller,
+      );
+
+      await session.quiesce();
+      await session.quiesceForLifecycle();
+      await session.pauseForLifecycle();
+      await session.resumeForLifecycle();
+      await session.pause();
+
+      expect(controller.calls, [
+        'quiesce',
+        'quiesceForLifecycle',
+        'pauseForLifecycle',
+        'resumeForLifecycle',
+        'pause',
+      ]);
+      await session.shutdown();
+      expect(controller.shutdownCalls, 1);
+    },
+  );
+}
+
+class _LifecycleSpyPlaybackController extends PlaybackController {
+  _LifecycleSpyPlaybackController()
+    : super(
+        item: _plainItem,
+        engine: _FakeEngine(),
+        resolver: _PlanResolver(_testPlan()),
+        reporter: _BlockingReporter(),
+        playbackHeaders: const {},
+      );
+
+  final List<String> calls = [];
+  int shutdownCalls = 0;
+  bool _shutdown = false;
+
+  @override
+  Future<void> pause() async => calls.add('pause');
+
+  @override
+  Future<void> quiesce() async => calls.add('quiesce');
+
+  @override
+  Future<void> quiesceForLifecycle() async => calls.add('quiesceForLifecycle');
+
+  @override
+  Future<void> pauseForLifecycle() async => calls.add('pauseForLifecycle');
+
+  @override
+  Future<void> resumeForLifecycle() async => calls.add('resumeForLifecycle');
+
+  @override
+  Future<void> shutdown() async {
+    if (_shutdown) return;
+    _shutdown = true;
+    shutdownCalls++;
+  }
 }
 
 PlaybackController _controller({
@@ -1071,6 +1747,16 @@ PlaybackController _controller({
   required EmbyItem item,
   Duration readyTimeout = const Duration(seconds: 1),
   Duration trackWaitTimeout = const Duration(seconds: 2),
+  Duration lateSubtitleTrackWaitTimeout = const Duration(seconds: 8),
+  Duration seekCallTimeout = const Duration(seconds: 8),
+  Duration playPauseTimeout = const Duration(seconds: 3),
+  Duration propertyWriteTimeout = const Duration(seconds: 2),
+  Duration lifecycleQuiesceTimeout = const Duration(seconds: 2),
+  Duration retirementQuiesceTimeout = const Duration(seconds: 3),
+  Duration shutdownBarrierTimeout = const Duration(seconds: 5),
+  Duration stopTimeout = const Duration(seconds: 5),
+  Duration disposeTimeout = const Duration(seconds: 5),
+  PlaybackEngineDisposalUnconfirmed? onEngineDisposalUnconfirmed,
   PlaybackDiagnostics? diagnostics,
   PlaybackItemSession? session,
   PlaybackStreamResolver? resolver,
@@ -1083,6 +1769,16 @@ PlaybackController _controller({
   playbackHeaders: api.playbackHeaders,
   readyTimeout: readyTimeout,
   trackWaitTimeout: trackWaitTimeout,
+  lateSubtitleTrackWaitTimeout: lateSubtitleTrackWaitTimeout,
+  seekCallTimeout: seekCallTimeout,
+  playPauseTimeout: playPauseTimeout,
+  propertyWriteTimeout: propertyWriteTimeout,
+  lifecycleQuiesceTimeout: lifecycleQuiesceTimeout,
+  retirementQuiesceTimeout: retirementQuiesceTimeout,
+  shutdownBarrierTimeout: shutdownBarrierTimeout,
+  stopTimeout: stopTimeout,
+  disposeTimeout: disposeTimeout,
+  onEngineDisposalUnconfirmed: onEngineDisposalUnconfirmed,
   diagnostics: diagnostics,
   session: session,
   resumeVerificationTimeout: const Duration(milliseconds: 100),
@@ -1221,18 +1917,36 @@ void engineLater(void Function() action) {
   scheduleMicrotask(action);
 }
 
+Future<void> _waitUntil(bool Function() predicate) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await Future<void>.delayed(Duration.zero);
+  }
+  fail('Timed out waiting for asynchronous test condition');
+}
+
 class _FakeEngine implements PlaybackEngine {
   _FakeEngine({
     this.openOperation,
+    this.playOperation,
+    this.pauseOperation,
+    this.quiesceOperation,
+    this.lifecycleQuiesceOperation,
     this.stopOperation,
     this.disposeOperation,
     this.seekOperation,
+    this.externalSubtitleOperation,
   });
 
   final Future<void>? openOperation;
+  final Future<void>? playOperation;
+  final Future<void>? pauseOperation;
+  final Future<void>? quiesceOperation;
+  final Future<void>? lifecycleQuiesceOperation;
   final Future<void>? stopOperation;
   final Future<void>? disposeOperation;
   final Future<void>? seekOperation;
+  final Future<void>? externalSubtitleOperation;
   final positionController = StreamController<Duration>.broadcast(sync: true);
   final durationController = StreamController<Duration>.broadcast(sync: true);
   final bufferController = StreamController<Duration>.broadcast(sync: true);
@@ -1256,9 +1970,21 @@ class _FakeEngine implements PlaybackEngine {
   final List<String?> selectedSubtitleTrackIds = [];
   final List<int> selectedSubtitleOpenCounts = [];
   final List<Uri> externalSubtitleUris = [];
+  final List<double> rateValues = [];
+  final List<Duration> audioDelayValues = [];
+  final List<Duration> subtitleDelayValues = [];
+  final List<(double, int, int, int)> subtitleStyleValues = [];
+  bool emitPlayingOnPlay = true;
   int playCalls = 0;
+  int pauseCalls = 0;
+  int quiesceCalls = 0;
+  int lifecycleQuiesceCalls = 0;
+  int lifecycleQuiescenceResumeCalls = 0;
   int stopCalls = 0;
   int disposeCalls = 0;
+  int _quiescenceEpoch = 0;
+  bool _retiring = false;
+  bool _lifecycleQuiesced = false;
   Object? openError;
   Object? externalSubtitleError;
 
@@ -1311,18 +2037,50 @@ class _FakeEngine implements PlaybackEngine {
   @override
   Future<void> play() async {
     playCalls++;
-    playingController.add(true);
+    final epoch = _quiescenceEpoch;
+    await playOperation;
+    if (_retiring || _lifecycleQuiesced || epoch != _quiescenceEpoch) return;
+    if (emitPlayingOnPlay) playingController.add(true);
   }
 
   @override
   Future<void> pause() async {
+    pauseCalls++;
     playingController.add(false);
+    await pauseOperation;
+  }
+
+  @override
+  Future<void> quiesce() async {
+    quiesceCalls++;
+    _retiring = true;
+    _quiescenceEpoch++;
+    playingController.add(false);
+    await quiesceOperation;
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() async {
+    lifecycleQuiesceCalls++;
+    _lifecycleQuiesced = true;
+    _quiescenceEpoch++;
+    playingController.add(false);
+    await lifecycleQuiesceOperation;
+  }
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {
+    lifecycleQuiescenceResumeCalls++;
+    _lifecycleQuiesced = false;
+    _quiescenceEpoch++;
   }
 
   @override
   Future<void> seek(Duration position) async {
     seekValues.add(position);
+    final epoch = _quiescenceEpoch;
     await seekOperation;
+    if (_retiring || _lifecycleQuiesced || epoch != _quiescenceEpoch) return;
     positionController.add(position);
   }
 
@@ -1345,16 +2103,19 @@ class _FakeEngine implements PlaybackEngine {
   }) async {
     externalSubtitleUris.add(uri);
     if (externalSubtitleError != null) throw externalSubtitleError!;
+    await externalSubtitleOperation;
   }
 
   @override
-  Future<void> setRate(double rate) async {}
+  Future<void> setRate(double rate) async => rateValues.add(rate);
 
   @override
-  Future<void> setAudioDelay(Duration delay) async {}
+  Future<void> setAudioDelay(Duration delay) async =>
+      audioDelayValues.add(delay);
 
   @override
-  Future<void> setSubtitleDelay(Duration delay) async {}
+  Future<void> setSubtitleDelay(Duration delay) async =>
+      subtitleDelayValues.add(delay);
 
   @override
   Future<void> configureSubtitleStyle({
@@ -1362,7 +2123,8 @@ class _FakeEngine implements PlaybackEngine {
     required int color,
     required int outlineColor,
     required int position,
-  }) async {}
+  }) async =>
+      subtitleStyleValues.add((fontSize, color, outlineColor, position));
 
   @override
   Future<void> stop() async {
@@ -1394,7 +2156,7 @@ class _BlockingReporter implements PlaybackReporter {
   }) async {}
 
   @override
-  Future<void> reportStart(Duration position) async {}
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {}
 
   @override
   Future<void> stop(Duration position) {

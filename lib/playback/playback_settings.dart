@@ -10,7 +10,7 @@ class PlaybackSettings {
     this.seekBackwardSeconds = 10,
     this.seekForwardSeconds = 10,
     this.horizontalSwipeSeekSpanSeconds = defaultHorizontalSwipeSeekSpanSeconds,
-    this.seekPreviewMode = SeekPreviewMode.automatic,
+    this.seekPreviewMode = SeekPreviewMode.serverOnly,
     this.playbackRate = 1,
     this.videoFit = 'contain',
     this.subtitleDelayMilliseconds = 0,
@@ -70,7 +70,7 @@ class PlaybackSettings {
     horizontalSwipeSeekSpanSeconds: normalizeHorizontalSwipeSeekSpanSeconds(
       horizontalSwipeSeekSpanSeconds ?? this.horizontalSwipeSeekSpanSeconds,
     ),
-    seekPreviewMode: seekPreviewMode ?? this.seekPreviewMode,
+    seekPreviewMode: (seekPreviewMode ?? this.seekPreviewMode).normalized,
     playbackRate: playbackRate ?? this.playbackRate,
     videoFit: videoFit ?? this.videoFit,
     subtitleDelayMilliseconds:
@@ -112,7 +112,7 @@ class PlaybackSettings {
     'horizontalSwipeSeekSpanSeconds': normalizeHorizontalSwipeSeekSpanSeconds(
       horizontalSwipeSeekSpanSeconds,
     ),
-    'seekPreviewMode': seekPreviewMode.name,
+    'seekPreviewMode': seekPreviewMode.normalized.name,
     'playbackRate': playbackRate,
     'videoFit': videoFit,
     'subtitleDelayMilliseconds': subtitleDelayMilliseconds,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:media_kit/media_kit.dart';
 
 import '../core/diagnostic_log.dart';
@@ -7,6 +9,8 @@ import 'cache/playback_cache_engine.dart';
 import 'cache/playback_cache_policy.dart';
 import 'cache/playback_cache_telemetry.dart';
 import 'playback_diagnostics.dart';
+import 'playback_operation_coordinator.dart';
+import 'playback_output_quiescer.dart';
 
 typedef NativePropertyWriter =
     Future<void> Function(String property, String value);
@@ -73,6 +77,9 @@ abstract interface class PlaybackEngine {
 
   Future<void> play();
   Future<void> pause();
+  Future<void> quiesce();
+  Future<void> quiesceForLifecycle();
+  Future<void> resumeFromLifecycleQuiescence();
   Future<void> seek(Duration position);
   Future<void> selectAudioTrack(String trackId);
   Future<void> selectSubtitleTrack(String? trackId);
@@ -98,10 +105,16 @@ class MediaKitPlaybackEngine
   MediaKitPlaybackEngine(
     this.player, {
     this.nativePropertyWriter,
+    PlaybackOutputQuiescer? outputQuiescer,
     PlaybackDiagnostics? diagnostics,
-  }) : _diagnostics = diagnostics ?? PlaybackDiagnostics() {
+    NativePlaybackCacheEngine? cacheEngine,
+    this.nativeOperationTimeouts = const PlaybackNativeOperationTimeouts(),
+  }) : _outputQuiescer =
+           outputQuiescer ?? MediaKitPlaybackOutputQuiescer(player),
+       _diagnostics = diagnostics ?? PlaybackDiagnostics(),
+       _cacheEngine = cacheEngine {
     final platform = player.platform;
-    if (platform is NativePlayer) {
+    if (_cacheEngine == null && platform is NativePlayer) {
       _cacheEngine = NativePlaybackCacheEngine(
         access: MediaKitNativePlaybackPropertyAccess(
           platform,
@@ -114,9 +127,22 @@ class MediaKitPlaybackEngine
 
   final Player player;
   final NativePropertyWriter? nativePropertyWriter;
+  final PlaybackOutputQuiescer _outputQuiescer;
   final PlaybackDiagnostics _diagnostics;
+  final PlaybackNativeOperationTimeouts nativeOperationTimeouts;
   NativePlaybackCacheEngine? _cacheEngine;
+  final Set<Future<void>> _nativeBarriers = <Future<void>>{};
   bool _hasOpenedMedia = false;
+  PlaybackRetirementState _retirementState = PlaybackRetirementState.active;
+  bool _lifecycleQuiesced = false;
+  bool _disposeStarted = false;
+  int _quiescenceEpoch = 0;
+  Future<void>? _pauseOutputOperation;
+  Future<void>? _disposeOperation;
+
+  PlaybackRetirementState get retirementState => _retirementState;
+
+  bool get _isRetiring => _retirementState != PlaybackRetirementState.active;
 
   @override
   Stream<Duration> get positionStream => player.stream.position;
@@ -128,7 +154,10 @@ class MediaKitPlaybackEngine
   Stream<Duration> get bufferStream => player.stream.buffer;
 
   @override
-  Stream<bool> get playingStream => player.stream.playing;
+  Stream<bool> get playingStream => player.stream.playing.map(
+    (playing) =>
+        playing && !_isRetiring && !_lifecycleQuiesced && !_disposeStarted,
+  );
 
   @override
   Stream<bool> get bufferingStream => player.stream.buffering;
@@ -180,84 +209,290 @@ class MediaKitPlaybackEngine
     Uri uri, {
     required Map<String, String> headers,
     required bool play,
-  }) async {
+  }) {
+    if (_isRetiring || _disposeStarted) return Future<void>.value();
+    final quiescenceEpoch = _quiescenceEpoch;
     _hasOpenedMedia = true;
-    await player.open(Media(uri.toString(), httpHeaders: headers), play: play);
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.open,
+      operation: () async {
+        await player.open(
+          Media(uri.toString(), httpHeaders: headers),
+          play: play,
+        );
+        if (play && _mustReassertQuiescence(quiescenceEpoch)) {
+          await _pauseOutput();
+        }
+      },
+    );
   }
 
   @override
-  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
+  Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() {
     final cacheEngine = _cacheEngine;
-    if (cacheEngine != null) return cacheEngine.probeCacheCapabilities();
-    return PlaybackCacheEngineCapabilities.unsupported();
+    if (_disposeStarted || cacheEngine == null) {
+      return Future.value(PlaybackCacheEngineCapabilities.unsupported());
+    }
+    return _trackAuxiliaryNativeOperation(cacheEngine.probeCacheCapabilities);
   }
 
   @override
   Future<PlaybackCacheApplyResult> configureCache(
     ResolvedPlaybackCacheProfile profile,
     PlaybackCacheEngineCapabilities capabilities,
-  ) async {
+  ) {
     final cacheEngine = _cacheEngine;
-    if (cacheEngine != null) {
-      return cacheEngine.configureCache(profile, capabilities);
+    if (!_disposeStarted && cacheEngine != null) {
+      return _trackAuxiliaryNativeOperation(
+        () => cacheEngine.configureCache(profile, capabilities),
+      );
     }
-    return PlaybackCacheApplyResult(
-      requestedMode: profile.runtimeMode,
-      actualMode: PlaybackCacheRuntimeMode.unconfirmed,
-      fallbackReason: PlaybackCacheFallbackReason.engineCapabilityUnavailable,
-      requiresPlayerRecreation: false,
-      readBack: const {},
+    return Future.value(
+      PlaybackCacheApplyResult(
+        requestedMode: profile.runtimeMode,
+        actualMode: PlaybackCacheRuntimeMode.unconfirmed,
+        fallbackReason: PlaybackCacheFallbackReason.engineCapabilityUnavailable,
+        requiresPlayerRecreation: false,
+        readBack: const {},
+      ),
     );
   }
 
   @override
-  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() =>
-      _cacheEngine?.readCacheSnapshot() ?? Future.value();
+  Future<PlaybackCacheEngineSnapshot?> readCacheSnapshot() {
+    final cacheEngine = _cacheEngine;
+    if (_disposeStarted || cacheEngine == null) return Future.value();
+    return _trackAuxiliaryNativeOperation(cacheEngine.readCacheSnapshot);
+  }
 
   @override
   Future<PlaybackCacheEngineSnapshot?> readCacheSnapshotForIdentity({
     required PlaybackCacheReadIdentity identity,
     required PlaybackCacheReadIdentityCurrent isIdentityCurrent,
-  }) =>
-      _cacheEngine?.readCacheSnapshotForIdentity(
+  }) {
+    final cacheEngine = _cacheEngine;
+    if (_disposeStarted || cacheEngine == null) return Future.value();
+    return _trackAuxiliaryNativeOperation(
+      () => cacheEngine.readCacheSnapshotForIdentity(
         identity: identity,
         isIdentityCurrent: isIdentityCurrent,
-      ) ??
-      Future.value();
-
-  @override
-  Future<void> play() => player.play();
-
-  @override
-  Future<void> pause() => player.pause();
-
-  @override
-  Future<void> seek(Duration position) => player.seek(position);
-
-  @override
-  Future<void> selectAudioTrack(String trackId) async {
-    final track = player.state.tracks.audio
-        .where((candidate) => candidate.id == trackId)
-        .firstOrNull;
-    if (track == null) {
-      throw StateError('Audio track $trackId is unavailable');
-    }
-    await player.setAudioTrack(track);
+      ),
+    );
   }
 
   @override
-  Future<void> selectSubtitleTrack(String? trackId) async {
-    if (trackId == null) {
-      await player.setSubtitleTrack(SubtitleTrack.no());
-      return;
+  Future<void> play() {
+    if (_isRetiring || _lifecycleQuiesced || _disposeStarted) {
+      return Future<void>.value();
     }
-    final track = player.state.tracks.subtitle
-        .where((candidate) => candidate.id == trackId)
-        .firstOrNull;
-    if (track == null) {
-      throw StateError('Subtitle track $trackId is unavailable');
+    final quiescenceEpoch = _quiescenceEpoch;
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.play,
+      operation: () async {
+        await player.play();
+        if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+      },
+    );
+  }
+
+  @override
+  Future<void> pause() {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.pause,
+      operation: player.pause,
+    );
+  }
+
+  @override
+  Future<void> quiesce() {
+    if (_disposeStarted) {
+      return _disposeOperation ?? Future<void>.value();
     }
-    await player.setSubtitleTrack(track);
+    if (_retirementState == PlaybackRetirementState.active) {
+      _retirementState = PlaybackRetirementState.quiescing;
+    }
+    _quiescenceEpoch++;
+    return _pauseOutput().whenComplete(() {
+      if (_retirementState == PlaybackRetirementState.quiescing) {
+        _retirementState = PlaybackRetirementState.retiring;
+      }
+    });
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() {
+    if (_disposeStarted) {
+      return _disposeOperation ?? Future<void>.value();
+    }
+    _lifecycleQuiesced = true;
+    _quiescenceEpoch++;
+    return _pauseOutput();
+  }
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {
+    if (_isRetiring || _disposeStarted) return;
+    _lifecycleQuiesced = false;
+    _quiescenceEpoch++;
+  }
+
+  @override
+  Future<void> seek(Duration position) {
+    if (_isRetiring || _lifecycleQuiesced || _disposeStarted) {
+      return Future<void>.value();
+    }
+    final quiescenceEpoch = _quiescenceEpoch;
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.seek,
+      operation: () async {
+        await player.seek(position);
+        if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
+      },
+    );
+  }
+
+  bool _mustReassertQuiescence(int operationEpoch) =>
+      operationEpoch != _quiescenceEpoch || _isRetiring || _lifecycleQuiesced;
+
+  Future<void> _pauseOutput() {
+    final existing = _pauseOutputOperation;
+    if (existing != null) return existing;
+    late final Future<void> operation;
+    operation = _pauseOutputSafely().whenComplete(() {
+      if (identical(_pauseOutputOperation, operation)) {
+        _pauseOutputOperation = null;
+      }
+    });
+    _pauseOutputOperation = operation;
+    return operation;
+  }
+
+  Future<void> _pauseOutputSafely() async {
+    try {
+      final urgentMute = _startNativeOperation(
+        kind: PlaybackNativeOperationKind.urgentMute,
+        operation: _outputQuiescer.pauseUrgently,
+      );
+      await urgentMute.logicalFuture;
+    } catch (error) {
+      DiagnosticLog.instance.warning(
+        'player',
+        'event=playback_urgent_pause_failed '
+            'errorType=${error.runtimeType}',
+      );
+    }
+  }
+
+  Future<void> _runNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
+  }) => _startNativeOperation(kind: kind, operation: operation).logicalFuture;
+
+  Future<void> _returnNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
+  }) {
+    // External subtitle discovery intentionally observes the raw native Future:
+    // its 2-second foreground wait may continue in Stage B's bounded late-track
+    // window. The operation still installs a typed, bounded teardown barrier.
+    return _startNativeOperation(kind: kind, operation: operation).nativeFuture;
+  }
+
+  PlaybackNativeOperation _startNativeOperation({
+    required PlaybackNativeOperationKind kind,
+    required PlaybackEngineOperation operation,
+    void Function()? onTimeout,
+  }) {
+    final nativeOperation = PlaybackNativeOperation.start(
+      kind: kind,
+      timeout: nativeOperationTimeouts.forKind(kind),
+      operation: operation,
+      onTimeout: onTimeout ?? () => _nativeOperationTimedOut(kind),
+    );
+    final barrier = nativeOperation.barrierFuture.then<void>((_) {});
+    _nativeBarriers.add(barrier);
+    unawaited(
+      barrier.whenComplete(() {
+        _nativeBarriers.remove(barrier);
+      }),
+    );
+    return nativeOperation;
+  }
+
+  Future<T> _trackAuxiliaryNativeOperation<T>(Future<T> Function() operation) {
+    final nativeOperation = Future<T>.sync(operation);
+    final nativeCompletion = nativeOperation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    late final Future<void> barrier;
+    barrier = nativeCompletion
+        .timeout(
+          nativeOperationTimeouts.propertyWrite,
+          onTimeout: () => _nativeOperationTimedOut(
+            PlaybackNativeOperationKind.propertyWrite,
+          ),
+        )
+        .whenComplete(() => _nativeBarriers.remove(barrier));
+    _nativeBarriers.add(barrier);
+    return nativeOperation;
+  }
+
+  Future<void> _waitForNativeBarriers() async {
+    while (_nativeBarriers.isNotEmpty) {
+      await Future.wait<void>(List<Future<void>>.of(_nativeBarriers));
+    }
+  }
+
+  void _nativeOperationTimedOut(PlaybackNativeOperationKind kind) {
+    if (kind == PlaybackNativeOperationKind.open ||
+        kind == PlaybackNativeOperationKind.play ||
+        kind == PlaybackNativeOperationKind.seek) {
+      _quiescenceEpoch++;
+    }
+    DiagnosticLog.instance.warning(
+      'player',
+      'event=playback_native_operation_timeout kind=${kind.name}',
+    );
+  }
+
+  @override
+  Future<void> selectAudioTrack(String trackId) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () async {
+        final track = player.state.tracks.audio
+            .where((candidate) => candidate.id == trackId)
+            .firstOrNull;
+        if (track == null) {
+          throw StateError('Audio track $trackId is unavailable');
+        }
+        await player.setAudioTrack(track);
+      },
+    );
+  }
+
+  @override
+  Future<void> selectSubtitleTrack(String? trackId) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () async {
+        if (trackId == null) {
+          await player.setSubtitleTrack(SubtitleTrack.no());
+          return;
+        }
+        final track = player.state.tracks.subtitle
+            .where((candidate) => candidate.id == trackId)
+            .firstOrNull;
+        if (track == null) {
+          throw StateError('Subtitle track $trackId is unavailable');
+        }
+        await player.setSubtitleTrack(track);
+      },
+    );
   }
 
   @override
@@ -265,20 +500,42 @@ class MediaKitPlaybackEngine
     Uri uri, {
     String? title,
     String? language,
-  }) => player.setSubtitleTrack(
-    SubtitleTrack.uri(uri.toString(), title: title, language: language),
-  );
+  }) {
+    if (_disposeStarted) return Future<void>.value();
+    return _returnNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () => player.setSubtitleTrack(
+        SubtitleTrack.uri(uri.toString(), title: title, language: language),
+      ),
+    );
+  }
 
   @override
-  Future<void> setRate(double rate) => player.setRate(rate);
+  Future<void> setRate(double rate) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () => player.setRate(rate),
+    );
+  }
 
   @override
-  Future<void> setAudioDelay(Duration delay) =>
-      _setNativeProperty('audio-delay', _seconds(delay));
+  Future<void> setAudioDelay(Duration delay) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () => _setNativeProperty('audio-delay', _seconds(delay)),
+    );
+  }
 
   @override
-  Future<void> setSubtitleDelay(Duration delay) =>
-      _setNativeProperty('sub-delay', _seconds(delay));
+  Future<void> setSubtitleDelay(Duration delay) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () => _setNativeProperty('sub-delay', _seconds(delay)),
+    );
+  }
 
   @override
   Future<void> configureSubtitleStyle({
@@ -286,11 +543,17 @@ class MediaKitPlaybackEngine
     required int color,
     required int outlineColor,
     required int position,
-  }) async {
-    await _setNativeProperty('sub-font-size', fontSize.toStringAsFixed(1));
-    await _setNativeProperty('sub-color', _mpvColor(color));
-    await _setNativeProperty('sub-border-color', _mpvColor(outlineColor));
-    await _setNativeProperty('sub-pos', position.clamp(0, 100).toString());
+  }) {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.propertyWrite,
+      operation: () async {
+        await _setNativeProperty('sub-font-size', fontSize.toStringAsFixed(1));
+        await _setNativeProperty('sub-color', _mpvColor(color));
+        await _setNativeProperty('sub-border-color', _mpvColor(outlineColor));
+        await _setNativeProperty('sub-pos', position.clamp(0, 100).toString());
+      },
+    );
   }
 
   Future<void> _setNativeProperty(String property, String value) async {
@@ -316,11 +579,54 @@ class MediaKitPlaybackEngine
       '#${value.toUnsigned(32).toRadixString(16).padLeft(8, '0').toUpperCase()}';
 
   @override
-  Future<void> stop() => player.stop();
+  Future<void> stop() {
+    if (_disposeStarted) return Future<void>.value();
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.stop,
+      operation: player.stop,
+    );
+  }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() {
+    final existing = _disposeOperation;
+    if (existing != null) return existing;
+    final wasRetiring = _isRetiring;
+    _disposeStarted = true;
+    if (!wasRetiring) {
+      _retirementState = PlaybackRetirementState.quiescing;
+      _quiescenceEpoch++;
+    }
+    final quiescence =
+        _pauseOutputOperation ?? (wasRetiring ? null : _pauseOutput());
+    final operation = _dispose(quiescence);
+    _disposeOperation = operation;
+    return operation;
+  }
+
+  Future<void> _dispose(Future<void>? quiescence) async {
+    if (quiescence != null) await quiescence;
+    if (_retirementState == PlaybackRetirementState.quiescing) {
+      _retirementState = PlaybackRetirementState.retiring;
+    }
+    await _waitForNativeBarriers();
     _cacheEngine?.dispose();
-    await player.dispose();
+    final disposal = _startNativeOperation(
+      kind: PlaybackNativeOperationKind.dispose,
+      operation: player.dispose,
+      onTimeout: () {
+        _retirementState = PlaybackRetirementState.quarantined;
+        _nativeOperationTimedOut(PlaybackNativeOperationKind.dispose);
+      },
+    );
+    try {
+      await disposal.logicalFuture;
+      if (_retirementState != PlaybackRetirementState.quarantined) {
+        _retirementState = PlaybackRetirementState.closed;
+      }
+    } catch (_) {
+      _retirementState = PlaybackRetirementState.quarantined;
+      rethrow;
+    }
   }
 }
