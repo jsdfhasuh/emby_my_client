@@ -72,6 +72,60 @@ void main() {
   });
 
   group('Emby WebSocket lifecycle', () {
+    test(
+      'server B ignores late A callbacks for an identical item ID',
+      () async {
+        final socketA = _ManualCallbackSocket();
+        final socketB = _ManualCallbackSocket();
+        final clientA = EmbyWebSocketClient(
+          _session,
+          connector: (_) async => socketA,
+        );
+        final clientB = EmbyWebSocketClient(
+          const EmbySession(
+            serverUrl: 'https://b.example.test',
+            serverName: 'B',
+            serverId: 'server-b',
+            userId: 'user-1',
+            username: 'tester',
+            accessToken: 'fixture-b',
+            deviceId: 'device-1',
+          ),
+          connector: (_) async => socketB,
+        );
+        addTearDown(socketA.disposeStream);
+        addTearDown(socketB.disposeStream);
+        addTearDown(clientB.dispose);
+        final receivedA = <EmbyEvent>[];
+        final receivedB = <EmbyEvent>[];
+        clientA.events.listen(receivedA.add);
+        clientB.events.listen(receivedB.add);
+        await clientA.start();
+        await clientA.dispose();
+        await clientB.start();
+        final message = jsonEncode({
+          'MessageType': 'UserDataChanged',
+          'Data': {
+            'UserId': 'user-1',
+            'UserDataList': [
+              {'ItemId': 'same-item'},
+            ],
+          },
+        });
+        socketA.emit(message);
+        socketA.emitDone();
+        socketB.emit(message);
+        await Future<void>.delayed(Duration.zero);
+        expect(receivedA, isEmpty);
+        expect(receivedB, hasLength(1));
+        expect((receivedB.single as EmbyUserDataChanged).itemIds, [
+          'same-item',
+        ]);
+        expect(clientB.isConnected, isTrue);
+        expect(socketB.closed, isFalse);
+      },
+    );
+
     test('connects with the Emby endpoint and honors ForceKeepAlive', () async {
       final socket = _FakeSocket();
       Uri? connectedUri;

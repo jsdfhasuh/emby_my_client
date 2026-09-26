@@ -16,40 +16,47 @@ class EmbyClientApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Emby 客户端',
-      debugShowCheckedModeBanner: false,
-      themeMode: ThemeMode.dark,
-      darkTheme: _darkTheme(),
-      navigatorObservers: [homeShellRouteObserver],
-      builder: (context, child) => PlaybackCacheStorageScope(
-        storage: controller.playbackCacheStorage,
-        child: PlaybackDiagnosticsTestOverridesScope(
-          controller: controller.playbackDiagnosticsTestOverrides,
-          child: PlaybackSettingsRepositoryScope(
-            repository: controller.playbackSettingsRepository,
-            child: child ?? const SizedBox.shrink(),
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => MaterialApp(
+        // Every route captures its API. Retire the whole route tree when that
+        // workspace changes, including automatic fallback after a 401 and
+        // reauthentication to the same account with a new client.
+        key: ObjectKey(controller.isSignedIn ? controller.api : null),
+        title: 'Emby 客户端',
+        debugShowCheckedModeBanner: false,
+        themeMode: ThemeMode.dark,
+        darkTheme: _darkTheme(),
+        navigatorObservers: [homeShellRouteObserver],
+        builder: (context, child) => PlaybackCacheStorageScope(
+          storage: controller.playbackCacheStorage,
+          child: PlaybackDiagnosticsTestOverridesScope(
+            controller: controller.playbackDiagnosticsTestOverrides,
+            child: PlaybackSettingsRepositoryScope(
+              repository: controller.playbackSettingsRepository,
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         ),
-      ),
-      home: ListenableBuilder(
-        listenable: controller,
-        builder: (context, _) {
-          if (controller.isInitializing) return const _BootScreen();
-          if (!controller.isSignedIn) {
-            if (controller.hasServerAccounts) {
-              return ServerAccountsScreen(
-                controller: controller,
-                rootMode: true,
-              );
+        home: ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) {
+            if (controller.isInitializing) return const _BootScreen();
+            if (!controller.isSignedIn) {
+              if (controller.hasServerAccounts) {
+                return ServerAccountsScreen(
+                  controller: controller,
+                  rootMode: true,
+                );
+              }
+              return LoginScreen(controller: controller);
             }
-            return LoginScreen(controller: controller);
-          }
-          return HomeShell(
-            key: ValueKey(controller.api),
-            controller: controller,
-          );
-        },
+            return HomeShell(
+              key: ValueKey(controller.api),
+              controller: controller,
+            );
+          },
+        ),
       ),
     );
   }

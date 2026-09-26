@@ -1,10 +1,13 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/app.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/inline_playback_session.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
+import 'package:emby_my_client/state/app_controller.dart';
+import 'package:emby_my_client/settings/library_sort_preferences.dart';
 import 'package:emby_my_client/ui/photos/inline_video_page.dart';
 import 'package:emby_my_client/ui/photos/photo_viewer_screen.dart';
 import 'package:emby_my_client/ui/photos/zoomable_photo_page.dart';
@@ -12,7 +15,79 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'shared_preferences_async_test_backend.dart';
+
 void main() {
+  for (final sameAccount in [false, true]) {
+    testWidgets(
+      'workspace replacement retires viewer and late playback (same account: $sameAccount)',
+      (tester) async {
+        final preferences = SharedPreferencesAsyncTestBackend.install();
+        addTearDown(preferences.restore);
+        final apiA = _WorkspaceApi(_session);
+        final apiB = _WorkspaceApi(sameAccount ? _session : _otherSession);
+        final controller = _WorkspaceController(apiA);
+        final harnessA = _ViewerSessionHarness();
+        final harnessB = _ViewerSessionHarness();
+        final startGate = Completer<void>();
+        harnessA.nextStartGate = startGate;
+        addTearDown(controller.dispose);
+        addTearDown(apiA.dispose);
+        addTearDown(apiB.dispose);
+        await tester.pumpWidget(EmbyClientApp(controller: controller));
+        await tester.pumpAndSettle();
+
+        void openViewer(EmbyApi api, _ViewerSessionHarness harness) {
+          tester
+              .state<NavigatorState>(find.byType(Navigator))
+              .push<void>(
+                MaterialPageRoute(
+                  builder: (_) => PhotoViewerScreen(
+                    api: api,
+                    source: _viewerSource(
+                      mode: MediaViewerMode.homeMedia,
+                      items: const [_video1],
+                      initialItemId: _video1.id,
+                    ),
+                    inlineSessionFactory: harness.create,
+                  ),
+                ),
+              );
+        }
+
+        openViewer(apiA, harnessA);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(harnessA.sessions, hasLength(1));
+        controller.replaceWorkspace(apiB);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byType(PhotoViewerScreen), findsNothing);
+        startGate.complete();
+        await tester.pumpAndSettle();
+        expect(harnessA.sessions.single.playCalls, 0);
+        expect(harnessA.sessions.single.shutdownCalls, 1);
+
+        openViewer(apiB, harnessB);
+        await tester.pumpAndSettle();
+        expect(harnessB.sessions.single.itemId, _video1.id);
+        expect(harnessB.sessions.single.playCalls, 1);
+        expect(harnessB.sessions.single.state.position, Duration.zero);
+        // Even a late notification with the same item ID belongs only to A.
+        harnessA.sessions.single._update(
+          harnessA.sessions.single.state.copyWith(
+            position: const Duration(seconds: 45),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('00:45'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
   testWidgets('viewer starts at the requested photo and swipes in order', (
     tester,
   ) async {
@@ -992,6 +1067,47 @@ DirectoryPhotoSource _viewerSource({
   initialHasMore: false,
   loadPage: ({required startIndex, required limit}) async =>
       const EmbyItemPage(items: [], totalRecordCount: 0),
+);
+
+class _WorkspaceController extends AppController {
+  _WorkspaceController(this._api)
+    : super(librarySortPreferenceStore: MemoryLibrarySortPreferenceStore());
+
+  EmbyApi _api;
+
+  @override
+  bool get isInitializing => false;
+  @override
+  bool get isSignedIn => true;
+  @override
+  EmbyApi get api => _api;
+  @override
+  EmbySession get session => _api.session;
+
+  void replaceWorkspace(EmbyApi api) {
+    _api = api;
+    notifyListeners();
+  }
+}
+
+class _WorkspaceApi extends EmbyApi {
+  _WorkspaceApi(super.session) : super(dio: Dio());
+
+  @override
+  Future<HomeData> getHomeBase() async =>
+      const HomeData(views: [], resume: [], latestSections: []);
+  @override
+  Future<List<EmbyItem>> getViews() async => const [];
+}
+
+const _otherSession = EmbySession(
+  serverUrl: 'https://other.example.test',
+  serverName: 'Other server',
+  serverId: 'server-2',
+  userId: 'user-1',
+  username: 'tester',
+  accessToken: 'fixture-token-b',
+  deviceId: 'device-1',
 );
 
 class _ViewerSessionHarness {

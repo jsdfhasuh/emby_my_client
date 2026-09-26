@@ -3,6 +3,12 @@
 Status: IN_PROGRESS
 Device acceptance: DEVICE_ACCEPTANCE_PENDING
 
+2026-09-26 authorization update: the owner now authorizes integrating the
+diagnostic and multi-server branches, marking PR #9 Ready, and merging after
+verification. This supersedes the historical Draft-only/no-merge instructions
+below. See [the integration record](../reviews/2026-09-26-branch-integration.md)
+and the live PR checks for current evidence. Device acceptance remains pending.
+
 ## Baseline
 
 - PR: `#9` (`codex/home-media-mixed-viewer` -> `main`)

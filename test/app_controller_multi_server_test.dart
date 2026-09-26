@@ -134,6 +134,32 @@ void main() {
     expect(harness.tracker.maxActiveApis, 1);
   });
 
+  test(
+    'failed active-account persistence restores A and permits retry',
+    () async {
+      final harness = await _Harness.create(
+        seedSessions: const [_sessionA, _sessionB],
+      );
+      addTearDown(harness.dispose);
+      harness.storage.failNextIndexWrite = true;
+
+      await expectLater(
+        harness.controller.switchAccount(harness.accountB.accountId),
+        throwsA(isA<SecureStorageFailure>()),
+      );
+      expect(harness.controller.session?.serverId, 'server-a');
+      expect(harness.controller.currentAccountId, harness.accountA.accountId);
+      expect(harness.controller.isSwitchingServer, isFalse);
+      expect(harness.tracker.activeApis, 1);
+      expect(harness.tracker.activeDownloads, 1);
+
+      await harness.controller.switchAccount(harness.accountB.accountId);
+      expect(harness.controller.session?.serverId, 'server-b');
+      expect(harness.controller.currentAccountId, harness.accountB.accountId);
+      expect(harness.tracker.maxActiveApis, 1);
+    },
+  );
+
   test('removing a non-current account leaves A workspace untouched', () async {
     final harness = await _Harness.create(
       seedSessions: const [_sessionA, _sessionB],
