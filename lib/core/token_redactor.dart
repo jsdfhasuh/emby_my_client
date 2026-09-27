@@ -23,6 +23,16 @@ abstract final class TokenRedactor {
   }
 
   static void registerCredentials(String text) {
+    // Opaque query values may contain non-UTF-8 bytes. Credential discovery
+    // is diagnostic-only and must not invalidate an otherwise legal request.
+    try {
+      _registerCredentials(text);
+    } catch (_) {
+      // Named token fields are still sanitized by the source-span matcher.
+    }
+  }
+
+  static void _registerCredentials(String text) {
     final uri = Uri.tryParse(text);
     if (uri != null && uri.hasScheme && uri.hasAuthority) {
       for (final entry in uri.queryParametersAll.entries) {

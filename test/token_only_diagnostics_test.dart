@@ -185,7 +185,7 @@ void main() {
     () async {
       final origin = await ProgressiveOrigin.start();
       addTearDown(origin.close);
-      const first = '/first?api_key=wire-original-secret&x=%2f&x=2';
+      const first = '/first?api_key=wire-original-secret&x=%2f&x=2&opaque=%FF';
       const last = '/last?access_token=wire-next-secret&sign=a%2Fb&x=1&x=2';
       origin.intercept = (request) async => request.target == first
           ? (
