@@ -103,8 +103,9 @@ class SourceInputFailure {
     _recoverable = recoverable ?? _recoverable;
     _recoveryExecuted = recoveryExecuted ?? _recoveryExecuted;
     _observedStale = _observedStale || stale || staleOverride == true;
-    if (duplicates != null && duplicates > _duplicates)
+    if (duplicates != null && duplicates > _duplicates) {
       _duplicates = duplicates;
+    }
     final state =
         '$_recoverable:$_recoveryExecuted:$_duplicates:$_observedStale';
     if (_recorded == state) return;
