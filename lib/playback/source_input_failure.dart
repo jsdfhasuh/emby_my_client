@@ -91,17 +91,22 @@ class SourceInputFailure {
   final int openAttempt, request, id;
   final bool stale;
   String? _recorded;
-  bool _recoverable = false, _recoveryExecuted = false;
+  bool _recoverable = false, _recoveryExecuted = false, _observedStale = false;
+  int _duplicates = 0;
   bool get cancelled => error.reason == 'cancelled';
   void record({
     bool? recoverable,
     bool? recoveryExecuted,
-    int duplicates = 0,
+    int? duplicates,
     bool? staleOverride,
   }) {
     _recoverable = recoverable ?? _recoverable;
     _recoveryExecuted = recoveryExecuted ?? _recoveryExecuted;
-    final state = '$_recoverable:$_recoveryExecuted:$duplicates:$staleOverride';
+    _observedStale = _observedStale || stale || staleOverride == true;
+    if (duplicates != null && duplicates > _duplicates)
+      _duplicates = duplicates;
+    final state =
+        '$_recoverable:$_recoveryExecuted:$_duplicates:$_observedStale';
     if (_recorded == state) return;
     _recorded = state;
     trace.emit('strm_failure', {
@@ -111,11 +116,11 @@ class SourceInputFailure {
       'stage': error.safeStage,
       'reason': error.reason,
       'http': error.safeHttp,
-      'stale': staleOverride ?? stale,
+      'stale': _observedStale,
       'cancelled': cancelled,
       'recoverable': _recoverable,
       'recoveryExecuted': _recoveryExecuted,
-      'duplicates': duplicates,
+      'duplicates': _duplicates,
     });
   }
 }

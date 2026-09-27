@@ -77,7 +77,8 @@ void main() {
       expect(actual.openAttempt, 1);
       expect(actual.trace, same(resource.trace));
       expect(actual.error.allowsSeekRecovery, true);
-      await report(logs.log, 'native-truncated');
+      final exported = await report(logs.log, 'native-truncated');
+      expect(exported.content.split('event=strm_failure').length - 1, 1);
     },
   );
 
