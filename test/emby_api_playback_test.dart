@@ -5,6 +5,7 @@ import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
+import 'package:emby_my_client/playback/strm_direct_play_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -157,12 +158,22 @@ void main() {
         userData: EmbyUserData(),
       );
 
-      await api.getPlaybackPlan(item, mediaSourceId: 'missing-private-source');
+      await api.getPlaybackPlan(item, mediaSourceId: privateSourceId);
+      await expectLater(
+        api.getPlaybackPlan(item, mediaSourceId: 'missing-private-source'),
+        throwsA(
+          isA<PlaybackResolveException>().having(
+            (error) => error.failure,
+            'failure',
+            PlaybackResolveFailure.sourceMissing,
+          ),
+        ),
+      );
 
       final output = logLines.join('\n');
       expect(output, contains('event=playback_plan_requested'));
       expect(output, contains('event=playback_sources_received'));
-      expect(output, contains('event=preferred_playback_source_unavailable'));
+      expect(output, isNot(contains('action=use_server_selection')));
       expect(output, contains('event=playback_plan_selected'));
       for (final sensitiveValue in [
         privateItemId,
@@ -386,9 +397,11 @@ void main() {
     );
 
     test(
-      'uses a stable preferred source ID and falls back when invalid',
+      'uses a stable preferred source ID and rejects a missing source',
       () async {
+        final requests = <RequestOptions>[];
         final api = _api((options, handler) {
+          requests.add(options);
           handler.resolve(
             _response(options, {
               'MediaSources': [
@@ -407,14 +420,21 @@ void main() {
           _item,
           mediaSourceId: 'stream',
         );
-        final invalid = await api.getPlaybackPlan(
-          _item,
-          mediaSourceId: 'missing',
+        await expectLater(
+          api.getPlaybackPlan(_item, mediaSourceId: 'missing'),
+          throwsA(
+            isA<PlaybackResolveException>().having(
+              (error) => error.failure,
+              'failure',
+              PlaybackResolveFailure.sourceMissing,
+            ),
+          ),
         );
 
         expect(preferred.mediaSourceId, 'stream');
         expect(preferred.method, PlayMethod.directStream);
-        expect(invalid.mediaSourceId, 'direct');
+        expect((requests[0].data as Map)['MediaSourceId'], 'stream');
+        expect((requests[1].data as Map)['MediaSourceId'], 'missing');
       },
     );
 

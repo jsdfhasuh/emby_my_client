@@ -624,6 +624,10 @@ class PlaybackMediaSource {
     this.liveStreamId,
     this.defaultAudioStreamIndex,
     this.defaultSubtitleStreamIndex,
+    this.requiredHttpHeaders = const {},
+    this.requiresOpening = false,
+    this.openToken,
+    this.isInfiniteStream = false,
   });
 
   final String id;
@@ -642,6 +646,10 @@ class PlaybackMediaSource {
   final String? liveStreamId;
   final int? defaultAudioStreamIndex;
   final int? defaultSubtitleStreamIndex;
+  final Map<String, String> requiredHttpHeaders;
+  final bool requiresOpening;
+  final String? openToken;
+  final bool isInfiniteStream;
   final List<Map<String, dynamic>> mediaStreams;
   final List<String> transcodingReasons;
 
@@ -663,12 +671,27 @@ class PlaybackMediaSource {
         liveStreamId: json['LiveStreamId']?.toString(),
         defaultAudioStreamIndex: _asInt(json['DefaultAudioStreamIndex']),
         defaultSubtitleStreamIndex: _asInt(json['DefaultSubtitleStreamIndex']),
+        requiredHttpHeaders: _requiredHttpHeaders(json['RequiredHttpHeaders']),
+        requiresOpening: json['RequiresOpening'] as bool? ?? false,
+        openToken: _nonEmptyString(json['OpenToken']),
+        isInfiniteStream: json['IsInfiniteStream'] as bool? ?? false,
         mediaStreams: (json['MediaStreams'] as List<dynamic>? ?? const [])
             .whereType<Map>()
             .map((e) => Map<String, dynamic>.from(e))
             .toList(),
         transcodingReasons: _asStringList(json['TranscodingReasons']),
       );
+}
+
+Map<String, String> _requiredHttpHeaders(dynamic value) {
+  if (value == null) return const {};
+  if (value is! Map ||
+      value.entries.any(
+        (entry) => entry.key is! String || entry.value is! String,
+      )) {
+    throw const FormatException('Invalid required HTTP header representation');
+  }
+  return Map<String, String>.unmodifiable(value.cast<String, String>());
 }
 
 class PlaybackInfoResult {

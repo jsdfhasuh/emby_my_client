@@ -12,6 +12,8 @@ import '../library/library_browse_state.dart' as browse;
 import '../library/library_content_profile.dart';
 import '../models/emby_models.dart';
 import '../playback/cache/playback_cache_policy.dart';
+import '../playback/strm_direct_play_policy.dart';
+import '../playback/playback_resource_request.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
 import 'emby_user_data_service.dart';
@@ -983,6 +985,188 @@ class EmbyApi {
     if (callback != null) unawaited(Future<void>.sync(callback));
   }
 
+  /// Metadata-only foundation for source-direct playback. Deliberately not
+  /// wired into Bootstrap until the native request gate has an implementation.
+  /// A successful snapshot is not permission to open it with stock media_kit.
+  Future<SelectedSourceSnapshot> getSourceDirectSnapshot(
+    EmbyItem item, {
+    required PlaybackResourceIdentity identity,
+    required CancelToken cancelToken,
+    required bool Function() isCurrent,
+    int? audioStreamIndex,
+    int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
+    bool forceTranscode = false,
+  }) async {
+    StrmDirectPlayPolicy.requireDirectRequest(forceTranscode: forceTranscode);
+    if (!identical(identity.apiSession, this) ||
+        identity.scope != ServerScope.fromSession(session) ||
+        identity.itemId != item.id ||
+        identity.sourceId.isEmpty) {
+      throw const PlaybackResolveException(
+        PlaybackResolveFailure.sourceIdentityConflict,
+      );
+    }
+    final requestCancellation = CancelToken();
+    var expired = false;
+    var finished = false;
+    final clock = Stopwatch()..start();
+    final timer = Timer(const Duration(seconds: 30), () {
+      expired = true;
+      requestCancellation.cancel('resolve_budget');
+    });
+    unawaited(
+      cancelToken.whenCancel.then((_) {
+        if (!finished) requestCancellation.cancel('resolve_cancelled');
+      }),
+    );
+    void checkCurrent() {
+      if (expired) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.budgetExceeded,
+        );
+      }
+      if (_disposed || cancelToken.isCancelled || !isCurrent()) {
+        requestCancellation.cancel('resolve_cancelled');
+        throw const PlaybackResolveException(PlaybackResolveFailure.cancelled);
+      }
+    }
+
+    Options options() {
+      checkCurrent();
+      final remaining = const Duration(seconds: 30) - clock.elapsed;
+      if (remaining <= Duration.zero) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.budgetExceeded,
+        );
+      }
+      return Options(sendTimeout: remaining, receiveTimeout: remaining);
+    }
+
+    EmbyItem? detail;
+    Future<EmbyItem> readDetail() async {
+      if (detail != null) return detail!;
+      checkCurrent();
+      final response = await _dio.get<dynamic>(
+        '/Users/${session.userId}/Items/${Uri.encodeComponent(item.id)}',
+        queryParameters: {'Fields': _detailItemFields},
+        cancelToken: requestCancellation,
+        options: options(),
+      );
+      checkCurrent();
+      final value = EmbyItem.fromJson(_map(response.data));
+      if (value.id != item.id) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.sourceIdentityConflict,
+        );
+      }
+      return detail = value;
+    }
+
+    try {
+      checkCurrent();
+      var classification = SourceClassification.unknown;
+      if (item.mediaSources.isNotEmpty) {
+        final source = StrmDirectPlayPolicy.fixedSource(
+          item.mediaSources,
+          identity.sourceId,
+        );
+        classification = StrmDirectPlayPolicy.classify(source);
+        if (item.mediaSources.length == 1 &&
+            item.path?.toLowerCase().endsWith('.strm') == true) {
+          classification = SourceClassification.confirmedStrm;
+        }
+      }
+      if (classification != SourceClassification.confirmedStrm) {
+        final fresh = await readDetail();
+        final source = StrmDirectPlayPolicy.fixedSource(
+          fresh.mediaSources,
+          identity.sourceId,
+        );
+        classification = StrmDirectPlayPolicy.classify(
+          source,
+          freshDetail: fresh,
+        );
+      }
+      if (classification != SourceClassification.confirmedStrm) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.sourceIdentityUnresolved,
+        );
+      }
+      final bodies = StrmDirectPlayPolicy.strictPayloads(
+        userId: session.userId,
+        mediaSourceId: identity.sourceId,
+        deviceProfile: _androidDeviceProfile(120000000),
+        audioStreamIndex: audioStreamIndex,
+        subtitleStreamIndex: subtitleStreamIndex,
+        subtitleDisabled: subtitleDisabled,
+        startTimeTicks: item.userData.playbackPositionTicks,
+      );
+      for (var index = 0; index < bodies.length; index++) {
+        checkCurrent();
+        late final Response<dynamic> response;
+        try {
+          response = await _dio.post<dynamic>(
+            '/Items/${Uri.encodeComponent(item.id)}/PlaybackInfo',
+            data: bodies[index],
+            cancelToken: requestCancellation,
+            options: options(),
+          );
+        } on DioException catch (error) {
+          checkCurrent();
+          if (index < bodies.length - 1 &&
+              const [400, 422, 500].contains(error.response?.statusCode)) {
+            continue;
+          }
+          rethrow;
+        }
+        checkCurrent();
+        final info = PlaybackInfoResult.fromJson(_map(response.data));
+        StrmDirectPlayPolicy.checkError(info.errorCode);
+        var source = StrmDirectPlayPolicy.fixedSource(
+          info.mediaSources,
+          identity.sourceId,
+        );
+        StrmDirectPlayPolicy.requireNoServerResource(source);
+        // Only a whole same-source detail snapshot may fill an absent URL.
+        // Never graft old RequiredHttpHeaders onto the replacement Path.
+        if (source.path == null ||
+            !source.path!.startsWith(RegExp(r'https?://'))) {
+          final fresh = await readDetail();
+          source = StrmDirectPlayPolicy.fixedSource(
+            fresh.mediaSources,
+            identity.sourceId,
+          );
+        }
+        checkCurrent();
+        return SelectedSourceSnapshot(
+          source: source,
+          identity: identity,
+          embyServer: Uri.parse(session.serverUrl),
+          playSessionId: info.playSessionId,
+        );
+      }
+      throw const PlaybackResolveException(PlaybackResolveFailure.serverError);
+    } on DioException catch (error) {
+      checkCurrent();
+      final status = error.response?.statusCode;
+      if ((status == 401 || status == 403) &&
+          !_disposed &&
+          _onSessionExpired != null) {
+        unawaited(Future<void>.sync(_onSessionExpired));
+      }
+      throw PlaybackResolveException(switch (status) {
+        401 || 403 => PlaybackResolveFailure.serverDenied,
+        429 => PlaybackResolveFailure.rateLimited,
+        _ => PlaybackResolveFailure.serverError,
+      });
+    } finally {
+      finished = true;
+      timer.cancel();
+      clock.stop();
+    }
+  }
+
   Future<PlaybackPlan> getPlaybackPlan(
     EmbyItem item, {
     int? mediaSourceIndex,
@@ -1002,6 +1186,7 @@ class EmbyApi {
 
     final info = await getPlaybackInfo(
       item,
+      mediaSourceId: mediaSourceId,
       audioStreamIndex: audioStreamIndex,
       subtitleStreamIndex: subtitleStreamIndex,
       subtitleDisabled: subtitleDisabled,
@@ -1009,6 +1194,7 @@ class EmbyApi {
       forceTranscode: forceTranscode,
     );
     final sources = info.mediaSources;
+    StrmDirectPlayPolicy.validateIdentities(sources);
     if (sources.isEmpty) {
       final suffix = info.errorCode == null ? '' : '（${info.errorCode}）';
       throw EmbyApiException('服务器没有提供可播放的媒体源$suffix');
@@ -1020,16 +1206,10 @@ class EmbyApi {
 
     PlaybackMediaSource? preferredSource;
     if (mediaSourceId != null && mediaSourceId.isNotEmpty) {
-      preferredSource = sources
-          .where((source) => source.id == mediaSourceId)
-          .firstOrNull;
-      if (preferredSource == null) {
-        DiagnosticLog.instance.warning(
-          'playback',
-          'event=preferred_playback_source_unavailable '
-              'action=use_server_selection',
-        );
-      }
+      preferredSource = StrmDirectPlayPolicy.fixedSource(
+        sources,
+        mediaSourceId,
+      );
     } else if (mediaSourceIndex != null &&
         mediaSourceIndex >= 0 &&
         mediaSourceIndex < sources.length) {
@@ -1037,12 +1217,7 @@ class EmbyApi {
     }
 
     final source =
-        preferredSource != null &&
-            (!forceTranscode ||
-                (preferredSource.supportsTranscoding &&
-                    preferredSource.transcodingUrl != null))
-        ? preferredSource
-        : _bestSource(sources, forceTranscode: forceTranscode);
+        preferredSource ?? _bestSource(sources, forceTranscode: forceTranscode);
     final selectedAudio = audioStreamIndex ?? source.defaultAudioStreamIndex;
     final selectedSubtitle = subtitleDisabled
         ? null
@@ -1161,6 +1336,7 @@ class EmbyApi {
 
   Future<PlaybackInfoResult> getPlaybackInfo(
     EmbyItem item, {
+    String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
     bool subtitleDisabled = false,
@@ -1170,6 +1346,7 @@ class EmbyApi {
     final requestedSubtitleIndex = subtitleDisabled ? -1 : subtitleStreamIndex;
     final commonBody = <String, dynamic>{
       'UserId': session.userId,
+      'MediaSourceId': ?mediaSourceId,
       'StartTimeTicks': item.userData.playbackPositionTicks,
       'MaxStreamingBitrate': maxStreamingBitrate,
       'AudioStreamIndex': audioStreamIndex,
@@ -1186,6 +1363,7 @@ class EmbyApi {
       ..['DeviceProfile'] = _androidDeviceProfile(maxStreamingBitrate);
     final minimalBody = <String, dynamic>{
       'UserId': session.userId,
+      'MediaSourceId': ?mediaSourceId,
       'StartTimeTicks': item.userData.playbackPositionTicks,
       'AudioStreamIndex': ?audioStreamIndex,
       'SubtitleStreamIndex': ?requestedSubtitleIndex,

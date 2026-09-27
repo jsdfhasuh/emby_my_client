@@ -1,0 +1,16 @@
+{
+  "schema": "strm-native-probe/v1",
+  "platform": "host-only",
+  "binarySha256": "d5f0694b08c124e785d858d00082f3e3b158dd9138bfc48c0382bf1eb443a5fc",
+  "mpvVersion": "mpv v0.36.0-403-g652a1dd907",
+  "ffmpegVersion": "n6.0",
+  "directNativeRawPathPreserved": true,
+  "crossOriginCustomAuthorizationForwarded": true,
+  "sixRedirectsFollowed": true,
+  "explicitEmptyHeaderResetObserved": true,
+  "rangeReopenPolicy": "NOT_RUN",
+  "subresources": "NOT_RUN",
+  "cookieJarReset": "NOT_RUN",
+  "mediaKitNormalization": "NOT_TESTED_BY_THIS_PROBE",
+  "sourceDirectCapability": "UNSUPPORTED"
+}
