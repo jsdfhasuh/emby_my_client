@@ -74,6 +74,14 @@ void main() {
         ],
       });
       final player = Player();
+      final nativeErrors = <String>[];
+      final nativeLogs = <String>[];
+      final errorSubscription = player.stream.error.listen(nativeErrors.add);
+      final logSubscription = player.stream.log.listen(
+        (event) => nativeLogs.add(event.toString()),
+      );
+      addTearDown(errorSubscription.cancel);
+      addTearDown(logSubscription.cancel);
       await (player.platform as NativePlayer).setProperty('vid', 'auto');
       final engine = MediaKitPlaybackEngine(player);
       final controller = PlaybackSessionBootstrap.createOnlineController(
@@ -92,7 +100,8 @@ void main() {
       expect(
         controller.state.phase,
         PlaybackPhase.ready,
-        reason: controller.state.errorMessage,
+        reason:
+            '${controller.state.errorMessage}\n${nativeErrors.join('\n')}\n${nativeLogs.join('\n')}',
       );
       expect(controller.state.plan!.isSourceDirect, isTrue);
       final directory = await Directory.systemTemp.createTemp(
