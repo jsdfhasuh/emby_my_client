@@ -1555,6 +1555,7 @@ class PlaybackController extends ChangeNotifier {
       DiagnosticLog.instance.error(
         'player',
         'event=playback_engine_error fingerprint=$diagnosticFingerprint',
+        error: error,
       );
     }
     final completer = _readyCompleter;
@@ -1607,7 +1608,7 @@ class PlaybackController extends ChangeNotifier {
     if (_shouldWriteEngineFingerprint(fingerprint)) {
       DiagnosticLog.instance.warning(
         'libmpv',
-        'event=libmpv_log fingerprint=$fingerprint',
+        'event=libmpv_log fingerprint=$fingerprint message=$log',
       );
     }
     if ((_state.phase == PlaybackPhase.ready ||

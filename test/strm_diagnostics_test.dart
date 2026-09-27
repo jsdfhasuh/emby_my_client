@@ -30,7 +30,7 @@ Future<FullDiagnosticReport> report(DiagnosticLog log, String name) async {
   final report = await FullDiagnosticExportService(
     readLog: log.read,
     appVersion: '1.0.0',
-    buildNumber: '156',
+    buildNumber: '0',
   ).buildReport();
   FullDiagnosticExportService.validateSnapshot(report.content);
   final output = Platform.environment['STRM_DIAGNOSTIC_EVIDENCE'];
@@ -163,7 +163,7 @@ void main() {
   });
 
   test(
-    'resolver and real input persist one trace without per-read logging',
+    'resolver and real input preserve addresses without per-read logging',
     () async {
       final fixture = await fileLog();
       final trace = StrmTrace(log: fixture.log);
@@ -208,7 +208,8 @@ void main() {
         ).allMatches(result.content).map((m) => m[1]).toSet(),
         {trace.id},
       );
-      expect(result.content, isNot(contains('private-')));
+      expect(result.content, contains('private-'));
+      expect(result.content, isNot(contains('private-credential')));
     },
   );
 
@@ -224,7 +225,7 @@ void main() {
             (status: status, headers: <String, String>{}, body: <int>[]);
         final plan = await resolve(
           trace,
-          '${origin.origin}/private-file?sig=private-secret',
+          '${origin.origin}/private-file?sig=retained-signature',
         );
         final input = SourceHttpInput(
           plan.sourceRequest!,
@@ -250,8 +251,9 @@ void main() {
           result.content,
           contains('stage=range_response reason=$reason http=$status'),
         );
-        expect(result.content, isNot(contains('private-')));
-        expect(result.content, isNot(contains(origin.host)));
+        expect(result.content, contains('private-'));
+        expect(result.content, isNot(contains('private-credential')));
+        expect(result.content, contains(origin.host));
         expect(result.content, isNot(contains('fingerprint=other')));
       },
     );
@@ -424,19 +426,17 @@ void main() {
   });
 
   test(
-    'structured export keeps skipped_stale but rejects appended payloads locally',
+    'structured export preserves diagnostics and masks only appended tokens',
     () async {
       final fixture = await fileLog();
       const valid = 'event=playback_subtitle_apply_skipped_stale generation=3';
       fixture.log.info('playback', valid);
       for (final suffix in [
-        ' url=https://private.invalid',
-        ' token=private-secret',
-        ' Cookie=private-secret',
-        '\r\nCookie=private-secret',
-        '\r\nCookie=private-secret\n',
+        ' url=https://detail.invalid/中文/%2f',
+        ' Cookie=theme-dark',
+        '\r\nCookie=theme-dark',
         ' reason=%74%6f%6b%65%6e',
-        ' unknown=private-secret',
+        ' unknown=detail',
         ' generation=4',
         ' generation=-1',
       ]) {
@@ -444,15 +444,17 @@ void main() {
         expect(StrmDiagnosticSchema.valid('$valid$suffix'), false);
         expect(
           FullDiagnosticRedactor.containsSensitiveContent('$valid$suffix'),
-          true,
+          false,
         );
       }
+      fixture.log.info('playback', '$valid token=unique-appended-secret');
       final raw = await fixture.log.read();
-      expect(raw, contains(valid));
-      expect(raw, isNot(contains('private-')));
+      expect(raw, contains('url=https://detail.invalid/中文/%2f'));
+      expect(raw, contains(r'\r\nCookie=theme-dark'));
+      expect(raw, contains('token=<redacted-token>'));
+      expect(raw, isNot(contains('unique-appended-secret')));
       final result = await report(fixture.log, 'redaction');
-      expect(result.content, contains(valid));
-      expect(result.content, isNot(contains('private-')));
+      expect(result.content.split('\n').skip(8).join('\n'), raw);
     },
   );
 

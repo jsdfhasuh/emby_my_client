@@ -1019,7 +1019,7 @@ void main() {
       );
 
       expect(value, isNot(contains(token)));
-      expect(value, contains('<redacted>'));
+      expect(value, contains('<redacted-token'));
     });
   });
 }

@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:convert';
+import '../core/token_redactor.dart';
 
 import '../core/server_scope.dart';
 import '../core/strm_diagnostics.dart';
@@ -48,6 +50,8 @@ class PlaybackResourceRequest {
     this.diagnosticTask,
   }) : trace = trace ?? StrmTrace(),
        headers = _validateHeaders(headers) {
+    TokenRedactor.registerCredentials(rawUrl);
+    TokenRedactor.registerCredentials(jsonEncode(headers));
     validateDestination(rawUrl, embyServer: embyServer);
   }
 

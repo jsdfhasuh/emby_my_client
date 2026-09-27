@@ -1,4 +1,5 @@
 import '../core/strm_diagnostics.dart';
+import '../core/token_redactor.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -89,6 +90,7 @@ class EmbyApi {
        _onSessionExpired = onSessionExpired,
        _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported,
        _onRealtimeConnected = onRealtimeConnected {
+    TokenRedactor.register(session.accessToken);
     if (dio != null) {
       _configureDio(dio, session, deviceName);
     }
@@ -1232,6 +1234,12 @@ class EmbyApi {
         );
       }
       check();
+      diagnosticTrace.detail('metadata', {
+        'sourceUrl': selected.path,
+        'itemId': item.id,
+        'sourceId': selectedId,
+        'requiredHttpHeaders': selected.requiredHttpHeaders,
+      }, task: generation);
       final snapshot = SelectedSourceSnapshot(
         trace: diagnosticTrace,
         isSessionActive: () => !_disposed,
@@ -1838,12 +1846,13 @@ class EmbyApi {
   ) async {
     try {
       return await action();
-    } on DioException catch (error) {
+    } on DioException catch (error, stack) {
       DiagnosticLog.instance.error(
         'network',
         '${error.requestOptions.method} ${error.requestOptions.uri} '
             'failed with HTTP ${error.response?.statusCode ?? 'none'}',
-        error: error.message,
+        error: error,
+        stackTrace: stack,
       );
       final friendly = _friendlyError(error);
       if (!_disposed &&

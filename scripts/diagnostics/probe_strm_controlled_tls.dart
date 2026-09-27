@@ -22,7 +22,7 @@ void main() {
     await runControlledTlsProbe(['${directory.path}/tls-probe.json']);
     final report = await FullDiagnosticExportService(
       appVersion: '1.0.0',
-      buildNumber: '156',
+      buildNumber: '0',
     ).buildReport();
     expect(
       report.content,

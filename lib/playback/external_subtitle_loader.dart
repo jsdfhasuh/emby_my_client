@@ -157,10 +157,11 @@ class ExternalSubtitleLoader {
       directory = null;
       event('succeeded');
       return lease;
-    } catch (error) {
+    } catch (error, stack) {
       final failure = SourceInputException.from(
         error,
         stage: 'subtitle_download',
+        stackTrace: stack,
         cancelled: _closed || revision != _revision,
       );
       if (trace != null) {

@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'sign_in_diagnostics.dart';
-import 'strm_diagnostics.dart';
+import 'token_redactor.dart';
 
 typedef DiagnosticLogTestSink = void Function(String line);
 typedef DiagnosticSafeEventTestSink =
@@ -361,19 +361,27 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   }
 
   void _write(String level, String component, String message) {
-    final clean =
-        StrmDiagnosticSchema.claimsStructured(message) &&
-            message.contains(RegExp(r'[\r\n]'))
-        ? '<redacted>'
-        : redact(message).replaceAll('\r', '');
+    final clean = TokenRedactor.escapeControls(redact(message));
     final timestamp = DateTime.now().toIso8601String();
     final candidate = '$timestamp [$level] [$component] $clean\n';
     final candidateBytes = utf8.encode(candidate).length;
-    final line = candidateBytes <= _fileByteLimit
-        ? candidate
-        : '$timestamp [WARN] [diagnostic] '
-              'event=diagnostic_entry_dropped reason=oversized '
-              'bytes=$candidateBytes\n';
+    final entryLimit = _fileByteLimit < 16384 ? _fileByteLimit : 16384;
+    var line = candidate;
+    if (candidateBytes > entryLimit) {
+      final marker =
+          '\n$timestamp [WARN] [diagnostic] '
+          '$truncationMarker eventDetail=diagnostic_entry_truncated '
+          'reason=oversized originalBytes=$candidateBytes\n';
+      final bytes = utf8.encode(candidate);
+      var end = (entryLimit - utf8.encode(marker).length).clamp(
+        0,
+        bytes.length,
+      );
+      while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) == 0x80) {
+        end--;
+      }
+      line = '${utf8.decode(bytes.sublist(0, end))}$marker';
+    }
     try {
       _testSink?.call(line.trimRight());
     } catch (_) {
@@ -514,80 +522,7 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
     }
   }
 
-  static String redact(String value) {
-    // Reject a whole attempted structured message before splitting controls.
-    if (StrmDiagnosticSchema.claimsStructured(value) &&
-        value.contains(RegExp(r'[\r\n]')) &&
-        !value.endsWith('\n')) {
-      return '<redacted>';
-    }
-    var result = value
-        .split('\n')
-        .map(
-          (line) =>
-              StrmDiagnosticSchema.claimsStructured(line) &&
-                  !StrmDiagnosticSchema.valid(line)
-              ? '<redacted>'
-              : line,
-        )
-        .join('\n');
-    result = result.replaceAll(
-      RegExp(r'''\b(?:https?|wss?)://[^\s<>"']+''', caseSensitive: false),
-      '<redacted-url>',
-    );
-    result = result.replaceAll(
-      RegExp(r'''\b(?:https?|wss?)%3A%2F%2F[^\s<>"']+''', caseSensitive: false),
-      '<redacted-url>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'(api_key|x-emby-token)(=|%3D|:\s*)([^&\s,"%}\]]+)',
-        caseSensitive: false,
-      ),
-      (match) => '${match[1]}${match[2]}<redacted>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(r'(Token\s*=\s*")[^"]+(")', caseSensitive: false),
-      (match) => '${match[1]}<redacted>${match[2]}',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'''((?:["']?authorization["']?\s*[:=]\s*["']?))(?:basic|bearer)?(?:\s+)?([^"'\s,}\]]+)(["']?)''',
-        caseSensitive: false,
-      ),
-      (match) => '${match[1]}<redacted>${match[3]}',
-    );
-    result = result.replaceAllMapped(
-      RegExp(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', caseSensitive: false),
-      (match) => '${match[1]}<redacted>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'''((?:["']?(?:password|pw|accesstoken|api_key|x-emby-token|username|deviceid)["']?\s*(?:=|:|%3d)\s*)["'])([^"']*)(["'])''',
-        caseSensitive: false,
-      ),
-      (match) => '${match[1]}<redacted>${match[3]}',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'''(\b(?:password|pw|accesstoken|api_key|x-emby-token|username|deviceid)\b\s*(?:=|:|%3d)\s*)([^&\s,}\]]+)''',
-        caseSensitive: false,
-      ),
-      (match) => '${match[1]}<redacted>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(r'(Authenticated user\s+)[^\r\n]+', caseSensitive: false),
-      (match) => '${match[1]}<redacted>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'(Selected [^\r\n]*?\bsource=\S+\s+name=).*?(\s+container=)',
-        caseSensitive: false,
-      ),
-      (match) => '${match[1]}<redacted>${match[2]}',
-    );
-    return result;
-  }
+  static String redact(String value) => TokenRedactor.redact(value);
 }
 
 @visibleForTesting

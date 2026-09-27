@@ -185,7 +185,7 @@ void main() {
   });
 
   test(
-    'one oversized entry is replaced by a bounded diagnostic marker',
+    'one oversized entry keeps a bounded prefix with an explicit truncation marker',
     () async {
       final fixture = await _fixture(maxBytes: 512, retainedBytes: 320);
 
@@ -193,9 +193,9 @@ void main() {
       final content = await fixture.log.read();
 
       expect(await fixture.file.length(), lessThanOrEqualTo(512));
-      expect(content, contains('event=diagnostic_entry_dropped'));
+      expect(content, contains('eventDetail=diagnostic_entry_truncated'));
       expect(content, contains('reason=oversized'));
-      expect(content, isNot(contains('z' * 100)));
+      expect(content, contains('z' * 100));
     },
   );
 

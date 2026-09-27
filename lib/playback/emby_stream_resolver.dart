@@ -84,7 +84,7 @@ class EmbyStreamResolver implements PlaybackStreamResolver {
         'fixedSource': true,
       });
       return plan;
-    } catch (error) {
+    } catch (error, stack) {
       final cancelled = cancellation.isCancelled || generation != _generation;
       final reason = error is PlaybackResolveException
           ? switch (error.failure) {
@@ -100,6 +100,8 @@ class EmbyStreamResolver implements PlaybackStreamResolver {
       SourceInputFailure(
         error: SourceInputException(
           cancelled ? 'cancelled' : reason,
+          cause: error,
+          stackTrace: stack,
           stage: error is PlaybackResolveException
               ? 'classification'
               : 'metadata',

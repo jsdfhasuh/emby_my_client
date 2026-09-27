@@ -611,7 +611,7 @@ enum FullDiagnosticExportValidator {
     guard
       header["schema"] == "emby-full-diagnostics/v1",
       header["platform"] == "iPadOS",
-      header["redaction"] == "best-effort",
+      header["redaction"] == "token-only-v1",
       header["appVersion"] == appVersion,
       header["buildNumber"] == buildNumber,
       let generatedAtUtc = header["generatedAtUtc"],
@@ -621,8 +621,7 @@ enum FullDiagnosticExportValidator {
       let digest = header["sha256"],
       isValidDigest(digest),
       digest == sha256Hex(Data(body.utf8)),
-      !body.components(separatedBy: "\n").contains(where: { StrmDiagnosticValidator.claims($0) && !StrmDiagnosticValidator.valid($0) }),
-      !SafeDiagnosticExportValidator.containsSensitiveContent(body)
+      TokenOnlyDiagnosticValidator.isSanitized(body)
     else {
       throw FullDiagnosticExportValidationError.unsafe
     }
@@ -920,6 +919,66 @@ final class SafeDiagnosticExportPresentationCoordinator {
 }
 
 // Closed schema mirror: test/strm_diagnostics_test.dart checks Dart parity.
+/// Full diagnostics preserve addresses and text. Safe login export remains a
+/// separate closed-schema product. Full sharing still validates digest, size,
+/// metadata, controls and token values before writing and before presentation.
+enum TokenOnlyDiagnosticValidator {
+  static let patterns = [
+    #"(?<![a-z0-9_-])(?:token|access_token|accesstoken|x-emby-token|api_key)["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s&;,}\[\]"']+))"#,
+    #"\bBearer\s+([^\s,;"']+)"#,
+  ]
+  static func isSanitized(_ input: String) -> Bool {
+    var value = input
+    while true {
+      let ns = value as NSString
+      for pattern in patterns {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return false }
+        for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)) {
+          for group in 1..<match.numberOfRanges {
+            let range = match.range(at: group)
+            if range.location != NSNotFound {
+              let token = ns.substring(with: range)
+              if !token.isEmpty && token != "<redacted-token>" { return false }
+            }
+          }
+        }
+      }
+      let arrayPattern = #"(?<![a-z0-9_-])(?:token|access_token|accesstoken|x-emby-token|api_key)["']?\s*[:=]\s*\[([^\]]*)\]"#
+      let arrays = try! NSRegularExpression(pattern: arrayPattern, options: [.caseInsensitive])
+      let strings = try! NSRegularExpression(pattern: #"["']([^"']*)["']"#)
+      for array in arrays.matches(in: value, range: NSRange(location: 0, length: ns.length)) {
+        let text = ns.substring(with: array.range(at: 1)) as NSString
+        for entry in strings.matches(in: text as String, range: NSRange(location: 0, length: text.length)) {
+          let token = text.substring(with: entry.range(at: 1))
+          if !token.isEmpty && token != "<redacted-token>" { return false }
+        }
+      }
+      let pattern = #"(?:%[0-9a-fA-F]{2})+|\\u[0-9a-fA-F]{4}|\\["\\/nrt]"#
+      guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+      var next = value
+      for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)).reversed() {
+        let raw = ns.substring(with: match.range)
+        let decoded: String
+        if raw.hasPrefix("%") {
+          decoded = raw.removingPercentEncoding ?? raw
+        } else if raw.hasPrefix(#"\u"#), let code = UInt32(raw.dropFirst(2), radix: 16), let scalar = UnicodeScalar(code) {
+          decoded = String(scalar)
+        } else {
+          switch raw.last {
+          case "n": decoded = "\n"
+          case "r": decoded = "\r"
+          case "t": decoded = "\t"
+          default: decoded = String(raw.suffix(1))
+          }
+        }
+        if let range = Range(match.range, in: next) { next.replaceSubrange(range, with: decoded) }
+      }
+      if next == value { return true }
+      value = next
+    }
+  }
+}
+
 enum StrmDiagnosticValidator {
   static let schemaJSON = #"{"common":["trace","openAttempt","request","task","cycle","elapsedMs","stale","cancelled","outcome"],"numbers":["openAttempt","request","task","cycle","elapsedMs","attempt","headerCount","redirects","candidates","failure","duplicates","nativeReads","httpRequests","ranges","networkBytes","deliveredBytes","prefixHits","requestMs","rateBytes","failures","cancellations","generation"],"booleans":["stale","cancelled","fixedSource","conflict","strict","lengthKnown","crossOrigin","credentialsStripped","rangeValid","recoverable","recoveryExecuted","continuingCycle","attached"],"events":{"strm_entry":["entry"],"strm_resolve":["classification","fixedSource","conflict","group","attempt","strict","http","route","inputMode"],"strm_input":["container","lengthKnown","headerCount"],"strm_http":["stage","http","crossOrigin","credentialsStripped","redirects","family","candidates","rangeValid","lengthKnown"],"strm_native":["stage"],"strm_failure":["stage","reason","http","failure","recoverable","recoveryExecuted","duplicates"],"strm_recovery":["continuingCycle","recoveryExecuted"],"strm_reporting":["operation","http"],"strm_subtitle":["stage","attached"],"strm_summary":["scope","nativeReads","httpRequests","redirects","ranges","networkBytes","deliveredBytes","prefixHits","requestMs","rateBytes","failures","cancellations","duplicates"],"playback_subtitle_apply_skipped_stale":["generation"]},"enums":{"outcome":["started","succeeded","failed","cancelled","stale","queued","confirmed","late","released","first_read","periodic","closed"],"entry":["fullscreen","inline","unavailable"],"classification":["strm","regular","unknown"],"group":["strict","regular","detail"],"route":["source_direct","server","offline"],"inputMode":["stream_cb","player"],"container":["mov","matroska","avi","mpegts","unknown"],"family":["ipv4","ipv6","mixed"],"scope":["input","playback"],"operation":["start","stopped","progress"],"stage":["metadata","classification","dns","connect","tls","redirect","range_response","body_read","native_register","native_open","native_read","subtitle_download","subtitle_apply","reporting"],"reason":["unknown","source_denied","range_unsupported","source_changed","truncated","redirect_limit","redirect_loop","tls_downgrade","tls_certificate","dns_failed","connect_failed","timeout","cancelled","unsupported_container","native_registration","native_policy_option","subtitle_format","subtitle_budget","subtitle_unconfirmed","destination","invalid_range","body_limit","redirect_location","identity_conflict","source_missing","unresolved","server_error"]}}"#
   private static let schema = (try? JSONSerialization.jsonObject(with: Data(schemaJSON.utf8))) as? [String: Any] ?? [:]

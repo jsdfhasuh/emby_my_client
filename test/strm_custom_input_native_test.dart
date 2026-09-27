@@ -112,7 +112,7 @@ void main() {
                               'Protocol': 'Http',
                               'RunTimeTicks': 240000000,
                               'RequiredHttpHeaders': {
-                                'Authorization': 'source-fixture',
+                                'Authorization': 'Bearer source-fixture',
                               },
                             },
                           ],
@@ -223,7 +223,7 @@ void main() {
       expect(
         source.requests.every(
           (r) =>
-              r.headers['authorization'] == 'source-fixture' &&
+              r.headers['authorization'] == 'Bearer source-fixture' &&
               !r.headers.containsKey('x-emby-token'),
         ),
         isTrue,
@@ -275,7 +275,7 @@ void main() {
         {trace.id},
       );
       expect(exported.content, isNot(contains('source-fixture')));
-      expect(exported.content, isNot(contains('sig=')));
+      expect(exported.content, contains('sig=%7e'));
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );

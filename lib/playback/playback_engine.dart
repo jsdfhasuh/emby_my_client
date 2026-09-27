@@ -164,11 +164,19 @@ class MediaKitPlaybackEngine
     }
   }
 
-  bool _forwardNativeMessage() {
+  bool _forwardNativeMessage(String message) {
     final failure = _sourceFailure;
     if (failure == null) return true;
     _nativeFailureDuplicates++;
-    if (_nativeFailureDuplicates == 1) failure.record(duplicates: 1);
+    if (_nativeFailureDuplicates == 1) {
+      failure.record(duplicates: 1);
+      failure.trace.detail(
+        'native_read',
+        {'message': message, 'failure': failure.id, 'duplicate': true},
+        openAttempt: failure.openAttempt,
+        request: failure.request,
+      );
+    }
     return false;
   }
 
@@ -349,14 +357,14 @@ class MediaKitPlaybackEngine
 
   @override
   Stream<String> get errorStream =>
-      player.stream.error.where((_) => _forwardNativeMessage());
+      player.stream.error.where(_forwardNativeMessage);
 
   @override
   Stream<String> get logStream => player.stream.log
       .where(
         (log) =>
             !{'error', 'fatal', 'warn'}.contains(log.level) ||
-            _forwardNativeMessage(),
+            _forwardNativeMessage(log.toString()),
       )
       .map((log) => log.toString());
 

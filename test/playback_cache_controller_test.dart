@@ -1314,7 +1314,7 @@ void main() {
     },
   );
 
-  test('raw engine output and item metadata never enter diagnostics', () async {
+  test('raw engine details are preserved except token values', () async {
     final lines = <String>[];
     DiagnosticLog.instance.setTestSink(lines.add);
     addTearDown(() => DiagnosticLog.instance.setTestSink(null));
@@ -1336,16 +1336,14 @@ void main() {
 
     final joined = lines.join('\n').toLowerCase();
     expect(joined, contains('event=libmpv_log fingerprint=other'));
-    for (final forbidden in const [
-      'private-item-id',
+    expect(joined, isNot(contains('secret-token')));
+    expect(joined, contains('authorization: bearer <redacted-token>'));
+    for (final retained in const [
       'secret-title',
-      'secret-token',
       'private.example',
       r'c:\users',
-      'authorization',
-      'bearer',
     ]) {
-      expect(joined, isNot(contains(forbidden)));
+      expect(joined, contains(retained));
     }
   });
 

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import '../core/token_redactor.dart';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -51,18 +53,55 @@ class SourceHttpInput {
     }
   }
 
-  SourceInputException _failure(Object error) {
+  String? _target;
+  Map<String, Object?> _outboundHeaders = {};
+  final Map<String, (String, int)> _detailsWritten = {};
+  void _detail(
+    String stage,
+    Map<String, Object?> fields, {
+    bool sampled = false,
+  }) {
+    final key = jsonEncode(fields);
+    final prior = _detailsWritten[stage];
+    if (sampled &&
+        prior != null &&
+        prior.$1 == _target &&
+        _clock.elapsedMilliseconds - prior.$2 < 5000) {
+      return;
+    }
+    _detailsWritten[stage] = (
+      sampled ? _target ?? key : key,
+      _clock.elapsedMilliseconds,
+    );
+    request.trace.detail(
+      stage,
+      fields,
+      openAttempt: openAttempt,
+      request: requestNumber,
+    );
+  }
+
+  Map<String, Object?> _headers(HttpHeaders headers) {
+    final result = <String, Object?>{};
+    headers.forEach((key, values) => result[key] = values);
+    return result;
+  }
+
+  SourceInputException _failure(Object error, [StackTrace? stack]) {
     final mapped = SourceInputException.from(
       error is PlaybackResolveException
           ? const SourceInputException('destination')
           : error,
       stage: _stage,
+      stackTrace: stack,
       cancelled: _closed && error is! SourceInputException,
     );
     final failure = SourceInputException(
       mapped.code,
       stage: mapped.safeStage,
       httpStatus: mapped.safeHttp ?? _responseStatus,
+      cause: mapped.cause ?? error,
+      stackTrace: mapped.stackTrace ?? stack,
     );
     if (failure.reason == 'cancelled') {
       cancellations++;
@@ -74,6 +113,12 @@ class SourceHttpInput {
       duplicates++;
       lastFailure = _failureKinds[key];
     } else {
+      _detail(_stage, {
+        'outcome': 'failed',
+        'requestUrl': _target,
+        'requestHeaders': _outboundHeaders,
+        'elapsedMs': _clock.elapsedMilliseconds,
+      });
       lastFailure = SourceInputFailure(
         error: failure,
         trace: request.trace,
@@ -190,15 +235,34 @@ class SourceHttpInput {
         requestNumber = request.trace.nextRequest();
         _responseStatus = null;
         _stage = 'connect';
+        _target = raw;
+        _outboundHeaders = {};
+        TokenRedactor.registerCredentials(raw);
+        _detail('connect', {
+          'outcome': 'started',
+          'requestUrl': raw,
+          'host': uri.host,
+          'port': uri.port,
+        }, sampled: true);
         final outbound = await _client.getUrl(uri);
         outbound.followRedirects = false;
         if (includeHeaders) {
           headers.forEach((name, value) => outbound.headers.set(name, value));
         }
+        _outboundHeaders = _headers(outbound.headers);
+        _detail('request_headers', {
+          'requestUrl': raw,
+          'headers': _outboundHeaders,
+        }, sampled: true);
         _stage = 'range_response';
         httpRequests++;
         final response = await outbound.close();
         _responseStatus = response.statusCode;
+        _detail('response_headers', {
+          'requestUrl': raw,
+          'http': response.statusCode,
+          'headers': _headers(response.headers),
+        }, sampled: response.statusCode == 200);
         if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
           final location = response.headers.value(HttpHeaders.locationHeader);
           await response.listen((_) {}).cancel();
@@ -208,6 +272,12 @@ class SourceHttpInput {
           redirects++;
           _stage = 'redirect';
           final next = resolveRawLocation(raw, location);
+          _detail('redirect', {
+            'fromUrl': raw,
+            'location': location,
+            'toUrl': next,
+            'http': response.statusCode,
+          });
           final cross = Uri.parse(next).origin != uri.origin;
           _stageEvent('redirect', {
             'outcome': 'succeeded',
@@ -262,8 +332,8 @@ class SourceHttpInput {
           throw const SourceInputException('subtitle_timeout');
         },
       );
-    } catch (error) {
-      throw _failure(error);
+    } catch (error, stack) {
+      throw _failure(error, stack);
     } finally {
       requestMs += watch.elapsedMilliseconds;
       _active--;
@@ -324,8 +394,8 @@ class SourceHttpInput {
           throw SourceInputException('timeout', stage: _stage);
         },
       );
-    } catch (error) {
-      throw _failure(error);
+    } catch (error, stack) {
+      throw _failure(error, stack);
     } finally {
       requestMs += clock.elapsedMilliseconds;
       _active--;
@@ -347,6 +417,15 @@ class SourceHttpInput {
       requestNumber = request.trace.nextRequest();
       _responseStatus = null;
       _stage = 'connect';
+      _target = raw;
+      _outboundHeaders = {};
+      TokenRedactor.registerCredentials(raw);
+      _detail('connect', {
+        'outcome': 'started',
+        'requestUrl': raw,
+        'host': uri.host,
+        'port': uri.port,
+      }, sampled: true);
       final outbound = await _client.getUrl(uri);
       outbound.followRedirects = false;
       outbound.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
@@ -362,10 +441,20 @@ class SourceHttpInput {
           (name, value) => outbound.headers.set(name, value),
         );
       }
+      _outboundHeaders = _headers(outbound.headers);
+      _detail('request_headers', {
+        'requestUrl': raw,
+        'headers': _outboundHeaders,
+      }, sampled: true);
       _stage = 'range_response';
       httpRequests++;
       final response = await outbound.close();
       _responseStatus = response.statusCode;
+      _detail('response_headers', {
+        'requestUrl': raw,
+        'http': response.statusCode,
+        'headers': _headers(response.headers),
+      }, sampled: response.statusCode == 206);
       if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
         final location = response.headers.value(HttpHeaders.locationHeader);
         // Cancel, don't drain an unbounded redirect body.
@@ -376,6 +465,12 @@ class SourceHttpInput {
         this.redirects++;
         _stage = 'redirect';
         final next = resolveRawLocation(raw, location);
+        _detail('redirect', {
+          'fromUrl': raw,
+          'location': location,
+          'toUrl': next,
+          'http': response.statusCode,
+        });
         final cross = Uri.parse(next).origin != uri.origin;
         _stageEvent('redirect', {
           'outcome': 'succeeded',
@@ -472,12 +567,29 @@ class SourceHttpInput {
       throw const SourceInputException('cancelled');
     }
     _stage = 'dns';
+    _detail('dns', {
+      'outcome': 'started',
+      'requestUrl': _target,
+      'host': uri.host,
+      'port': uri.port,
+    });
     late List<InternetAddress> addresses;
     try {
       addresses = await InternetAddress.lookup(uri.host);
-    } catch (error) {
-      throw SourceInputException.from(error, stage: 'dns', cancelled: _closed);
+    } catch (error, stack) {
+      throw SourceInputException.from(
+        error,
+        stage: 'dns',
+        cancelled: _closed,
+        stackTrace: stack,
+      );
     }
+    _detail('dns', {
+      'outcome': 'succeeded',
+      'host': uri.host,
+      'port': uri.port,
+      'addresses': addresses.map((a) => a.address).toList(),
+    });
     _stageEvent('dns', {
       'outcome': 'succeeded',
       'candidates': addresses.length,
@@ -505,6 +617,12 @@ class SourceHttpInput {
       );
     }
     _stage = 'connect';
+    _detail('connect_attempt', {
+      'requestUrl': _target,
+      'host': uri.host,
+      'ip': addresses.first.address,
+      'port': uri.port,
+    });
     final task = await Socket.startConnect(addresses.first, uri.port);
     Socket? active;
     var cancelled = false;

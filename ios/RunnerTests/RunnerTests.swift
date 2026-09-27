@@ -1263,18 +1263,37 @@ final class RunnerTests: XCTestCase {
     )
   }
 
-  func testStrmStructuredFullExportPreservesSafeFieldsAndRejectsInjection() throws {
+  func testStrmStructuredFullExportPreservesDetailsAndRejectsTokens() throws {
     let safe = "event=playback_subtitle_apply_skipped_stale generation=3"
-    let failure = "event=strm_failure trace=0123456789abcdef openAttempt=1 request=2 failure=1 stage=range_response reason=source_denied http=403 stale=false cancelled=false recoverable=false recoveryExecuted=false duplicates=0"
-    for line in [safe, failure] {
-      XCTAssertTrue(StrmDiagnosticValidator.valid(line))
-      let data = Data(validFullBody(line + "\n").utf8)
-      XCTAssertNoThrow(try FullDiagnosticExportValidator.validate(content: data, appVersion: "1.0.0", buildNumber: "42"))
-      for suffix in [" url=https://private.invalid", " token=private-secret", " Cookie=private-secret", "\r\nCookie=private-secret", " reason=%74%6f%6b%65%6e", " unknown=private-secret", " generation=-1", " trace=private-secret"] {
-        XCTAssertFalse(StrmDiagnosticValidator.valid(line + suffix))
-        assertFullUnsafe(Data(validFullBody(line + suffix + "\n").utf8))
+    for suffix in [" url=https://private.invalid/中文/%2f", " Cookie=theme-dark", " reason=%74%6f%6b%65%6e", " unknown=detail", " generation=-1"] {
+      XCTAssertNoThrow(try FullDiagnosticExportValidator.validate(
+        content: Data(validFullBody(safe + suffix + "\n").utf8), appVersion: "1.0.0", buildNumber: "42"))
+    }
+    for token in ["token=secret", "AccessToken=secret", "X-Emby-Token: secret", "Authorization: Bearer secret", "api_key=secret", "%74%6f%6b%65%6e%3dsecret", "access_token%253Dsecret"] {
+      assertFullUnsafe(Data(validFullBody(safe + " " + token + "\n").utf8))
+      XCTAssertTrue(TokenOnlyDiagnosticValidator.isSanitized(token.replacingOccurrences(of: "secret", with: "<redacted-token>")))
+    }
+  }
+
+  func testTokenOnlyValidationHandlesNestedEncodingAndRepeatedHeaderValues() throws {
+    for alias in ["token", "ToKeN", "access_token", "AccessToken", "X-Emby-Token", "api_key"] {
+      var raw = "https://主机.example:8920/中文/%2f?\(alias)=native-secret&sign=keep&x=1&x=2"
+      var secret = "native-secret"
+      for _ in 0...4 {
+        XCTAssertFalse(TokenOnlyDiagnosticValidator.isSanitized(raw))
+        let masked = raw.replacingOccurrences(of: secret, with: "<redacted-token>")
+        XCTAssertTrue(TokenOnlyDiagnosticValidator.isSanitized(masked))
+        XCTAssertNoThrow(try FullDiagnosticExportValidator.validate(content: Data(validFullBody(masked).utf8), appVersion: "1.0.0", buildNumber: "42"))
+        raw = raw.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        secret = secret.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
       }
     }
+    let headers = #"{"X-Emby-Token":["one","two"],"Cookie":"token=three; theme=keep"}"#
+    XCTAssertFalse(TokenOnlyDiagnosticValidator.isSanitized(headers))
+    let masked = headers.replacingOccurrences(of: "one", with: "<redacted-token>")
+      .replacingOccurrences(of: "two", with: "<redacted-token>")
+      .replacingOccurrences(of: "three", with: "<redacted-token>")
+    XCTAssertTrue(TokenOnlyDiagnosticValidator.isSanitized(masked))
   }
 
   func testFullReportPassesAndFilenameUsesNativeBuildAndTime() throws {
@@ -1357,28 +1376,16 @@ final class RunnerTests: XCTestCase {
     assertFullUnsafe(Data(lines.joined(separator: "\n").utf8))
   }
 
-  func testFullReportRejectsSensitiveContentAndControlCharacters() {
-    for value in [
-      "password=secret",
-      "Authorization: Basic credential",
-      "Authorization: Bearer token",
-      "Cookie: session=value",
-      "X-Emby-Token: secret",
-      "https://example.test:8096/path",
-      "https%3A%2F%2Fexample.test%3A8096",
-      "192.0.2.1",
-      "2001:db8::1",
-      "example.test:8096",
-      "/var/mobile/Containers/Data/file.json",
-      #"\Users\owner\cache"#,
-      #"encoded\nstack"#,
-      "Session JSON",
-      "request headers",
-      "response body",
-    ] {
+  func testFullReportPreservesNonTokensAndRejectsTokensAndControls() throws {
+    for value in ["password=secret", "Authorization: Basic credential", "Cookie: session=value",
+      "https://example.test:8096/中文/%2f?sign=keep&x=1&x=2", "https%3A%2F%2Fexample.test%3A8096",
+      "192.0.2.1", "2001:db8::1", "example.test:8096", "/var/mobile/Containers/Data/file.json",
+      #"\Users\owner\cache"#, #"encoded\nstack"#, "Session JSON", "request headers", "response body"] {
+      XCTAssertNoThrow(try FullDiagnosticExportValidator.validate(content: Data(validFullBody(value).utf8), appVersion: "1.0.0", buildNumber: "42"))
+    }
+    for value in ["Authorization: Bearer secret", "X-Emby-Token: secret", "token=secret", "api_key=secret"] {
       assertFullUnsafe(Data(validFullBody(value).utf8))
     }
-
     assertFullUnsafe(Data(validFullBody("line\u{007F}injected").utf8))
     assertFullUnsafe(Data(validFullBody("line\rinjected").utf8))
   }
@@ -1484,7 +1491,7 @@ final class RunnerTests: XCTestCase {
       "appVersion=1.0.0",
       "buildNumber=42",
       "platform=iPadOS",
-      "redaction=best-effort",
+      "redaction=token-only-v1",
       "truncated=false",
       "sha256=\(digest)",
       body,

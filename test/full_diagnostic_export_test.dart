@@ -53,16 +53,16 @@ deviceId=fixture-device http://192.0.2.10:8096 Session JSON {"accessToken":"fixt
 path=/Users/fixture/Library/Containers/app/data
 ''').buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
 
-    expect(report.content, isNot(contains('fixture-password')));
-    expect(report.content, isNot(contains('fixture-user')));
+    expect(report.content, contains('fixture-password'));
+    expect(report.content, contains('fixture-user'));
     expect(report.content, isNot(contains('fixture-token')));
-    expect(report.content, isNot(contains('192.0.2.10')));
-    expect(report.content, isNot(contains('/Users/fixture')));
-    expect(report.content, isNot(contains('Authorization')));
+    expect(report.content, contains('192.0.2.10'));
+    expect(report.content, contains('/Users/fixture'));
+    expect(report.content, contains('Authorization: Basic'));
   });
 
   test(
-    'full report redacts server, path, session, and request fields',
+    'full report preserves server path session and request fields except tokens',
     () async {
       final report = await _service('''
 serverUrl=http://fixture.invalid:8096
@@ -72,29 +72,32 @@ Session: {"value":"fixture"}
 request headers: {"Authorization":"Bearer fixture"}
 ''').buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
 
-      expect(report.content, isNot(contains('fixture.invalid')));
-      expect(report.content, isNot(contains('192.0.2.40')));
-      expect(report.content, isNot(contains('/var/mobile')));
-      expect(report.content, isNot(contains('Session:')));
-      expect(report.content, isNot(contains('request headers')));
+      expect(report.content, contains('fixture.invalid'));
+      expect(report.content, contains('192.0.2.40'));
+      expect(report.content, contains('/var/mobile'));
+      expect(report.content, contains('Session:'));
+      expect(report.content, contains('request headers'));
       FullDiagnosticExportService.validateSnapshot(report.content);
     },
   );
 
-  test('full report sanitizes native-only unsafe sequences', () async {
-    final report = await _service(
-      r'event=fixture escaped=\n windowsPath=\Users\owner\cache peer=_fixture.example:443',
-    ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
+  test(
+    'full report preserves escaped controls paths and native endpoints',
+    () async {
+      final report = await _service(
+        r'event=fixture escaped=\n windowsPath=\Users\owner\cache peer=_fixture.example:443',
+      ).buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
 
-    expect(report.content, isNot(contains(r'\n')));
-    expect(report.content, isNot(contains(r'\Users\owner')));
-    expect(report.content, isNot(contains('fixture.example:443')));
-    expect(
-      FullDiagnosticRedactor.containsSensitiveContent(r'event=foo_token'),
-      isTrue,
-    );
-    FullDiagnosticExportService.validateSnapshot(report.content);
-  });
+      expect(report.content, contains(r'\n'));
+      expect(report.content, contains(r'\Users\owner'));
+      expect(report.content, contains('fixture.example:443'));
+      expect(
+        FullDiagnosticRedactor.containsSensitiveContent(r'event=foo_token'),
+        isFalse,
+      );
+      FullDiagnosticExportService.validateSnapshot(report.content);
+    },
+  );
 
   test('read failure maps to the fixed read code', () async {
     await expectLater(
@@ -112,17 +115,16 @@ request headers: {"Authorization":"Bearer fixture"}
     );
   });
 
-  test('second redaction failure fails closed', () async {
-    await expectLater(
-      _service('payload 2001:db8::10').buildReport(),
-      throwsA(
-        isA<FullDiagnosticExportException>().having(
-          (error) => error.code,
-          'code',
-          FullDiagnosticExportException.unsafe,
-        ),
-      ),
+  test('IPv6 is preserved while unredacted tokens fail validation', () async {
+    final report = await _service(
+      'payload 2001:db8::10 token=secret',
+    ).buildReport();
+    expect(report.content, contains('2001:db8::10 token=<redacted-token>'));
+    expect(
+      FullDiagnosticRedactor.containsSensitiveContent('token=secret'),
+      true,
     );
+    FullDiagnosticExportService.validateSnapshot(report.content);
   });
 
   test('large legal logs truncate complete recent lines under 750 KiB', () async {

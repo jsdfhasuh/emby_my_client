@@ -91,9 +91,9 @@ void main() {
     expect(find.textContaining('StateError'), findsNothing);
     final log = logLines.join('\n');
     expect(log, contains('Item detail initial load failed'));
-    expect(log, contains('password=<redacted>'));
-    expect(log, isNot(contains('detail-secret')));
-    expect(log, isNot(contains('private.example.test')));
+    expect(log, contains('password=detail-secret'));
+    expect(log, contains('detail-secret'));
+    expect(log, contains('private.example.test'));
 
     await tester.pumpWidget(const SizedBox.shrink());
     await api.dispose();

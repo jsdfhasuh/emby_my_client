@@ -11,7 +11,11 @@ class SourceInputException implements Exception {
     this.stage,
     this.httpStatus,
     this.failure,
+    this.cause,
+    this.stackTrace,
   });
+  final Object? cause;
+  final StackTrace? stackTrace;
   final SourceInputFailure? failure;
   final String code;
   final String? stage;
@@ -56,25 +60,37 @@ class SourceInputException implements Exception {
     Object error, {
     required String stage,
     bool cancelled = false,
+    StackTrace? stackTrace,
   }) {
-    if (cancelled) return SourceInputException('cancelled', stage: stage);
-    if (error is SourceInputException) return error;
-    if (error is TimeoutException) {
-      return SourceInputException('timeout', stage: stage);
-    }
-    if (error is HandshakeException || error is TlsException) {
-      return const SourceInputException('tls_certificate', stage: 'tls');
-    }
-    if (error is SocketException && (stage == 'dns' || stage == 'connect')) {
+    if (error is SourceInputException && !cancelled) {
       return SourceInputException(
-        stage == 'dns' ? 'dns_failed' : 'connect_failed',
-        stage: stage,
+        error.code,
+        stage: error.stage,
+        httpStatus: error.httpStatus,
+        failure: error.failure,
+        cause: error.cause,
+        stackTrace: error.stackTrace ?? stackTrace,
       );
     }
-    if (error is HttpException && stage == 'body_read') {
-      return const SourceInputException('truncated', stage: 'body_read');
-    }
-    return SourceInputException('unknown', stage: stage);
+    final reason = cancelled
+        ? 'cancelled'
+        : error is TimeoutException
+        ? 'timeout'
+        : error is HandshakeException || error is TlsException
+        ? 'tls_certificate'
+        : error is SocketException && stage == 'dns'
+        ? 'dns_failed'
+        : error is SocketException && stage == 'connect'
+        ? 'connect_failed'
+        : error is HttpException && stage == 'body_read'
+        ? 'truncated'
+        : 'unknown';
+    return SourceInputException(
+      reason,
+      stage: reason == 'tls_certificate' ? 'tls' : stage,
+      cause: error,
+      stackTrace: stackTrace,
+    );
   }
 }
 
@@ -109,6 +125,23 @@ class SourceInputFailure {
     final state =
         '$_recoverable:$_recoveryExecuted:$_duplicates:$_observedStale';
     if (_recorded == state) return;
+    if (_recorded == null) {
+      final cause = error.cause ?? error;
+      trace.detail(
+        error.safeStage,
+        {
+          'errorType': cause.runtimeType.toString(),
+          'message': cause.toString(),
+          if (error.stackTrace != null) 'stack': error.stackTrace.toString(),
+          if (cause is SocketException) 'osErrorCode': cause.osError?.errorCode,
+          if (cause is SocketException)
+            'osErrorMessage': cause.osError?.message,
+          'failure': id,
+        },
+        openAttempt: openAttempt,
+        request: request,
+      );
+    }
     _recorded = state;
     trace.emit('strm_failure', {
       'openAttempt': openAttempt,

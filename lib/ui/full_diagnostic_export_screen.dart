@@ -155,7 +155,7 @@ class _FullDiagnosticExportScreenState
         barrierDismissible: false,
         builder: (context) => AlertDialog(
           title: const Text('导出完整调试日志？'),
-          content: const Text('完整调试日志包含播放、方向、网络和错误栈信息。系统会执行脱敏，但发送前仍请人工检查。'),
+          content: const Text('完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。'),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -306,7 +306,7 @@ class _FullDiagnosticExportScreenState
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
-          const Text('完整调试日志包含播放、方向、网络和错误栈信息。系统会执行脱敏，但发送前仍请人工检查。'),
+          const Text('完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。'),
           const SizedBox(height: 18),
           Wrap(
             spacing: 18,

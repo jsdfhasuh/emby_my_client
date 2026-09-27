@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'diagnostic_log.dart';
-import 'strm_diagnostics.dart';
+import 'token_redactor.dart';
 import 'safe_diagnostic_export.dart';
 
 const _maxFullDiagnosticBytes = 750 * 1024;
@@ -232,7 +232,7 @@ class FullDiagnosticExportService {
       'appVersion=${metadata.appVersion}',
       'buildNumber=${metadata.buildNumber}',
       'platform=iPadOS',
-      'redaction=best-effort',
+      'redaction=token-only-v1',
       'truncated=false',
       'sha256=$placeholder',
     ].join('\n');
@@ -252,7 +252,7 @@ class FullDiagnosticExportService {
       'appVersion=${metadata.appVersion}',
       'buildNumber=${metadata.buildNumber}',
       'platform=iPadOS',
-      'redaction=best-effort',
+      'redaction=token-only-v1',
       'truncated=$truncated',
       'sha256=$digest',
       body,
@@ -312,7 +312,7 @@ class FullDiagnosticExportService {
     final body = lines.skip(keys.length).join('\n');
     if (header['schema'] != 'emby-full-diagnostics/v1' ||
         header['platform'] != 'iPadOS' ||
-        header['redaction'] != 'best-effort' ||
+        header['redaction'] != 'token-only-v1' ||
         !_isUtcTimestamp(header['generatedAtUtc']!) ||
         !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(header['appVersion']!) ||
         !RegExp(r'^\d+$').hasMatch(header['buildNumber']!) ||
@@ -334,162 +334,10 @@ class FullDiagnosticExportService {
 
 class FullDiagnosticRedactor {
   const FullDiagnosticRedactor._();
-
-  static final RegExp _nativeEndpointPattern = RegExp(
-    r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}:\d{2,5}|(?:localhost|emby):\d{2,5}|\[[0-9a-f:]+\]:\d{2,5}',
-    caseSensitive: false,
+  static String redact(String value) => TokenRedactor.escapeControls(
+    TokenRedactor.redact(value),
+    preserveLines: true,
   );
-  static final RegExp _backslashSensitivePathPattern = RegExp(
-    r'\\(?:users|private|var|tmp)\\[^\s\r\n]*',
-    caseSensitive: false,
-  );
-  static final RegExp _escapedControlSequencePattern = RegExp(
-    r'\\(?:r|n|t|u000[0-9a-f]{1,4})',
-    caseSensitive: false,
-  );
-
-  static String redact(String value) {
-    value = value
-        .split('\n')
-        .map(
-          (line) =>
-              StrmDiagnosticSchema.claimsStructured(line) &&
-                  !StrmDiagnosticSchema.valid(line)
-              ? '<redacted>'
-              : line,
-        )
-        .join('\n');
-    var result = value.replaceAll('<redacted-url>', '<redacted>');
-    result = result.replaceAll('\r', '');
-    result = result.replaceAllMapped(
-      RegExp(
-        r'^.*(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9]).*$',
-        caseSensitive: false,
-        multiLine: true,
-      ),
-      (_) => '<redacted>',
-    );
-    result = result.replaceAllMapped(
-      RegExp(
-        r'(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)\s*(?:=|:|%3d)\s*[^\s,}\]]+',
-        caseSensitive: false,
-      ),
-      (_) => '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(r'(?:https?|wss?)://[^\s<>\"]+', caseSensitive: false),
-      '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(r'(?:https?|wss?)%3a%2f%2f[^\s<>\"]+', caseSensitive: false),
-      '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)'),
-      '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(r'\b(?:localhost|emby):\d{2,5}\b', caseSensitive: false),
-      '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(r'\b[a-z0-9.-]+\.[a-z]{2,}:\d{2,5}\b', caseSensitive: false),
-      '<redacted>',
-    );
-    result = result.replaceAll(_nativeEndpointPattern, '<redacted>');
-    result = result.replaceAll(
-      RegExp(
-        r'(?:[a-z]:[\\/]|[\\/](?:home|users|private|var|tmp|data|documents|library)[\\/])[^\s\r\n]*',
-        caseSensitive: false,
-      ),
-      '<redacted>',
-    );
-    result = result.replaceAll(_backslashSensitivePathPattern, '<redacted>');
-    result = result.replaceAll(_escapedControlSequencePattern, '<redacted>');
-    result = result.replaceAll(
-      RegExp(
-        r'\"session(?:json|object|data)?\"\s*:|\bsession\s+(?:json|object|data)\b|\bsession\s*[:=]\s*[\{\[]',
-        caseSensitive: false,
-      ),
-      '<redacted>',
-    );
-    result = result.replaceAll(
-      RegExp(
-        r'\"(?:request|response)(?:body|headers?)\"\s*:|\b(?:request|response)\s+(?:body|headers?)\b',
-        caseSensitive: false,
-      ),
-      '<redacted>',
-    );
-    if (containsSensitiveContent(result)) {
-      throw const FullDiagnosticExportException(
-        FullDiagnosticExportException.unsafe,
-      );
-    }
-    return result;
-  }
-
-  @visibleForTesting
-  static bool containsSensitiveContent(String value) {
-    if (value
-        .split('\n')
-        .any(
-          (line) =>
-              StrmDiagnosticSchema.claimsStructured(line) &&
-              !StrmDiagnosticSchema.valid(line),
-        )) {
-      return true;
-    }
-    final patterns = <RegExp>[
-      RegExp(
-        r'(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9])',
-        caseSensitive: false,
-      ),
-      RegExp(
-        r'(?:https?|wss?)://|(?:https?|wss?)%3a%2f%2f',
-        caseSensitive: false,
-      ),
-      RegExp(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)'),
-      RegExp(r'\b(?:localhost|emby):\d{2,5}\b', caseSensitive: false),
-      RegExp(r'\b[a-z0-9.-]+\.[a-z]{2,}:\d{2,5}\b', caseSensitive: false),
-      _nativeEndpointPattern,
-      RegExp(
-        r'(?:[a-z]:[\\/]|[\\/](?:home|users|private|var|tmp|data|documents|library)[\\/])',
-        caseSensitive: false,
-      ),
-      _backslashSensitivePathPattern,
-      _escapedControlSequencePattern,
-      RegExp(
-        r'\bsession\s*(?:json|object|data)\b|\bsession\s*[:=]\s*[\{\[]',
-        caseSensitive: false,
-      ),
-      RegExp(
-        r'\b(?:request|response)\s+(?:body|headers?)\b',
-        caseSensitive: false,
-      ),
-    ];
-    if (patterns.any((pattern) => pattern.hasMatch(value))) return true;
-    return _containsIpv6(value);
-  }
-
-  static bool _containsIpv6(String value) {
-    final candidates = RegExp(r'[0-9a-fA-F:]{2,}').allMatches(value);
-    for (final match in candidates) {
-      final candidate = match.group(0)!;
-      if (!candidate.contains(':') || candidate.contains(':::')) continue;
-      final compressed = candidate.contains('::');
-      final groups =
-          (compressed ? candidate.replaceFirst('::', ':') : candidate)
-              .split(':')
-              .where((group) => group.isNotEmpty)
-              .toList();
-      if (groups.every(
-            (group) =>
-                group.length <= 4 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(group),
-          ) &&
-          (compressed ? groups.length <= 7 : groups.length == 8)) {
-        return true;
-      }
-    }
-    return false;
-  }
+  static bool containsSensitiveContent(String value) =>
+      TokenRedactor.redact(value) != value;
 }

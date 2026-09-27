@@ -1,10 +1,40 @@
 import 'dart:math';
+import 'dart:convert';
 
 import 'diagnostic_log.dart';
 
 /// Closed vocabulary shared by local logging and full-export validation.
-/// Never pass remote text, identifiers, paths, or exception strings here.
+/// Numeric events remain closed; detailed runtime evidence uses JSON below.
 abstract final class StrmDiagnosticSchema {
+  // Detail records use JSON after `details=`. These are runtime display
+  // copies; headers may be maps of lists and exception stacks may be multiline.
+  // The common sink escapes controls, masks tokens and bounds each entry.
+  static const detailFields = {
+    'sourceUrl',
+    'itemId',
+    'sourceId',
+    'requiredHttpHeaders',
+    'requestUrl',
+    'host',
+    'port',
+    'addresses',
+    'ip',
+    'headers',
+    'fromUrl',
+    'location',
+    'toUrl',
+    'http',
+    'outcome',
+    'elapsedMs',
+    'requestHeaders',
+    'errorType',
+    'message',
+    'stack',
+    'osErrorCode',
+    'osErrorMessage',
+    'failure',
+    'duplicate',
+  };
   static const common = {
     'trace',
     'openAttempt',
@@ -273,6 +303,30 @@ class StrmTrace {
           'event=$event trace=$id ${fields.entries.map((e) => '${e.key}=${e.value ?? 'unavailable'}').join(' ')}'
               .trimRight();
       if (StrmDiagnosticSchema.valid(line)) log.info('strm', line);
+    } catch (_) {
+      /* diagnostic-only */
+    }
+  }
+
+  /// JSON preserves field boundaries and escapes controls without rewriting
+  /// opaque URLs. DiagnosticLog sanitizes only the serialized display copy.
+  void detail(
+    String stage,
+    Map<String, Object?> fields, {
+    int? openAttempt,
+    int? request,
+    int? task,
+  }) {
+    try {
+      log.info(
+        'strm',
+        'event=strm_detail trace=$id '
+            'openAttempt=${openAttempt ?? currentAttempt} '
+            '${request == null ? '' : 'request=$request '}'
+            '${task == null ? '' : 'task=$task '}'
+            'stage=$stage elapsedMs=${clock.elapsedMilliseconds} '
+            'details=${jsonEncode(fields)}',
+      );
     } catch (_) {
       /* diagnostic-only */
     }
