@@ -303,6 +303,15 @@ void main() {
       expect(failures.single, contains('trace=${old.id}'));
       expect(failures.single, contains('reason=cancelled'));
       expect(failures.single, contains('http=unavailable'));
+      final summary = result.content
+          .split('\n')
+          .singleWhere(
+            (line) =>
+                line.contains('scope=playback') &&
+                line.contains('trace=${old.id}'),
+          );
+      expect(summary, contains('cancellations=1'));
+      expect(summary, contains('failures=0'));
     },
   );
 

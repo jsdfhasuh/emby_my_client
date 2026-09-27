@@ -296,7 +296,7 @@ class StrmTrace {
       'requestMs': _inputTotals['requestMs'],
       'cancellations': _inputTotals['cancellations'],
       'duplicates': _inputTotals['duplicates'],
-      'failures': _failures,
+      'failures': _inputTotals['failures'],
     });
   }
 }
