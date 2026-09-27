@@ -3,11 +3,15 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'playback_resource_request.dart';
+import 'source_input_failure.dart';
+import 'strm_direct_play_policy.dart';
+export 'source_input_failure.dart';
 
 /// Progressive input only. HTTP is never delegated to libmpv/FFmpeg. Each
 /// bounded Range request (including a seek) repeats destination/auth policy.
 class SourceHttpInput {
-  SourceHttpInput(this.request, {required this.embyServer}) {
+  SourceHttpInput(this.request, {required this.embyServer, int? openAttempt})
+    : openAttempt = openAttempt ?? request.trace.currentAttempt {
     _client
       ..autoUncompress = false
       ..connectionTimeout = const Duration(seconds: 10)
@@ -17,6 +21,136 @@ class SourceHttpInput {
 
   final PlaybackResourceRequest request;
   final Uri embyServer;
+  final int openAttempt;
+  final Stopwatch _clock = Stopwatch()..start();
+  String _stage = 'connect';
+  int? _responseStatus;
+  int requestNumber = 0;
+  int nativeReads = 0, httpRequests = 0, redirects = 0, ranges = 0;
+  int networkBytes = 0, deliveredBytes = 0, prefixHits = 0, requestMs = 0;
+  int failures = 0, cancellations = 0, duplicates = 0;
+  int _active = 0, _windowAt = 0, _windowBytes = 0;
+  bool _summaryWritten = false, _firstRead = false, _nativeMeasured = false;
+  final Set<String> _stagesWritten = {};
+  final Map<String, SourceInputFailure> _failureKinds = {};
+  SourceInputFailure? lastFailure;
+
+  void _event(String event, Map<String, Object?> fields) =>
+      request.trace.emit(event, {
+        'openAttempt': openAttempt,
+        'request': requestNumber,
+        'stale': request.trace.finished || !request.sessionActive,
+        ...fields,
+      });
+  void _stageEvent(String stage, Map<String, Object?> fields) {
+    // At most one successful event per stage per input, not one per Range.
+    if (_stagesWritten.add(
+      '$stage:${fields['crossOrigin']}:${fields['credentialsStripped']}',
+    )) {
+      _event('strm_http', {'stage': stage, ...fields});
+    }
+  }
+
+  SourceInputException _failure(Object error) {
+    final mapped = SourceInputException.from(
+      error is PlaybackResolveException
+          ? const SourceInputException('destination')
+          : error,
+      stage: _stage,
+      cancelled: _closed && error is! SourceInputException,
+    );
+    final failure = SourceInputException(
+      mapped.code,
+      stage: mapped.safeStage,
+      httpStatus: mapped.safeHttp ?? _responseStatus,
+    );
+    if (failure.reason == 'cancelled') {
+      cancellations++;
+    } else {
+      failures++;
+    }
+    final key = '${failure.safeStage}:${failure.reason}:${failure.safeHttp}';
+    if (_failureKinds.containsKey(key)) {
+      duplicates++;
+      lastFailure = _failureKinds[key];
+    } else {
+      lastFailure = SourceInputFailure(
+        error: failure,
+        trace: request.trace,
+        openAttempt: openAttempt,
+        request: requestNumber,
+        stale: !request.sessionActive,
+      );
+      _failureKinds[key] = lastFailure!;
+      lastFailure!.record();
+    }
+    return SourceInputException(
+      failure.code,
+      stage: failure.safeStage,
+      httpStatus: failure.safeHttp,
+      failure: lastFailure,
+    );
+  }
+
+  void recordNativeRead() {
+    _nativeMeasured = true;
+    nativeReads++;
+  }
+
+  void recordDelivery(int bytes) {
+    deliveredBytes += bytes;
+    if (!_firstRead) {
+      _firstRead = true;
+      _event('strm_native', {'stage': 'native_read', 'outcome': 'first_read'});
+    }
+    _summary(periodic: true);
+  }
+
+  void _summary({bool periodic = false}) {
+    if (!periodic && (!_wasClosed || _active != 0 || _summaryWritten)) return;
+    final now = _clock.elapsedMilliseconds;
+    if (periodic && (now - _windowAt < 5000 || networkBytes == _windowBytes)) {
+      return;
+    }
+    if (!periodic) {
+      _summaryWritten = true;
+      request.trace.addInputTotals({
+        'nativeReads': _nativeMeasured ? nativeReads : null,
+        'httpRequests': httpRequests,
+        'redirects': redirects,
+        'ranges': ranges,
+        'networkBytes': networkBytes,
+        'deliveredBytes': _nativeMeasured ? deliveredBytes : null,
+        'prefixHits': prefixHits,
+        'requestMs': requestMs,
+        'failures': failures,
+        'cancellations': cancellations,
+        'duplicates': duplicates,
+      });
+    }
+    _event('strm_summary', {
+      'scope': 'input',
+      'outcome': periodic ? 'periodic' : 'closed',
+      'nativeReads': _nativeMeasured ? nativeReads : null,
+      'httpRequests': httpRequests,
+      'redirects': redirects,
+      'ranges': ranges,
+      'networkBytes': networkBytes,
+      'deliveredBytes': _nativeMeasured ? deliveredBytes : null,
+      'prefixHits': prefixHits,
+      'requestMs': requestMs,
+      'elapsedMs': now,
+      'rateBytes': now == _windowAt
+          ? null
+          : (networkBytes - _windowBytes) * 1000 ~/ (now - _windowAt),
+      'failures': failures,
+      'cancellations': cancellations,
+      'duplicates': duplicates,
+    });
+    _windowAt = now;
+    _windowBytes = networkBytes;
+  }
+
   final HttpClient _client = HttpClient();
   bool _wasClosed = false;
   bool get _closed => _wasClosed || !request.sessionActive;
@@ -53,19 +187,35 @@ class SourceHttpInput {
             includeHeaders &&
             uri.origin == origin &&
             (authorizeHeaders?.call(raw) ?? true);
+        requestNumber = request.trace.nextRequest();
+        _responseStatus = null;
+        _stage = 'connect';
         final outbound = await _client.getUrl(uri);
         outbound.followRedirects = false;
         if (includeHeaders) {
           headers.forEach((name, value) => outbound.headers.set(name, value));
         }
+        _stage = 'range_response';
+        httpRequests++;
         final response = await outbound.close();
+        _responseStatus = response.statusCode;
         if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
           final location = response.headers.value(HttpHeaders.locationHeader);
           await response.listen((_) {}).cancel();
           if (location == null || jumps == 5) {
             throw const SourceInputException('redirect_limit');
           }
+          redirects++;
+          _stage = 'redirect';
           final next = resolveRawLocation(raw, location);
+          final cross = Uri.parse(next).origin != uri.origin;
+          _stageEvent('redirect', {
+            'outcome': 'succeeded',
+            'http': response.statusCode,
+            'redirects': redirects,
+            'crossOrigin': cross,
+            'credentialsStripped': cross,
+          });
           if (uri.scheme == 'https' && Uri.parse(next).scheme != 'https') {
             throw const SourceInputException('tls_downgrade');
           }
@@ -75,13 +225,26 @@ class SourceHttpInput {
         if (response.statusCode != 200 ||
             response.contentLength > 10 * 1024 * 1024) {
           await response.listen((_) {}).cancel();
-          throw const SourceInputException('subtitle_response');
+          throw SourceInputException(
+            response.statusCode == 401 || response.statusCode == 403
+                ? 'source_denied'
+                : response.contentLength > 10 * 1024 * 1024
+                ? 'subtitle_budget'
+                : 'unknown',
+            stage: 'subtitle_download',
+            httpStatus: response.statusCode,
+          );
         }
+        _stage = 'body_read';
         final bytes = BytesBuilder(copy: false);
         await for (final chunk in response) {
           if (_closed || bytes.length + chunk.length > 10 * 1024 * 1024) {
-            throw const SourceInputException('subtitle_limit');
+            throw SourceInputException(
+              _closed ? 'cancelled' : 'subtitle_budget',
+              stage: 'subtitle_download',
+            );
           }
+          networkBytes += chunk.length;
           bytes.add(chunk);
         }
         return bytes.takeBytes();
@@ -89,6 +252,8 @@ class SourceHttpInput {
       throw const SourceInputException('redirect_limit');
     }
 
+    _active++;
+    final watch = Stopwatch()..start();
     try {
       return await fetch().timeout(
         const Duration(seconds: 15),
@@ -97,19 +262,40 @@ class SourceHttpInput {
           throw const SourceInputException('subtitle_timeout');
         },
       );
-    } catch (_) {
-      throw const SourceInputException('subtitle_download');
+    } catch (error) {
+      throw _failure(error);
     } finally {
+      requestMs += watch.elapsedMilliseconds;
+      _active--;
       close();
     }
   }
 
   Future<void> prepare() async {
-    _prefix = await _range(0, 262144);
-    format = progressiveFormat(_prefix!);
-    if (format == null) {
+    _event('strm_input', {
+      'outcome': 'started',
+      'headerCount': request.headers.length,
+    });
+    try {
+      _prefix = await _range(0, 262144);
+      format = progressiveFormat(_prefix!);
+      if (format == null) {
+        throw const SourceInputException('unsupported_container');
+      }
+      _event('strm_input', {
+        'outcome': 'succeeded',
+        'container': format,
+        'lengthKnown': _size != null,
+      });
+    } catch (error) {
+      final failure = error is SourceInputException && error.failure != null
+          ? error
+          : _failure(error);
+      _event('strm_input', {
+        'outcome': failure.reason == 'cancelled' ? 'cancelled' : 'failed',
+      });
       close();
-      throw const SourceInputException('unsupported_container');
+      throw failure;
     }
   }
 
@@ -120,6 +306,7 @@ class SourceHttpInput {
     }
     final prefix = _prefix;
     if (prefix != null && offset < prefix.length) {
+      prefixHits++;
       final end = (offset + count).clamp(0, prefix.length);
       return Uint8List.sublistView(prefix, offset, end);
     }
@@ -127,19 +314,22 @@ class SourceHttpInput {
   }
 
   Future<Uint8List> _range(int offset, int count) async {
+    _active++;
+    final clock = Stopwatch()..start();
     try {
       return await _fetch(offset, count).timeout(
         const Duration(seconds: 25),
         onTimeout: () {
           close();
-          throw const SourceInputException('timeout');
+          throw SourceInputException('timeout', stage: _stage);
         },
       );
-    } on SourceInputException {
-      rethrow;
-    } catch (_) {
-      // Native/UI/diagnostics must never receive a signed URL from io errors.
-      throw const SourceInputException('transport');
+    } catch (error) {
+      throw _failure(error);
+    } finally {
+      requestMs += clock.elapsedMilliseconds;
+      _active--;
+      _summary(periodic: !_wasClosed);
     }
   }
 
@@ -154,6 +344,9 @@ class SourceHttpInput {
       if (!visited.add(raw)) throw const SourceInputException('redirect_loop');
       final uri = OpaqueHttpUri(raw);
       credentialsAllowed = credentialsAllowed && uri.origin == originalOrigin;
+      requestNumber = request.trace.nextRequest();
+      _responseStatus = null;
+      _stage = 'connect';
       final outbound = await _client.getUrl(uri);
       outbound.followRedirects = false;
       outbound.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
@@ -169,7 +362,10 @@ class SourceHttpInput {
           (name, value) => outbound.headers.set(name, value),
         );
       }
+      _stage = 'range_response';
+      httpRequests++;
       final response = await outbound.close();
+      _responseStatus = response.statusCode;
       if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
         final location = response.headers.value(HttpHeaders.locationHeader);
         // Cancel, don't drain an unbounded redirect body.
@@ -177,7 +373,17 @@ class SourceHttpInput {
         if (location == null || redirects == 5) {
           throw const SourceInputException('redirect_limit');
         }
+        this.redirects++;
+        _stage = 'redirect';
         final next = resolveRawLocation(raw, location);
+        final cross = Uri.parse(next).origin != uri.origin;
+        _stageEvent('redirect', {
+          'outcome': 'succeeded',
+          'http': response.statusCode,
+          'redirects': this.redirects,
+          'crossOrigin': cross,
+          'credentialsStripped': cross,
+        });
         if (uri.scheme == 'https' && Uri.parse(next).scheme != 'https') {
           throw const SourceInputException('tls_downgrade');
         }
@@ -198,6 +404,8 @@ class SourceHttpInput {
           response.statusCode == 401 || response.statusCode == 403
               ? 'source_denied'
               : 'range_unsupported',
+          stage: 'range_response',
+          httpStatus: response.statusCode,
         );
       }
       final start = int.parse(range[1]!);
@@ -209,7 +417,10 @@ class SourceHttpInput {
           total <= end ||
           (_size != null && _size != total)) {
         await response.listen((_) {}).cancel();
-        throw const SourceInputException('source_changed');
+        throw SourceInputException(
+          'source_changed',
+          httpStatus: response.statusCode,
+        );
       }
       final etag = response.headers.value(HttpHeaders.etagHeader);
       final validator = etag != null && !etag.startsWith('W/')
@@ -217,20 +428,36 @@ class SourceHttpInput {
           : response.headers.value(HttpHeaders.lastModifiedHeader);
       if (_validator != null && validator != _validator) {
         await response.listen((_) {}).cancel();
-        throw const SourceInputException('source_changed');
+        throw SourceInputException(
+          'source_changed',
+          httpStatus: response.statusCode,
+        );
       }
       _validator ??= validator;
       _size = total;
+      _stage = 'body_read';
       final bytes = BytesBuilder(copy: false);
       await for (final chunk in response) {
         if (_closed || bytes.length + chunk.length > end - start + 1) {
-          throw const SourceInputException('body_limit');
+          throw SourceInputException(_closed ? 'cancelled' : 'body_limit');
         }
+        networkBytes += chunk.length;
         bytes.add(chunk);
       }
       if (bytes.length != end - start + 1) {
-        throw const SourceInputException('truncated');
+        throw SourceInputException(
+          'truncated',
+          stage: 'body_read',
+          httpStatus: response.statusCode,
+        );
       }
+      ranges++;
+      _stageEvent('range_response', {
+        'outcome': 'succeeded',
+        'http': response.statusCode,
+        'rangeValid': true,
+        'lengthKnown': true,
+      });
       return bytes.takeBytes();
     }
     throw const SourceInputException('redirect_limit');
@@ -244,9 +471,28 @@ class SourceHttpInput {
     if (_closed || proxyHost != null) {
       throw const SourceInputException('cancelled');
     }
-    final addresses = await InternetAddress.lookup(uri.host);
+    _stage = 'dns';
+    late List<InternetAddress> addresses;
+    try {
+      addresses = await InternetAddress.lookup(uri.host);
+    } catch (error) {
+      throw SourceInputException.from(error, stage: 'dns', cancelled: _closed);
+    }
+    _stageEvent('dns', {
+      'outcome': 'succeeded',
+      'candidates': addresses.length,
+      'family': addresses.map((a) => a.type).toSet().length > 1
+          ? 'mixed'
+          : addresses.isNotEmpty &&
+                addresses.first.type == InternetAddressType.IPv6
+          ? 'ipv6'
+          : 'ipv4',
+    });
     if (_closed || addresses.isEmpty) {
-      throw const SourceInputException('destination');
+      throw SourceInputException(
+        _closed ? 'cancelled' : 'dns_failed',
+        stage: 'dns',
+      );
     }
     // Validate resolved addresses too: DNS must not bypass the literal checks.
     for (final address in addresses) {
@@ -258,17 +504,21 @@ class SourceHttpInput {
         embyServer: embyServer,
       );
     }
+    _stage = 'connect';
     final task = await Socket.startConnect(addresses.first, uri.port);
     Socket? active;
     var cancelled = false;
     final future = task.socket.then<Socket>((socket) async {
+      _stageEvent('connect', {'outcome': 'succeeded'});
       active = socket;
       if (_closed || cancelled) {
         socket.destroy();
         throw const SourceInputException('cancelled');
       }
       if (uri.scheme == 'https') {
+        _stage = 'tls';
         final secured = await SecureSocket.secure(socket, host: uri.host);
+        _stageEvent('tls', {'outcome': 'succeeded'});
         active = secured;
         if (_closed || cancelled) {
           secured.destroy();
@@ -289,6 +539,7 @@ class SourceHttpInput {
     _wasClosed = true;
     _prefix = null;
     _client.close(force: true);
+    _summary();
   }
 
   /// Restrict the demuxer too: playlists/concat can otherwise open subresources
@@ -311,13 +562,6 @@ class SourceHttpInput {
     }
     return null;
   }
-}
-
-class SourceInputException implements Exception {
-  const SourceInputException(this.code);
-  final String code;
-  @override
-  String toString() => 'SourceInputException($code)';
 }
 
 /// HttpClient uses path/query for the wire request. Keep the opaque spelling

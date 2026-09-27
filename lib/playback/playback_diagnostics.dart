@@ -1,3 +1,5 @@
+import '../core/strm_diagnostics.dart';
+import 'source_input_failure.dart';
 import 'dart:async';
 
 import '../core/diagnostic_log.dart';
@@ -104,12 +106,15 @@ typedef PlaybackDiagnosticClock = DateTime Function();
 class PlaybackDiagnostics {
   PlaybackDiagnostics({
     PlaybackDiagnosticWriter? writer,
+    this.trace,
     this.seekFlushInterval = const Duration(milliseconds: 250),
     this.timeoutRateLimit = const Duration(seconds: 2),
     PlaybackDiagnosticClock? clock,
   }) : _writer = writer ?? _writeToDiagnosticLog,
        _clock = clock ?? DateTime.now;
 
+  final StrmTrace? trace;
+  final Map<int, int> _subtitleAttempts = {};
   final PlaybackDiagnosticWriter _writer;
   final Duration seekFlushInterval;
   final Duration timeoutRateLimit;
@@ -399,6 +404,10 @@ class PlaybackDiagnostics {
     required int? streamIndex,
     required int generation,
   }) {
+    if (_subtitleAttempts.length > 64) {
+      _subtitleAttempts.remove(_subtitleAttempts.keys.first);
+    }
+    _subtitleAttempts[generation] = trace?.currentAttempt ?? 0;
     _emit(PlaybackDiagnosticEvent.subtitleApplyRequested, [
       'selectionSource=$selectionSource',
       'subtitleKind=$subtitleKind',
@@ -432,6 +441,15 @@ class PlaybackDiagnostics {
     required int generation,
     required Object error,
   }) {
+    if (error is SourceInputException && trace != null) {
+      SourceInputFailure(
+        error: error,
+        trace: trace!,
+        openAttempt: _subtitleAttempts[generation] ?? 0,
+        request: 0,
+        stale: false,
+      ).record();
+    }
     _emit(
       PlaybackDiagnosticEvent.subtitleApplyFailed,
       [
@@ -530,6 +548,25 @@ class PlaybackDiagnostics {
     List<String> fields, {
     PlaybackDiagnosticLevel level = PlaybackDiagnosticLevel.info,
   }) {
+    if (event.code.startsWith('playback_subtitle_')) {
+      final generationField = fields
+          .where((f) => f.startsWith('generation='))
+          .firstOrNull;
+      final generation = int.tryParse(generationField?.split('=').last ?? '');
+      trace?.emit('strm_subtitle', {
+        'stage': 'subtitle_apply',
+        'task': generation,
+        'openAttempt': _subtitleAttempts[generation],
+        'outcome': switch (event) {
+          PlaybackDiagnosticEvent.subtitleApplyRequested => 'queued',
+          PlaybackDiagnosticEvent.subtitleApplied ||
+          PlaybackDiagnosticEvent.subtitleDisabled => 'confirmed',
+          PlaybackDiagnosticEvent.subtitleApplyCancelled => 'cancelled',
+          PlaybackDiagnosticEvent.subtitleApplySkippedStale => 'stale',
+          _ => 'failed',
+        },
+      });
+    }
     final suffix = fields.isEmpty ? '' : ' ${fields.join(' ')}';
     _writer(level, 'playback', 'event=${event.code}$suffix');
   }

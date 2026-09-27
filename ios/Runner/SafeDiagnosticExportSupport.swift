@@ -621,6 +621,7 @@ enum FullDiagnosticExportValidator {
       let digest = header["sha256"],
       isValidDigest(digest),
       digest == sha256Hex(Data(body.utf8)),
+      !body.components(separatedBy: "\n").contains(where: { StrmDiagnosticValidator.claims($0) && !StrmDiagnosticValidator.valid($0) }),
       !SafeDiagnosticExportValidator.containsSensitiveContent(body)
     else {
       throw FullDiagnosticExportValidationError.unsafe
@@ -915,5 +916,50 @@ final class SafeDiagnosticExportPresentationCoordinator {
     completionGate.complete { [onFinish] in
       onFinish(outcome)
     }
+  }
+}
+
+// Closed schema mirror: test/strm_diagnostics_test.dart checks Dart parity.
+enum StrmDiagnosticValidator {
+  static let schemaJSON = #"{"common":["trace","openAttempt","request","task","cycle","elapsedMs","stale","cancelled","outcome"],"numbers":["openAttempt","request","task","cycle","elapsedMs","attempt","headerCount","redirects","candidates","failure","duplicates","nativeReads","httpRequests","ranges","networkBytes","deliveredBytes","prefixHits","requestMs","rateBytes","failures","cancellations","generation"],"booleans":["stale","cancelled","fixedSource","conflict","strict","lengthKnown","crossOrigin","credentialsStripped","rangeValid","recoverable","recoveryExecuted","continuingCycle","attached"],"events":{"strm_entry":["entry"],"strm_resolve":["classification","fixedSource","conflict","group","attempt","strict","http","route","inputMode"],"strm_input":["container","lengthKnown","headerCount"],"strm_http":["stage","http","crossOrigin","credentialsStripped","redirects","family","candidates","rangeValid","lengthKnown"],"strm_native":["stage"],"strm_failure":["stage","reason","http","failure","recoverable","recoveryExecuted","duplicates"],"strm_recovery":["continuingCycle","recoveryExecuted"],"strm_reporting":["operation","http"],"strm_subtitle":["stage","attached"],"strm_summary":["scope","nativeReads","httpRequests","redirects","ranges","networkBytes","deliveredBytes","prefixHits","requestMs","rateBytes","failures","cancellations","duplicates"],"playback_subtitle_apply_skipped_stale":["generation"]},"enums":{"outcome":["started","succeeded","failed","cancelled","stale","queued","confirmed","late","released","first_read","periodic","closed"],"entry":["fullscreen","inline","unavailable"],"classification":["strm","regular","unknown"],"group":["strict","regular","detail"],"route":["source_direct","server","offline"],"inputMode":["stream_cb","player"],"container":["mov","matroska","avi","mpegts","unknown"],"family":["ipv4","ipv6","mixed"],"scope":["input","playback"],"operation":["start","stopped","progress"],"stage":["metadata","classification","dns","connect","tls","redirect","range_response","body_read","native_register","native_open","native_read","subtitle_download","subtitle_apply","reporting"],"reason":["unknown","source_denied","range_unsupported","source_changed","truncated","redirect_limit","redirect_loop","tls_downgrade","tls_certificate","dns_failed","connect_failed","timeout","cancelled","unsupported_container","native_registration","native_policy_option","subtitle_format","subtitle_budget","subtitle_unconfirmed","destination","invalid_range","body_limit","redirect_location","identity_conflict","source_missing","unresolved","server_error"]}}"#
+  private static let schema = (try? JSONSerialization.jsonObject(with: Data(schemaJSON.utf8))) as? [String: Any] ?? [:]
+  static func payload(_ line: String) -> String {
+    line.replacingOccurrences(of: #"^\d{4}-\d\d-\d\dT[0-9:.]+Z? \[(?:INFO|WARN|ERROR|DEBUG)\] \[[a-z_]+\] "#, with: "", options: .regularExpression)
+  }
+  static func claims(_ line: String) -> Bool {
+    let value = payload(line)
+    return value.hasPrefix("event=strm_") || value.hasPrefix("event=playback_subtitle_apply_skipped_stale")
+  }
+  static func valid(_ line: String) -> Bool {
+    guard line.utf16.count <= 2048, !line.contains("\r"), !line.contains("\n"), !line.contains("\t") else { return false }
+    let parts = payload(line).components(separatedBy: " ")
+    guard let first = parts.first, first.hasPrefix("event="),
+      let events = schema["events"] as? [String: [String]],
+      let fields = events[String(first.dropFirst(6))],
+      let common = schema["common"] as? [String],
+      let numbers = schema["numbers"] as? [String],
+      let booleans = schema["booleans"] as? [String],
+      let enums = schema["enums"] as? [String: [String]] else { return false }
+    var seen = Set<String>()
+    for part in parts.dropFirst() {
+      let pair = part.components(separatedBy: "=")
+      guard pair.count == 2 else { return false }
+      let key = pair[0], value = pair[1]
+      guard seen.insert(key).inserted, fields.contains(key) || common.contains(key) else { return false }
+      if key == "trace" {
+        guard value.range(of: #"^[0-9a-f]{16}$"#, options: .regularExpression) != nil else { return false }
+      } else if key == "http" {
+        if value != "unavailable" {
+          guard value.range(of: #"^[1-5][0-9]{2}$"#, options: .regularExpression) != nil else { return false }
+        }
+      } else if numbers.contains(key) {
+        guard value == "unavailable" || value.range(of: #"^(0|[1-9][0-9]{0,14})$"#, options: .regularExpression) != nil else { return false }
+      } else if booleans.contains(key) {
+        guard value == "true" || value == "false" else { return false }
+      } else {
+        guard enums[key]?.contains(value) == true else { return false }
+      }
+    }
+    return first == "event=playback_subtitle_apply_skipped_stale" ? seen.contains("generation") : seen.contains("trace")
   }
 }

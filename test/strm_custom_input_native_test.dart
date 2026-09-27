@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'package:emby_my_client/playback/source_http_input.dart';
+import 'package:emby_my_client/core/strm_diagnostics.dart';
+import 'strm_diagnostics_test.dart' show fileLog, report;
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
@@ -16,9 +20,73 @@ import 'support/progressive_fixture.dart';
 
 void main() {
   test(
+    'actual bridge retains truncated HTTP failure before native error',
+    () async {
+      MediaKit.ensureInitialized();
+      final logs = await fileLog();
+      final origin = await ProgressiveOrigin.start();
+      addTearDown(origin.close);
+      var count = 0;
+      origin.intercept = (request) async {
+        if (++count == 1) return null;
+        final start = int.parse(
+          RegExp(r'bytes=(\d+)-').firstMatch(request.headers['range']!)![1]!,
+        );
+        return (
+          status: 206,
+          headers: {
+            'Content-Range':
+                'bytes $start-${start + 99}/${origin.bytes.length}',
+            'ETag': '"fixture-v1"',
+          },
+          body: origin.bytes.sublist(start, start + 10),
+        );
+      };
+      final resource = fixtureRequest(
+        '${origin.origin}/private?sig=private-secret',
+        trace: StrmTrace(log: logs.log),
+      );
+      final player = Player(
+        configuration: const PlayerConfiguration(vo: 'null'),
+      );
+      final native = player.platform as NativePlayer;
+      await native.setProperty('ao', 'null');
+      final failure = Completer<SourceInputFailure>();
+      final adapter = await MpvSourceInput.create(
+        native,
+        onReadFailure: (value) {
+          if (!failure.isCompleted) failure.complete(value);
+        },
+      );
+      addTearDown(() async {
+        adapter.releaseAll();
+        await player.dispose();
+        adapter.afterNativeDisposal();
+      });
+      final prepared = await adapter.prepare(resource);
+      await native.setProperty('demuxer', 'lavf');
+      await native.setProperty('demuxer-lavf-format', prepared.format);
+      await native.setProperty('demuxer-lavf-o', 'protocol_whitelist=none');
+      Media(prepared.uri.toString(), httpHeaders: const {});
+      await native.command(['loadfile', prepared.uri.toString(), 'replace']);
+      final actual = await failure.future.timeout(const Duration(seconds: 15));
+      expect(actual.error.reason, 'truncated');
+      expect(actual.error.safeHttp, 206);
+      expect(actual.error.safeStage, 'body_read');
+      expect(actual.request, greaterThan(1));
+      expect(actual.openAttempt, 1);
+      expect(actual.trace, same(resource.trace));
+      expect(actual.error.allowsSeekRecovery, true);
+      await report(logs.log, 'native-truncated');
+    },
+  );
+
+  test(
     'Bootstrap STRM resolves strict metadata and actually plays/resumes without Emby video',
     () async {
       MediaKit.ensureInitialized();
+      final logFixture = await fileLog();
+      final trace = StrmTrace(log: logFixture.log);
       final source = await ProgressiveOrigin.start();
       addTearDown(source.close);
       final requests = <RequestOptions>[];
@@ -90,6 +158,8 @@ void main() {
       final engine = MediaKitPlaybackEngine(player);
       final controller = PlaybackSessionBootstrap.createOnlineController(
         api: api,
+        trace: trace,
+        entry: 'fullscreen',
         item: item,
         engine: engine,
         session: PlaybackItemSession.forTest('native-source'),
@@ -177,6 +247,34 @@ void main() {
         requests.where((r) => r.path == '/Sessions/Playing/Stopped'),
         hasLength(1),
       );
+      final exported = await report(logFixture.log, 'native-bootstrap');
+      expect(
+        exported.content,
+        contains('route=source_direct inputMode=stream_cb'),
+      );
+      expect(
+        exported.content,
+        contains('stage=native_read outcome=first_read'),
+      );
+      expect(exported.content, contains('openAttempt=2'));
+      expect(exported.content.split('scope=playback').length - 1, 1);
+      expect(
+        exported.content.split('operation=start outcome=started').length - 1,
+        1,
+      );
+      expect(
+        exported.content.split('operation=stopped outcome=succeeded').length -
+            1,
+        1,
+      );
+      expect(
+        RegExp(
+          r'trace=([0-9a-f]{16})',
+        ).allMatches(exported.content).map((m) => m[1]).toSet(),
+        {trace.id},
+      );
+      expect(exported.content, isNot(contains('source-fixture')));
+      expect(exported.content, isNot(contains('sig=')));
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );

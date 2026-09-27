@@ -1,3 +1,4 @@
+import '../core/strm_diagnostics.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,7 +10,8 @@ import 'source_http_input.dart';
 /// Owns downloads/files only. Selection and native application belong to the
 /// controller queue. Attached leases live until the real engine is destroyed.
 class ExternalSubtitleLoader {
-  ExternalSubtitleLoader(this.api);
+  ExternalSubtitleLoader(this.api, {this.trace});
+  final StrmTrace? trace;
   final EmbyApi api;
   final Object _task = Object();
   final Set<SubtitleFileLease> _leases = {};
@@ -33,6 +35,16 @@ class ExternalSubtitleLoader {
   }) async {
     cancel();
     final revision = _revision;
+    final attempt = trace?.currentAttempt ?? 0;
+    final task = trace?.nextTask();
+    void event(String outcome) => trace?.emit('strm_subtitle', {
+      'openAttempt': attempt,
+      'task': task,
+      'stage': 'subtitle_download',
+      'outcome': outcome,
+      'stale': revision != _revision,
+    });
+    event('started');
     if (_closed || _reserved + _fileLimit > _sessionLimit) {
       throw const SourceInputException('subtitle_budget');
     }
@@ -85,6 +97,8 @@ class ExternalSubtitleLoader {
           : const <String, String>{};
       final resource = PlaybackResourceRequest(
         rawUrl: absolute,
+        trace: trace,
+        diagnosticTask: task,
         headers: const {},
         identity: PlaybackResourceIdentity(
           scope: ServerScope.fromSession(api.session),
@@ -98,7 +112,11 @@ class ExternalSubtitleLoader {
         isSessionActive: () =>
             api.isSessionActive && !_closed && revision == _revision,
       );
-      final input = _pending = SourceHttpInput(resource, embyServer: server);
+      final input = _pending = SourceHttpInput(
+        resource,
+        embyServer: server,
+        openAttempt: attempt,
+      );
       final bytes = await input.downloadText(
         headers: headers,
         authorizeHeaders: authenticated ? owns : (_) => false,
@@ -133,10 +151,29 @@ class ExternalSubtitleLoader {
       lease = SubtitleFileLease(file, () {
         _reserved -= bytes.length;
         _leases.remove(lease);
+        event('released');
       });
       _leases.add(lease);
       directory = null;
+      event('succeeded');
       return lease;
+    } catch (error) {
+      final failure = SourceInputException.from(
+        error,
+        stage: 'subtitle_download',
+        cancelled: _closed || revision != _revision,
+      );
+      if (trace != null) {
+        SourceInputFailure(
+          error: failure,
+          trace: trace!,
+          openAttempt: attempt,
+          request: 0,
+          stale: revision != _revision,
+        ).record();
+      }
+      event(failure.reason == 'cancelled' ? 'cancelled' : 'failed');
+      rethrow;
     } finally {
       _reserved -= reservation;
       if (directory != null) await _deleteOwnedFiles(directory);

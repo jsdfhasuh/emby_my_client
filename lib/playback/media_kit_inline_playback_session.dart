@@ -88,6 +88,7 @@ class MediaKitInlinePlaybackSession extends ChangeNotifier
       final videoController = VideoController(player);
       late final MediaKitInlinePlaybackSession result;
       final controller = PlaybackSessionBootstrap.createOnlineController(
+        entry: 'inline',
         api: api,
         item: item,
         engine: MediaKitPlaybackEngine(

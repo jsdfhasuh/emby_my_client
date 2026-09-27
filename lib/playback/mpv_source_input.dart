@@ -1,3 +1,4 @@
+import '../core/strm_diagnostics.dart';
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
@@ -19,7 +20,7 @@ class MpvSourceInput {
 
   static Future<MpvSourceInput> create(
     NativePlayer player, {
-    void Function()? onReadFailure,
+    void Function(SourceInputFailure)? onReadFailure,
   }) async {
     final library = Platform.isIOS
         ? DynamicLibrary.process()
@@ -51,10 +52,12 @@ class MpvSourceInput {
 
   final DynamicLibrary _library;
   final Pointer<Void> _context;
-  final void Function()? _onReadFailure;
+  final void Function(SourceInputFailure)? _onReadFailure;
   late final Timer _timer;
   final Map<int, SourceHttpInput> _inputs = {};
   int _nextId = 0;
+  StrmTrace? _lastTrace;
+  int _lastAttempt = 0;
   bool _destroyed = false;
   late final _add = _library
       .lookupFunction<
@@ -83,12 +86,20 @@ class MpvSourceInput {
       >('strm_destroy');
 
   Future<({Uri uri, String format})> prepare(
-    PlaybackResourceRequest request,
-  ) async {
+    PlaybackResourceRequest request, [
+    int? attempt,
+  ]) async {
+    final openAttempt = attempt ?? request.trace.nextOpen();
     if (_destroyed) throw const SourceInputException('cancelled');
     releaseAll();
+    _lastTrace = request.trace;
+    _lastAttempt = openAttempt;
     final id = ++_nextId;
-    final input = SourceHttpInput(request, embyServer: request.embyServer);
+    final input = SourceHttpInput(
+      request,
+      embyServer: request.embyServer,
+      openAttempt: openAttempt,
+    );
     _inputs[id] = input;
     try {
       await input.prepare();
@@ -98,6 +109,11 @@ class MpvSourceInput {
       if (_add(_context, id, input.size) != 1) {
         throw const SourceInputException('native_registration');
       }
+      request.trace.emit('strm_native', {
+        'openAttempt': openAttempt,
+        'stage': 'native_register',
+        'outcome': 'succeeded',
+      });
       return (uri: Uri.parse('embyinput://$id'), format: input.format!);
     } catch (_) {
       _inputs.remove(id)?.close();
@@ -122,18 +138,34 @@ class MpvSourceInput {
     final input = _inputs[id];
     try {
       if (input == null) throw const SourceInputException('cancelled');
+      input.recordNativeRead();
       final bytes = await input.read(offset, count);
-      if (_destroyed) return;
+      if (_destroyed || !identical(_inputs[id], input)) return;
       final copy = calloc<Uint8>(bytes.length);
       try {
         copy.asTypedList(bytes.length).setAll(0, bytes);
         _complete(_context, id, sequence, copy, bytes.length);
+        input.recordDelivery(bytes.length);
       } finally {
         calloc.free(copy);
       }
-    } catch (_) {
-      if (!_destroyed && input != null && identical(_inputs[id], input)) {
-        _onReadFailure?.call();
+    } catch (error) {
+      if (input != null) {
+        final stale =
+            _destroyed ||
+            !identical(_inputs[id], input) ||
+            !input.request.sessionActive;
+        final failure =
+            (error is SourceInputException ? error.failure : null) ??
+            SourceInputFailure(
+              error: SourceInputException.from(error, stage: 'native_read'),
+              trace: input.request.trace,
+              openAttempt: input.openAttempt,
+              request: input.requestNumber,
+              stale: stale,
+            );
+        failure.record(staleOverride: stale);
+        if (!stale) _onReadFailure?.call(failure);
       }
       if (!_destroyed) _complete(_context, id, sequence, nullptr, -1);
     }
@@ -144,6 +176,11 @@ class MpvSourceInput {
     for (final entry in _inputs.entries) {
       _release(_context, entry.key);
       entry.value.close();
+      entry.value.request.trace.emit('strm_native', {
+        'openAttempt': entry.value.openAttempt,
+        'stage': 'native_read',
+        'outcome': 'cancelled',
+      });
     }
     _inputs.clear();
   }
@@ -154,5 +191,10 @@ class MpvSourceInput {
     _destroyed = true;
     _timer.cancel();
     _destroy(_context);
+    _lastTrace?.emit('strm_native', {
+      'openAttempt': _lastAttempt,
+      'stage': 'native_register',
+      'outcome': 'released',
+    });
   }
 }

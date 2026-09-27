@@ -1,3 +1,4 @@
+import 'package:emby_my_client/core/strm_diagnostics.dart';
 import 'dart:async';
 
 import 'package:emby_my_client/core/server_scope.dart';
@@ -10,8 +11,10 @@ import 'support/progressive_fixture.dart';
 PlaybackResourceRequest fixtureRequest(
   String raw, {
   Map<String, String> headers = const {},
+  StrmTrace? trace,
 }) => PlaybackResourceRequest(
   rawUrl: raw,
+  trace: trace,
   headers: headers,
   embyServer: Uri.parse('https://emby.invalid'),
   identity: PlaybackResourceIdentity(

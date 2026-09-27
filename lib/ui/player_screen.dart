@@ -412,6 +412,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
     } else {
       controller = PlaybackSessionBootstrap.createOnlineController(
+        entry: 'fullscreen',
         api: widget.api,
         item: _currentItem,
         engine: MediaKitPlaybackEngine(_player),

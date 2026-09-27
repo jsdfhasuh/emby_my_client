@@ -1,3 +1,5 @@
+import '../core/strm_diagnostics.dart';
+import 'source_input_failure.dart';
 import 'dart:async';
 
 import '../core/diagnostic_log.dart';
@@ -17,7 +19,8 @@ abstract interface class PlaybackReporter {
 }
 
 class PlaybackSessionReporter implements PlaybackReporter {
-  PlaybackSessionReporter({required this.api, required this.item});
+  PlaybackSessionReporter({required this.api, required this.item, this.trace});
+  final StrmTrace? trace;
 
   final EmbyApi api;
   final EmbyItem item;
@@ -30,7 +33,11 @@ class PlaybackSessionReporter implements PlaybackReporter {
 
   @override
   void activate(PlaybackPlan plan) {
-    _cycle = _PlaybackReportingCycle(plan, _retirement);
+    _cycle = _PlaybackReportingCycle(
+      plan,
+      _retirement,
+      trace ?? plan.sourceRequest?.trace,
+    );
   }
 
   @override
@@ -54,11 +61,15 @@ class PlaybackSessionReporter implements PlaybackReporter {
       try {
         if (cycle.stopped) return;
         cycle.startAttempted = true;
-        await api.reportPlaybackStart(
-          item,
-          plan,
-          position: position,
-          isPaused: isPaused,
+        await _report(
+          cycle,
+          'start',
+          () => api.reportPlaybackStart(
+            item,
+            plan,
+            position: position,
+            isPaused: isPaused,
+          ),
         );
         cycle.started = true;
       } finally {
@@ -120,7 +131,11 @@ class PlaybackSessionReporter implements PlaybackReporter {
     try {
       if (cycle.startAttempted) {
         try {
-          await api.reportPlaybackStopped(item, plan, position: position);
+          await _report(
+            cycle,
+            'stopped',
+            () => api.reportPlaybackStopped(item, plan, position: position),
+          );
         } catch (error) {
           DiagnosticLog.instance.warning(
             'playback',
@@ -131,6 +146,44 @@ class PlaybackSessionReporter implements PlaybackReporter {
       }
     } finally {
       await cleanupOperation;
+    }
+  }
+
+  Future<void> _report(
+    _PlaybackReportingCycle cycle,
+    String operation,
+    Future<void> Function() send,
+  ) async {
+    final attempt = cycle.trace?.currentAttempt;
+    final watch = Stopwatch()..start();
+    void event(String outcome) => cycle.trace?.emit('strm_reporting', {
+      'openAttempt': attempt,
+      'cycle': cycle.number,
+      'operation': operation,
+      'outcome': outcome,
+      'elapsedMs': watch.elapsedMilliseconds,
+      'stale': !identical(_cycle, cycle),
+    });
+    event('started');
+    try {
+      await send();
+      event('succeeded');
+    } catch (error) {
+      event('failed');
+      if (cycle.trace != null) {
+        SourceInputFailure(
+          error: SourceInputException(
+            'server_error',
+            stage: 'reporting',
+            httpStatus: error is EmbyApiException ? error.statusCode : null,
+          ),
+          trace: cycle.trace!,
+          openAttempt: attempt ?? 0,
+          request: 0,
+          stale: !identical(_cycle, cycle),
+        ).record();
+      }
+      rethrow;
     }
   }
 
@@ -168,7 +221,10 @@ class PlaybackSessionReporter implements PlaybackReporter {
 }
 
 class _PlaybackReportingCycle {
-  _PlaybackReportingCycle(this.plan, this.tail);
+  _PlaybackReportingCycle(this.plan, this.tail, this.trace)
+    : number = trace?.nextCycle();
+  final StrmTrace? trace;
+  final int? number;
 
   Future<void> tail;
   Future<void> enqueue(Future<void> Function() operation) {

@@ -1,3 +1,8 @@
+import 'package:emby_my_client/core/strm_diagnostics.dart';
+import 'package:emby_my_client/playback/source_http_input.dart';
+import 'package:emby_my_client/playback/playback_resource_request.dart';
+import 'source_http_input_test.dart' show fixtureRequest;
+import 'strm_diagnostics_test.dart' show fileLog, report;
 import 'dart:async';
 import 'dart:io';
 
@@ -21,6 +26,77 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final reason in [
+    'truncated',
+    'source_denied',
+    'tls_certificate',
+    'cancelled',
+    'unknown',
+  ]) {
+    test(
+      'typed source $reason then late native error preserves recovery policy',
+      () async {
+        final logs = await fileLog();
+        final trace = StrmTrace(log: logs.log);
+        final events = <String>[];
+        final engine = _CacheEngine(events: events);
+        final source = fixtureRequest('https://source.invalid/private');
+        final controller = _controller(
+          engine: engine,
+          storage: _CacheStorage(events),
+          resolver: _Resolver(sourceRequest: source),
+          recoveryPolicy: const PlaybackRecoveryPolicy(
+            seekRecoveryWindow: Duration(minutes: 1),
+            stablePlaybackWindow: Duration(minutes: 1),
+          ),
+        );
+        await controller.start();
+        await controller.seekAbsolute(
+          const Duration(minutes: 5),
+          source: SeekSource.horizontalDrag,
+        );
+        final failure = SourceInputFailure(
+          error: SourceInputException(
+            reason,
+            httpStatus: reason == 'source_denied' ? 403 : null,
+          ),
+          trace: trace,
+          openAttempt: 1,
+          request: 2,
+          stale: false,
+        );
+        failure.record();
+        engine.sourceFailures.add(failure);
+        engine.sourceFailures.add(failure);
+        if (reason != 'cancelled') {
+          engine.errorController.add('source_input_failed');
+          engine.logController.add('partial file');
+        }
+        if (reason == 'truncated') {
+          await _waitUntil(() => engine.openCalls == 2);
+          expect(controller.state.plan!.sourceRequest, same(source));
+          expect(controller.state.plan!.method, PlayMethod.directPlay);
+        } else {
+          expect(engine.openCalls, 1);
+          expect(
+            controller.state.phase,
+            reason == 'cancelled' ? PlaybackPhase.ready : PlaybackPhase.failed,
+          );
+        }
+        await controller.shutdown();
+        await engine.sourceFailures.close();
+        trace.finish();
+        final exported = await report(logs.log, 'controller-$reason');
+        expect(exported.content, contains('reason=$reason'));
+        if (reason == 'truncated') {
+          expect(exported.content, contains('recoveryExecuted=true'));
+        } else {
+          expect(exported.content, isNot(contains('recoveryExecuted=true')));
+        }
+      },
+    );
+  }
+
   test(
     'cache is resolved and applied before open then cleaned after dispose',
     () async {
@@ -1428,7 +1504,22 @@ class _CacheStorage implements PlaybackCacheStorage {
   }
 }
 
-class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
+class _CacheEngine
+    implements
+        PlaybackEngine,
+        PlaybackCacheEngine,
+        SourceFailureEmitter,
+        SourceDirectPlaybackEngine {
+  final sourceFailures = StreamController<SourceInputFailure>.broadcast(
+    sync: true,
+  );
+  @override
+  Stream<SourceInputFailure> get sourceFailureStream => sourceFailures.stream;
+  @override
+  Future<void> openSource(
+    PlaybackResourceRequest request, {
+    required bool play,
+  }) => open(Uri.parse('embyinput://fixture'), headers: const {}, play: play);
   _CacheEngine({
     required this.events,
     this.snapshot,
@@ -1652,7 +1743,8 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
 }
 
 class _Resolver implements PlaybackStreamResolver {
-  const _Resolver();
+  const _Resolver({this.sourceRequest});
+  final PlaybackResourceRequest? sourceRequest;
 
   @override
   bool get canForceTranscode => true;
@@ -1668,6 +1760,7 @@ class _Resolver implements PlaybackStreamResolver {
     bool forceTranscode = false,
   }) async => PlaybackPlan(
     uri: Uri.https('media.test', '/video.mp4'),
+    sourceRequest: sourceRequest,
     mediaSourceId: 'source',
     playSessionId: 'play-session',
     method: forceTranscode ? PlayMethod.transcode : PlayMethod.directPlay,

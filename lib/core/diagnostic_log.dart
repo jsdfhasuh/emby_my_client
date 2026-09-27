@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'sign_in_diagnostics.dart';
+import 'strm_diagnostics.dart';
 
 typedef DiagnosticLogTestSink = void Function(String line);
 typedef DiagnosticSafeEventTestSink =
@@ -60,6 +61,11 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   final int _fileByteLimit;
   final int _retainedFileByteLimit;
 
+  int _queuedBytes = 0;
+  int droppedWrites = 0;
+  int _unreportedDrops = 0;
+  bool writeFailed = false;
+  static const maxQueuedBytes = 256 * 1024;
   File? _file;
   File? _safeFile;
   Future<void> _pendingWrite = Future.value();
@@ -79,7 +85,8 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
       );
       info('app', 'Diagnostic log initialized');
     } catch (error) {
-      debugPrint('[diagnostic] Failed to initialize log: $error');
+      writeFailed = true;
+      debugPrint('[diagnostic] Failed to initialize log');
     }
   }
 
@@ -354,7 +361,11 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   }
 
   void _write(String level, String component, String message) {
-    final clean = redact(message).replaceAll('\r', '');
+    final clean =
+        StrmDiagnosticSchema.claimsStructured(message) &&
+            message.contains(RegExp(r'[\r\n]'))
+        ? '<redacted>'
+        : redact(message).replaceAll('\r', '');
     final timestamp = DateTime.now().toIso8601String();
     final candidate = '$timestamp [$level] [$component] $clean\n';
     final candidateBytes = utf8.encode(candidate).length;
@@ -363,11 +374,24 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
         : '$timestamp [WARN] [diagnostic] '
               'event=diagnostic_entry_dropped reason=oversized '
               'bytes=$candidateBytes\n';
-    debugPrint(line.trimRight());
-    _testSink?.call(line.trimRight());
+    try {
+      _testSink?.call(line.trimRight());
+    } catch (_) {
+      writeFailed = true;
+    }
 
     final file = _file;
     if (file == null) return;
+    final bytes = utf8.encode(line).length;
+    if (_queuedBytes + bytes > maxQueuedBytes) {
+      droppedWrites++;
+      _unreportedDrops++;
+      return;
+    }
+    _queuedBytes += bytes;
+    // STRM events already have a bounded asynchronous file queue; avoid a
+    // second unbounded Flutter console queue on the media input path.
+    if (component != 'strm') debugPrint(line.trimRight());
     _pendingWrite = _pendingWrite.then((_) async {
       try {
         await _recoverLogBackup(file);
@@ -376,7 +400,24 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
           await _trimLogFile(file);
         }
       } catch (error) {
-        debugPrint('[diagnostic] Failed to write log: $error');
+        writeFailed = true;
+        debugPrint('[diagnostic] Failed to write log');
+      } finally {
+        _queuedBytes -= bytes;
+        if (_queuedBytes == 0 && _unreportedDrops > 0) {
+          final count = _unreportedDrops;
+          _unreportedDrops = 0;
+          try {
+            await file.writeAsString(
+              '${DateTime.now().toIso8601String()} [WARN] [diagnostic] event=diagnostic_entries_dropped count=${count.clamp(1, 999999)}\n',
+              mode: FileMode.append,
+              flush: true,
+            );
+            if (await file.length() > _fileByteLimit) await _trimLogFile(file);
+          } catch (_) {
+            writeFailed = true;
+          }
+        }
       }
     });
   }
@@ -474,7 +515,22 @@ class DiagnosticLog implements SafeDiagnosticEventSource {
   }
 
   static String redact(String value) {
-    var result = value;
+    // Reject a whole attempted structured message before splitting controls.
+    if (StrmDiagnosticSchema.claimsStructured(value) &&
+        value.contains(RegExp(r'[\r\n]')) &&
+        !value.endsWith('\n')) {
+      return '<redacted>';
+    }
+    var result = value
+        .split('\n')
+        .map(
+          (line) =>
+              StrmDiagnosticSchema.claimsStructured(line) &&
+                  !StrmDiagnosticSchema.valid(line)
+              ? '<redacted>'
+              : line,
+        )
+        .join('\n');
     result = result.replaceAll(
       RegExp(r'''\b(?:https?|wss?)://[^\s<>"']+''', caseSensitive: false),
       '<redacted-url>',

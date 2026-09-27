@@ -128,12 +128,19 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
       body: FutureBuilder<String>(
         future: _future,
         builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return const Center(child: Text('诊断日志读取失败，请重试'));
+          }
           if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
           final log = snapshot.data!;
           if (log.isEmpty) {
-            return const Center(child: Text('暂无诊断记录'));
+            return Center(
+              child: Text(
+                DiagnosticLog.instance.writeFailed ? '诊断日志写入失败' : '暂无诊断记录',
+              ),
+            );
           }
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
@@ -144,6 +151,9 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
                   '本机完整诊断（仅本机查看）',
                   style: TextStyle(fontWeight: FontWeight.w700),
                 ),
+                if (DiagnosticLog.instance.writeFailed ||
+                    DiagnosticLog.instance.droppedWrites > 0)
+                  const Text('部分诊断记录未能写入，播放不受影响。'),
                 const SizedBox(height: 10),
                 SelectableText(
                   log,

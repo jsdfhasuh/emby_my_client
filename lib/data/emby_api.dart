@@ -1,3 +1,4 @@
+import '../core/strm_diagnostics.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -1001,7 +1002,10 @@ class EmbyApi {
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
     bool knownStrm = false,
+    StrmTrace? trace,
   }) async {
+    trace ??= StrmTrace();
+    final diagnosticTrace = trace;
     final clock = Stopwatch()..start();
     final timer = Timer(
       const Duration(seconds: 30),
@@ -1027,6 +1031,13 @@ class EmbyApi {
     EmbyItem? detail;
     Future<EmbyItem> fresh() async {
       if (detail != null) return detail!;
+      final requestNumber = diagnosticTrace.nextRequest();
+      final watch = Stopwatch()..start();
+      diagnosticTrace.emit('strm_resolve', {
+        'request': requestNumber,
+        'group': 'detail',
+        'outcome': 'started',
+      });
       final response = await _request(
         () => _dio.get<dynamic>(
           '/Users/${session.userId}/Items/${Uri.encodeComponent(item.id)}',
@@ -1039,6 +1050,13 @@ class EmbyApi {
         ),
       );
       check();
+      diagnosticTrace.emit('strm_resolve', {
+        'request': requestNumber,
+        'group': 'detail',
+        'outcome': 'succeeded',
+        'http': response.statusCode,
+        'elapsedMs': watch.elapsedMilliseconds,
+      });
       detail = EmbyItem.fromJson(_map(response.data));
       if (detail!.id != item.id) {
         throw const PlaybackResolveException(
@@ -1063,6 +1081,20 @@ class EmbyApi {
         startTimeTicks: item.userData.playbackPositionTicks,
       );
       for (var attempt = 0; attempt < payloads.length; attempt++) {
+        final requestNumber = diagnosticTrace.nextRequest();
+        final watch = Stopwatch()..start();
+        void event(String outcome, int? status) =>
+            diagnosticTrace.emit('strm_resolve', {
+              'request': requestNumber,
+              'group': 'strict',
+              'attempt': attempt + 1,
+              'strict': true,
+              'fixedSource': selectedId != null,
+              'outcome': outcome,
+              'http': status,
+              'elapsedMs': watch.elapsedMilliseconds,
+            });
+        event('started', null);
         try {
           final response = await _request(
             () => _dio.post<dynamic>(
@@ -1075,9 +1107,11 @@ class EmbyApi {
               ),
             ),
           );
+          event('succeeded', response.statusCode);
           check();
           return strictInfo = PlaybackInfoResult.fromJson(_map(response.data));
         } on EmbyApiException catch (error) {
+          event('failed', error.statusCode);
           check();
           if (attempt == payloads.length - 1 ||
               !error.allowsPlaybackInfoFallback) {
@@ -1134,6 +1168,15 @@ class EmbyApi {
         selectedId = selected.id;
         classification = StrmDirectPlayPolicy.classify(selected);
       }
+      diagnosticTrace.emit('strm_resolve', {
+        'classification': switch (classification) {
+          SourceClassification.confirmedStrm => 'strm',
+          SourceClassification.confirmedRegular => 'regular',
+          _ => 'unknown',
+        },
+        'fixedSource': selectedId != null,
+        'conflict': false,
+      });
       if (classification == SourceClassification.unknown) {
         throw const PlaybackResolveException(
           PlaybackResolveFailure.sourceIdentityUnresolved,
@@ -1150,6 +1193,7 @@ class EmbyApi {
           forceTranscode: forceTranscode,
           cancelToken: cancelToken,
           timeout: remaining(),
+          trace: diagnosticTrace,
         );
         check();
         StrmDirectPlayPolicy.checkError(info.errorCode);
@@ -1189,6 +1233,7 @@ class EmbyApi {
       }
       check();
       final snapshot = SelectedSourceSnapshot(
+        trace: diagnosticTrace,
         isSessionActive: () => !_disposed,
         source: selected,
         identity: PlaybackResourceIdentity(
@@ -1591,6 +1636,7 @@ class EmbyApi {
     bool forceTranscode = false,
     CancelToken? cancelToken,
     Duration? timeout,
+    StrmTrace? trace,
   }) async {
     final requestedSubtitleIndex = subtitleDisabled ? -1 : subtitleStreamIndex;
     final commonBody = <String, dynamic>{
@@ -1625,6 +1671,18 @@ class EmbyApi {
     final attempts = [fullBody, commonBody, minimalBody];
 
     for (var index = 0; index < attempts.length; index++) {
+      final requestNumber = trace?.nextRequest();
+      final watch = Stopwatch()..start();
+      void event(String outcome, int? status) => trace?.emit('strm_resolve', {
+        'request': requestNumber,
+        'group': 'regular',
+        'attempt': index + 1,
+        'strict': false,
+        'outcome': outcome,
+        'http': status,
+        'elapsedMs': watch.elapsedMilliseconds,
+      });
+      event('started', null);
       try {
         final response = await _request(
           () => _dio.post<dynamic>(
@@ -1640,8 +1698,10 @@ class EmbyApi {
             },
           ),
         );
+        event('succeeded', response.statusCode);
         return PlaybackInfoResult.fromJson(_map(response.data));
       } on EmbyApiException catch (error) {
+        event('failed', error.statusCode);
         final hasFallback = index < attempts.length - 1;
         if (!hasFallback || !error.allowsPlaybackInfoFallback) rethrow;
         DiagnosticLog.instance.warning(

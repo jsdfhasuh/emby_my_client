@@ -1,3 +1,6 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:emby_my_client/core/diagnostic_log.dart';
+import 'package:emby_my_client/core/full_diagnostic_export.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -6,7 +9,34 @@ import 'package:emby_my_client/playback/playback_resource_request.dart';
 import 'package:emby_my_client/playback/source_http_input.dart';
 import '../../test/support/progressive_fixture.dart';
 
-Future<void> main(List<String> args) async {
+void main() {
+  test('controlled TLS policy and diagnostic export', () async {
+    final output = Platform.environment['STRM_DIAGNOSTIC_EVIDENCE'];
+    final directory = output == null
+        ? await Directory.systemTemp.createTemp('strm-tls-evidence-')
+        : await Directory(output).create(recursive: true);
+    final file = File('${directory.path}/tls-local.log');
+    // This script is a flutter test entry point, outside the test/ directory.
+    // ignore: invalid_use_of_visible_for_testing_member
+    await DiagnosticLog.instance.initializeFileForTesting(file);
+    await runControlledTlsProbe(['${directory.path}/tls-probe.json']);
+    final report = await FullDiagnosticExportService(
+      appVersion: '1.0.0',
+      buildNumber: '156',
+    ).buildReport();
+    expect(
+      report.content,
+      contains('stage=tls reason=tls_certificate http=unavailable'),
+    );
+    expect(report.content, contains('reason=tls_downgrade'));
+    await File(
+      '${directory.path}/tls-export.txt',
+    ).writeAsString(report.content);
+    if (output == null) await directory.delete(recursive: true);
+  });
+}
+
+Future<void> runControlledTlsProbe(List<String> args) async {
   final interfaces = await NetworkInterface.list(
     type: InternetAddressType.IPv4,
   );

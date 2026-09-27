@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'diagnostic_log.dart';
+import 'strm_diagnostics.dart';
 import 'safe_diagnostic_export.dart';
 
 const _maxFullDiagnosticBytes = 750 * 1024;
@@ -348,11 +349,21 @@ class FullDiagnosticRedactor {
   );
 
   static String redact(String value) {
+    value = value
+        .split('\n')
+        .map(
+          (line) =>
+              StrmDiagnosticSchema.claimsStructured(line) &&
+                  !StrmDiagnosticSchema.valid(line)
+              ? '<redacted>'
+              : line,
+        )
+        .join('\n');
     var result = value.replaceAll('<redacted-url>', '<redacted>');
     result = result.replaceAll('\r', '');
     result = result.replaceAllMapped(
       RegExp(
-        r'^.*(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip).*$',
+        r'^.*(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9]).*$',
         caseSensitive: false,
         multiLine: true,
       ),
@@ -419,6 +430,15 @@ class FullDiagnosticRedactor {
 
   @visibleForTesting
   static bool containsSensitiveContent(String value) {
+    if (value
+        .split('\n')
+        .any(
+          (line) =>
+              StrmDiagnosticSchema.claimsStructured(line) &&
+              !StrmDiagnosticSchema.valid(line),
+        )) {
+      return true;
+    }
     final patterns = <RegExp>[
       RegExp(
         r'(?:^|[^a-z0-9])(?:password|pw|username|account|accountname|accesstoken|token|x-emby-token|api_key|authorization|basic|bearer|cookie|deviceid|device_id|serverurl|baseurl|address|host|hostname|url|ip)(?:$|[^a-z0-9])',

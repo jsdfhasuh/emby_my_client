@@ -1,3 +1,5 @@
+import '../core/strm_diagnostics.dart';
+import 'source_input_failure.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -38,6 +40,7 @@ class PlaybackController extends ChangeNotifier {
     required this.reporter,
     required this.playbackHeaders,
     this.subtitleLoader,
+    this.trace,
     this.engineRecreator,
     PlaybackItemSession? session,
     this.cacheSettings = const PlaybackCacheSettings(),
@@ -81,6 +84,9 @@ class PlaybackController extends ChangeNotifier {
     _createOperationCoordinator();
   }
 
+  final StrmTrace? trace;
+  final Set<SourceInputFailure> _handledSourceFailures = {};
+  SourceInputFailure? _lastSourceFailure;
   final EmbyItem item;
   PlaybackEngine _engine;
   final PlaybackStreamResolver resolver;
@@ -228,6 +234,12 @@ class PlaybackController extends ChangeNotifier {
     PlaybackPlan? preparedPlan,
     bool continueReporting = false,
   }) async {
+    _lastSourceFailure = null;
+    trace?.emit('strm_recovery', {
+      'outcome': 'started',
+      'continuingCycle': continueReporting,
+      'recoveryExecuted': continueReporting,
+    });
     final token = _advanceGeneration();
     await _bindEngine(token);
     _throwIfStale(token);
@@ -398,6 +410,12 @@ class PlaybackController extends ChangeNotifier {
         _throwIfStale(token);
         _startProgressTimer();
         await _startCacheMonitoring(token);
+        trace?.emit('strm_recovery', {
+          'outcome': 'succeeded',
+          'openAttempt': trace?.currentAttempt,
+          'continuingCycle': continueReporting,
+          'recoveryExecuted': continueReporting,
+        });
         DiagnosticLog.instance.info(
           'player',
           'event=playback_ready method=${plan.method.serverValue}',
@@ -407,6 +425,17 @@ class PlaybackController extends ChangeNotifier {
         if (plan != null) await _stopReporterSafely();
         return;
       } catch (error) {
+        if (error is SourceInputException) {
+          (error.failure ??
+                  SourceInputFailure(
+                    error: error,
+                    trace: trace ?? StrmTrace(),
+                    openAttempt: trace?.currentAttempt ?? 0,
+                    request: 0,
+                    stale: !_isCurrent(token),
+                  ))
+              .record();
+        }
         if (!_isCurrent(token)) return;
         _discardReadyWaitAfterStartupError();
         final canRetryCacheInMemory =
@@ -509,6 +538,7 @@ class PlaybackController extends ChangeNotifier {
         await _disposeEngine();
         await _cleanupCacheSessionSafely();
         _writeTerminalSummaries();
+        trace?.finish();
         return;
       }
     }
@@ -1373,6 +1403,7 @@ class PlaybackController extends ChangeNotifier {
     );
     await _cleanupCacheSessionSafely();
     _writeTerminalSummaries();
+    trace?.finish();
     if (disposalConfirmed &&
         _retirementState != PlaybackRetirementState.quarantined) {
       _retirementState = PlaybackRetirementState.closed;
@@ -1418,6 +1449,16 @@ class PlaybackController extends ChangeNotifier {
     );
     bool eventIsCurrent() =>
         identical(engine, boundEngine) && _isCurrent(token);
+    if (boundEngine is SourceFailureEmitter) {
+      _subscriptions.add(
+        (boundEngine as SourceFailureEmitter).sourceFailureStream.listen((
+          failure,
+        ) {
+          if (!eventIsCurrent() || failure.stale || failure.cancelled) return;
+          _handleSourceFailure(failure);
+        }),
+      );
+    }
     _subscriptions.addAll([
       boundEngine.positionStream.listen((position) {
         if (!eventIsCurrent()) return;
@@ -1474,7 +1515,40 @@ class PlaybackController extends ChangeNotifier {
     ]);
   }
 
+  void _handleSourceFailure(SourceInputFailure failure) {
+    if (trace != null &&
+        (!identical(trace, failure.trace) ||
+            failure.openAttempt != trace!.currentAttempt)) {
+      failure.record(staleOverride: true);
+      return;
+    }
+    if (!_handledSourceFailures.add(failure)) return;
+    if (_handledSourceFailures.length > 64) {
+      _handledSourceFailures.remove(_handledSourceFailures.first);
+    }
+    _lastSourceFailure = failure;
+    final pending = _readyCompleter;
+    if (pending != null && !pending.isCompleted) {
+      pending.completeError(failure.error);
+      return;
+    }
+    final eligible = failure.error.allowsSeekRecovery;
+    final scheduled = eligible && _requestRuntimeRecovery('partial file');
+    failure.record(recoverable: scheduled, recoveryExecuted: false);
+    if (scheduled) return;
+    if (_state.phase == PlaybackPhase.ready) {
+      _setState(
+        _state.copyWith(
+          phase: PlaybackPhase.failed,
+          isBuffering: false,
+          errorMessage: '源站读取失败，请返回后重试',
+        ),
+      );
+    }
+  }
+
   void _handleEngineError(String error) {
+    if (_lastSourceFailure != null) return;
     final fingerprint = _approvedRecoveryFingerprint(error);
     final diagnosticFingerprint = _engineDiagnosticFingerprint(error);
     if (_shouldWriteEngineFingerprint(diagnosticFingerprint)) {
@@ -1508,6 +1582,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _handleEngineLog(String log) {
+    if (_lastSourceFailure != null) return;
     final lower = log.toLowerCase();
     if (lower.contains('failed to create file cache') &&
         !_state.diskCacheFailureObserved) {
@@ -1774,6 +1849,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _performCacheSafetyReopen(
     PlaybackControlOperationLease lease,
   ) async {
+    _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
     final wasPlaying = _desiredPlaying;
     final retained = _state.plan?.isSourceDirect == true ? _state.plan : null;
@@ -2056,6 +2132,7 @@ class PlaybackController extends ChangeNotifier {
       _setRuntimeRecoveryFailed(fingerprint);
       return;
     }
+    _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
     final wasPlaying = _desiredPlaying;
     final wasTranscoding = plan.method == PlayMethod.transcode;
@@ -2825,12 +2902,38 @@ class PlaybackController extends ChangeNotifier {
     PlaybackEngine boundEngine,
     Future<void> Function() apply,
   ) {
+    final attempt = trace?.currentAttempt;
+    final task = trace?.nextTask();
+    void event(String outcome) => trace?.emit('strm_subtitle', {
+      'openAttempt': attempt,
+      'task': task,
+      'stage': 'subtitle_apply',
+      'outcome': outcome,
+      'stale':
+          !_isCurrentEngine(token, boundEngine) ||
+          !identical(_desiredSubtitleSelection, selection),
+    });
+    event('queued');
     final queue = _subtitleQueues[boundEngine] ??= SubtitleApplicationQueue();
     return queue.submit(
       isCurrent: () =>
           _isCurrentEngine(token, boundEngine) &&
           identical(_desiredSubtitleSelection, selection),
-      apply: apply,
+      apply: () async {
+        event('started');
+        try {
+          await apply();
+          event(
+            _isCurrentEngine(token, boundEngine) &&
+                    identical(_desiredSubtitleSelection, selection)
+                ? 'succeeded'
+                : 'late',
+          );
+        } catch (_) {
+          event('failed');
+          rethrow;
+        }
+      },
     );
   }
 

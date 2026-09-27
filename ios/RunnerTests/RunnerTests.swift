@@ -1263,6 +1263,20 @@ final class RunnerTests: XCTestCase {
     )
   }
 
+  func testStrmStructuredFullExportPreservesSafeFieldsAndRejectsInjection() throws {
+    let safe = "event=playback_subtitle_apply_skipped_stale generation=3"
+    let failure = "event=strm_failure trace=0123456789abcdef openAttempt=1 request=2 failure=1 stage=range_response reason=source_denied http=403 stale=false cancelled=false recoverable=false recoveryExecuted=false duplicates=0"
+    for line in [safe, failure] {
+      XCTAssertTrue(StrmDiagnosticValidator.valid(line))
+      let data = Data(validFullBody(line + "\n").utf8)
+      XCTAssertNoThrow(try FullDiagnosticExportValidator.validate(content: data, appVersion: "1.0.0", buildNumber: "42"))
+      for suffix in [" url=https://private.invalid", " token=private-secret", " Cookie=private-secret", "\r\nCookie=private-secret", " reason=%74%6f%6b%65%6e", " unknown=private-secret", " generation=-1", " trace=private-secret"] {
+        XCTAssertFalse(StrmDiagnosticValidator.valid(line + suffix))
+        assertFullUnsafe(Data(validFullBody(line + suffix + "\n").utf8))
+      }
+    }
+  }
+
   func testFullReportPassesAndFilenameUsesNativeBuildAndTime() throws {
     let data = validFullReport()
     let result = try FullDiagnosticExportValidator.validate(

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../core/server_scope.dart';
+import '../core/strm_diagnostics.dart';
 import '../models/emby_models.dart';
 import 'strm_direct_play_policy.dart';
 
@@ -43,10 +44,15 @@ class PlaybackResourceRequest {
     required this.identity,
     required this.embyServer,
     this.isSessionActive,
-  }) : headers = _validateHeaders(headers) {
+    StrmTrace? trace,
+    this.diagnosticTask,
+  }) : trace = trace ?? StrmTrace(),
+       headers = _validateHeaders(headers) {
     validateDestination(rawUrl, embyServer: embyServer);
   }
 
+  final StrmTrace trace;
+  final int? diagnosticTask;
   final String rawUrl;
   final Map<String, String> headers;
   final PlaybackResourceIdentity identity;
@@ -165,7 +171,9 @@ class SelectedSourceSnapshot {
     required Uri embyServer,
     required this.playSessionId,
     bool Function()? isSessionActive,
+    StrmTrace? trace,
   }) : request = PlaybackResourceRequest(
+         trace: trace,
          rawUrl: source.path ?? '',
          headers: source.requiredHttpHeaders,
          identity: identity,

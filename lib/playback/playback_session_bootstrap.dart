@@ -1,3 +1,5 @@
+import '../core/strm_diagnostics.dart';
+import 'playback_diagnostics.dart';
 import '../data/emby_api.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_storage.dart';
@@ -23,30 +25,38 @@ abstract final class PlaybackSessionBootstrap {
         const PlaybackNativeOperationTimeouts(),
     PlaybackCacheStorage? cacheStorage,
     PlaybackDiagnosticsTestOverrides? testOverrides,
-  }) => PlaybackController(
-    item: item,
-    engine: engine,
-    resolver: EmbyStreamResolver(api),
-    subtitleLoader: ExternalSubtitleLoader(api),
-    reporter: PlaybackSessionReporter(api: api, item: item),
-    playbackHeaders: api.playbackHeaders,
-    engineRecreator: engineRecreator,
-    onEngineDisposalUnconfirmed: onEngineDisposalUnconfirmed,
-    session: session,
-    cacheSettings: settings.cache,
-    cacheStorage: cacheStorage,
-    testOverrides: testOverrides,
-    maxStreamingBitrate: settings.maxStreamingBitrate,
-    openTimeout: nativeOperationTimeouts.open,
-    seekCallTimeout: nativeOperationTimeouts.seek,
-    playPauseTimeout: nativeOperationTimeouts.play,
-    propertyWriteTimeout: nativeOperationTimeouts.propertyWrite,
-    lifecycleQuiesceTimeout: nativeOperationTimeouts.lifecycleQuiesce,
-    retirementQuiesceTimeout: nativeOperationTimeouts.retirementQuiesce,
-    shutdownBarrierTimeout: nativeOperationTimeouts.shutdownBarrier,
-    stopTimeout: nativeOperationTimeouts.stop,
-    disposeTimeout: nativeOperationTimeouts.dispose,
-  );
+    String entry = 'unavailable',
+    StrmTrace? trace,
+  }) {
+    trace ??= StrmTrace();
+    trace.emit('strm_entry', {'entry': entry, 'outcome': 'started'});
+    return PlaybackController(
+      trace: trace,
+      diagnostics: PlaybackDiagnostics(trace: trace),
+      item: item,
+      engine: engine,
+      resolver: EmbyStreamResolver(api, trace: trace),
+      subtitleLoader: ExternalSubtitleLoader(api, trace: trace),
+      reporter: PlaybackSessionReporter(api: api, item: item, trace: trace),
+      playbackHeaders: api.playbackHeaders,
+      engineRecreator: engineRecreator,
+      onEngineDisposalUnconfirmed: onEngineDisposalUnconfirmed,
+      session: session,
+      cacheSettings: settings.cache,
+      cacheStorage: cacheStorage,
+      testOverrides: testOverrides,
+      maxStreamingBitrate: settings.maxStreamingBitrate,
+      openTimeout: nativeOperationTimeouts.open,
+      seekCallTimeout: nativeOperationTimeouts.seek,
+      playPauseTimeout: nativeOperationTimeouts.play,
+      propertyWriteTimeout: nativeOperationTimeouts.propertyWrite,
+      lifecycleQuiesceTimeout: nativeOperationTimeouts.lifecycleQuiesce,
+      retirementQuiesceTimeout: nativeOperationTimeouts.retirementQuiesce,
+      shutdownBarrierTimeout: nativeOperationTimeouts.shutdownBarrier,
+      stopTimeout: nativeOperationTimeouts.stop,
+      disposeTimeout: nativeOperationTimeouts.dispose,
+    );
+  }
 
   static Future<void> configureAndStart({
     required PlaybackController controller,

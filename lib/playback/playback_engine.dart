@@ -115,6 +115,7 @@ class MediaKitPlaybackEngine
     implements
         PlaybackEngine,
         SourceDirectPlaybackEngine,
+        SourceFailureEmitter,
         PlaybackNativeResourceOwner,
         PlaybackCacheEngine,
         PlaybackCacheIdentitySnapshotReader {
@@ -149,7 +150,30 @@ class MediaKitPlaybackEngine
   MpvSourceInput? _sourceInput;
   int _inputRevision = 0;
   Future<void> _subtitleNativeTail = Future<void>.value();
-  final _sourceErrors = StreamController<String>.broadcast(sync: true);
+  final _sourceErrors = StreamController<SourceInputFailure>.broadcast(
+    sync: true,
+  );
+  SourceInputFailure? _sourceFailure;
+  int _nativeFailureDuplicates = 0;
+  void _flushSourceDuplicates() {
+    final failure = _sourceFailure;
+    if (failure != null && _nativeFailureDuplicates > 0) {
+      failure.record(duplicates: _nativeFailureDuplicates);
+      failure.trace.addInputTotals({'duplicates': _nativeFailureDuplicates});
+      _nativeFailureDuplicates = 0;
+    }
+  }
+
+  bool _forwardNativeMessage() {
+    final failure = _sourceFailure;
+    if (failure == null) return true;
+    _nativeFailureDuplicates++;
+    if (_nativeFailureDuplicates == 1) failure.record(duplicates: 1);
+    return false;
+  }
+
+  @override
+  Stream<SourceInputFailure> get sourceFailureStream => _sourceErrors.stream;
   bool _sourceMode = false;
   final Map<String, String> _sourceOptionDefaults = {};
 
@@ -169,59 +193,113 @@ class MediaKitPlaybackEngine
   }) {
     if (_isRetiring || _disposeStarted) return Future<void>.value();
     final epoch = _quiescenceEpoch;
+    final openAttempt = request.trace.nextOpen();
+    _flushSourceDuplicates();
+    _sourceFailure = null;
+    _nativeFailureDuplicates = 0;
+    request.trace.emit('strm_native', {
+      'openAttempt': openAttempt,
+      'stage': 'native_open',
+      'outcome': 'started',
+    });
     final revision = ++_inputRevision;
     _hasOpenedMedia = true;
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.open,
       operation: () async {
-        await _subtitleNativeTail;
-        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
-          return;
-        }
-        final native = player.platform;
-        if (native is! NativePlayer) {
-          throw const SourceInputException('native_unavailable');
-        }
-        _sourceInput ??= await MpvSourceInput.create(
-          native,
-          onReadFailure: () {
-            if (!_disposeStarted) _sourceErrors.add('source_input_failed');
-          },
-        );
-        final input = await _sourceInput!.prepare(request);
-        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
-          return;
-        }
-        await player.stop();
-        await player.pause();
-        for (final name in [..._sourceOptions.keys, 'demuxer-lavf-format']) {
-          _sourceOptionDefaults.putIfAbsent(name, () => '');
-          if (!_sourceMode) {
-            _sourceOptionDefaults[name] = await native.getProperty(name);
+        var stage = 'native_register';
+        try {
+          await _subtitleNativeTail;
+          if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+            return;
           }
-        }
-        _sourceMode = true;
-        for (final entry in {
-          ..._sourceOptions,
-          'demuxer-lavf-format': input.format,
-        }.entries) {
-          await native.setProperty(entry.key, entry.value);
-          // Unsupported options must fail before any native media open.
-          if (await native.getProperty(entry.key) != entry.value) {
-            throw const SourceInputException('native_policy_option');
+          final native = player.platform;
+          if (native is! NativePlayer) {
+            throw const SourceInputException('native_unavailable');
           }
+          _sourceInput ??= await MpvSourceInput.create(
+            native,
+            onReadFailure: (failure) {
+              if (!_disposeStarted && !identical(_sourceFailure, failure)) {
+                _sourceFailure = failure;
+                _sourceErrors.add(failure);
+              }
+            },
+          );
+          stage = 'body_read';
+          final input = await _sourceInput!.prepare(request, openAttempt);
+          if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+            return;
+          }
+          stage = 'native_open';
+          await player.stop();
+          await player.pause();
+          for (final name in [..._sourceOptions.keys, 'demuxer-lavf-format']) {
+            _sourceOptionDefaults.putIfAbsent(name, () => '');
+            if (!_sourceMode) {
+              _sourceOptionDefaults[name] = await native.getProperty(name);
+            }
+          }
+          _sourceMode = true;
+          for (final entry in {
+            ..._sourceOptions,
+            'demuxer-lavf-format': input.format,
+          }.entries) {
+            try {
+              await native.setProperty(entry.key, entry.value);
+            } catch (_) {
+              throw const SourceInputException('native_policy_option');
+            }
+            // Unsupported options must fail before any native media open.
+            if (await native.getProperty(entry.key) != entry.value) {
+              throw const SourceInputException('native_policy_option');
+            }
+          }
+          // The remote URL/credentials never enter Media or native global headers.
+          Media(input.uri.toString(), httpHeaders: const {});
+          await native.command(['loadfile', input.uri.toString(), 'replace']);
+          request.trace.emit('strm_native', {
+            'openAttempt': openAttempt,
+            'stage': 'native_open',
+            'outcome': 'succeeded',
+          });
+          if (play && !_mustReassertQuiescence(epoch)) await player.play();
+          if (_mustReassertQuiescence(epoch)) await _pauseOutput();
+        } catch (error) {
+          final safe = error is SourceInputException
+              ? error
+              : SourceInputException(
+                  stage == 'native_register'
+                      ? 'native_registration'
+                      : 'unknown',
+                  stage: stage,
+                );
+          final failure =
+              safe.failure ??
+              SourceInputFailure(
+                error: safe,
+                trace: request.trace,
+                openAttempt: openAttempt,
+                request: 0,
+                stale: revision != _inputRevision,
+              );
+          failure.record();
+          throw SourceInputException(
+            safe.code,
+            stage: safe.safeStage,
+            httpStatus: safe.safeHttp,
+            failure: failure,
+          );
         }
-        // The remote URL/credentials never enter Media or native global headers.
-        Media(input.uri.toString(), httpHeaders: const {});
-        await native.command(['loadfile', input.uri.toString(), 'replace']);
-        if (play && !_mustReassertQuiescence(epoch)) await player.play();
-        if (_mustReassertQuiescence(epoch)) await _pauseOutput();
       },
     );
   }
 
   Future<void> _restoreSourceOptions() async {
     _sourceInput?.releaseAll();
+    _flushSourceDuplicates();
+    _sourceFailure = null;
+    _nativeFailureDuplicates = 0;
     if (!_sourceMode) return;
     final native = player.platform as NativePlayer;
     for (final entry in _sourceOptionDefaults.entries) {
@@ -270,18 +348,17 @@ class MediaKitPlaybackEngine
   Stream<bool> get completedStream => player.stream.completed;
 
   @override
-  Stream<String> get errorStream => Stream<String>.multi((output) {
-    final native = player.stream.error.listen(output.add);
-    final source = _sourceErrors.stream.listen(output.add);
-    output.onCancel = () async {
-      await native.cancel();
-      await source.cancel();
-    };
-  }, isBroadcast: true);
+  Stream<String> get errorStream =>
+      player.stream.error.where((_) => _forwardNativeMessage());
 
   @override
-  Stream<String> get logStream =>
-      player.stream.log.map((log) => log.toString());
+  Stream<String> get logStream => player.stream.log
+      .where(
+        (log) =>
+            !{'error', 'fatal', 'warn'}.contains(log.level) ||
+            _forwardNativeMessage(),
+      )
+      .map((log) => log.toString());
 
   @override
   Stream<List<EngineTrack>> get audioTracksStream => player.stream.tracks.map(
@@ -758,6 +835,7 @@ class MediaKitPlaybackEngine
   Future<void> stop() {
     if (_disposeStarted) return Future<void>.value();
     _inputRevision++;
+    _flushSourceDuplicates();
     _sourceInput?.releaseAll();
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.stop,
@@ -795,6 +873,7 @@ class MediaKitPlaybackEngine
       operation: () async {
         await player.dispose();
         _sourceInput?.afterNativeDisposal();
+        _flushSourceDuplicates();
         await _sourceErrors.close();
         for (final release in _resourceReleases) {
           await release();
