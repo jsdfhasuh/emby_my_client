@@ -1,0 +1,11 @@
+{
+  "schema": "emby-strm-tls-probe/v1",
+  "untrustedCertificate": "tested-rejected-before-http",
+  "validatedIpTlsHostnameCertificate": "tested",
+  "httpsRangePayload": "tested",
+  "downgradeBeforeRequest": "tested",
+  "syntheticTlsRequests": 3,
+  "realOpenList": "NOT_RUN",
+  "physicalDevice": "NOT_RUN",
+  "sourceImplementationCommit": "1759a9d"
+}

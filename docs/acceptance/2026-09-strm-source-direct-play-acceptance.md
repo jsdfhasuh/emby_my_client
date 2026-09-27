@@ -59,7 +59,7 @@ libmpv 只看到 `embyinput://整数`；C 复制缓冲区，不保存 Dart/原�
 | OpenList 风格 302 + 重复 Range + 原生解码/seek/续播 | tested：真实 HTTP、两个 LAN origin、生成 AVI | iOS 原生桥 XCTest 已加入；实际 Dart 网络/设备 NOT_RUN |
 | 跨 origin 头隔离、最多五跳、回环目的拒绝、取消 | tested：真实 HTTP，不是 HEAD/fake | 相同实现，目标端网络 NOT_RUN |
 | 外挂 SRT 实际选中和关闭 sid | tested：锁定 Windows libmpv | NOT_RUN（实机轨道/画面） |
-| HTTPS 证书/SNI/降级 | 执行代码已实现；TLS 端到端 NOT_RUN | NOT_RUN |
+| HTTPS 证书/SNI/降级 | tested：独立 TLS 夹具验证证书拒绝、可信证书 Range、降级前阻断；DNS 名 SNI 样本 NOT_RUN | NOT_RUN |
 | MP4/MKV/AVI/188-byte TS 有限渐进媒体 | sniff/格式约束已实现；AVI 实际解码 tested，其他格式 unverified | 待平台与真实样本 |
 | 无 Range 206、未知总长度、其他容器 | unsupported：明确失败，不能转 Emby | 同一限制 |
 | HLS/DASH/外部引用/分片/密钥 | unsupported：不交给不受控网络；禁外部引用和协议 | 同一限制 |
@@ -103,7 +103,7 @@ libmpv 只看到 `embyinput://整数`；C 复制缓冲区，不保存 Dart/原�
 | B19 | reporter 实际 Dio 请求：Stopped 调用方超时→新周期等待→旧实际完成→新 Start，迟到响应不串周期 |
 | B20 | 本地同周期复用已实现；没有自动刷新 URL 功能，源拒绝有界失败而不伪装新会话延续；真实签名过期刷新验收 NOT_RUN |
 | B12/B17/C09 | 既有普通媒体、离线、全屏、内嵌、混合媒体焦点、下一集、Trickplay、生命周期/缓存全量回归；设备快滑验收 NOT_RUN |
-| C01/C02/C03/C05/C06/C07 | `source_http_input_test`、原生测试及 loader：原始请求、重定向、Range、剥离资源头、HTML/gzip 拒绝；TLS 实测/全部平台组合 NOT_RUN |
+| C01/C02/C03/C05/C06/C07 | `source_http_input_test`、原生测试及 loader：原始请求、重定向、Range、剥离资源头、HTML/gzip 拒绝；DNS 名 SNI/全部平台组合 NOT_RUN |
 | C04/C08 | 首版仅有限 Range 渐进输入；HLS/DASH unsupported；保守内存缓存，不将 unknown 长度当磁盘缓存证据 |
 | C10 | 固定异常分类、不传源 URL 到 mpv，现有日志/完整导出回归；真实服务敏感字段样本 NOT_RUN |
 | C11 | Windows sid/track-list tested，A/B/off fake 副作用 tested；iOS/Android 实际字幕画面 NOT_RUN |
@@ -137,3 +137,14 @@ libmpv 只看到 `embyinput://整数`；C 复制缓冲区，不保存 Dart/原�
 
 最小下一步：用真实 Emby STRM/OpenList 的有限 MP4/MKV（含 HTTPS/CDN）在设备验收，
 抓取不含凭据的 origin/Range/会话事件计数，检查字幕画面和快滑焦点，再补真实签名过期样本。
+
+## 后续验证与 CI 修正
+
+- TLS 探针实际通过，见 `evidence/strm-windows-controlled-tls.json`。执行：
+  `dart --packages=.dart_tool/package_config.json scripts/diagnostics/probe_strm_controlled_tls.dart <output.json>`。
+  测试证书仅加入独立探针进程的信任上下文，产品没有忽略证书校验。
+- run 153：Linux 1271 通过，新增 Bootstrap 原生测试 1 失败；格式、分析和 C 桥编译通过。
+  保留失败断言和原生日志诊断，继续修复该失败后构建最终提交。
+- run 154：保留原断言、仅增加失败原生日志的第二次 Linux 全量通过，说明首轮失败有时序/环境因素，不能据此宣称已定位产品根因。
+  将两项原生夹具显式设为 vo=null/ao=null，仍要求真实 video-params、位置、请求和上报断言，
+  避免依赖 CI 的显示/声音设备；Windows 重新执行两项原生测试通过。

@@ -73,7 +73,10 @@ void main() {
           {'Id': 'source', 'Container': 'strm', 'Path': '/disk/movie.strm'},
         ],
       });
-      final player = Player();
+      // Decode real frames without depending on a display or sound server.
+      final player = Player(
+        configuration: const PlayerConfiguration(vo: 'null'),
+      );
       final nativeErrors = <String>[];
       final nativeLogs = <String>[];
       final errorSubscription = player.stream.error.listen(nativeErrors.add);
@@ -83,6 +86,7 @@ void main() {
       addTearDown(errorSubscription.cancel);
       addTearDown(logSubscription.cancel);
       await (player.platform as NativePlayer).setProperty('vid', 'auto');
+      await (player.platform as NativePlayer).setProperty('ao', 'null');
       final engine = MediaKitPlaybackEngine(player);
       final controller = PlaybackSessionBootstrap.createOnlineController(
         api: api,
@@ -190,9 +194,12 @@ void main() {
         headers: {'Location': '${b.origin}/signed%2fvideo?x=1&x=2'},
         body: <int>[],
       );
-      final player = Player();
+      final player = Player(
+        configuration: const PlayerConfiguration(vo: 'null'),
+      );
       final native = player.platform as NativePlayer;
       await native.setProperty('vid', 'auto');
+      await native.setProperty('ao', 'null');
       await native.setProperty('cache-on-disk', 'no');
       final adapter = await MpvSourceInput.create(native);
       addTearDown(() async {
