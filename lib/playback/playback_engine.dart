@@ -477,7 +477,8 @@ class MediaKitPlaybackEngine
   @override
   Future<void> selectSubtitleTrack(String? trackId) {
     if (_disposeStarted) return Future<void>.value();
-    return _runNativeOperation(
+    // The controller serializes subtitle writes until real native completion.
+    return _returnNativeOperation(
       kind: PlaybackNativeOperationKind.propertyWrite,
       operation: () async {
         if (trackId == null) {

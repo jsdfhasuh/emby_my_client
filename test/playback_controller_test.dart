@@ -17,6 +17,134 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'B21 new-source preflight clears A indices before the first B request',
+    () async {
+      final engine = _FakeEngine();
+      engine.onOpen = (count) {
+        engine.durationController.add(const Duration(hours: 1));
+        engine.audioTracksController.add([
+          EngineTrack(id: '2', language: count == 1 ? 'chi' : 'eng'),
+        ]);
+        engine.subtitleTracksController.add([
+          EngineTrack(id: '3', title: count == 1 ? 'Chinese' : 'English'),
+        ]);
+      };
+      final resolver = _PlanResolver(
+        _testPlan(
+          mediaStreams: const [
+            {'Index': 2, 'Type': 'Audio', 'Language': 'chi'},
+            {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+          ],
+        ),
+        sourcePlans: {
+          'source-b': _testPlan(
+            subtitleStreamIndex: 3,
+            mediaStreams: const [
+              {'Index': 2, 'Type': 'Audio', 'Language': 'eng'},
+              {'Index': 5, 'Type': 'Audio', 'Language': 'chi'},
+              {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'English'},
+            ],
+          ).copyWith(audioStreamIndex: 2),
+        },
+      );
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        resolver: resolver,
+      );
+      await controller.start(
+        mediaSourceId: 'source-1',
+        audioStreamIndex: 2,
+        subtitleStreamIndex: 3,
+      );
+      await controller.selectMediaSource('source-b');
+      expect(resolver.sourceRequests, ['source-1', 'source-b']);
+      expect(resolver.audioStreamRequests, [2, null]);
+      expect(resolver.subtitleStreamRequests, [3, null]);
+      expect(controller.state.plan?.mediaSourceId, 'source-b');
+      expect(controller.state.appliedAudioStreamIndex, 2);
+      expect(controller.state.plan?.mediaStreams.first['Language'], 'eng');
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'B22 failed source preflight preserves current engine and selection',
+    () async {
+      final engine = _FakeEngine();
+      engine.onOpen = (_) =>
+          engine.durationController.add(const Duration(hours: 1));
+      final resolver = _PlanResolver(_testPlan());
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        resolver: resolver,
+      );
+      await controller.start(mediaSourceId: 'source-1', subtitleDisabled: true);
+      resolver.failSource = 'source-b';
+      await controller.selectMediaSource('source-b');
+      expect(resolver.subtitleDisabledRequests, [true, true]);
+      expect(engine.openUris, hasLength(1));
+      expect(engine.stopCalls, 0);
+      expect(controller.state.plan?.mediaSourceId, 'source-1');
+      expect(controller.state.desiredSubtitleSelection.isDisabled, isTrue);
+      await controller.shutdown();
+    },
+  );
+
+  test(
+    'B23 controller serializes late native A before the latest disable',
+    () async {
+      final nativeGate = Completer<void>();
+      final engine = _FakeEngine(externalSubtitleOperation: nativeGate.future);
+      engine.onOpen = (_) =>
+          engine.durationController.add(const Duration(hours: 1));
+      final resolver = _PlanResolver(
+        _testPlan(
+          mediaStreams: const [
+            {
+              'Index': 3,
+              'Type': 'Subtitle',
+              'IsExternal': true,
+              'DeliveryUrl': 'https://subtitle.invalid/a.srt',
+            },
+            {
+              'Index': 4,
+              'Type': 'Subtitle',
+              'IsExternal': true,
+              'DeliveryUrl': 'https://subtitle.invalid/b.srt',
+            },
+          ],
+        ),
+      );
+      final controller = _controller(
+        api: _api([]),
+        engine: engine,
+        item: _plainItem,
+        resolver: resolver,
+      );
+      await controller.start();
+      final a = controller.selectSubtitleStream(3);
+      await _waitUntil(() => engine.externalSubtitleUris.isNotEmpty);
+      final b = controller.selectSubtitleStream(4);
+      final off = controller.selectSubtitleStream(null);
+      expect(engine.actualSubtitle, isNull);
+      nativeGate.complete();
+      await Future.wait([a, b, off]);
+      expect(engine.externalSubtitleUris, hasLength(1));
+      expect(engine.nativeSubtitleEffects, ['external', 'off']);
+      expect(engine.actualSubtitle, isNull);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.disabled,
+      );
+      await controller.shutdown();
+    },
+  );
+
   test('completed seek presentation commits only executed results', () {
     const start = Duration(minutes: 2);
     const requested = Duration(minutes: 8);
@@ -64,7 +192,9 @@ void main() {
       final engine = _FakeEngine();
       engine.onOpen = (_) {
         engineLater(() {
-          engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+          engine.subtitleTracksController.add(const [
+            EngineTrack(id: '3', title: 'Chinese'),
+          ]);
           engine.durationController.add(const Duration(hours: 1));
         });
       };
@@ -540,7 +670,9 @@ void main() {
       final engine = _FakeEngine();
       engine.onOpen = (_) {
         engineLater(() {
-          engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+          engine.subtitleTracksController.add(const [
+            EngineTrack(id: '3', title: 'Chinese'),
+          ]);
           engine.durationController.add(const Duration(hours: 1));
         });
       };
@@ -565,7 +697,9 @@ void main() {
       final api = _api(requests, defaultAudioStreamIndex: 2);
       final engine = _FakeEngine();
       engine.onOpen = (_) {
-        engine.audioTracksController.add(const [EngineTrack(id: '2')]);
+        engine.audioTracksController.add(const [
+          EngineTrack(id: '2', language: 'eng', codec: 'aac'),
+        ]);
         engine.durationController.add(const Duration(hours: 1));
       };
       final controller = _controller(
@@ -595,8 +729,9 @@ void main() {
       engine.onOpen = (_) {
         engine.durationController.add(const Duration(hours: 1));
         Timer.run(
-          () =>
-              engine.subtitleTracksController.add(const [EngineTrack(id: '3')]),
+          () => engine.subtitleTracksController.add(const [
+            EngineTrack(id: '3', title: 'Chinese'),
+          ]),
         );
       };
       final controller = _controller(
@@ -640,7 +775,9 @@ void main() {
       );
       expect(engine.selectedSubtitleTrackIds, isEmpty);
 
-      engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+      engine.subtitleTracksController.add(const [
+        EngineTrack(id: '3', title: 'Chinese'),
+      ]);
       await _waitUntil(
         () =>
             controller.state.subtitleSelectionStatus ==
@@ -673,7 +810,9 @@ void main() {
     );
 
     await controller.selectSubtitleStream(null);
-    engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+    engine.subtitleTracksController.add(const [
+      EngineTrack(id: '3', title: 'Chinese'),
+    ]);
     await Future<void>.delayed(Duration.zero);
 
     expect(engine.selectedSubtitleTrackIds, [null]);
@@ -746,7 +885,9 @@ void main() {
         isNot(contains('event=playback_subtitle_mapping_failed')),
       );
 
-      engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+      engine.subtitleTracksController.add(const [
+        EngineTrack(id: '3', title: 'Chinese'),
+      ]);
       await controller.selectSubtitleStream(3);
 
       expect(engine.selectedSubtitleTrackIds, ['3']);
@@ -951,7 +1092,9 @@ void main() {
       final engine = _FakeEngine();
       engine.onOpen = (_) {
         engine.durationController.add(const Duration(hours: 1));
-        engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+        engine.subtitleTracksController.add(const [
+          EngineTrack(id: '3', title: 'Chinese'),
+        ]);
       };
       final resolver = _PlanResolver(
         _testPlan(
@@ -990,8 +1133,8 @@ void main() {
       engine.onOpen = (_) {
         engine.durationController.add(const Duration(hours: 1));
         engine.subtitleTracksController.add(const [
-          EngineTrack(id: '3'),
-          EngineTrack(id: '4'),
+          EngineTrack(id: '3', title: 'Chinese'),
+          EngineTrack(id: '4', title: 'Japanese'),
         ]);
       };
       final resolver = _PlanResolver(
@@ -1031,8 +1174,8 @@ void main() {
       firstEngine.onOpen = (_) {
         firstEngine.durationController.add(const Duration(hours: 1));
         firstEngine.subtitleTracksController.add(const [
-          EngineTrack(id: '3'),
-          EngineTrack(id: '4'),
+          EngineTrack(id: '3', title: 'Chinese'),
+          EngineTrack(id: '4', title: 'Japanese'),
         ]);
       };
       final firstController = _controller(
@@ -1043,8 +1186,8 @@ void main() {
           _testPlan(
             subtitleStreamIndex: 3,
             mediaStreams: const [
-              {'Index': 3, 'Type': 'Subtitle'},
-              {'Index': 4, 'Type': 'Subtitle'},
+              {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+              {'Index': 4, 'Type': 'Subtitle', 'DisplayTitle': 'Japanese'},
             ],
           ),
         ),
@@ -1058,7 +1201,9 @@ void main() {
       final secondEngine = _FakeEngine();
       secondEngine.onOpen = (_) {
         secondEngine.durationController.add(const Duration(hours: 1));
-        secondEngine.subtitleTracksController.add(const [EngineTrack(id: '5')]);
+        secondEngine.subtitleTracksController.add(const [
+          EngineTrack(id: '5', title: 'English'),
+        ]);
       };
       final secondController = _controller(
         api: api,
@@ -1068,7 +1213,7 @@ void main() {
           _testPlan(
             subtitleStreamIndex: 5,
             mediaStreams: const [
-              {'Index': 5, 'Type': 'Subtitle'},
+              {'Index': 5, 'Type': 'Subtitle', 'DisplayTitle': 'English'},
             ],
           ),
         ),
@@ -1355,9 +1500,13 @@ void main() {
     await waitingForReady.future.timeout(const Duration(milliseconds: 300));
     await Future<void>.delayed(Duration.zero);
     final shutdown = controller.shutdown();
-    engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+    engine.subtitleTracksController.add(const [
+      EngineTrack(id: '3', title: 'Chinese'),
+    ]);
     await Future.wait([startup, shutdown]);
-    engine.subtitleTracksController.add(const [EngineTrack(id: '3')]);
+    engine.subtitleTracksController.add(const [
+      EngineTrack(id: '3', title: 'Chinese'),
+    ]);
 
     expect(engine.selectedSubtitleTrackIds, isEmpty);
     expect(controller.state.phase, PlaybackPhase.idle);
@@ -1791,11 +1940,15 @@ PlaybackDiagnostics _diagnostics(List<String> lines) => PlaybackDiagnostics(
 );
 
 class _PlanResolver implements PlaybackStreamResolver {
-  _PlanResolver(this.plan);
+  _PlanResolver(this.plan, {this.sourcePlans = const {}});
 
   final PlaybackPlan plan;
+  final Map<String, PlaybackPlan> sourcePlans;
   final List<int?> subtitleStreamRequests = [];
   final List<bool> subtitleDisabledRequests = [];
+  final List<int?> audioStreamRequests = [];
+  final List<String?> sourceRequests = [];
+  String? failSource;
 
   @override
   bool get canForceTranscode => true;
@@ -1812,13 +1965,20 @@ class _PlanResolver implements PlaybackStreamResolver {
   }) async {
     subtitleStreamRequests.add(subtitleStreamIndex);
     subtitleDisabledRequests.add(subtitleDisabled);
-    return plan.copyWith(
-      method: forceTranscode ? PlayMethod.transcode : plan.method,
-      audioStreamIndex: audioStreamIndex ?? plan.audioStreamIndex,
+    audioStreamRequests.add(audioStreamIndex);
+    sourceRequests.add(mediaSourceId);
+    if (mediaSourceId != null && mediaSourceId == failSource) {
+      throw StateError('Synthetic unavailable source');
+    }
+    final sourcePlan = sourcePlans[mediaSourceId] ?? plan;
+    return sourcePlan.copyWith(
+      mediaSourceId: mediaSourceId,
+      method: forceTranscode ? PlayMethod.transcode : sourcePlan.method,
+      audioStreamIndex: audioStreamIndex ?? sourcePlan.audioStreamIndex,
       clearSubtitleStreamIndex: subtitleDisabled,
       subtitleStreamIndex: subtitleDisabled
           ? null
-          : subtitleStreamIndex ?? plan.subtitleStreamIndex,
+          : subtitleStreamIndex ?? sourcePlan.subtitleStreamIndex,
       subtitleDisabled: subtitleDisabled,
     );
   }
@@ -1970,6 +2130,8 @@ class _FakeEngine implements PlaybackEngine {
   final List<String?> selectedSubtitleTrackIds = [];
   final List<int> selectedSubtitleOpenCounts = [];
   final List<Uri> externalSubtitleUris = [];
+  String? actualSubtitle;
+  final List<String> nativeSubtitleEffects = [];
   final List<double> rateValues = [];
   final List<Duration> audioDelayValues = [];
   final List<Duration> subtitleDelayValues = [];
@@ -2093,6 +2255,8 @@ class _FakeEngine implements PlaybackEngine {
   Future<void> selectSubtitleTrack(String? trackId) async {
     selectedSubtitleTrackIds.add(trackId);
     selectedSubtitleOpenCounts.add(openPlayValues.length);
+    actualSubtitle = trackId;
+    nativeSubtitleEffects.add(trackId ?? 'off');
   }
 
   @override
@@ -2104,6 +2268,8 @@ class _FakeEngine implements PlaybackEngine {
     externalSubtitleUris.add(uri);
     if (externalSubtitleError != null) throw externalSubtitleError!;
     await externalSubtitleOperation;
+    actualSubtitle = uri.toString();
+    nativeSubtitleEffects.add('external');
   }
 
   @override

@@ -38,7 +38,7 @@ void main() {
     expect(subtitle.deliveryUrl, contains('/Subtitles/3/'));
   });
 
-  test('prefers exact mpv track ID then a unique metadata match', () {
+  test('requires positive metadata even when numeric track IDs match', () {
     const server = PlaybackTrack(
       index: 2,
       type: 'Audio',
@@ -51,7 +51,7 @@ void main() {
         EngineTrack(id: '2'),
         EngineTrack(id: '9'),
       ]),
-      '2',
+      isNull,
     );
     expect(
       mapper.engineTrackId(server, const [
@@ -59,6 +59,38 @@ void main() {
         EngineTrack(id: '8', language: 'jpn', codec: 'aac'),
       ]),
       '7',
+    );
+  });
+
+  test('B02 numeric coincidence cannot override a language conflict', () {
+    const server = PlaybackTrack(index: 2, type: 'Audio', language: 'chi');
+    final result = mapper.match(server, const [
+      EngineTrack(id: '2', language: 'eng'),
+      EngineTrack(id: '5', language: 'zho'),
+    ]);
+    expect(result.status, TrackMappingStatus.matched);
+    expect(result.engineId, '5');
+  });
+
+  test('B03 absent and ambiguous metadata are distinct failures', () {
+    const server = PlaybackTrack(index: 2, type: 'Audio', language: 'chi');
+    expect(
+      mapper.match(server, const [EngineTrack(id: '2')]).status,
+      TrackMappingStatus.unavailable,
+    );
+    expect(
+      mapper.match(server, const [
+        EngineTrack(id: '2', language: 'chi'),
+        EngineTrack(id: '5', language: 'zh'),
+      ]).status,
+      TrackMappingStatus.ambiguous,
+    );
+    expect(
+      mapper.engineTrackId(server, const [
+        EngineTrack(id: 'auto', language: 'chi'),
+        EngineTrack(id: 'no', language: 'chi'),
+      ]),
+      isNull,
     );
   });
 }

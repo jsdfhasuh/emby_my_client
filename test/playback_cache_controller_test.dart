@@ -307,8 +307,12 @@ void main() {
       final second = _CacheEngine(events: events);
       second.onOpen = () {
         Timer.run(() {
-          first.subtitleController.add(const [EngineTrack(id: '3')]);
-          second.subtitleController.add(const [EngineTrack(id: '3')]);
+          first.subtitleController.add(const [
+            EngineTrack(id: '3', title: 'Chinese'),
+          ]);
+          second.subtitleController.add(const [
+            EngineTrack(id: '3', title: 'Chinese'),
+          ]);
         });
       };
       final controller = _controller(

@@ -27,6 +27,14 @@ class PlaybackTrack {
   final String? deliveryUrl;
 }
 
+enum TrackMappingStatus { matched, unavailable, ambiguous }
+
+class TrackMappingResult {
+  const TrackMappingResult(this.status, [this.engineId]);
+  final TrackMappingStatus status;
+  final String? engineId;
+}
+
 class TrackMapper {
   const TrackMapper();
 
@@ -52,35 +60,51 @@ class TrackMapper {
   String? engineTrackId(
     PlaybackTrack serverTrack,
     List<EngineTrack> engineTracks,
-  ) {
-    for (final engineTrack in engineTracks) {
-      if (engineTrack.id == serverTrack.index.toString()) {
-        return engineTrack.id;
-      }
-    }
+  ) => match(serverTrack, engineTracks).engineId;
 
+  TrackMappingResult match(
+    PlaybackTrack serverTrack,
+    List<EngineTrack> engineTracks,
+  ) {
     final matching = engineTracks
         .where((engineTrack) {
-          final languageMatches =
-              serverTrack.language == null ||
-              engineTrack.language == null ||
-              serverTrack.language!.toLowerCase() ==
-                  engineTrack.language!.toLowerCase();
-          final codecMatches =
-              serverTrack.codec == null ||
-              engineTrack.codec == null ||
-              serverTrack.codec!.toLowerCase() ==
-                  engineTrack.codec!.toLowerCase();
-          final titleMatches =
-              serverTrack.title == null ||
-              engineTrack.title == null ||
-              serverTrack.title!.toLowerCase() ==
-                  engineTrack.title!.toLowerCase();
-          return languageMatches && codecMatches && titleMatches;
+          if (engineTrack.id == 'auto' || engineTrack.id == 'no') return false;
+          var evidence = false;
+          for (final pair in [
+            (_language(serverTrack.language), _language(engineTrack.language)),
+            (_text(serverTrack.codec), _text(engineTrack.codec)),
+            (_text(serverTrack.title), _text(engineTrack.title)),
+            (serverTrack.channels, engineTrack.channels),
+          ]) {
+            if (pair.$1 == null || pair.$2 == null) continue;
+            if (pair.$1 != pair.$2) return false;
+            evidence = true;
+          }
+          return evidence;
         })
         .toList(growable: false);
-    return matching.length == 1 ? matching.single.id : null;
+    return switch (matching.length) {
+      0 => const TrackMappingResult(TrackMappingStatus.unavailable),
+      1 => TrackMappingResult(TrackMappingStatus.matched, matching.single.id),
+      _ => const TrackMappingResult(TrackMappingStatus.ambiguous),
+    };
   }
+
+  static String? _text(String? value) {
+    final text = value?.trim().toLowerCase();
+    return text == null || text.isEmpty || text == 'und' ? null : text;
+  }
+
+  static String? _language(String? value) => switch (_text(value)) {
+    'eng' || 'en' => 'en',
+    'chi' || 'zho' || 'zh' => 'zh',
+    'jpn' || 'ja' => 'ja',
+    'fra' || 'fre' || 'fr' => 'fr',
+    'deu' || 'ger' || 'de' => 'de',
+    'spa' || 'es' => 'es',
+    'kor' || 'ko' => 'ko',
+    final value => value,
+  };
 
   PlaybackTrack? findByIndex(PlaybackPlan plan, String type, int index) =>
       fromPlan(plan, type).where((track) => track.index == index).firstOrNull;

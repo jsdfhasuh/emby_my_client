@@ -22,6 +22,7 @@ import 'playback_session_reporter.dart';
 import 'playback_seek_statistics.dart';
 import 'playback_state.dart';
 import 'track_mapper.dart';
+import 'subtitle_application_queue.dart';
 
 typedef PlaybackEngineRecreator =
     Future<PlaybackEngine> Function(PlaybackItemSession session);
@@ -111,6 +112,7 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackEngineDisposalUnconfirmed? onEngineDisposalUnconfirmed;
   final PlaybackClock _clock;
   final TrackMapper _trackMapper = const TrackMapper();
+  final _subtitleQueues = Expando<SubtitleApplicationQueue>();
 
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   late PlaybackOperationCoordinator _operationCoordinator;
@@ -220,6 +222,7 @@ class PlaybackController extends ChangeNotifier {
     AutomaticPlaybackOpenReason transcodeFallbackReason =
         AutomaticPlaybackOpenReason.startupTranscodeFallback,
     String? openingStatusMessage,
+    PlaybackPlan? preparedPlan,
   }) async {
     final token = _advanceGeneration();
     await _bindEngine(token);
@@ -247,15 +250,18 @@ class PlaybackController extends ChangeNotifier {
       PlaybackPlan? plan;
       var engineOpenTimedOut = false;
       try {
-        plan = await resolver.resolve(
-          item,
-          mediaSourceId: _selectedMediaSourceId,
-          audioStreamIndex: _selectedAudioStreamIndex,
-          subtitleStreamIndex: _desiredSubtitleSelection.streamIndex,
-          subtitleDisabled: _desiredSubtitleSelection.isDisabled,
-          maxStreamingBitrate: _maxStreamingBitrate,
-          forceTranscode: forceTranscode,
-        );
+        plan =
+            preparedPlan ??
+            await resolver.resolve(
+              item,
+              mediaSourceId: _selectedMediaSourceId,
+              audioStreamIndex: _selectedAudioStreamIndex,
+              subtitleStreamIndex: _desiredSubtitleSelection.streamIndex,
+              subtitleDisabled: _desiredSubtitleSelection.isDisabled,
+              maxStreamingBitrate: _maxStreamingBitrate,
+              forceTranscode: forceTranscode,
+            );
+        preparedPlan = null;
         if (!_isCurrent(token)) {
           await reporter.cleanup(plan);
           return;
@@ -363,6 +369,7 @@ class PlaybackController extends ChangeNotifier {
         );
         _throwIfStale(token);
         try {
+          _syncAppliedTrackReportingPlan();
           await reporter.reportStart(
             _state.position,
             isPaused: !playAfterReady,
@@ -1015,7 +1022,11 @@ class PlaybackController extends ChangeNotifier {
           );
           _throwIfCurrentEngine(token, boundEngine);
           _markAudioApplied(streamIndex, token, boundEngine);
-          reporter.updatePlan(plan.copyWith(audioStreamIndex: streamIndex));
+          final updated = (_state.plan ?? plan).copyWith(
+            audioStreamIndex: streamIndex,
+          );
+          _setState(_state.copyWith(plan: updated));
+          reporter.updatePlan(updated);
           await _reportProgress();
           return;
         }
@@ -1157,12 +1168,55 @@ class PlaybackController extends ChangeNotifier {
             !lease.isCurrent) {
           return;
         }
+        final switchingSource =
+            mediaSourceId != null &&
+            mediaSourceId !=
+                (_selectedMediaSourceId ?? _state.plan?.mediaSourceId);
+        PlaybackPlan? candidate;
+        if (switchingSource) {
+          // Preflight is a draft: the current source and its selection remain
+          // untouched until a valid candidate has been accepted.
+          try {
+            if (audioStreamIndex != null || subtitleStreamIndex != null) {
+              throw StateError(
+                'New source selection requires target track evidence',
+              );
+            }
+            candidate = await resolver.resolve(
+              item,
+              mediaSourceId: mediaSourceId,
+              subtitleDisabled:
+                  clearSubtitle || _desiredSubtitleSelection.isDisabled,
+              maxStreamingBitrate: maxStreamingBitrate ?? _maxStreamingBitrate,
+              forceTranscode: forceTranscode,
+            );
+            if (!lease.isCurrent || _shuttingDown || _retiring) {
+              await reporter.cleanup(candidate);
+              return;
+            }
+            if (candidate.mediaSourceId != mediaSourceId) {
+              await reporter.cleanup(candidate);
+              throw StateError('Requested source is unavailable');
+            }
+          } catch (_) {
+            if (lease.isCurrent && !_shuttingDown && !_retiring) {
+              _setState(_state.copyWith(statusMessage: '所选版本不可用，继续当前播放'));
+            }
+            return;
+          }
+        }
         final position = _state.position;
         final wasPlaying = _desiredPlaying;
+        Future<bool> abandonCandidateIfStale() async {
+          if (lease.isCurrent && !_shuttingDown && !_retiring) return false;
+          if (candidate != null) await reporter.cleanup(candidate);
+          return true;
+        }
+
         _advanceGeneration();
         _progressTimer?.cancel();
         await _stopCacheCoordinator();
-        if (!lease.isCurrent || _shuttingDown) return;
+        if (await abandonCandidateIfStale()) return;
         _setState(
           _state.copyWith(
             phase: PlaybackPhase.resolving,
@@ -1171,10 +1225,22 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         await _stopForControlledRestart(position);
-        if (!lease.isCurrent || _shuttingDown) return;
+        if (await abandonCandidateIfStale()) return;
         await _cleanupCacheSessionSafely();
-        if (!lease.isCurrent || _shuttingDown) return;
+        if (await abandonCandidateIfStale()) return;
 
+        if (mediaSourceId != null &&
+            mediaSourceId !=
+                (_selectedMediaSourceId ?? _state.plan?.mediaSourceId)) {
+          // Numeric indices are identities within one source, not preferences.
+          _selectedAudioStreamIndex = null;
+          if (!_desiredSubtitleSelection.isDisabled) {
+            _desiredSubtitleSelection =
+                const SubtitleSelection.followServerDefault();
+          }
+          _appliedAudioEngine = null;
+          _appliedSubtitleEngine = null;
+        }
         if (mediaSourceId != null) _selectedMediaSourceId = mediaSourceId;
         if (audioStreamIndex != null) {
           _selectedAudioStreamIndex = audioStreamIndex;
@@ -1189,12 +1255,18 @@ class PlaybackController extends ChangeNotifier {
         if (maxStreamingBitrate != null) {
           _maxStreamingBitrate = maxStreamingBitrate;
         }
-        if (!lease.isCurrent || _shuttingDown) return;
-        await _startPlayback(
-          resumePosition: position,
-          playAfterReady: wasPlaying,
-          forceTranscodeInitially: forceTranscode,
-        );
+        if (await abandonCandidateIfStale()) return;
+        try {
+          await _startPlayback(
+            resumePosition: position,
+            playAfterReady: wasPlaying,
+            forceTranscodeInitially: forceTranscode,
+            preparedPlan: candidate,
+          );
+        } catch (_) {
+          if (candidate != null) await reporter.cleanup(candidate);
+          rethrow;
+        }
       },
     );
   }
@@ -2311,13 +2383,29 @@ class PlaybackController extends ChangeNotifier {
     SubtitleSelection selection,
     int? streamIndex,
   ) {
+    final current = _state.plan;
+    if (current == null ||
+        current.mediaSourceId != plan.mediaSourceId ||
+        current.playSessionId != plan.playSessionId) {
+      return;
+    }
+    final appliedAudio = current.method == PlayMethod.directPlay
+        ? current.copyWith(
+            audioStreamIndex: _state.appliedAudioStreamIndex,
+            clearAudioStreamIndex: _state.appliedAudioStreamIndex == null,
+          )
+        : current;
     final updated = selection.isDisabled
-        ? plan.copyWith(clearSubtitleStreamIndex: true, subtitleDisabled: true)
-        : plan.copyWith(
+        ? appliedAudio.copyWith(
+            clearSubtitleStreamIndex: true,
+            subtitleDisabled: true,
+          )
+        : appliedAudio.copyWith(
             clearSubtitleStreamIndex: streamIndex == null,
             subtitleStreamIndex: streamIndex,
             subtitleDisabled: false,
           );
+    _setState(_state.copyWith(plan: updated));
     reporter.updatePlan(updated);
   }
 
@@ -2364,14 +2452,22 @@ class PlaybackController extends ChangeNotifier {
           ? null
           : _trackMapper.engineTrackId(track, tracks);
       if (engineId == null) {
-        throw StateError('Unable to map Emby audio track $audioIndex');
+        // A default without positive mapping evidence must not force a new
+        // server stream. Keep the engine default and report it as unapplied.
+        _setState(
+          _state.copyWith(
+            audioSelectionStatus: AudioSelectionStatus.failed,
+            clearAppliedAudioStreamIndex: true,
+          ),
+        );
+      } else {
+        await _runPropertyWrite(
+          boundEngine,
+          () => boundEngine.selectAudioTrack(engineId),
+        );
+        _throwIfCurrentEngine(token, boundEngine);
+        _markAudioApplied(audioIndex, token, boundEngine);
       }
-      await _runPropertyWrite(
-        boundEngine,
-        () => boundEngine.selectAudioTrack(engineId),
-      );
-      _throwIfCurrentEngine(token, boundEngine);
-      _markAudioApplied(audioIndex, token, boundEngine);
     } else if (_isCurrent(token)) {
       _setState(
         _state.copyWith(audioSelectionStatus: AudioSelectionStatus.applied),
@@ -2442,7 +2538,12 @@ class PlaybackController extends ChangeNotifier {
       if (selection.isDisabled) {
         await _runPropertyWrite(
           boundEngine,
-          () => boundEngine.selectSubtitleTrack(null),
+          () => _submitSubtitleWrite(
+            selection,
+            token,
+            boundEngine,
+            () => boundEngine.selectSubtitleTrack(null),
+          ),
         );
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
         _markSubtitleApplied(
@@ -2484,10 +2585,15 @@ class PlaybackController extends ChangeNotifier {
       );
       if (track?.isExternal == true && track?.deliveryUrl != null) {
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-        final externalLoad = boundEngine.loadExternalSubtitle(
-          resolver.resolveExternalUrl(track!.deliveryUrl!),
-          title: track.title,
-          language: track.language,
+        final externalLoad = _submitSubtitleWrite(
+          selection,
+          token,
+          boundEngine,
+          () => boundEngine.loadExternalSubtitle(
+            resolver.resolveExternalUrl(track!.deliveryUrl!),
+            title: track.title,
+            language: track.language,
+          ),
         );
         try {
           await externalLoad.timeout(
@@ -2565,7 +2671,12 @@ class PlaybackController extends ChangeNotifier {
       }
       await _runPropertyWrite(
         boundEngine,
-        () => boundEngine.selectSubtitleTrack(engineId),
+        () => _submitSubtitleWrite(
+          selection,
+          token,
+          boundEngine,
+          () => boundEngine.selectSubtitleTrack(engineId),
+        ),
       );
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
       _markSubtitleApplied(
@@ -2583,6 +2694,8 @@ class PlaybackController extends ChangeNotifier {
         generation: token,
       );
       _updateReporterSubtitlePlan(plan, selection, resolvedSubtitleIndex);
+    } on SubtitleApplicationSuperseded {
+      _diagnostics.subtitleApplyCancelled(generation: token);
     } on _PlaybackCancelled {
       _diagnostics.subtitleApplyCancelled(generation: token);
       rethrow;
@@ -2595,6 +2708,21 @@ class PlaybackController extends ChangeNotifier {
         error: error,
       );
     }
+  }
+
+  Future<void> _submitSubtitleWrite(
+    SubtitleSelection selection,
+    int token,
+    PlaybackEngine boundEngine,
+    Future<void> Function() apply,
+  ) {
+    final queue = _subtitleQueues[boundEngine] ??= SubtitleApplicationQueue();
+    return queue.submit(
+      isCurrent: () =>
+          _isCurrentEngine(token, boundEngine) &&
+          identical(_desiredSubtitleSelection, selection),
+      apply: apply,
+    );
   }
 
   void _scheduleLateEmbeddedSubtitle({
@@ -2914,7 +3042,32 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
+  void _syncAppliedTrackReportingPlan() {
+    final plan = _state.plan;
+    if (plan == null || plan.method != PlayMethod.directPlay) return;
+    final audio = _state.audioSelectionStatus == AudioSelectionStatus.applied
+        ? _state.appliedAudioStreamIndex
+        : null;
+    final subtitle = switch (_state.subtitleSelectionStatus) {
+      SubtitleSelectionStatus.appliedEmbedded ||
+      SubtitleSelectionStatus.appliedExternal =>
+        _state.appliedSubtitleStreamIndex,
+      _ => null,
+    };
+    reporter.updatePlan(
+      plan.copyWith(
+        audioStreamIndex: audio,
+        clearAudioStreamIndex: audio == null,
+        subtitleStreamIndex: subtitle,
+        clearSubtitleStreamIndex: subtitle == null,
+        subtitleDisabled:
+            _state.subtitleSelectionStatus == SubtitleSelectionStatus.disabled,
+      ),
+    );
+  }
+
   Future<void> _reportProgress({bool? isPaused}) async {
+    _syncAppliedTrackReportingPlan();
     try {
       await reporter.reportProgress(
         position: _state.position,
