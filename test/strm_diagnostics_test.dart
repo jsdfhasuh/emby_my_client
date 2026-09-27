@@ -9,6 +9,7 @@ import 'package:emby_my_client/core/strm_diagnostics.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
+import 'package:emby_my_client/playback/playback_session_reporter.dart';
 import 'package:emby_my_client/playback/source_http_input.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -89,6 +90,57 @@ Future<PlaybackPlan> resolve(StrmTrace trace, String url) async {
 }
 
 void main() {
+  test('queued reporting retains the attempt captured at invocation', () async {
+    final fixture = await fileLog();
+    final trace = StrmTrace(log: fixture.log);
+    final plan = await resolve(trace, 'https://source.invalid/video');
+    final requests = <String>[];
+    final dio = Dio()
+      ..interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (o, h) {
+            requests.add(o.path);
+            h.resolve(Response(requestOptions: o, statusCode: 204));
+          },
+        ),
+      );
+    final api = EmbyApi(
+      const EmbySession(
+        serverUrl: 'https://private-emby.invalid',
+        serverName: 'fixture',
+        serverId: 'private-server',
+        userId: 'private-user',
+        username: 'private-user',
+        accessToken: 'private-credential',
+        deviceId: 'private-device',
+      ),
+      dio: dio,
+    );
+    addTearDown(api.dispose);
+    final reporter = PlaybackSessionReporter(
+      api: api,
+      item: EmbyItem.fromJson({'Id': 'private-item'}),
+      trace: trace,
+    );
+    reporter.activate(plan);
+    trace.nextOpen();
+    final start = reporter.reportStart(Duration.zero, isPaused: true);
+    trace.nextOpen();
+    await start;
+    final stopped = reporter.stop(Duration.zero);
+    trace.nextOpen();
+    await stopped;
+    expect(requests, ['/Sessions/Playing', '/Sessions/Playing/Stopped']);
+    final exported = await report(fixture.log, 'queued-reporting');
+    final lines = exported.content.split('\n');
+    final starts = lines.where((l) => l.contains('operation=start'));
+    final stops = lines.where((l) => l.contains('operation=stopped'));
+    expect(starts, hasLength(2));
+    expect(stops, hasLength(2));
+    expect(starts.every((l) => l.contains('openAttempt=1')), true);
+    expect(stops.every((l) => l.contains('openAttempt=2')), true);
+  });
+
   test('Dart and native full export use exactly the same closed schema', () {
     final swift = File(
       'ios/Runner/SafeDiagnosticExportSupport.swift',

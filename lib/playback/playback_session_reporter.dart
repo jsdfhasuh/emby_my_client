@@ -56,6 +56,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
     if (existing != null) return existing;
     if (cycle.startAttempted) return Future<void>.value();
     final plan = cycle.plan;
+    final attempt = cycle.trace?.currentAttempt;
     late final Future<void> operation;
     operation = cycle.enqueue(() async {
       try {
@@ -64,6 +65,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
         await _report(
           cycle,
           'start',
+          attempt,
           () => api.reportPlaybackStart(
             item,
             plan,
@@ -117,6 +119,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
     if (cycle.stopped) return;
     cycle.stopped = true;
     final plan = cycle.plan;
+    final attempt = cycle.trace?.currentAttempt;
     final cleanupOperation = cleanup(plan);
     await cycle.tail;
     final startOperation = cycle.startOperation;
@@ -134,6 +137,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
           await _report(
             cycle,
             'stopped',
+            attempt,
             () => api.reportPlaybackStopped(item, plan, position: position),
           );
         } catch (error) {
@@ -152,9 +156,9 @@ class PlaybackSessionReporter implements PlaybackReporter {
   Future<void> _report(
     _PlaybackReportingCycle cycle,
     String operation,
+    int? attempt,
     Future<void> Function() send,
   ) async {
-    final attempt = cycle.trace?.currentAttempt;
     final watch = Stopwatch()..start();
     void event(String outcome) => cycle.trace?.emit('strm_reporting', {
       'openAttempt': attempt,
