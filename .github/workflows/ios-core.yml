@@ -13,6 +13,7 @@ on:
       - 'lib/**'
       - 'test/**'
       - 'ios/**'
+      - 'native/**'
       - 'scripts/android/**'
       - 'scripts/ios/**'
       - 'pubspec.yaml'
@@ -112,6 +113,13 @@ jobs:
             echo 'libmpv is not visible to the dynamic linker' >&2
             exit 1
           }
+
+      - name: Build controlled libmpv input bridge for native host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -shared -fPIC -O2 -Wall -Wextra -Werror -pthread native/strm_input.c -o "$RUNNER_TEMP/libstrm_input.so"
+          echo "STRM_INPUT_LIBRARY=$RUNNER_TEMP/libstrm_input.so" >> "$GITHUB_ENV"
 
       - name: Verify host libmpv availability
         shell: bash
@@ -656,6 +664,15 @@ jobs:
       - name: Check lock drift after iOS build
         shell: bash
         run: git diff --exit-code -- pubspec.lock ios/Podfile.lock
+
+      - name: Verify controlled input symbols survive release linking
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm -gU build/ios/iphoneos/Runner.app/Runner > "$RUNNER_TEMP/runner-symbols.txt"
+          for symbol in strm_create strm_add strm_poll strm_complete strm_release strm_destroy; do
+            grep -q " _$symbol$" "$RUNNER_TEMP/runner-symbols.txt"
+          done
 
       - name: Install and verify Homebrew Core ldid 2.1.5
         shell: bash

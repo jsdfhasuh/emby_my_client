@@ -5,6 +5,98 @@ import UIKit
 import XCTest
 
 final class RunnerTests: XCTestCase {
+  func testControlledStrmInputDecodesSeeksAndResumes() throws {
+    // Uses the exact C bridge linked into Runner, not a mock stream callback.
+    let context = try PlaybackCacheNativeProbe.makeTestContext()
+    let symbol = try XCTUnwrap(dlsym(dlopen(nil, RTLD_NOW), "mpv_stream_cb_add_ro"))
+    let bridge = try XCTUnwrap(strm_create(UnsafeMutableRawPointer(context), symbol))
+    let fixture = strmFixtureVideo()
+    XCTAssertEqual(strm_add(bridge, 1, Int64(fixture.count)), 1)
+    let stopping = DispatchSemaphore(value: 0)
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue(label: "strm-fixture-input").async {
+      defer { done.signal() }
+      var event = [Int64](repeating: 0, count: 4)
+      while stopping.wait(timeout: .now()) == .timedOut {
+        if strm_poll(bridge, &event) == 1 {
+          let offset = Int(event[2]), count = Int(event[3])
+          fixture.withUnsafeBytes { bytes in
+            strm_complete(bridge, event[0], event[1],
+              bytes.baseAddress!.advanced(by: offset).assumingMemoryBound(to: CChar.self), Int64(count))
+          }
+        } else { Thread.sleep(forTimeInterval: 0.001) }
+      }
+    }
+    defer {
+      strm_release(bridge, 1)
+      mpv_terminate_destroy(context)
+      stopping.signal()
+      done.wait()
+      strm_destroy(bridge)
+    }
+    for (name, value) in ["vid": "auto", "vo": "null", "ao": "null",
+      "pause": "yes", "demuxer": "lavf", "demuxer-lavf-format": "avi",
+      "demuxer-lavf-o": "protocol_whitelist=none", "access-references": "no",
+      "ordered-chapters": "no", "sub-auto": "no", "audio-file-auto": "no"] {
+      XCTAssertGreaterThanOrEqual(mpv_set_property_string(context, name, value), 0, name)
+    }
+    func command(_ values: [String]) -> Int32 {
+      let strings = values.map { strdup($0)! }
+      defer { strings.forEach { free($0) } }
+      var pointers = strings.map { UnsafePointer<CChar>($0) as UnsafePointer<CChar>? }
+      pointers.append(nil)
+      return mpv_command(context, &pointers)
+    }
+    func waitFor(_ name: String, _ predicate: (String) -> Bool) -> Bool {
+      let deadline = Date().addingTimeInterval(15)
+      while Date() < deadline {
+        if let text = mpv_get_property_string(context, name) {
+          let value = String(cString: text); mpv_free(text)
+          if predicate(value) { return true }
+        }
+        Thread.sleep(forTimeInterval: 0.01)
+      }
+      return false
+    }
+    XCTAssertGreaterThanOrEqual(command(["loadfile", "embyinput://1", "replace"]), 0)
+    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })
+    XCTAssertGreaterThanOrEqual(command(["seek", "16", "absolute+exact"]), 0)
+    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= 15 })
+    strm_release(bridge, 1)
+    XCTAssertGreaterThanOrEqual(command(["stop"]), 0)
+    XCTAssertEqual(strm_add(bridge, 2, Int64(fixture.count)), 1)
+    XCTAssertGreaterThanOrEqual(command(["loadfile", "embyinput://2", "replace"]), 0)
+    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })
+    XCTAssertGreaterThanOrEqual(command(["seek", "12", "absolute+exact"]), 0)
+    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= 11 })
+    strm_release(bridge, 2)
+    print("STRM_CUSTOM_INPUT_DECODE_SEEK_RESUME=PASSED")
+  }
+
+  private func strmFixtureVideo() -> Data {
+    func words(_ values: [UInt32]) -> Data {
+      var data = Data()
+      for value in values { var little = value.littleEndian; withUnsafeBytes(of: &little) { data.append(contentsOf: $0) } }
+      return data
+    }
+    func chunk(_ name: String, _ body: Data) -> Data {
+      var result = Data(name.utf8) + words([UInt32(body.count)]) + body
+      if body.count % 2 == 1 { result.append(0) }
+      return result
+    }
+    let size: UInt32 = 32 * 24 * 3, frames: UInt32 = 240
+    let avih = chunk("avih", words([100000, size * 10, 0, 16, frames, 0, 1, size, 32, 24, 0, 0, 0, 0]))
+    let strh = Data("vidsDIB ".utf8) + words([0, 0, 0, 1, 10, 0, frames, size, UInt32.max, 0]) + Data([0, 0, 0, 0, 32, 0, 24, 0])
+    let strf = words([40, 32, 24]) + Data([1, 0, 24, 0]) + words([0, size, 0, 0, 0, 0])
+    let hdrl = chunk("LIST", Data("hdrl".utf8) + avih + chunk("LIST", Data("strl".utf8) + chunk("strh", strh) + chunk("strf", strf)))
+    var movie = Data(), index = Data()
+    for frame in 0..<frames {
+      index.append(Data("00db".utf8) + words([16, UInt32(movie.count) + 4, size]))
+      movie.append(chunk("00db", Data((0..<size).map { UInt8(($0 + frame * 7) % 256) })))
+    }
+    return chunk("RIFF", Data("AVI ".utf8) + hdrl + chunk("LIST", Data("movi".utf8) + movie) + chunk("idx1", index))
+  }
+
   func testNativeGateEvidenceUsesExactSchemaAndStatuses() throws {
     let evidence = PlaybackCacheNativeGateEvidence(
       diskCacheCapability: .blockedByBundledLibmpv,

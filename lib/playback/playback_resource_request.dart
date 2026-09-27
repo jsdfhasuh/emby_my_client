@@ -41,7 +41,8 @@ class PlaybackResourceRequest {
     required this.rawUrl,
     required Map<String, String> headers,
     required this.identity,
-    required Uri embyServer,
+    required this.embyServer,
+    this.isSessionActive,
   }) : headers = _validateHeaders(headers) {
     validateDestination(rawUrl, embyServer: embyServer);
   }
@@ -49,6 +50,9 @@ class PlaybackResourceRequest {
   final String rawUrl;
   final Map<String, String> headers;
   final PlaybackResourceIdentity identity;
+  final Uri embyServer;
+  final bool Function()? isSessionActive;
+  bool get sessionActive => isSessionActive?.call() ?? true;
 
   @override
   String toString() => 'PlaybackResourceRequest(sourceDirect)';
@@ -160,11 +164,13 @@ class SelectedSourceSnapshot {
     required PlaybackResourceIdentity identity,
     required Uri embyServer,
     required this.playSessionId,
+    bool Function()? isSessionActive,
   }) : request = PlaybackResourceRequest(
          rawUrl: source.path ?? '',
          headers: source.requiredHttpHeaders,
          identity: identity,
          embyServer: embyServer,
+         isSessionActive: isSessionActive,
        ),
        mediaStreams = List.unmodifiable(
          source.mediaStreams.map(

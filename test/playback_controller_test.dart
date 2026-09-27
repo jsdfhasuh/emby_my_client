@@ -1,22 +1,79 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
+import 'package:emby_my_client/playback/external_subtitle_loader.dart';
 import 'package:emby_my_client/playback/media_kit_inline_playback_session.dart';
 import 'package:emby_my_client/playback/inline_playback_resource_lease.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_diagnostics.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
+import 'package:emby_my_client/playback/playback_resource_request.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_reporter.dart';
 import 'package:emby_my_client/playback/playback_session_bootstrap.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/progressive_fixture.dart';
 
 void main() {
+  test(
+    'source runtime seek recovery reuses snapshot and reporting cycle',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, remoteStrm: true);
+      addTearDown(api.dispose);
+      final engine = _FakeEngine();
+      engine.onOpen = (_) =>
+          engine.durationController.add(const Duration(hours: 1));
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+      );
+      addTearDown(controller.shutdown);
+      await controller.start(subtitleDisabled: true);
+      expect(controller.state.plan!.isSourceDirect, true);
+      await controller.seekAbsolute(
+        const Duration(minutes: 4),
+        source: SeekSource.progressBar,
+      );
+      engine.errorController.add('Error reading packet');
+      for (
+        var i = 0;
+        i < 100 &&
+            (engine.openUris.length < 2 ||
+                controller.state.phase != PlaybackPhase.ready);
+        i++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(engine.openUris, hasLength(2));
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(
+        requests.where((r) => r.path.endsWith('/PlaybackInfo')),
+        hasLength(1),
+      );
+      expect(
+        requests.where((r) => r.path == '/Sessions/Playing'),
+        hasLength(1),
+      );
+      expect(
+        requests.where((r) => r.path == '/Sessions/Playing/Stopped'),
+        isEmpty,
+      );
+      await controller.shutdown();
+      expect(
+        requests.where((r) => r.path == '/Sessions/Playing/Stopped'),
+        hasLength(1),
+      );
+    },
+  );
   test(
     'B21 new-source preflight clears A indices before the first B request',
     () async {
@@ -98,42 +155,56 @@ void main() {
   test(
     'B23 controller serializes late native A before the latest disable',
     () async {
+      final server = await ProgressiveOrigin.start();
+      addTearDown(server.close);
+      server.intercept = (_) async => (
+        status: 200,
+        headers: <String, String>{},
+        body: utf8.encode('1\n00:00:00,000 --> 00:00:24,000\nFixture\n'),
+      );
+      final api = _api([]);
+      addTearDown(api.dispose);
       final nativeGate = Completer<void>();
       final engine = _FakeEngine(externalSubtitleOperation: nativeGate.future);
       engine.onOpen = (_) =>
           engine.durationController.add(const Duration(hours: 1));
       final resolver = _PlanResolver(
         _testPlan(
-          mediaStreams: const [
+          mediaStreams: [
             {
               'Index': 3,
               'Type': 'Subtitle',
               'IsExternal': true,
-              'DeliveryUrl': 'https://subtitle.invalid/a.srt',
+              'DeliveryUrl': '${server.origin}/a.srt',
             },
             {
               'Index': 4,
               'Type': 'Subtitle',
               'IsExternal': true,
-              'DeliveryUrl': 'https://subtitle.invalid/b.srt',
+              'DeliveryUrl': '${server.origin}/b.srt',
             },
           ],
         ),
       );
       final controller = _controller(
-        api: _api([]),
+        api: api,
+        subtitleLoader: ExternalSubtitleLoader(api),
         engine: engine,
         item: _plainItem,
         resolver: resolver,
       );
-      await controller.start();
-      final a = controller.selectSubtitleStream(3);
-      await _waitUntil(() => engine.externalSubtitleUris.isNotEmpty);
+      await controller.start(subtitleStreamIndex: 3);
+      expect(controller.state.phase, PlaybackPhase.ready);
+      await engine.externalSubtitleEntered.future.timeout(
+        const Duration(seconds: 3),
+      );
+      final file = File.fromUri(engine.externalSubtitleUris.single);
+      expect(await file.exists(), true);
       final b = controller.selectSubtitleStream(4);
       final off = controller.selectSubtitleStream(null);
       expect(engine.actualSubtitle, isNull);
       nativeGate.complete();
-      await Future.wait([a, b, off]);
+      await Future.wait([b, off]);
       expect(engine.externalSubtitleUris, hasLength(1));
       expect(engine.nativeSubtitleEffects, ['external', 'off']);
       expect(engine.actualSubtitle, isNull);
@@ -142,6 +213,7 @@ void main() {
         SubtitleSelectionStatus.disabled,
       );
       await controller.shutdown();
+      expect(await file.exists(), false);
     },
   );
 
@@ -1366,7 +1438,7 @@ void main() {
   });
 
   test(
-    'remote strm uses authenticated Emby stream and still falls back',
+    'remote strm uses source input and never falls back when readiness fails',
     () async {
       final requests = <RequestOptions>[];
       final api = _api(requests, remoteStrm: true);
@@ -1389,12 +1461,17 @@ void main() {
 
       await controller.start();
 
-      expect(engine.openUris.first.origin, _session.serverUrl);
-      expect(engine.openUris.first.path, '/Videos/item-1/stream');
-      expect(engine.openHeaders.first['X-Emby-Token'], _session.accessToken);
-      expect(engine.openUris.last.origin, _session.serverUrl);
-      expect(engine.openHeaders.last['X-Emby-Token'], _session.accessToken);
-      expect(controller.state.plan?.method, PlayMethod.transcode);
+      expect(engine.openUris, hasLength(1));
+      expect(engine.openUris.single.host, 'upstream.example.test');
+      expect(engine.openHeaders.single, isEmpty);
+      expect(controller.state.plan?.isSourceDirect, isTrue);
+      expect(controller.state.phase, PlaybackPhase.failed);
+      final metadata = requests
+          .where((r) => r.path.endsWith('/PlaybackInfo'))
+          .toList();
+      expect(metadata, hasLength(1));
+      expect(metadata.single.data['EnableDirectStream'], false);
+      expect(metadata.single.data['EnableTranscoding'], false);
 
       await controller.shutdown();
     },
@@ -1404,7 +1481,7 @@ void main() {
     'fatal stream logs fall back immediately and stop failed transcode',
     () async {
       final requests = <RequestOptions>[];
-      final api = _api(requests, remoteStrm: true);
+      final api = _api(requests);
       final engine = _FakeEngine();
       final statuses = <String>[];
       engine.onOpen = (count) {
@@ -1891,6 +1968,7 @@ class _LifecycleSpyPlaybackController extends PlaybackController {
 }
 
 PlaybackController _controller({
+  ExternalSubtitleLoader? subtitleLoader,
   required EmbyApi api,
   required _FakeEngine engine,
   required EmbyItem item,
@@ -1911,6 +1989,7 @@ PlaybackController _controller({
   PlaybackStreamResolver? resolver,
   PlaybackReporter? reporter,
 }) => PlaybackController(
+  subtitleLoader: subtitleLoader,
   item: item,
   engine: engine,
   resolver: resolver ?? EmbyStreamResolver(api),
@@ -2014,6 +2093,28 @@ EmbyApi _api(
     InterceptorsWrapper(
       onRequest: (options, handler) {
         requests.add(options);
+        if (options.method == 'GET' && options.path.contains('/Users/')) {
+          handler.resolve(
+            Response<dynamic>(
+              requestOptions: options,
+              statusCode: 200,
+              data: {
+                'Id': options.path.split('/').last,
+                'MediaSources': [
+                  {
+                    'Id': 'source-1',
+                    'Protocol': 'File',
+                    'Path': remoteStrm
+                        ? '/media/movie.strm'
+                        : '/media/movie.mkv',
+                    'Container': remoteStrm ? 'strm' : 'mkv',
+                  },
+                ],
+              },
+            ),
+          );
+          return;
+        }
         if (options.path.endsWith('/PlaybackInfo')) {
           handler.resolve(
             Response<dynamic>(
@@ -2025,7 +2126,7 @@ EmbyApi _api(
                   {
                     'Id': 'source-1',
                     'Path': remoteStrm
-                        ? 'https://upstream.example.test/live.m3u8'
+                        ? 'https://upstream.example.test/movie.mp4'
                         : null,
                     'Protocol': remoteStrm ? 'Http' : 'File',
                     'Container': remoteStrm ? 'strm' : 'mkv',
@@ -2085,7 +2186,21 @@ Future<void> _waitUntil(bool Function() predicate) async {
   fail('Timed out waiting for asynchronous test condition');
 }
 
-class _FakeEngine implements PlaybackEngine {
+class _FakeEngine
+    implements
+        PlaybackEngine,
+        SourceDirectPlaybackEngine,
+        PlaybackNativeResourceOwner {
+  final externalSubtitleEntered = Completer<void>();
+  final List<Future<void> Function()> resources = [];
+  @override
+  void retainUntilNativeDisposal(Future<void> Function() release) =>
+      resources.add(release);
+  @override
+  Future<void> openSource(
+    PlaybackResourceRequest request, {
+    required bool play,
+  }) => open(Uri.parse(request.rawUrl), headers: request.headers, play: play);
   _FakeEngine({
     this.openOperation,
     this.playOperation,
@@ -2266,6 +2381,9 @@ class _FakeEngine implements PlaybackEngine {
     String? language,
   }) async {
     externalSubtitleUris.add(uri);
+    if (!externalSubtitleEntered.isCompleted) {
+      externalSubtitleEntered.complete();
+    }
     if (externalSubtitleError != null) throw externalSubtitleError!;
     await externalSubtitleOperation;
     actualSubtitle = uri.toString();
@@ -2303,6 +2421,9 @@ class _FakeEngine implements PlaybackEngine {
   Future<void> dispose() async {
     disposeCalls++;
     await disposeOperation;
+    for (final release in resources) {
+      await release();
+    }
   }
 }
 

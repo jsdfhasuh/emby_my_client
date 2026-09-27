@@ -949,6 +949,68 @@ void main() {
       },
     );
 
+    test(
+      'B19 new Start waits for old actual Stopped after caller timeout',
+      () async {
+        final events = <String>[];
+        final stoppedGate = Completer<void>();
+        final stoppedSeen = Completer<void>();
+        final api = _api((options, handler) {
+          if (options.path.startsWith('/Sessions/Playing')) {
+            events.add('${options.path}:${options.data['PlaySessionId']}');
+          }
+          if (options.path == '/Sessions/Playing/Stopped' &&
+              options.data['PlaySessionId'] == 'old') {
+            stoppedSeen.complete();
+            unawaited(
+              stoppedGate.future.then(
+                (_) => handler.resolve(_response(options, {})),
+              ),
+            );
+          } else {
+            handler.resolve(_response(options, {}));
+          }
+        });
+        addTearDown(api.dispose);
+        final reporter = PlaybackSessionReporter(api: api, item: _item);
+        reporter.activate(
+          _plan(method: PlayMethod.directPlay, playSessionId: 'old'),
+        );
+        await reporter.reportStart(Duration.zero, isPaused: true);
+        final oldStop = reporter.stop(const Duration(seconds: 4));
+        await stoppedSeen.future;
+        await expectLater(
+          oldStop.timeout(const Duration(milliseconds: 5)),
+          throwsA(isA<TimeoutException>()),
+        );
+        reporter.activate(
+          _plan(method: PlayMethod.directPlay, playSessionId: 'new'),
+        );
+        final newStart = reporter.reportStart(
+          const Duration(seconds: 4),
+          isPaused: false,
+        );
+        await reporter.reportProgress(
+          position: const Duration(seconds: 5),
+          isPaused: false,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(events, [
+          '/Sessions/Playing:old',
+          '/Sessions/Playing/Stopped:old',
+        ]);
+        stoppedGate.complete();
+        await Future.wait([oldStop, newStart]);
+        await reporter.stop(const Duration(seconds: 6));
+        expect(events, [
+          '/Sessions/Playing:old',
+          '/Sessions/Playing/Stopped:old',
+          '/Sessions/Playing:new',
+          '/Sessions/Playing/Stopped:new',
+        ]);
+      },
+    );
+
     test('redacts encoded URL, headers and exception text', () {
       const token = 'super-secret-token';
       final value = DiagnosticLog.redact(

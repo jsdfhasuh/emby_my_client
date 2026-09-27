@@ -11,6 +11,9 @@ import 'cache/playback_cache_telemetry.dart';
 import 'playback_diagnostics.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_output_quiescer.dart';
+import 'playback_resource_request.dart';
+import 'mpv_source_input.dart';
+import 'source_http_input.dart';
 
 typedef NativePropertyWriter =
     Future<void> Function(String property, String value);
@@ -97,9 +100,22 @@ abstract interface class PlaybackEngine {
   Future<void> dispose();
 }
 
+abstract interface class SourceDirectPlaybackEngine {
+  Future<void> openSource(
+    PlaybackResourceRequest request, {
+    required bool play,
+  });
+}
+
+abstract interface class PlaybackNativeResourceOwner {
+  void retainUntilNativeDisposal(Future<void> Function() release);
+}
+
 class MediaKitPlaybackEngine
     implements
         PlaybackEngine,
+        SourceDirectPlaybackEngine,
+        PlaybackNativeResourceOwner,
         PlaybackCacheEngine,
         PlaybackCacheIdentitySnapshotReader {
   MediaKitPlaybackEngine(
@@ -126,6 +142,94 @@ class MediaKitPlaybackEngine
   }
 
   final Player player;
+  final List<Future<void> Function()> _resourceReleases = [];
+  @override
+  void retainUntilNativeDisposal(Future<void> Function() release) =>
+      _resourceReleases.add(release);
+  MpvSourceInput? _sourceInput;
+  int _inputRevision = 0;
+  Future<void> _subtitleNativeTail = Future<void>.value();
+  final _sourceErrors = StreamController<String>.broadcast(sync: true);
+  bool _sourceMode = false;
+  final Map<String, String> _sourceOptionDefaults = {};
+
+  static const _sourceOptions = {
+    'demuxer': 'lavf',
+    'demuxer-lavf-o': 'protocol_whitelist=none',
+    'access-references': 'no',
+    'ordered-chapters': 'no',
+    'sub-auto': 'no',
+    'audio-file-auto': 'no',
+  };
+
+  @override
+  Future<void> openSource(
+    PlaybackResourceRequest request, {
+    required bool play,
+  }) {
+    if (_isRetiring || _disposeStarted) return Future<void>.value();
+    final epoch = _quiescenceEpoch;
+    final revision = ++_inputRevision;
+    _hasOpenedMedia = true;
+    return _runNativeOperation(
+      kind: PlaybackNativeOperationKind.open,
+      operation: () async {
+        await _subtitleNativeTail;
+        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+          return;
+        }
+        final native = player.platform;
+        if (native is! NativePlayer) {
+          throw const SourceInputException('native_unavailable');
+        }
+        _sourceInput ??= await MpvSourceInput.create(
+          native,
+          onReadFailure: () {
+            if (!_disposeStarted) _sourceErrors.add('source_input_failed');
+          },
+        );
+        final input = await _sourceInput!.prepare(request);
+        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+          return;
+        }
+        await player.stop();
+        await player.pause();
+        for (final name in [..._sourceOptions.keys, 'demuxer-lavf-format']) {
+          _sourceOptionDefaults.putIfAbsent(name, () => '');
+          if (!_sourceMode) {
+            _sourceOptionDefaults[name] = await native.getProperty(name);
+          }
+        }
+        _sourceMode = true;
+        for (final entry in {
+          ..._sourceOptions,
+          'demuxer-lavf-format': input.format,
+        }.entries) {
+          await native.setProperty(entry.key, entry.value);
+          // Unsupported options must fail before any native media open.
+          if (await native.getProperty(entry.key) != entry.value) {
+            throw const SourceInputException('native_policy_option');
+          }
+        }
+        // The remote URL/credentials never enter Media or native global headers.
+        Media(input.uri.toString(), httpHeaders: const {});
+        await native.command(['loadfile', input.uri.toString(), 'replace']);
+        if (play && !_mustReassertQuiescence(epoch)) await player.play();
+        if (_mustReassertQuiescence(epoch)) await _pauseOutput();
+      },
+    );
+  }
+
+  Future<void> _restoreSourceOptions() async {
+    _sourceInput?.releaseAll();
+    if (!_sourceMode) return;
+    final native = player.platform as NativePlayer;
+    for (final entry in _sourceOptionDefaults.entries) {
+      await native.setProperty(entry.key, entry.value);
+    }
+    _sourceMode = false;
+  }
+
   final NativePropertyWriter? nativePropertyWriter;
   final PlaybackOutputQuiescer _outputQuiescer;
   final PlaybackDiagnostics _diagnostics;
@@ -166,7 +270,14 @@ class MediaKitPlaybackEngine
   Stream<bool> get completedStream => player.stream.completed;
 
   @override
-  Stream<String> get errorStream => player.stream.error;
+  Stream<String> get errorStream => Stream<String>.multi((output) {
+    final native = player.stream.error.listen(output.add);
+    final source = _sourceErrors.stream.listen(output.add);
+    output.onCancel = () async {
+      await native.cancel();
+      await source.cancel();
+    };
+  }, isBroadcast: true);
 
   @override
   Stream<String> get logStream =>
@@ -213,9 +324,15 @@ class MediaKitPlaybackEngine
     if (_isRetiring || _disposeStarted) return Future<void>.value();
     final quiescenceEpoch = _quiescenceEpoch;
     _hasOpenedMedia = true;
+    final revision = ++_inputRevision;
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.open,
       operation: () async {
+        await _subtitleNativeTail;
+        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+          return;
+        }
+        await _restoreSourceOptions();
         await player.open(
           Media(uri.toString(), httpHeaders: headers),
           play: play,
@@ -396,7 +513,12 @@ class MediaKitPlaybackEngine
     // External subtitle discovery intentionally observes the raw native Future:
     // its 2-second foreground wait may continue in Stage B's bounded late-track
     // window. The operation still installs a typed, bounded teardown barrier.
-    return _startNativeOperation(kind: kind, operation: operation).nativeFuture;
+    final future = _startNativeOperation(
+      kind: kind,
+      operation: operation,
+    ).nativeFuture;
+    _subtitleNativeTail = future.catchError((Object _) {});
+    return future;
   }
 
   PlaybackNativeOperation _startNativeOperation({
@@ -483,6 +605,7 @@ class MediaKitPlaybackEngine
       operation: () async {
         if (trackId == null) {
           await player.setSubtitleTrack(SubtitleTrack.no());
+          await _confirmSubtitle('no');
           return;
         }
         final track = player.state.tracks.subtitle
@@ -492,6 +615,7 @@ class MediaKitPlaybackEngine
           throw StateError('Subtitle track $trackId is unavailable');
         }
         await player.setSubtitleTrack(track);
+        await _confirmSubtitle(trackId);
       },
     );
   }
@@ -505,10 +629,61 @@ class MediaKitPlaybackEngine
     if (_disposeStarted) return Future<void>.value();
     return _returnNativeOperation(
       kind: PlaybackNativeOperationKind.propertyWrite,
-      operation: () => player.setSubtitleTrack(
-        SubtitleTrack.uri(uri.toString(), title: title, language: language),
-      ),
+      operation: () async {
+        final native = player.platform;
+        if (native is! NativePlayer) {
+          throw const SourceInputException('subtitle_unconfirmed');
+        }
+        String? videoFormat;
+        if (_sourceMode) {
+          if (uri.scheme != 'file') {
+            throw const SourceInputException('subtitle_local_required');
+          }
+          final format = switch (uri.path.split('.').last) {
+            'srt' => 'srt',
+            'vtt' => 'webvtt',
+            'ass' => 'ass',
+            _ => throw const SourceInputException('subtitle_format'),
+          };
+          videoFormat = await native.getProperty('demuxer-lavf-format');
+          await native.setProperty('demuxer-lavf-format', format);
+        }
+        try {
+          await player.setSubtitleTrack(
+            SubtitleTrack.uri(uri.toString(), title: title, language: language),
+          );
+          final sid = await native.getProperty('sid');
+          final tracks = await MediaKitNativePlaybackPropertyAccess(
+            native,
+          ).getNativeNode('track-list');
+          final matched =
+              tracks is List &&
+              tracks.any(
+                (entry) =>
+                    entry is Map &&
+                    entry['type'] == 'sub' &&
+                    entry['id'].toString() == sid &&
+                    entry['external'] == true &&
+                    entry['external-filename'] == uri.toString(),
+              );
+          if (!matched) {
+            throw const SourceInputException('subtitle_unconfirmed');
+          }
+        } finally {
+          if (videoFormat != null) {
+            await native.setProperty('demuxer-lavf-format', videoFormat);
+          }
+        }
+      },
     );
+  }
+
+  Future<void> _confirmSubtitle(String expected) async {
+    final native = player.platform;
+    if (native is! NativePlayer ||
+        await native.getProperty('sid') != expected) {
+      throw const SourceInputException('subtitle_unconfirmed');
+    }
   }
 
   @override
@@ -582,6 +757,8 @@ class MediaKitPlaybackEngine
   @override
   Future<void> stop() {
     if (_disposeStarted) return Future<void>.value();
+    _inputRevision++;
+    _sourceInput?.releaseAll();
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.stop,
       operation: player.stop,
@@ -606,6 +783,7 @@ class MediaKitPlaybackEngine
   }
 
   Future<void> _dispose(Future<void>? quiescence) async {
+    _sourceInput?.releaseAll();
     if (quiescence != null) await quiescence;
     if (_retirementState == PlaybackRetirementState.quiescing) {
       _retirementState = PlaybackRetirementState.retiring;
@@ -614,7 +792,15 @@ class MediaKitPlaybackEngine
     _cacheEngine?.dispose();
     final disposal = _startNativeOperation(
       kind: PlaybackNativeOperationKind.dispose,
-      operation: player.dispose,
+      operation: () async {
+        await player.dispose();
+        _sourceInput?.afterNativeDisposal();
+        await _sourceErrors.close();
+        for (final release in _resourceReleases) {
+          await release();
+        }
+        _resourceReleases.clear();
+      },
       onTimeout: () {
         _retirementState = PlaybackRetirementState.quarantined;
         _nativeOperationTimedOut(PlaybackNativeOperationKind.dispose);

@@ -1,3 +1,5 @@
+import '../playback/playback_resource_request.dart';
+
 const disabledSubtitleStreamIndex = -1;
 
 class EmbySession {
@@ -759,6 +761,8 @@ List<Map<String, dynamic>> mergeMediaStreams(
   return List<Map<String, dynamic>>.unmodifiable(merged);
 }
 
+enum PlaybackRouteKind { serverMedia, sourceDirect, offlineLocal }
+
 class PlaybackPlan {
   const PlaybackPlan({
     required this.uri,
@@ -781,7 +785,17 @@ class PlaybackPlan {
     this.duration,
     this.transportKind = PlaybackTransportKind.unknown,
     this.sourceSizeBytes,
-  });
+    this.sourceRequest,
+  }) : assert(sourceRequest == null || !usesServerAuthentication),
+       assert(sourceRequest == null || method == PlayMethod.directPlay);
+
+  final PlaybackResourceRequest? sourceRequest;
+  bool get isSourceDirect => sourceRequest != null;
+  PlaybackRouteKind get routeKind => isSourceDirect
+      ? PlaybackRouteKind.sourceDirect
+      : uri.scheme == 'file'
+      ? PlaybackRouteKind.offlineLocal
+      : PlaybackRouteKind.serverMedia;
 
   final Uri uri;
   final String mediaSourceId;
@@ -829,35 +843,53 @@ class PlaybackPlan {
     List<Map<String, dynamic>>? mediaStreams,
     List<String>? transcodingReasons,
     List<PlaybackMediaSource>? availableMediaSources,
-  }) => PlaybackPlan(
-    uri: uri ?? this.uri,
-    mediaSourceId: mediaSourceId ?? this.mediaSourceId,
-    playSessionId: clearPlaySessionId
-        ? null
-        : playSessionId ?? this.playSessionId,
-    method: method ?? this.method,
-    usesServerAuthentication:
-        usesServerAuthentication ?? this.usesServerAuthentication,
-    audioStreamIndex: clearAudioStreamIndex
-        ? null
-        : audioStreamIndex ?? this.audioStreamIndex,
-    subtitleStreamIndex: clearSubtitleStreamIndex
-        ? null
-        : subtitleStreamIndex ?? this.subtitleStreamIndex,
-    subtitleDisabled: subtitleDisabled ?? this.subtitleDisabled,
-    liveStreamId: clearLiveStreamId ? null : liveStreamId ?? this.liveStreamId,
-    mediaSourceName: mediaSourceName ?? this.mediaSourceName,
-    container: container ?? this.container,
-    bitrate: bitrate ?? this.bitrate,
-    errorCode: errorCode ?? this.errorCode,
-    sourceProtocol: sourceProtocol ?? this.sourceProtocol,
-    duration: duration ?? this.duration,
-    transportKind: transportKind ?? this.transportKind,
-    sourceSizeBytes: sourceSizeBytes ?? this.sourceSizeBytes,
-    mediaStreams: mediaStreams ?? this.mediaStreams,
-    transcodingReasons: transcodingReasons ?? this.transcodingReasons,
-    availableMediaSources: availableMediaSources ?? this.availableMediaSources,
-  );
+  }) {
+    if (isSourceDirect &&
+        ((uri != null && uri != this.uri) ||
+            (mediaSourceId != null && mediaSourceId != this.mediaSourceId) ||
+            (method != null && method != PlayMethod.directPlay) ||
+            usesServerAuthentication == true ||
+            mediaStreams != null ||
+            sourceProtocol != null ||
+            sourceSizeBytes != null ||
+            duration != null ||
+            container != null)) {
+      throw StateError('Source snapshot must be replaced atomically');
+    }
+    return PlaybackPlan(
+      uri: uri ?? this.uri,
+      mediaSourceId: mediaSourceId ?? this.mediaSourceId,
+      playSessionId: clearPlaySessionId
+          ? null
+          : playSessionId ?? this.playSessionId,
+      method: method ?? this.method,
+      usesServerAuthentication:
+          usesServerAuthentication ?? this.usesServerAuthentication,
+      audioStreamIndex: clearAudioStreamIndex
+          ? null
+          : audioStreamIndex ?? this.audioStreamIndex,
+      subtitleStreamIndex: clearSubtitleStreamIndex
+          ? null
+          : subtitleStreamIndex ?? this.subtitleStreamIndex,
+      subtitleDisabled: subtitleDisabled ?? this.subtitleDisabled,
+      liveStreamId: clearLiveStreamId
+          ? null
+          : liveStreamId ?? this.liveStreamId,
+      mediaSourceName: mediaSourceName ?? this.mediaSourceName,
+      container: container ?? this.container,
+      bitrate: bitrate ?? this.bitrate,
+      errorCode: errorCode ?? this.errorCode,
+      sourceProtocol: sourceProtocol ?? this.sourceProtocol,
+      duration: duration ?? this.duration,
+      transportKind: transportKind ?? this.transportKind,
+      sourceSizeBytes: sourceSizeBytes ?? this.sourceSizeBytes,
+      sourceRequest: sourceRequest,
+      mediaStreams: mediaStreams ?? this.mediaStreams,
+      transcodingReasons: transcodingReasons ?? this.transcodingReasons,
+      availableMediaSources:
+          availableMediaSources ?? this.availableMediaSources,
+    );
+  }
 }
 
 Map<String, dynamic> _asMap(dynamic value) {

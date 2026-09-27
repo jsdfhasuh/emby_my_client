@@ -23,13 +23,14 @@ class PlaybackSessionReporter implements PlaybackReporter {
   final EmbyItem item;
 
   _PlaybackReportingCycle? _cycle;
+  Future<void> _retirement = Future<void>.value();
 
   PlaybackPlan? get plan => _cycle?.plan;
   bool get hasStarted => _cycle?.started ?? false;
 
   @override
   void activate(PlaybackPlan plan) {
-    _cycle = _PlaybackReportingCycle(plan);
+    _cycle = _PlaybackReportingCycle(plan, _retirement);
   }
 
   @override
@@ -46,11 +47,13 @@ class PlaybackSessionReporter implements PlaybackReporter {
     }
     final existing = cycle.startOperation;
     if (existing != null) return existing;
-    cycle.startAttempted = true;
+    if (cycle.startAttempted) return Future<void>.value();
     final plan = cycle.plan;
     late final Future<void> operation;
-    operation = (() async {
+    operation = cycle.enqueue(() async {
       try {
+        if (cycle.stopped) return;
+        cycle.startAttempted = true;
         await api.reportPlaybackStart(
           item,
           plan,
@@ -63,7 +66,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
           cycle.startOperation = null;
         }
       }
-    })();
+    });
     cycle.startOperation = operation;
     return operation;
   }
@@ -75,12 +78,16 @@ class PlaybackSessionReporter implements PlaybackReporter {
   }) async {
     final cycle = _cycle;
     if (cycle == null || !cycle.started || cycle.stopped) return;
-    await api.reportPlaybackProgress(
-      item,
-      cycle.plan,
-      position: position,
-      isPaused: isPaused,
-    );
+    final plan = cycle.plan;
+    await cycle.enqueue(() async {
+      if (cycle.stopped) return;
+      await api.reportPlaybackProgress(
+        item,
+        plan,
+        position: position,
+        isPaused: isPaused,
+      );
+    });
   }
 
   @override
@@ -91,6 +98,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
     if (existing != null) return existing;
     final operation = _stop(cycle, position);
     cycle.stopOperation = operation;
+    _retirement = operation.catchError((Object _) {});
     return operation;
   }
 
@@ -99,6 +107,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
     cycle.stopped = true;
     final plan = cycle.plan;
     final cleanupOperation = cleanup(plan);
+    await cycle.tail;
     final startOperation = cycle.startOperation;
     if (startOperation != null) {
       try {
@@ -159,7 +168,14 @@ class PlaybackSessionReporter implements PlaybackReporter {
 }
 
 class _PlaybackReportingCycle {
-  _PlaybackReportingCycle(this.plan);
+  _PlaybackReportingCycle(this.plan, this.tail);
+
+  Future<void> tail;
+  Future<void> enqueue(Future<void> Function() operation) {
+    final result = tail.then((_) => operation());
+    tail = result.catchError((Object _) {});
+    return result;
+  }
 
   PlaybackPlan plan;
   bool startAttempted = false;

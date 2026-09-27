@@ -13,6 +13,7 @@ import 'cache/playback_cache_settings.dart';
 import 'cache/playback_cache_storage.dart';
 import 'cache/playback_cache_telemetry.dart';
 import 'emby_stream_resolver.dart';
+import 'external_subtitle_loader.dart';
 import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
@@ -36,6 +37,7 @@ class PlaybackController extends ChangeNotifier {
     required this.resolver,
     required this.reporter,
     required this.playbackHeaders,
+    this.subtitleLoader,
     this.engineRecreator,
     PlaybackItemSession? session,
     this.cacheSettings = const PlaybackCacheSettings(),
@@ -84,6 +86,7 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackStreamResolver resolver;
   final PlaybackReporter reporter;
   final Map<String, String> playbackHeaders;
+  final ExternalSubtitleLoader? subtitleLoader;
   final PlaybackEngineRecreator? engineRecreator;
   final PlaybackItemSession session;
   final PlaybackCacheSettings cacheSettings;
@@ -223,6 +226,7 @@ class PlaybackController extends ChangeNotifier {
         AutomaticPlaybackOpenReason.startupTranscodeFallback,
     String? openingStatusMessage,
     PlaybackPlan? preparedPlan,
+    bool continueReporting = false,
   }) async {
     final token = _advanceGeneration();
     await _bindEngine(token);
@@ -268,7 +272,8 @@ class PlaybackController extends ChangeNotifier {
         }
 
         final resume = _resumePositionForPlan(plan, resumePosition);
-        reporter.activate(plan);
+        _selectedMediaSourceId = plan.mediaSourceId;
+        if (!continueReporting) reporter.activate(plan);
         await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
         _throwIfStale(token);
         _setState(
@@ -294,13 +299,23 @@ class PlaybackController extends ChangeNotifier {
           await _withDeadline(
             _operationCoordinator.runTrackedNativeOperation(
               kind: PlaybackNativeOperationKind.open,
-              operation: () => boundEngine.open(
-                openingPlan.uri,
-                headers: openingPlan.usesServerAuthentication
-                    ? playbackHeaders
-                    : const <String, String>{},
-                play: resume == Duration.zero && playAfterReady,
-              ),
+              operation: () => openingPlan.isSourceDirect
+                  ? (boundEngine is SourceDirectPlaybackEngine
+                        ? (boundEngine as SourceDirectPlaybackEngine)
+                              .openSource(
+                                openingPlan.sourceRequest!,
+                                play: resume == Duration.zero && playAfterReady,
+                              )
+                        : Future<void>.error(
+                            StateError('Source input unavailable'),
+                          ))
+                  : boundEngine.open(
+                      openingPlan.uri,
+                      headers: openingPlan.usesServerAuthentication
+                          ? playbackHeaders
+                          : const <String, String>{},
+                      play: resume == Duration.zero && playAfterReady,
+                    ),
               barrierTimeout: openTimeout,
             ),
             openTimeout,
@@ -370,10 +385,9 @@ class PlaybackController extends ChangeNotifier {
         _throwIfStale(token);
         try {
           _syncAppliedTrackReportingPlan();
-          await reporter.reportStart(
-            _state.position,
-            isPaused: !playAfterReady,
-          );
+          await reporter
+              .reportStart(_state.position, isPaused: !playAfterReady)
+              .timeout(reporterTimeout);
         } catch (error) {
           DiagnosticLog.instance.warning(
             'playback',
@@ -416,7 +430,14 @@ class PlaybackController extends ChangeNotifier {
               clearError: true,
             ),
           );
-          await _stopForControlledRestart(_state.position);
+          if (plan.isSourceDirect) {
+            preparedPlan = plan;
+            continueReporting = true;
+          }
+          await _stopForControlledRestart(
+            _state.position,
+            preserveReporting: plan.isSourceDirect,
+          );
           await _cleanupCacheSessionSafely();
           continue;
         }
@@ -425,6 +446,7 @@ class PlaybackController extends ChangeNotifier {
             !retriedWithTranscode &&
             resolver.canForceTranscode &&
             plan != null &&
+            !plan.isSourceDirect &&
             plan.method != PlayMethod.transcode &&
             _state.phase != PlaybackPhase.ready &&
             _tryReserveAutomaticOpen(transcodeFallbackReason);
@@ -872,7 +894,17 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> handleMemoryPressure() async {
-    await _cacheCoordinator?.handleMemoryPressure();
+    final coordinator = _cacheCoordinator;
+    if (coordinator != null) {
+      await coordinator.handleMemoryPressure();
+    } else if (_state.plan?.isSourceDirect == true &&
+        _state.phase == PlaybackPhase.ready &&
+        !_lifecycleSuspended &&
+        !_retiring) {
+      // Progressive source input uses a bounded memory profile even when disk
+      // monitoring is unavailable. Memory pressure still needs the 64 MiB cap.
+      await _handleCacheSafetyReopen(PlaybackCacheSafetyReason.memoryPressure);
+    }
   }
 
   Future<SeekResult> seekAbsolute(
@@ -1031,6 +1063,9 @@ class PlaybackController extends ChangeNotifier {
           return;
         }
       }
+      if (plan.isSourceDirect) {
+        throw StateError('Audio track could not be confirmed');
+      }
       await reconfigure(
         audioStreamIndex: streamIndex,
         forceTranscode: plan.method == PlayMethod.directPlay,
@@ -1060,6 +1095,7 @@ class PlaybackController extends ChangeNotifier {
     final token = _generation;
     if (_isSubtitleApplied(selection, token, boundEngine)) return;
     _cancelLateSubtitleTask();
+    subtitleLoader?.cancel();
     _desiredSubtitleSelection = selection;
     _setState(
       _state.copyWith(
@@ -1172,6 +1208,12 @@ class PlaybackController extends ChangeNotifier {
             mediaSourceId != null &&
             mediaSourceId !=
                 (_selectedMediaSourceId ?? _state.plan?.mediaSourceId);
+        if (!switchingSource &&
+            _state.plan?.isSourceDirect == true &&
+            (forceTranscode || maxStreamingBitrate != null)) {
+          _setState(_state.copyWith(statusMessage: '源站直连不支持服务器转码或码率切换'));
+          return;
+        }
         PlaybackPlan? candidate;
         if (switchingSource) {
           // Preflight is a draft: the current source and its selection remain
@@ -1287,6 +1329,7 @@ class PlaybackController extends ChangeNotifier {
     Future<void> nativeBarrier,
   ) async {
     final nativeBudget = _ShutdownNativeBarrierBudget(shutdownBarrierTimeout);
+    await subtitleLoader?.dispose();
     _advanceGeneration();
     _pendingRecoveryFingerprint = null;
     _progressTimer?.cancel();
@@ -1733,6 +1776,7 @@ class PlaybackController extends ChangeNotifier {
   ) async {
     final position = _state.requestedPosition ?? _state.position;
     final wasPlaying = _desiredPlaying;
+    final retained = _state.plan?.isSourceDirect == true ? _state.plan : null;
     _advanceGeneration();
     _progressTimer?.cancel();
     _cancelCacheCoordinator();
@@ -1744,7 +1788,10 @@ class PlaybackController extends ChangeNotifier {
         cacheFallbackReason: _forcedCacheFallbackReason,
       ),
     );
-    await _stopForControlledRestart(position);
+    await _stopForControlledRestart(
+      position,
+      preserveReporting: retained != null,
+    );
     if (!lease.isCurrent || _shuttingDown) return;
     await _cleanupCacheSessionSafely();
     if (_disposed || _shuttingDown || !lease.isCurrent) return;
@@ -1752,6 +1799,8 @@ class PlaybackController extends ChangeNotifier {
       resumePosition: position,
       playAfterReady: wasPlaying,
       openingStatusMessage: '正在调整缓存…',
+      preparedPlan: retained,
+      continueReporting: retained != null,
     );
     if (!_disposed &&
         !_shuttingDown &&
@@ -1763,18 +1812,23 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _stopForControlledRestart(Duration position) async {
-    try {
-      await _withDeadline(
-        reporter.stop(position),
-        reporterTimeout,
-        PlaybackOperationTimeoutKind.reporterStop,
-      );
-    } catch (_) {
-      DiagnosticLog.instance.warning(
-        'playback',
-        'event=playback_reporter_stop_failed operation=controlled_restart',
-      );
+  Future<void> _stopForControlledRestart(
+    Duration position, {
+    bool preserveReporting = false,
+  }) async {
+    if (!preserveReporting) {
+      try {
+        await _withDeadline(
+          reporter.stop(position),
+          reporterTimeout,
+          PlaybackOperationTimeoutKind.reporterStop,
+        );
+      } catch (_) {
+        DiagnosticLog.instance.warning(
+          'playback',
+          'event=playback_reporter_stop_failed operation=controlled_restart',
+        );
+      }
     }
     try {
       await _withDeadline(
@@ -1907,7 +1961,8 @@ class PlaybackController extends ChangeNotifier {
     final plan = _state.plan;
     final lastSeek = _lastExecutedSeekAt;
     if (plan == null ||
-        plan.transportKind != PlaybackTransportKind.progressiveHttp ||
+        (!plan.isSourceDirect &&
+            plan.transportKind != PlaybackTransportKind.progressiveHttp) ||
         lastSeek == null ||
         _seekBecameStable ||
         session.hasUsed(
@@ -2019,7 +2074,10 @@ class PlaybackController extends ChangeNotifier {
       PlaybackRecoveryDiagnosticEvent.started,
       fingerprint: fingerprint,
     );
-    await _stopForControlledRestart(position);
+    await _stopForControlledRestart(
+      position,
+      preserveReporting: plan.isSourceDirect,
+    );
     if (!lease.isCurrent || _disposed || _shuttingDown) {
       _recordRuntimeRecoveryCancelled();
       return;
@@ -2036,6 +2094,8 @@ class PlaybackController extends ChangeNotifier {
       transcodeFallbackReason:
           AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
       openingStatusMessage: '正在恢复播放…',
+      preparedPlan: plan.isSourceDirect ? plan : null,
+      continueReporting: plan.isSourceDirect,
     );
     if (_disposed || _shuttingDown || !lease.isCurrent) {
       _recordRuntimeRecoveryCancelled();
@@ -2474,7 +2534,20 @@ class PlaybackController extends ChangeNotifier {
       );
     }
 
-    await _applySubtitleSelection(plan, token, boundEngine);
+    final chosenSubtitle =
+        _desiredSubtitleSelection.streamIndex ?? plan.subtitleStreamIndex;
+    final external = chosenSubtitle == null
+        ? null
+        : _trackMapper.findByIndex(plan, 'subtitle', chosenSubtitle);
+    if (subtitleLoader != null &&
+        external?.isExternal == true &&
+        !_desiredSubtitleSelection.isDisabled) {
+      // The same state machine owns this task. Video ready/seek/Start never
+      // waits for the network download or its timeout.
+      unawaited(_applySubtitleSelection(plan, token, boundEngine));
+    } else {
+      await _applySubtitleSelection(plan, token, boundEngine);
+    }
   }
 
   Future<void> _applySubtitleSelection(
@@ -2585,6 +2658,42 @@ class PlaybackController extends ChangeNotifier {
       );
       if (track?.isExternal == true && track?.deliveryUrl != null) {
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+        final loader = subtitleLoader;
+        if (loader != null) {
+          final file = await loader.load(
+            track!.deliveryUrl!,
+            itemId: item.id,
+            sourceId: plan.mediaSourceId,
+          );
+          try {
+            _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+            await _submitSubtitleWrite(selection, token, boundEngine, () async {
+              _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+              if (boundEngine is! PlaybackNativeResourceOwner) {
+                throw StateError('Subtitle lease owner unavailable');
+              }
+              file.attached = true;
+              (boundEngine as PlaybackNativeResourceOwner)
+                  .retainUntilNativeDisposal(file.release);
+              await boundEngine.loadExternalSubtitle(
+                file.file.uri,
+                title: track.title,
+                language: track.language,
+              );
+            }).timeout(trackWaitTimeout);
+            _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+            _markExternalSubtitleApplied(
+              plan: plan,
+              selection: selection,
+              streamIndex: resolvedSubtitleIndex,
+              token: token,
+              boundEngine: boundEngine,
+            );
+          } finally {
+            if (!file.attached) await file.release();
+          }
+          return;
+        }
         final externalLoad = _submitSubtitleWrite(
           selection,
           token,
@@ -3118,6 +3227,9 @@ class PlaybackController extends ChangeNotifier {
 
   int _advanceGeneration() {
     _generation++;
+    final boundResolver = resolver;
+    if (boundResolver is EmbyStreamResolver) boundResolver.cancelPending();
+    subtitleLoader?.cancel();
     _cancelLateSubtitleTask();
     _cancelSubtitleTrackWaits();
     return _generation;

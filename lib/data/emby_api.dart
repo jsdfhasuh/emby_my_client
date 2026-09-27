@@ -123,6 +123,7 @@ class EmbyApi {
   final FutureOr<void> Function()? _onRealtimeConnected;
   bool _imageAuthenticationFailureReported = false;
   bool _disposed = false;
+  bool get isSessionActive => !_disposed;
   late final EmbyUserDataService userData;
   late final EmbySessionService sessionControl;
   late final EmbyWebSocketClient realtime;
@@ -985,9 +986,252 @@ class EmbyApi {
     if (callback != null) unawaited(Future<void>.sync(callback));
   }
 
-  /// Metadata-only foundation for source-direct playback. Deliberately not
-  /// wired into Bootstrap until the native request gate has an implementation.
-  /// A successful snapshot is not permission to open it with stock media_kit.
+  /// Online entry point: classification and the fixed source precede every
+  /// compatibility request. Unknown is never permission for server streaming.
+  Future<PlaybackPlan> resolveOnlinePlayback(
+    EmbyItem item, {
+    required Object itemSession,
+    required int generation,
+    required CancelToken cancelToken,
+    required bool Function() isCurrent,
+    String? mediaSourceId,
+    int? audioStreamIndex,
+    int? subtitleStreamIndex,
+    bool subtitleDisabled = false,
+    int maxStreamingBitrate = 120000000,
+    bool forceTranscode = false,
+    bool knownStrm = false,
+  }) async {
+    final clock = Stopwatch()..start();
+    final timer = Timer(
+      const Duration(seconds: 30),
+      () => cancelToken.cancel('resolve_budget'),
+    );
+    void check() {
+      if (_disposed || cancelToken.isCancelled || !isCurrent()) {
+        throw const PlaybackResolveException(PlaybackResolveFailure.cancelled);
+      }
+    }
+
+    Duration remaining() {
+      check();
+      final value = const Duration(seconds: 30) - clock.elapsed;
+      if (value <= Duration.zero) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.budgetExceeded,
+        );
+      }
+      return value;
+    }
+
+    EmbyItem? detail;
+    Future<EmbyItem> fresh() async {
+      if (detail != null) return detail!;
+      final response = await _request(
+        () => _dio.get<dynamic>(
+          '/Users/${session.userId}/Items/${Uri.encodeComponent(item.id)}',
+          queryParameters: {'Fields': _detailItemFields},
+          cancelToken: cancelToken,
+          options: Options(
+            sendTimeout: remaining(),
+            receiveTimeout: remaining(),
+          ),
+        ),
+      );
+      check();
+      detail = EmbyItem.fromJson(_map(response.data));
+      if (detail!.id != item.id) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.sourceIdentityConflict,
+        );
+      }
+      return detail!;
+    }
+
+    String? selectedId = mediaSourceId;
+    PlaybackMediaSource? selected;
+    PlaybackInfoResult? strictInfo;
+    Future<PlaybackInfoResult> strict() async {
+      if (strictInfo != null) return strictInfo!;
+      final payloads = StrmDirectPlayPolicy.strictPayloads(
+        userId: session.userId,
+        deviceProfile: _androidDeviceProfile(maxStreamingBitrate),
+        mediaSourceId: selectedId,
+        audioStreamIndex: audioStreamIndex,
+        subtitleStreamIndex: subtitleStreamIndex,
+        subtitleDisabled: subtitleDisabled,
+        startTimeTicks: item.userData.playbackPositionTicks,
+      );
+      for (var attempt = 0; attempt < payloads.length; attempt++) {
+        try {
+          final response = await _request(
+            () => _dio.post<dynamic>(
+              '/Items/${Uri.encodeComponent(item.id)}/PlaybackInfo',
+              data: payloads[attempt],
+              cancelToken: cancelToken,
+              options: Options(
+                sendTimeout: remaining(),
+                receiveTimeout: remaining(),
+              ),
+            ),
+          );
+          check();
+          return strictInfo = PlaybackInfoResult.fromJson(_map(response.data));
+        } on EmbyApiException catch (error) {
+          check();
+          if (attempt == payloads.length - 1 ||
+              !error.allowsPlaybackInfoFallback) {
+            rethrow;
+          }
+        }
+      }
+      throw const PlaybackResolveException(PlaybackResolveFailure.serverError);
+    }
+
+    try {
+      check();
+      if (item.mediaSources.isNotEmpty) {
+        selected = StrmDirectPlayPolicy.selectOnce(
+          item.mediaSources,
+          requestedId: selectedId,
+        );
+        selectedId = selected.id;
+      }
+      var classification = knownStrm
+          ? SourceClassification.confirmedStrm
+          : selected == null
+          ? SourceClassification.unknown
+          : StrmDirectPlayPolicy.classify(selected);
+      if (classification == SourceClassification.confirmedStrm) {
+        StrmDirectPlayPolicy.requireDirectRequest(
+          forceTranscode: forceTranscode,
+        );
+      } else {
+        final value = await fresh();
+        if (value.mediaSources.isNotEmpty) {
+          selected = StrmDirectPlayPolicy.selectOnce(
+            value.mediaSources,
+            requestedId: selectedId,
+          );
+          selectedId = selected.id;
+          classification = StrmDirectPlayPolicy.classify(
+            selected,
+            freshDetail: value,
+          );
+        } else if (selectedId != null) {
+          throw const PlaybackResolveException(
+            PlaybackResolveFailure.sourceMissing,
+          );
+        }
+      }
+      if (selected == null) {
+        final identification = await strict();
+        StrmDirectPlayPolicy.checkError(identification.errorCode);
+        selected = StrmDirectPlayPolicy.selectOnce(
+          identification.mediaSources,
+          requestedId: selectedId,
+        );
+        selectedId = selected.id;
+        classification = StrmDirectPlayPolicy.classify(selected);
+      }
+      if (classification == SourceClassification.unknown) {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.sourceIdentityUnresolved,
+        );
+      }
+      if (classification == SourceClassification.confirmedRegular) {
+        final info = await getPlaybackInfo(
+          item,
+          mediaSourceId: selectedId,
+          audioStreamIndex: audioStreamIndex,
+          subtitleStreamIndex: subtitleStreamIndex,
+          subtitleDisabled: subtitleDisabled,
+          maxStreamingBitrate: maxStreamingBitrate,
+          forceTranscode: forceTranscode,
+          cancelToken: cancelToken,
+          timeout: remaining(),
+        );
+        check();
+        StrmDirectPlayPolicy.checkError(info.errorCode);
+        selected = StrmDirectPlayPolicy.fixedSource(
+          info.mediaSources,
+          selectedId!,
+        );
+        if (!StrmDirectPlayPolicy.hasStrmEvidence(selected)) {
+          return getPlaybackPlan(
+            item,
+            mediaSourceId: selectedId,
+            audioStreamIndex: audioStreamIndex,
+            subtitleStreamIndex: subtitleStreamIndex,
+            subtitleDisabled: subtitleDisabled,
+            maxStreamingBitrate: maxStreamingBitrate,
+            forceTranscode: forceTranscode,
+            authorizedInfo: info,
+          );
+        }
+        // The fixed source changed evidence; no server video is opened.
+        classification = SourceClassification.confirmedStrm;
+      }
+      StrmDirectPlayPolicy.requireDirectRequest(forceTranscode: forceTranscode);
+      final info = await strict();
+      StrmDirectPlayPolicy.checkError(info.errorCode);
+      selected = StrmDirectPlayPolicy.fixedSource(
+        info.mediaSources,
+        selectedId!,
+      );
+      StrmDirectPlayPolicy.requireNoServerResource(selected);
+      if (selected.path == null ||
+          !selected.path!.startsWith(RegExp(r'https?://'))) {
+        selected = StrmDirectPlayPolicy.fixedSource(
+          (await fresh()).mediaSources,
+          selectedId,
+        );
+      }
+      check();
+      final snapshot = SelectedSourceSnapshot(
+        isSessionActive: () => !_disposed,
+        source: selected,
+        identity: PlaybackResourceIdentity(
+          scope: ServerScope.fromSession(session),
+          apiSession: this,
+          itemId: item.id,
+          sourceId: selectedId,
+          itemSession: itemSession,
+          generation: generation,
+        ),
+        embyServer: Uri.parse(session.serverUrl),
+        playSessionId: info.playSessionId,
+      );
+      return PlaybackPlan(
+        uri: Uri.parse('embyinput://pending'),
+        mediaSourceId: selectedId,
+        playSessionId: snapshot.playSessionId,
+        method: PlayMethod.directPlay,
+        usesServerAuthentication: false,
+        sourceRequest: snapshot.request,
+        mediaStreams: snapshot.mediaStreams,
+        transcodingReasons: const [],
+        availableMediaSources: info.mediaSources,
+        audioStreamIndex: audioStreamIndex ?? selected.defaultAudioStreamIndex,
+        subtitleStreamIndex: subtitleDisabled
+            ? null
+            : subtitleStreamIndex ?? selected.defaultSubtitleStreamIndex,
+        subtitleDisabled: subtitleDisabled,
+        container: selected.container,
+        duration: snapshot.duration,
+        sourceSizeBytes: snapshot.sizeBytes,
+        sourceProtocol: 'Http',
+        transportKind: PlaybackTransportKind.unknown,
+      );
+    } finally {
+      timer.cancel();
+      clock.stop();
+    }
+  }
+
+  /// Low-level snapshot entry for an already classified source. Online
+  /// Bootstrap uses resolveOnlinePlayback to own classification and budgets.
+  /// Snapshots must be opened through the controlled custom input adapter.
   Future<SelectedSourceSnapshot> getSourceDirectSnapshot(
     EmbyItem item, {
     required PlaybackResourceIdentity identity,
@@ -1176,6 +1420,7 @@ class EmbyApi {
     bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
+    PlaybackInfoResult? authorizedInfo,
   }) async {
     DiagnosticLog.instance.info(
       'playback',
@@ -1184,15 +1429,17 @@ class EmbyApi {
           'forceTranscode=$forceTranscode',
     );
 
-    final info = await getPlaybackInfo(
-      item,
-      mediaSourceId: mediaSourceId,
-      audioStreamIndex: audioStreamIndex,
-      subtitleStreamIndex: subtitleStreamIndex,
-      subtitleDisabled: subtitleDisabled,
-      maxStreamingBitrate: maxStreamingBitrate,
-      forceTranscode: forceTranscode,
-    );
+    final info =
+        authorizedInfo ??
+        await getPlaybackInfo(
+          item,
+          mediaSourceId: mediaSourceId,
+          audioStreamIndex: audioStreamIndex,
+          subtitleStreamIndex: subtitleStreamIndex,
+          subtitleDisabled: subtitleDisabled,
+          maxStreamingBitrate: maxStreamingBitrate,
+          forceTranscode: forceTranscode,
+        );
     final sources = info.mediaSources;
     StrmDirectPlayPolicy.validateIdentities(sources);
     if (sources.isEmpty) {
@@ -1342,6 +1589,8 @@ class EmbyApi {
     bool subtitleDisabled = false,
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
+    CancelToken? cancelToken,
+    Duration? timeout,
   }) async {
     final requestedSubtitleIndex = subtitleDisabled ? -1 : subtitleStreamIndex;
     final commonBody = <String, dynamic>{
@@ -1381,6 +1630,10 @@ class EmbyApi {
           () => _dio.post<dynamic>(
             '/Items/${item.id}/PlaybackInfo',
             data: attempts[index],
+            cancelToken: cancelToken,
+            options: timeout == null
+                ? null
+                : Options(sendTimeout: timeout, receiveTimeout: timeout),
             queryParameters: {
               'UserId': session.userId,
               'StartTimeTicks': item.userData.playbackPositionTicks,

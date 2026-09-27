@@ -47,6 +47,7 @@ required_symbols=(
   mpv_set_property_string
   mpv_command
   mpv_terminate_destroy
+  mpv_stream_cb_add_ro
 )
 
 required_common_strings=(
@@ -114,5 +115,16 @@ for apk_path in "$@"; do
       exit 65
     fi
     echo "android_mpv_static_capability_smoke=$apk_path:$abi"
+    bridge="$temp_dir/$(basename "$apk_path")-$abi-strm_input.so"
+    unzip -p "$apk_path" "lib/$abi/libstrm_input.so" >"$bridge"
+    test -s "$bridge"
+    bridge_symbols="$("$readelf_command" --wide --dyn-syms "$bridge")"
+    for symbol in strm_create strm_add strm_poll strm_complete strm_release strm_destroy; do
+      if ! grep -Eq "[[:space:]]${symbol}$" <<<"$bridge_symbols"; then
+        echo "Missing controlled input symbol $symbol in $apk_path ($abi)" >&2
+        exit 65
+      fi
+    done
+    echo "android_strm_input_packaged=$apk_path:$abi"
   done
 done

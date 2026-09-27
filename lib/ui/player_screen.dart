@@ -1481,7 +1481,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                   },
           ),
         const Divider(),
-        for (final option in bitrates)
+        if (plan.isSourceDirect)
+          const ListTile(
+            title: Text('源站直连 · 原画'),
+            subtitle: Text('由源站提供视频，不使用服务器转码'),
+          ),
+        for (final option in plan.isSourceDirect ? <(int, String)>[] : bitrates)
           ListTile(
             leading: const Icon(Icons.network_check),
             title: Text(option.$2),
@@ -2170,11 +2175,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                   if (_plan != null)
                     Text(
-                      switch (_plan!.method) {
-                        PlayMethod.directPlay => '直接播放',
-                        PlayMethod.directStream => '直接串流',
-                        PlayMethod.transcode => '转码',
-                      },
+                      _plan!.isSourceDirect
+                          ? '源站直连'
+                          : switch (_plan!.method) {
+                              PlayMethod.directPlay => '直接播放',
+                              PlayMethod.directStream => '直接串流',
+                              PlayMethod.transcode => '转码',
+                            },
                       style: const TextStyle(
                         color: Color(0xFFD0D5D6),
                         fontSize: 12,

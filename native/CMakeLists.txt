@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.18)
+project(strm_input C)
+add_library(strm_input SHARED strm_input.c)
+target_compile_options(strm_input PRIVATE -Wall -Wextra -Werror)
+set_target_properties(strm_input PROPERTIES C_STANDARD 11 C_VISIBILITY_PRESET hidden)

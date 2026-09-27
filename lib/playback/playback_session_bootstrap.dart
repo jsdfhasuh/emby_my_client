@@ -2,6 +2,7 @@ import '../data/emby_api.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_storage.dart';
 import 'emby_stream_resolver.dart';
+import 'external_subtitle_loader.dart';
 import 'playback_controller.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
@@ -26,6 +27,7 @@ abstract final class PlaybackSessionBootstrap {
     item: item,
     engine: engine,
     resolver: EmbyStreamResolver(api),
+    subtitleLoader: ExternalSubtitleLoader(api),
     reporter: PlaybackSessionReporter(api: api, item: item),
     playbackHeaders: api.playbackHeaders,
     engineRecreator: engineRecreator,
