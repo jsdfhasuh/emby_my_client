@@ -30,6 +30,7 @@ class SourceHttpInput {
   int requestNumber = 0;
   int nativeReads = 0, httpRequests = 0, redirects = 0, ranges = 0;
   int networkBytes = 0, deliveredBytes = 0, prefixHits = 0, requestMs = 0;
+  int readAheadHits = 0;
   int failures = 0, cancellations = 0, duplicates = 0;
   int _active = 0, _windowAt = 0, _windowBytes = 0;
   bool _summaryWritten = false, _firstRead = false, _nativeMeasured = false;
@@ -167,6 +168,7 @@ class SourceHttpInput {
         'networkBytes': networkBytes,
         'deliveredBytes': _nativeMeasured ? deliveredBytes : null,
         'prefixHits': prefixHits,
+        'readAheadHits': readAheadHits,
         'requestMs': requestMs,
         'failures': failures,
         'cancellations': cancellations,
@@ -183,6 +185,8 @@ class SourceHttpInput {
       'networkBytes': networkBytes,
       'deliveredBytes': _nativeMeasured ? deliveredBytes : null,
       'prefixHits': prefixHits,
+      'readAheadHits': readAheadHits,
+      'readAheadBytes': _readAheadBytes,
       'requestMs': requestMs,
       'elapsedMs': now,
       'rateBytes': now == _windowAt
@@ -202,6 +206,14 @@ class SourceHttpInput {
   int? _size;
   String? _validator;
   Uint8List? _prefix;
+  // Keep the sniffed prefix pinned and recent ranges in LRU order. This cache
+  // is per input/attempt and never shared between sources or login sessions.
+  static const readAheadSize = 1024 * 1024;
+  static const cacheBudget = 32 * 1024 * 1024;
+  final _readAhead = <int, Uint8List>{};
+  int _readAheadBytes = 0;
+  int get cachedBytes => (_prefix?.length ?? 0) + _readAheadBytes;
+  Future<void> _readTail = Future<void>.value();
   String? format;
   int get size => _size!;
 
@@ -369,7 +381,15 @@ class SourceHttpInput {
     }
   }
 
-  Future<Uint8List> read(int offset, int count) async {
+  Future<Uint8List> read(int offset, int count) {
+    // A single transport operation at a time also coalesces concurrent native
+    // reads covered by the same prefetch and preserves request diagnostics.
+    final result = _readTail.then((_) => _read(offset, count));
+    _readTail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
+
+  Future<Uint8List> _read(int offset, int count) async {
     if (_closed) throw const SourceInputException('cancelled');
     if (offset < 0 || count <= 0 || count > 262144 || offset >= size) {
       throw const SourceInputException('invalid_range');
@@ -380,7 +400,28 @@ class SourceHttpInput {
       final end = (offset + count).clamp(0, prefix.length);
       return Uint8List.sublistView(prefix, offset, end);
     }
-    return _range(offset, count);
+    for (final start in _readAhead.keys.toList().reversed) {
+      final bytes = _readAhead[start]!;
+      if (offset >= start && offset < start + bytes.length) {
+        _readAhead.remove(start);
+        _readAhead[start] = bytes;
+        readAheadHits++;
+        final relative = offset - start;
+        return Uint8List.sublistView(
+          bytes,
+          relative,
+          (relative + count).clamp(0, bytes.length),
+        );
+      }
+    }
+    final bytes = await _range(offset, readAheadSize.clamp(0, size - offset));
+    if (_closed) throw const SourceInputException('cancelled');
+    while (cachedBytes + bytes.length > cacheBudget && _readAhead.isNotEmpty) {
+      _readAheadBytes -= _readAhead.remove(_readAhead.keys.first)!.length;
+    }
+    _readAhead[offset] = bytes;
+    _readAheadBytes += bytes.length;
+    return Uint8List.sublistView(bytes, 0, count.clamp(0, bytes.length));
   }
 
   Future<Uint8List> _range(int offset, int count) async {
@@ -537,6 +578,7 @@ class SourceHttpInput {
           throw SourceInputException(_closed ? 'cancelled' : 'body_limit');
         }
         networkBytes += chunk.length;
+        request.startupProgress.recordBytes(start + bytes.length, chunk.length);
         bytes.add(chunk);
       }
       if (bytes.length != end - start + 1) {
@@ -656,6 +698,8 @@ class SourceHttpInput {
   void close() {
     _wasClosed = true;
     _prefix = null;
+    _readAhead.clear();
+    _readAheadBytes = 0;
     _client.close(force: true);
     _summary();
   }

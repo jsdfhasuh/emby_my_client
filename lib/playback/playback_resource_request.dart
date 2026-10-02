@@ -6,6 +6,7 @@ import '../core/server_scope.dart';
 import '../core/strm_diagnostics.dart';
 import '../models/emby_models.dart';
 import 'strm_direct_play_policy.dart';
+import 'source_startup_progress.dart';
 
 /// Identity is deliberately stronger than ServerScope: a new login cannot
 /// consume a snapshot or late response produced by the old API object.
@@ -56,6 +57,7 @@ class PlaybackResourceRequest {
   }
 
   final StrmTrace trace;
+  final SourceStartupProgress startupProgress = SourceStartupProgress();
   final int? diagnosticTask;
   final String rawUrl;
   final Map<String, String> headers;

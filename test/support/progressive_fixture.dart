@@ -107,7 +107,7 @@ class ProgressiveOrigin {
   Future<FixtureReply?> Function(FixtureRequest)? intercept;
   String get origin => 'http://$host:${server.port}';
 
-  static Future<ProgressiveOrigin> start() async {
+  static Future<ProgressiveOrigin> start({Uint8List? content}) async {
     final interfaces = await NetworkInterface.list(
       type: InternetAddressType.IPv4,
     );
@@ -116,7 +116,11 @@ class ProgressiveOrigin {
         .firstWhere((a) => !a.isLoopback)
         .address;
     final server = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
-    final fixture = ProgressiveOrigin._(server, host, progressiveVideo());
+    final fixture = ProgressiveOrigin._(
+      server,
+      host,
+      content ?? progressiveVideo(),
+    );
     server.listen(fixture._accept);
     return fixture;
   }

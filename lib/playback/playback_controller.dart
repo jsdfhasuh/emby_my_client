@@ -49,6 +49,8 @@ class PlaybackController extends ChangeNotifier {
     PlaybackDiagnostics? diagnostics,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
+    this.sourceReadyIdleTimeout = const Duration(seconds: 15),
+    this.sourceReadyTimeout = const Duration(seconds: 120),
     this.openTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
     this.seekCallTimeout = const Duration(seconds: 8),
@@ -100,6 +102,8 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackCacheStorage cacheStorage;
   final PlaybackDiagnostics _diagnostics;
   final Duration readyTimeout;
+  final Duration sourceReadyIdleTimeout;
+  final Duration sourceReadyTimeout;
   final Duration openTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
@@ -357,7 +361,7 @@ class PlaybackController extends ChangeNotifier {
             statusMessage: currentOpeningStatusMessage,
           ),
         );
-        await _waitUntilReady(token);
+        await _waitUntilReady(token, plan);
         _throwIfStale(token);
         if (plan.method == PlayMethod.directPlay) {
           await _applySelectedDirectPlayTracks(plan, token);
@@ -3233,11 +3237,19 @@ class PlaybackController extends ChangeNotifier {
     if (completer != null && !completer.isCompleted) completer.complete();
   }
 
-  Future<void> _waitUntilReady(int token) async {
+  Future<void> _waitUntilReady(int token, PlaybackPlan plan) async {
     _throwIfStale(token);
     final completer = _readyCompleter;
     if (completer == null) {
       throw StateError('Playback ready wait was not initialized');
+    }
+    if (plan.isSourceDirect) {
+      await plan.sourceRequest!.startupProgress.waitUntilReady(
+        completer.future,
+        idleTimeout: sourceReadyIdleTimeout,
+        totalTimeout: sourceReadyTimeout,
+      );
+      return;
     }
     await completer.future.timeout(
       readyTimeout,

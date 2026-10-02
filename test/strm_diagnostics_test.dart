@@ -197,7 +197,9 @@ void main() {
       expect(result.content, contains('nativeReads=2001 httpRequests=2'));
       expect(
         result.content,
-        contains('networkBytes=263144 deliveredBytes=33000 prefixHits=2000'),
+        contains(
+          'networkBytes=${262144 + origin.bytes.length - 400000} deliveredBytes=33000 prefixHits=2000 readAheadHits=0',
+        ),
       );
       expect(result.content.split('scope=input').length - 1, 1);
       expect(result.content.split('scope=playback').length - 1, 1);
