@@ -1166,6 +1166,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   LibraryGridGeometry? _latestGridGeometry;
   LibraryScanKey? _activeScanKey;
   LibraryLocalScanSnapshot? _scanSnapshot;
+  int _localScanRestoreToken = 0;
+  double? _pendingLocalScanRestoreOffset;
+  int? _pendingLocalScanRestoreGeneration;
+  int? _pendingLocalScanRestoreToken;
   bool _preparingPlaybackQueue = false;
 
   @override
@@ -1409,6 +1413,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   void didUpdateWidget(covariant LibraryBrowseScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.libraryScanService, widget.libraryScanService)) {
+      _cancelPendingLocalScanPositionRestore();
       oldWidget.libraryScanService?.removeListener(_onLibraryScanChanged);
       widget.libraryScanService?.addListener(_onLibraryScanChanged);
       final previousState = _state;
@@ -1729,7 +1734,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   }
 
   Future<void> _refreshPreservingPosition() {
-    if (_usesLocalScan) return _restartLocalScan();
+    if (_usesLocalScan) {
+      return _restartLocalScan(restoreScrollPosition: true);
+    }
     return _restartQuery(
       targetStartIndex: _nextStartIndex > _pageSize
           ? _nextStartIndex
@@ -1775,6 +1782,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   void _subscribeToLocalScan({bool restart = false}) {
     final service = widget.libraryScanService;
     if (service == null) {
+      _cancelPendingLocalScanPositionRestore();
       setState(() {
         _loading = false;
         _loadFailed = true;
@@ -1796,6 +1804,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
         stackTrace: stackTrace,
       );
       if (!mounted) return;
+      _cancelPendingLocalScanPositionRestore();
       setState(() {
         _loading = false;
         _loadFailed = true;
@@ -1803,22 +1812,87 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     }
   }
 
-  Future<void> _restartLocalScan() async {
+  Future<void> _restartLocalScan({bool restoreScrollPosition = false}) async {
     if (!mounted) return;
-    _clearPosition(scrollToTop: true);
+    final preserveVisibleItems =
+        restoreScrollPosition && _items.isNotEmpty && _controller.hasClients;
+    final restoreToken = ++_localScanRestoreToken;
+    _pendingLocalScanRestoreOffset = preserveVisibleItems
+        ? _controller.offset
+        : null;
+    _pendingLocalScanRestoreGeneration = preserveVisibleItems
+        ? _generation
+        : null;
+    _pendingLocalScanRestoreToken = preserveVisibleItems ? restoreToken : null;
+    _clearPosition(scrollToTop: !preserveVisibleItems);
     setState(() {
-      _items.clear();
-      _seenItemIds.clear();
-      _nextStartIndex = 0;
-      _totalCount = null;
-      _resultTotalDirty = false;
-      _reportedTotalBelowLoaded = false;
-      _hasMore = false;
+      if (!preserveVisibleItems) {
+        _items.clear();
+        _seenItemIds.clear();
+        _nextStartIndex = 0;
+        _totalCount = null;
+        _resultTotalDirty = false;
+        _reportedTotalBelowLoaded = false;
+        _hasMore = false;
+        _scanSnapshot = null;
+      }
       _loadFailed = false;
       _loading = true;
-      _scanSnapshot = null;
     });
     _subscribeToLocalScan(restart: true);
+  }
+
+  bool get _hasPendingLocalScanPositionRestore =>
+      _pendingLocalScanRestoreOffset != null &&
+      _pendingLocalScanRestoreGeneration == _generation &&
+      _pendingLocalScanRestoreToken != null;
+
+  void _cancelPendingLocalScanPositionRestore() {
+    _localScanRestoreToken++;
+    _pendingLocalScanRestoreOffset = null;
+    _pendingLocalScanRestoreGeneration = null;
+    _pendingLocalScanRestoreToken = null;
+  }
+
+  void _scheduleLocalScanPositionRestore({
+    required double offset,
+    required int generation,
+    required int restoreToken,
+    int remainingAttachAttempts = 2,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _generation ||
+          restoreToken != _localScanRestoreToken) {
+        return;
+      }
+      if (!_controller.hasClients) {
+        if (remainingAttachAttempts > 0) {
+          _scheduleLocalScanPositionRestore(
+            offset: offset,
+            generation: generation,
+            restoreToken: restoreToken,
+            remainingAttachAttempts: remainingAttachAttempts - 1,
+          );
+        }
+        return;
+      }
+      final targetOffset = offset
+          .clamp(
+            _controller.position.minScrollExtent,
+            _controller.position.maxScrollExtent,
+          )
+          .toDouble();
+      _suppressPositionNotifications = true;
+      try {
+        if ((targetOffset - _controller.offset).abs() > _scrollTolerance) {
+          _controller.jumpTo(targetOffset);
+        }
+      } finally {
+        _suppressPositionNotifications = false;
+        _clearPosition();
+      }
+    });
   }
 
   void _onLibraryScanChanged() {
@@ -1839,6 +1913,35 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     final service = widget.libraryScanService;
     final key = _activeScanKey;
     if (service == null || key == null) return;
+    final hasPendingRestore = _hasPendingLocalScanPositionRestore;
+    final keepVisibleItems =
+        hasPendingRestore &&
+        snapshot.status != LibraryScanStatus.complete &&
+        snapshot.status != LibraryScanStatus.cancelled;
+    final restoreOffset =
+        hasPendingRestore && snapshot.status == LibraryScanStatus.complete
+        ? _pendingLocalScanRestoreOffset
+        : null;
+    final restoreGeneration = _pendingLocalScanRestoreGeneration;
+    final restoreToken = _pendingLocalScanRestoreToken;
+    if (restoreOffset != null) {
+      _pendingLocalScanRestoreOffset = null;
+      _pendingLocalScanRestoreGeneration = null;
+      _pendingLocalScanRestoreToken = null;
+    } else if (snapshot.status == LibraryScanStatus.cancelled) {
+      _cancelPendingLocalScanPositionRestore();
+    }
+    if (keepVisibleItems) {
+      setState(() {
+        _loading = switch (snapshot.status) {
+          LibraryScanStatus.queued || LibraryScanStatus.scanning => true,
+          LibraryScanStatus.paused => false,
+          LibraryScanStatus.complete || LibraryScanStatus.cancelled => false,
+        };
+        _loadFailed = snapshot.safeError != null;
+      });
+      return;
+    }
     final items = service
         .itemsFor(key, _state.localFilter)
         .where(
@@ -1866,6 +1969,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       };
       _loadFailed = snapshot.safeError != null;
     });
+    if (restoreOffset != null &&
+        restoreGeneration != null &&
+        restoreToken != null) {
+      _scheduleLocalScanPositionRestore(
+        offset: restoreOffset,
+        generation: restoreGeneration,
+        restoreToken: restoreToken,
+      );
+    }
   }
 
   Future<void> _refreshRealtime() async {
@@ -2148,6 +2260,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     if (shouldSaveSort) unawaited(_saveRootSortPreference(next));
     if (shouldClearSort) unawaited(_clearRootSortPreference());
     if (identical(next, _state) || next == _state) return;
+    _cancelPendingLocalScanPositionRestore();
     _generation++;
     _reloadGeneration = null;
     _activeReload = null;

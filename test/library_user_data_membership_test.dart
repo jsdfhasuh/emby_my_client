@@ -351,6 +351,73 @@ void main() {
     },
   );
 
+  testWidgets(
+    'library change restarts a completed local scan without losing position',
+    (tester) async {
+      _setCompactView(tester);
+      final socket = _FakeEmbySocket();
+      final api = _MembershipApi(
+        socket: socket,
+        items: [
+          for (var index = 0; index < 125; index++)
+            _item(
+              'item-$index',
+              userData: const EmbyUserData(),
+              isRegular: true,
+            ),
+        ],
+      );
+      final scanService = LibraryLocalMediaScanService(
+        api: api,
+        scope: ServerScope.fromSession(api.session),
+        delay: (_) => Future<void>.value(),
+      );
+      await _pumpLibrary(
+        tester,
+        api,
+        const LibraryBrowseState(
+          mediaType: LibraryMediaType.movie,
+          localFilter: LibraryLocalMediaFilter.regular,
+          playedFilter: LibraryPlayedFilter.unplayed,
+        ),
+        scanService: scanService,
+      );
+      final initialScanCalls = api.localScanCalls;
+      expect(initialScanCalls, 3);
+
+      final scrollable = _verticalScrollable();
+      await tester.scrollUntilVisible(
+        _itemFinder('item-70'),
+        700,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      final position = tester.state<ScrollableState>(scrollable).position;
+      final previousOffset = position.pixels;
+      expect(previousOffset, greaterThan(0));
+
+      api.updateUserData('item-70', const EmbyUserData(isPlayed: true));
+      socket.emitLibraryChanged(itemsUpdated: ['item-70']);
+      await _pumpRealtime(tester);
+
+      final debugState =
+          tester.state(find.byType(LibraryBrowseScreen))
+              as LibraryBrowseDebugState;
+      expect(debugState.debugLoadedItemIds, hasLength(124));
+      expect(debugState.debugLoadedItemIds, isNot(contains('item-70')));
+      expect(api.userDataCalls, 0);
+      expect(
+        api.localCalls
+            .skip(initialScanCalls)
+            .map((call) => call.startIndex)
+            .toList(growable: false),
+        [0, 60, 120],
+      );
+      expect(position.pixels, closeTo(previousOffset, 1));
+      await _disposeLibrary(tester, api, scanService: scanService);
+    },
+  );
+
   for (final entry in const [
     (
       'an unloaded item entering favorites',
@@ -712,6 +779,15 @@ class _FakeEmbySocket implements EmbySocket {
             for (final itemId in itemIds) {'ItemId': itemId},
           ],
         },
+      }),
+    );
+  }
+
+  void emitLibraryChanged({List<String> itemsUpdated = const []}) {
+    _messages.add(
+      jsonEncode({
+        'MessageType': 'LibraryChanged',
+        'Data': {'ItemsUpdated': itemsUpdated},
       }),
     );
   }

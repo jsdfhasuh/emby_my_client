@@ -716,6 +716,166 @@ void main() {
     },
   );
 
+  test('memory pressure recovery suppresses stale connection errors', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      diagnostics: _diagnostics(diagnostics),
+    );
+    final observedErrors = <String>[];
+    controller.addListener(() {
+      final error = controller.state.errorMessage;
+      if (error != null) observedErrors.add(error);
+    });
+    await controller.start();
+    final snapshotGate = Completer<void>();
+    engine.snapshotOperation = snapshotGate.future;
+
+    final pressure = controller.handleMemoryPressure();
+    await _waitUntil(() => engine.snapshotReads >= 2);
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(observedErrors, isEmpty);
+
+    snapshotGate.complete();
+    await pressure;
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(
+      diagnostics,
+      contains(
+        contains(
+          'event=playback_engine_error_suppressed '
+          'context=cache_safety_reopen',
+        ),
+      ),
+    );
+
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '无法连接媒体流');
+    expect(observedErrors, ['无法连接媒体流']);
+    await controller.shutdown();
+  });
+
+  test('cache safety does not suppress replacement engine errors', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+    final pressureSnapshotGate = Completer<void>();
+    final replacementSnapshotGate = Completer<void>();
+    engine.snapshotOperation = pressureSnapshotGate.future;
+    engine.onOpen = () {
+      if (engine.openCalls == 2) {
+        engine.snapshotOperation = replacementSnapshotGate.future;
+      }
+    };
+
+    final pressure = controller.handleMemoryPressure();
+    await _waitUntil(() => engine.snapshotReads >= 2);
+    pressureSnapshotGate.complete();
+    await _waitUntil(
+      () =>
+          engine.openCalls == 2 &&
+          controller.state.phase == PlaybackPhase.ready,
+    );
+
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '无法连接媒体流');
+
+    replacementSnapshotGate.complete();
+    await pressure;
+    await controller.shutdown();
+  });
+
+  test(
+    'deferred cache safety errors surface when reopen is unavailable',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final session = PlaybackItemSession.forTest('deferred-safety-error');
+      expect(
+        session.tryReserveAutomaticOpen(
+          AutomaticPlaybackOpenReason.cacheSafetyReopen,
+        ),
+        isTrue,
+      );
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+      );
+      await controller.start();
+
+      final snapshotReadsBefore = engine.snapshotReads;
+      final snapshotGate = Completer<void>();
+      engine.snapshotOperation = snapshotGate.future;
+      final pressure = controller.handleMemoryPressure();
+      await _waitUntil(() => engine.snapshotReads > snapshotReadsBefore);
+
+      engine.errorController.add('network connection failed');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.errorMessage, isNull);
+
+      snapshotGate.complete();
+      await pressure;
+
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, '无法连接媒体流');
+      expect(engine.openCalls, 1);
+      await controller.shutdown();
+    },
+  );
+
+  test('resume seek timeout is not reported as a connection failure', () {
+    expect(
+      PlaybackController.friendlyPlaybackError(
+        TimeoutException('Resume seek did not settle'),
+      ),
+      '恢复播放位置超时，请重试',
+    );
+  });
+
+  test('resume seek settle timeout keeps its specific startup error', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events, emitPositionOnSeek: false);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      item: _item.copyWith(
+        userData: const EmbyUserData(playbackPositionTicks: 3000000000),
+      ),
+      resumeVerificationTimeout: const Duration(milliseconds: 10),
+    );
+
+    await controller.start();
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '直连失败，服务器转码也不可用：恢复播放位置超时，请重试');
+    expect(controller.state.errorMessage, isNot(contains('连接')));
+    expect(engine.seekCalls, 2);
+    await controller.shutdown();
+  });
+
   test('repeated memory pressure requests perform one safety reopen', () async {
     final events = <String>[];
     final engine = _CacheEngine(events: events);
@@ -1356,6 +1516,7 @@ PlaybackController _controller({
   PlaybackDiagnostics? diagnostics,
   PlaybackReporter? reporter,
   Duration readyTimeout = const Duration(seconds: 18),
+  Duration resumeVerificationTimeout = const Duration(seconds: 2),
   Duration cacheCleanupTimeout = const Duration(seconds: 3),
   PlaybackClock? clock,
 }) => PlaybackController(
@@ -1371,6 +1532,7 @@ PlaybackController _controller({
   testOverrides: testOverrides,
   diagnostics: diagnostics,
   readyTimeout: readyTimeout,
+  resumeVerificationTimeout: resumeVerificationTimeout,
   cacheCleanupTimeout: cacheCleanupTimeout,
   progressInterval: const Duration(hours: 1),
   cacheStatePollInterval: const Duration(hours: 1),
@@ -1430,6 +1592,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
     this.snapshot,
     this.requireRecreationAfterOpen = false,
     this.keepSubtitleStreamOpenAfterDispose = false,
+    this.emitPositionOnSeek = true,
     this.seekGate,
     this.stopGate,
     this.noReadyOnOpen = const {},
@@ -1442,6 +1605,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
   Future<void>? snapshotOperation;
   final bool requireRecreationAfterOpen;
   final bool keepSubtitleStreamOpenAfterDispose;
+  final bool emitPositionOnSeek;
   final Completer<void>? seekGate;
   final Completer<void>? stopGate;
   final Set<int> noReadyOnOpen;
@@ -1619,7 +1783,7 @@ class _CacheEngine implements PlaybackEngine, PlaybackCacheEngine {
       maxConcurrentSeeks = concurrentSeeks;
     }
     await seekGate?.future;
-    positionController.add(position);
+    if (emitPositionOnSeek) positionController.add(position);
     concurrentSeeks--;
   }
 

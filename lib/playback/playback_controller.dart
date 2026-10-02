@@ -151,6 +151,11 @@ class PlaybackController extends ChangeNotifier {
   PlaybackCacheRuntimeMode? _lastNativeConfirmedMode;
   int _cacheFailureObservationGeneration = 0;
   final Set<PlaybackCacheSafetyReason> _cacheSafetyDiagnosticsWritten = {};
+  int _memoryPressureHandlingCount = 0;
+  int _cacheSafetyReopenPendingCount = 0;
+  int? _cacheSafetyErrorSuppressionGeneration;
+  String? _cacheSafetyDeferredEngineError;
+  int? _cacheSafetyDeferredEngineErrorGeneration;
   late final PlaybackCacheEvidenceAccumulator _cacheEvidence =
       PlaybackCacheEvidenceAccumulator(
         sessionId: session.id,
@@ -302,8 +307,24 @@ class PlaybackController extends ChangeNotifier {
               : resume;
           _setState(_state.copyWith(phase: PlaybackPhase.seekingResume));
           final result = await seekAbsolute(target, source: SeekSource.resume);
-          if (result.disposition != SeekDisposition.executed) {
-            throw TimeoutException('Resume seek did not settle');
+          switch (result.disposition) {
+            case SeekDisposition.executed:
+            case SeekDisposition.superseded:
+              break;
+            case SeekDisposition.cancelled:
+              throw const _PlaybackCancelled();
+            case SeekDisposition.failed:
+              switch (result.failureKind) {
+                case SeekFailureKind.callTimeout ||
+                    SeekFailureKind.settleTimeout:
+                  throw TimeoutException('Resume seek did not settle');
+                case SeekFailureKind.higherPriorityOperation ||
+                    SeekFailureKind.staleSession:
+                  throw const _PlaybackCancelled();
+                case SeekFailureKind.engineError:
+                case null:
+                  throw StateError('Resume seek failed');
+              }
           }
           _throwIfStale(token);
           if (playAfterReady) {
@@ -768,7 +789,21 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> handleMemoryPressure() async {
-    await _cacheCoordinator?.handleMemoryPressure();
+    final coordinator = _cacheCoordinator;
+    if (coordinator == null ||
+        !coordinator.isActive ||
+        coordinator.safetyReopenRequested) {
+      return;
+    }
+    final errorSuppressionGeneration = _generation;
+    _beginCacheSafetyErrorSuppression(errorSuppressionGeneration);
+    _memoryPressureHandlingCount++;
+    try {
+      await coordinator.handleMemoryPressure();
+    } finally {
+      _memoryPressureHandlingCount--;
+      _clearCacheSafetyErrorSuppressionIfIdle(errorSuppressionGeneration);
+    }
   }
 
   Future<SeekResult> seekAbsolute(
@@ -1193,7 +1228,7 @@ class PlaybackController extends ChangeNotifier {
       }),
       boundEngine.errorStream.listen((error) {
         if (!eventIsCurrent()) return;
-        _handleEngineError(error);
+        _handleEngineError(error, engineGeneration: token);
       }),
       boundEngine.logStream.listen((log) {
         if (!eventIsCurrent()) return;
@@ -1210,7 +1245,7 @@ class PlaybackController extends ChangeNotifier {
     ]);
   }
 
-  void _handleEngineError(String error) {
+  void _handleEngineError(String error, {required int engineGeneration}) {
     final fingerprint = _approvedRecoveryFingerprint(error);
     final diagnosticFingerprint = _engineDiagnosticFingerprint(error);
     if (_shouldWriteEngineFingerprint(diagnosticFingerprint)) {
@@ -1222,6 +1257,19 @@ class PlaybackController extends ChangeNotifier {
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(error);
+      return;
+    }
+    if (_state.phase == PlaybackPhase.ready &&
+        engineGeneration == _cacheSafetyErrorSuppressionGeneration &&
+        (_memoryPressureHandlingCount > 0 ||
+            _cacheSafetyReopenPendingCount > 0)) {
+      if (_cacheSafetyDeferredEngineErrorGeneration != engineGeneration) {
+        _cacheSafetyDeferredEngineError = error;
+        _cacheSafetyDeferredEngineErrorGeneration = engineGeneration;
+      } else {
+        _cacheSafetyDeferredEngineError ??= error;
+      }
+      _diagnostics.engineErrorSuppressedForCacheSafety();
       return;
     }
     if (_state.phase == PlaybackPhase.ready) {
@@ -1482,7 +1530,19 @@ class PlaybackController extends ChangeNotifier {
       PlaybackCacheSafetyReason.memoryPressure =>
         PlaybackCacheFallbackReason.memoryPressure,
     };
-    return _operationCoordinator.runControlOperation(
+    final errorSuppressionGeneration = _generation;
+    _beginCacheSafetyErrorSuppression(errorSuppressionGeneration);
+    _cacheSafetyReopenPendingCount++;
+    if (_state.phase == PlaybackPhase.ready) {
+      _setState(
+        _state.copyWith(
+          isBuffering: true,
+          statusMessage: '正在调整缓存…',
+          clearError: true,
+        ),
+      );
+    }
+    final operation = _operationCoordinator.runControlOperation(
       priority: PlaybackControlOperationPriority.cacheSafety,
       operation: (lease) async {
         if (_disposed || _shuttingDown || _engineDisposed || !lease.isCurrent) {
@@ -1505,6 +1565,40 @@ class PlaybackController extends ChangeNotifier {
         );
       },
     );
+    return operation.whenComplete(() {
+      if (_cacheSafetyReopenPendingCount > 0) {
+        _cacheSafetyReopenPendingCount--;
+      }
+      _clearCacheSafetyErrorSuppressionIfIdle(errorSuppressionGeneration);
+    });
+  }
+
+  void _beginCacheSafetyErrorSuppression(int generation) {
+    if (_cacheSafetyErrorSuppressionGeneration == generation) return;
+    _cacheSafetyErrorSuppressionGeneration = generation;
+    _cacheSafetyDeferredEngineError = null;
+    _cacheSafetyDeferredEngineErrorGeneration = null;
+  }
+
+  void _clearCacheSafetyErrorSuppressionIfIdle(int generation) {
+    if (_memoryPressureHandlingCount == 0 &&
+        _cacheSafetyReopenPendingCount == 0 &&
+        _cacheSafetyErrorSuppressionGeneration == generation) {
+      _cacheSafetyErrorSuppressionGeneration = null;
+      final deferredError =
+          _cacheSafetyDeferredEngineErrorGeneration == generation
+          ? _cacheSafetyDeferredEngineError
+          : null;
+      _cacheSafetyDeferredEngineError = null;
+      _cacheSafetyDeferredEngineErrorGeneration = null;
+      if (deferredError != null &&
+          _generation == generation &&
+          _state.phase == PlaybackPhase.ready &&
+          !_disposed &&
+          !_shuttingDown) {
+        _handleEngineError(deferredError, engineGeneration: generation);
+      }
+    }
   }
 
   Future<void> _performCacheSafetyReopen(
@@ -1615,7 +1709,7 @@ class PlaybackController extends ChangeNotifier {
   void _injectApprovedSeekFailureIfPending() {
     if (!_testSeekFailurePending || _state.phase != PlaybackPhase.ready) return;
     _testSeekFailurePending = false;
-    _handleEngineError('partial file');
+    _handleEngineError('partial file', engineGeneration: _generation);
   }
 
   void _updateStablePlayback(Duration position) {
@@ -2858,6 +2952,12 @@ class PlaybackController extends ChangeNotifier {
 
   static String friendlyPlaybackError(Object error) {
     final message = error.toString().toLowerCase();
+    if (message.contains('resume seek did not settle')) {
+      return '恢复播放位置超时，请重试';
+    }
+    if (message.contains('resume seek failed')) {
+      return '恢复播放位置失败，请重试';
+    }
     if (message.contains('failed to resolve hostname') ||
         message.contains('no address associated with hostname') ||
         message.contains('unknown host')) {
