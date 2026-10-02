@@ -23,6 +23,7 @@ int offsetOf(FixtureRequest request) => int.parse(
 
 Future<(ProgressiveOrigin, SourceHttpInput)> setup({
   int length = 40 * block,
+  bool adaptive = false,
 }) async {
   final bytes = Uint8List(length);
   for (var i = 0; i < length; i++) {
@@ -34,6 +35,7 @@ Future<(ProgressiveOrigin, SourceHttpInput)> setup({
   final input = SourceHttpInput(
     fixtureRequest('${server.origin}/parallel.avi'),
     embyServer: Uri.parse('https://emby.invalid'),
+    rangeBytes: adaptive ? null : block,
   );
   addTearDown(input.close);
   await input.prepare();
@@ -41,6 +43,46 @@ Future<(ProgressiveOrigin, SourceHttpInput)> setup({
 }
 
 void main() {
+  test(
+    'adaptive mixed ranges preserve coverage and budget and reset to 2 MiB on seek',
+    () async {
+      final (server, input) = await setup(adaptive: true);
+      const mib = 1024 * 1024;
+      var offset = mib;
+      final tiers = <int>{input.rangeBytes};
+      while (offset < 56 * mib) {
+        final bytes = await input.read(offset, 65536);
+        expect(bytes, server.bytes.sublist(offset, offset + bytes.length));
+        offset += bytes.length;
+        tiers.add(input.rangeBytes);
+        expect(
+          input.cachedBytes + input.reservedBytes,
+          lessThanOrEqualTo(SourceHttpInput.cacheBudget),
+        );
+      }
+      expect(tiers, containsAll([2 * mib, 4 * mib]));
+      final spans = server.requests.skip(1).map((request) {
+        final range = request.headers['range']!.substring(6).split('-');
+        return (int.parse(range[0]), int.parse(range[1]));
+      }).toList()..sort((a, b) => a.$1.compareTo(b.$1));
+      for (var i = 1; i < spans.length; i++) {
+        expect(spans[i].$1, spans[i - 1].$2 + 1);
+      }
+      input.cancelPendingPrefetch();
+      expect(input.rangeBytes, 2 * mib);
+      expect(input.prefetchConcurrency, 8);
+      expect(
+        await input.read(76 * mib, 16),
+        server.bytes.sublist(76 * mib, 76 * mib + 16),
+      );
+      expect(input.rangeBytes, 2 * mib);
+      expect(
+        input.cachedBytes + input.reservedBytes,
+        lessThanOrEqualTo(SourceHttpInput.cacheBudget),
+      );
+    },
+  );
+
   test(
     'each parallel redirect strips credentials and preserves opaque targets',
     () async {
@@ -66,6 +108,7 @@ void main() {
           },
         ),
         embyServer: Uri.parse('https://emby.invalid'),
+        rangeBytes: block,
       );
       addTearDown(input.close);
       await input.prepare();

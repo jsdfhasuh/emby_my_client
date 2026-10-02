@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'playback_resource_request.dart';
 import 'source_input_failure.dart';
+import 'source_read_ahead_policy.dart';
 import 'strm_direct_play_policy.dart';
 export 'source_input_failure.dart';
 
@@ -17,10 +18,16 @@ class SourceHttpInput {
     required this.embyServer,
     int? openAttempt,
     this.maxConcurrentRequests = 8,
-    this.rangeBytes = readAheadSize,
-  }) : openAttempt = openAttempt ?? request.trace.currentAttempt {
+    int? rangeBytes,
+  }) : openAttempt = openAttempt ?? request.trace.currentAttempt,
+       _readAheadPolicy = SourceReadAheadPolicy(
+         fixedRangeBytes: rangeBytes,
+         maximumConcurrency: maxConcurrentRequests,
+       ) {
     assert(maxConcurrentRequests >= 1 && maxConcurrentRequests <= 8);
-    assert(rangeBytes > 0 && rangeBytes <= readAheadSize);
+    assert(
+      rangeBytes == null || (rangeBytes > 0 && rangeBytes <= 6 * 1024 * 1024),
+    );
     _client
       ..autoUncompress = false
       ..connectionTimeout = const Duration(seconds: 10)
@@ -32,7 +39,11 @@ class SourceHttpInput {
   final Uri embyServer;
   final int openAttempt;
   final int maxConcurrentRequests;
-  final int rangeBytes;
+  final SourceReadAheadPolicy _readAheadPolicy;
+  int get rangeBytes => _readAheadPolicy.rangeBytes;
+  int get prefetchConcurrency => _parallelEnabled
+      ? _readAheadPolicy.concurrency(maxConcurrentRequests)
+      : 1;
   final Stopwatch _clock = Stopwatch()..start();
   String _stage = 'connect';
   int? _responseStatus;
@@ -212,7 +223,7 @@ class SourceHttpInput {
       'prefixHits': prefixHits,
       'readAheadHits': readAheadHits,
       'readAheadBytes': _readAheadBytes,
-      'prefetchConcurrency': _parallelEnabled ? maxConcurrentRequests : 1,
+      'prefetchConcurrency': prefetchConcurrency,
       'prefetchBlockBytes': rangeBytes,
       'activeRequests': _pending.length,
       'prefetchCancellations': prefetchCancellations,
@@ -424,6 +435,11 @@ class SourceHttpInput {
   /// Stop obsolete background work without invalidating verified cached bytes
   /// or aborting a native read that libmpv is currently waiting for.
   void cancelPendingPrefetch({int? preserveOffset}) {
+    _readAheadPolicy.reset();
+    _cancelPendingPrefetch(preserveOffset: preserveOffset);
+  }
+
+  void _cancelPendingPrefetch({int? preserveOffset}) {
     for (final transfer in _pending.values.toList()) {
       if (!transfer.demand &&
           !(preserveOffset != null && transfer.contains(preserveOffset))) {
@@ -465,6 +481,7 @@ class SourceHttpInput {
         final end = (relative + count).clamp(0, bytes.length);
         _lastReadEnd = start + end;
         request.startupProgress.recordBytes(offset, end - relative);
+        _readAheadPolicy.consumed(end - relative);
         _fillWindow(start);
         return Uint8List.sublistView(bytes, relative, end);
       }
@@ -484,40 +501,111 @@ class SourceHttpInput {
     final end = (relative + count).clamp(0, bytes.length);
     _lastReadEnd = transfer.offset + end;
     request.startupProgress.recordBytes(offset, end - relative);
+    _readAheadPolicy.consumed(end - relative);
     return Uint8List.sublistView(bytes, relative, end);
   }
 
   void _fillWindow(int start) {
     if (_closed || !_parallelEnabled) return;
-    for (var i = 1; i < maxConcurrentRequests; i++) {
-      final offset = start + i * rangeBytes;
-      if (offset >= size || _pending.length >= maxConcurrentRequests) break;
-      if (_readAhead.containsKey(offset) ||
-          _pending.values.any((t) => t.contains(offset))) {
+    final limit = (start + rangeBytes * prefetchConcurrency).clamp(0, size);
+    var offset = start;
+    while (offset < limit) {
+      // Walk actual coverage, not a fixed block grid: old and new tiers may
+      // coexist after adaptation. Never overlap a completed or pending range.
+      final cached = _readAhead.entries
+          .where(
+            (entry) =>
+                offset >= entry.key && offset < entry.key + entry.value.length,
+          )
+          .firstOrNull;
+      if (cached != null) {
+        offset = cached.key + cached.value.length;
         continue;
       }
-      _schedule(offset, demand: false);
+      final pending = _pending.values
+          .where((t) => t.contains(offset))
+          .firstOrNull;
+      if (pending != null) {
+        offset = pending.offset + pending.count;
+        continue;
+      }
+      if (_pending.length >= prefetchConcurrency) break;
+      // Don't turn a growing window's edge into a stream of tiny requests.
+      // Wait for room for a full block, except for the actual end of file.
+      if (offset + rangeBytes > limit && limit < size) break;
+      var end = (offset + rangeBytes).clamp(0, limit);
+      for (final next in [..._readAhead.keys, ..._pending.keys]) {
+        if (next > offset && next < end) end = next;
+      }
+      final count = end - offset;
+      // Protect the active window while allowing older ranges to be evicted.
+      final protectedBytes = _readAhead.entries
+          .where(
+            (entry) =>
+                entry.key + entry.value.length > start && entry.key < limit,
+          )
+          .fold(0, (bytes, entry) => bytes + entry.value.length);
+      if ((_prefix?.length ?? 0) + protectedBytes + reservedBytes + count >
+          cacheBudget) {
+        break;
+      }
+      _schedule(
+        offset,
+        count: count,
+        demand: false,
+        protectedStart: start,
+        protectedEnd: limit,
+      );
+      offset = end;
     }
   }
 
-  _HttpTransfer _schedule(int offset, {required bool demand}) {
-    if (_pending.length >= maxConcurrentRequests) cancelPendingPrefetch();
+  _HttpTransfer _schedule(
+    int offset, {
+    int? count,
+    required bool demand,
+    int? protectedStart,
+    int? protectedEnd,
+  }) {
+    if (_pending.length >= prefetchConcurrency) _cancelPendingPrefetch();
+    var length = (count ?? rangeBytes).clamp(0, size - offset);
+    // A demanded hole can be followed by a completed range of a different size.
+    for (final next in [..._readAhead.keys, ..._pending.keys]) {
+      if (next > offset && next < offset + length) length = next - offset;
+    }
+    if (demand &&
+        reservedBytes + length + (_prefix?.length ?? 0) > cacheBudget) {
+      _cancelPendingPrefetch();
+    }
     final transfer = _newTransfer(
       offset,
-      rangeBytes.clamp(0, size - offset),
+      length,
       demand: demand,
+      protectedStart: protectedStart,
+      protectedEnd: protectedEnd,
     );
     _pending[offset] = transfer;
     transfer.result = _runTransfer(transfer, cache: true);
     return transfer;
   }
 
-  _HttpTransfer _newTransfer(int offset, int count, {required bool demand}) {
-    _trimCache(cacheBudget - reservedBytes - count);
+  _HttpTransfer _newTransfer(
+    int offset,
+    int count, {
+    required bool demand,
+    int? protectedStart,
+    int? protectedEnd,
+  }) {
+    _trimCache(
+      cacheBudget - reservedBytes - count,
+      protectedStart: protectedStart,
+      protectedEnd: protectedEnd,
+    );
     final client = _idleClients.isEmpty
         ? HttpClient()
         : _idleClients.removeLast();
     final transfer = _HttpTransfer(this, client, offset, count, demand);
+    transfer.policyGeneration = _readAheadPolicy.generation;
     client
       ..autoUncompress = false
       ..connectionTimeout = const Duration(seconds: 10)
@@ -529,9 +617,19 @@ class SourceHttpInput {
     return transfer;
   }
 
-  void _trimCache(int budget) {
+  void _trimCache(int budget, {int? protectedStart, int? protectedEnd}) {
     while (cachedBytes > budget && _readAhead.isNotEmpty) {
-      _readAheadBytes -= _readAhead.remove(_readAhead.keys.first)!.length;
+      final candidate = _readAhead.entries
+          .where(
+            (entry) =>
+                protectedStart == null ||
+                protectedEnd == null ||
+                entry.key + entry.value.length <= protectedStart ||
+                entry.key >= protectedEnd,
+          )
+          .firstOrNull;
+      if (candidate == null) break;
+      _readAheadBytes -= _readAhead.remove(candidate.key)!.length;
     }
   }
 
@@ -577,14 +675,22 @@ class SourceHttpInput {
         _readAhead[transfer.offset] = bytes;
         _readAheadBytes += bytes.length;
       }
+      if (cache) {
+        _readAheadPolicy.completed(
+          bytes: bytes.length,
+          elapsed: clock.elapsed,
+          sampleGeneration: transfer.policyGeneration,
+        );
+      }
       return _TransferResult(bytes: bytes);
     } catch (error, stack) {
+      if (!transfer.closed || timedOut) _readAheadPolicy.failed();
       if (!transfer.demand && !_closed && (!transfer.cancelled || timedOut)) {
         // Background failures must not fail playback. Retry on demand using
         // the single-request path and retain all destination/validator checks.
         _parallelEnabled = false;
         prefetchFailures++;
-        cancelPendingPrefetch();
+        _cancelPendingPrefetch();
       }
       final mapped = transfer.cancelled && error is! SourceInputException
           ? const SourceInputException('cancelled')
@@ -934,6 +1040,7 @@ class _HttpTransfer {
   String stage = 'connect';
   int? responseStatus;
   int requestNumber = 0;
+  int policyGeneration = 0;
   String? target;
   Map<String, Object?> outboundHeaders = {};
   late Future<_TransferResult> result;
