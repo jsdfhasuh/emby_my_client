@@ -818,6 +818,45 @@ class PlaybackPlan {
   final List<String> transcodingReasons;
   final List<PlaybackMediaSource> availableMediaSources;
 
+  /// Refine cache evidence from the same controlled input that will be opened.
+  /// Keep URL, credentials, stream metadata and reporting identity unchanged.
+  PlaybackPlan withVerifiedSourceInput(VerifiedSourceInput input) {
+    if (!isSourceDirect ||
+        !identical(input.request, sourceRequest) ||
+        !input.request.sessionActive ||
+        input.sizeBytes <= 0) {
+      throw StateError('Verified input does not belong to this source');
+    }
+    final finite =
+        (duration ?? Duration.zero) > Duration.zero &&
+        (liveStreamId == null || liveStreamId!.isEmpty);
+    return PlaybackPlan(
+      uri: uri,
+      mediaSourceId: mediaSourceId,
+      playSessionId: playSessionId,
+      method: method,
+      usesServerAuthentication: usesServerAuthentication,
+      sourceRequest: sourceRequest,
+      mediaStreams: mediaStreams,
+      transcodingReasons: transcodingReasons,
+      availableMediaSources: availableMediaSources,
+      audioStreamIndex: audioStreamIndex,
+      subtitleStreamIndex: subtitleStreamIndex,
+      subtitleDisabled: subtitleDisabled,
+      liveStreamId: liveStreamId,
+      mediaSourceName: mediaSourceName,
+      container: container,
+      bitrate: bitrate,
+      errorCode: errorCode,
+      sourceProtocol: sourceProtocol,
+      duration: duration,
+      sourceSizeBytes: input.sizeBytes,
+      transportKind: finite
+          ? PlaybackTransportKind.progressiveHttp
+          : PlaybackTransportKind.unknown,
+    );
+  }
+
   PlaybackPlan copyWith({
     Uri? uri,
     String? mediaSourceId,

@@ -85,7 +85,7 @@ class MpvSourceInput {
         void Function(Pointer<Void>)
       >('strm_destroy');
 
-  Future<({Uri uri, String format})> prepare(
+  Future<({Uri uri, String format, int sizeBytes})> prepare(
     PlaybackResourceRequest request, [
     int? attempt,
   ]) async {
@@ -114,7 +114,11 @@ class MpvSourceInput {
         'stage': 'native_register',
         'outcome': 'succeeded',
       });
-      return (uri: Uri.parse('embyinput://$id'), format: input.format!);
+      return (
+        uri: Uri.parse('embyinput://$id'),
+        format: input.format!,
+        sizeBytes: input.size,
+      );
     } catch (_) {
       _inputs.remove(id)?.close();
       rethrow;

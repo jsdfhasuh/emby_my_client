@@ -19,6 +19,7 @@ import 'external_subtitle_loader.dart';
 import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
+import 'playback_resource_request.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_recovery_policy.dart';
 import 'playback_session_reporter.dart';
@@ -290,7 +291,8 @@ class PlaybackController extends ChangeNotifier {
         final resume = _resumePositionForPlan(plan, resumePosition);
         _selectedMediaSourceId = plan.mediaSourceId;
         if (!continueReporting) reporter.activate(plan);
-        await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
+        plan = await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
+        reporter.updatePlan(plan);
         _throwIfStale(token);
         _setState(
           _state.copyWith(
@@ -548,11 +550,30 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _prepareCacheForPlan(
+  Future<PlaybackPlan> _prepareCacheForPlan(
     PlaybackPlan plan,
     int token, {
     Duration readAheadAnchor = Duration.zero,
   }) async {
+    if (plan.isSourceDirect) {
+      // Never reuse transport evidence from a prior native open/recovery.
+      plan = plan.copyWith(transportKind: PlaybackTransportKind.unknown);
+      final sourceEngine = engine;
+      if (sourceEngine is SourceDirectPreparationEngine) {
+        VerifiedSourceInput? verified;
+        final request = plan.sourceRequest!;
+        await _operationCoordinator.runTrackedNativeOperation(
+          kind: PlaybackNativeOperationKind.open,
+          operation: () async {
+            verified = await (sourceEngine as SourceDirectPreparationEngine)
+                .prepareSource(request);
+          },
+          barrierTimeout: openTimeout,
+        );
+        _throwIfStale(token);
+        plan = plan.withVerifiedSourceInput(verified!);
+      }
+    }
     final cacheEngine = engine is PlaybackCacheEngine
         ? engine as PlaybackCacheEngine
         : null;
@@ -738,6 +759,7 @@ class PlaybackController extends ChangeNotifier {
       _testCacheFailureObservationPending = false;
       _handleEngineLog('Failed to create file cache');
     }
+    return plan;
   }
 
   Future<void> playOrPause() async {

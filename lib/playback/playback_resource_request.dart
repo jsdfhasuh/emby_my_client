@@ -168,6 +168,16 @@ class PlaybackResourceRequest {
   );
 }
 
+/// Evidence obtained from a prepared and container-validated HTTP input.
+class VerifiedSourceInput {
+  const VerifiedSourceInput({required this.request, required this.sizeBytes});
+
+  final PlaybackResourceRequest request;
+
+  /// Total size from a validated finite Content-Range, not the .strm file size.
+  final int sizeBytes;
+}
+
 /// URL, headers and metadata always come from this single authorized response.
 /// No copyWith accepts individual URL/header replacements.
 class SelectedSourceSnapshot {
