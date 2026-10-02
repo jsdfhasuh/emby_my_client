@@ -622,6 +622,7 @@ class MediaKitPlaybackEngine
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.seek,
       operation: () async {
+        _sourceInput?.cancelPendingPrefetch();
         await player.seek(position);
         if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
       },

@@ -42,6 +42,8 @@ void main() {
       addTearDown(server.close);
       final input = SourceHttpInput(
         fixtureRequest('${server.origin}/large.avi'),
+        maxConcurrentRequests: 1,
+        rangeBytes: 1024 * 1024,
         embyServer: Uri.parse('https://emby.invalid'),
       );
       addTearDown(input.close);
@@ -82,6 +84,8 @@ void main() {
       addTearDown(server.close);
       final input = SourceHttpInput(
         fixtureRequest('${server.origin}/large.avi'),
+        maxConcurrentRequests: 1,
+        rangeBytes: 1024 * 1024,
         embyServer: Uri.parse('https://emby.invalid'),
       );
       addTearDown(input.close);

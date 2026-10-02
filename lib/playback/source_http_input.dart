@@ -12,8 +12,15 @@ export 'source_input_failure.dart';
 /// Progressive input only. HTTP is never delegated to libmpv/FFmpeg. Each
 /// bounded Range request (including a seek) repeats destination/auth policy.
 class SourceHttpInput {
-  SourceHttpInput(this.request, {required this.embyServer, int? openAttempt})
-    : openAttempt = openAttempt ?? request.trace.currentAttempt {
+  SourceHttpInput(
+    this.request, {
+    required this.embyServer,
+    int? openAttempt,
+    this.maxConcurrentRequests = 8,
+    this.rangeBytes = readAheadSize,
+  }) : openAttempt = openAttempt ?? request.trace.currentAttempt {
+    assert(maxConcurrentRequests >= 1 && maxConcurrentRequests <= 8);
+    assert(rangeBytes > 0 && rangeBytes <= readAheadSize);
     _client
       ..autoUncompress = false
       ..connectionTimeout = const Duration(seconds: 10)
@@ -24,6 +31,8 @@ class SourceHttpInput {
   final PlaybackResourceRequest request;
   final Uri embyServer;
   final int openAttempt;
+  final int maxConcurrentRequests;
+  final int rangeBytes;
   final Stopwatch _clock = Stopwatch()..start();
   String _stage = 'connect';
   int? _responseStatus;
@@ -31,6 +40,7 @@ class SourceHttpInput {
   int nativeReads = 0, httpRequests = 0, redirects = 0, ranges = 0;
   int networkBytes = 0, deliveredBytes = 0, prefixHits = 0, requestMs = 0;
   int readAheadHits = 0;
+  int prefetchCancellations = 0, prefetchFailures = 0;
   int failures = 0, cancellations = 0, duplicates = 0;
   int _active = 0, _windowAt = 0, _windowBytes = 0;
   bool _summaryWritten = false, _firstRead = false, _nativeMeasured = false;
@@ -38,19 +48,26 @@ class SourceHttpInput {
   final Map<String, SourceInputFailure> _failureKinds = {};
   SourceInputFailure? lastFailure;
 
-  void _event(String event, Map<String, Object?> fields) =>
-      request.trace.emit(event, {
-        'openAttempt': openAttempt,
-        'request': requestNumber,
-        'stale': request.trace.finished || !request.sessionActive,
-        ...fields,
-      });
-  void _stageEvent(String stage, Map<String, Object?> fields) {
+  void _event(
+    String event,
+    Map<String, Object?> fields, {
+    _HttpTransfer? transfer,
+  }) => request.trace.emit(event, {
+    'openAttempt': openAttempt,
+    'request': transfer?.requestNumber ?? requestNumber,
+    'stale': request.trace.finished || !request.sessionActive,
+    ...fields,
+  });
+  void _stageEvent(
+    String stage,
+    Map<String, Object?> fields, {
+    _HttpTransfer? transfer,
+  }) {
     // At most one successful event per stage per input, not one per Range.
     if (_stagesWritten.add(
       '$stage:${fields['crossOrigin']}:${fields['credentialsStripped']}',
     )) {
-      _event('strm_http', {'stage': stage, ...fields});
+      _event('strm_http', {'stage': stage, ...fields}, transfer: transfer);
     }
   }
 
@@ -61,24 +78,26 @@ class SourceHttpInput {
     String stage,
     Map<String, Object?> fields, {
     bool sampled = false,
+    _HttpTransfer? transfer,
   }) {
+    final target = transfer?.target ?? _target;
     final key = jsonEncode(fields);
     final prior = _detailsWritten[stage];
     if (sampled &&
         prior != null &&
-        prior.$1 == _target &&
+        prior.$1 == target &&
         _clock.elapsedMilliseconds - prior.$2 < 5000) {
       return;
     }
     _detailsWritten[stage] = (
-      sampled ? _target ?? key : key,
+      sampled ? target ?? key : key,
       _clock.elapsedMilliseconds,
     );
     request.trace.detail(
       stage,
       fields,
       openAttempt: openAttempt,
-      request: requestNumber,
+      request: transfer?.requestNumber ?? requestNumber,
     );
   }
 
@@ -88,19 +107,25 @@ class SourceHttpInput {
     return result;
   }
 
-  SourceInputException _failure(Object error, [StackTrace? stack]) {
+  SourceInputException _failure(
+    Object error, [
+    StackTrace? stack,
+    _HttpTransfer? transfer,
+  ]) {
+    final stage = transfer?.stage ?? _stage;
+    final status = transfer?.responseStatus ?? _responseStatus;
     final mapped = SourceInputException.from(
       error is PlaybackResolveException
           ? const SourceInputException('destination')
           : error,
-      stage: _stage,
+      stage: stage,
       stackTrace: stack,
       cancelled: _closed && error is! SourceInputException,
     );
     final failure = SourceInputException(
       mapped.code,
       stage: mapped.safeStage,
-      httpStatus: mapped.safeHttp ?? _responseStatus,
+      httpStatus: mapped.safeHttp ?? status,
       cause: mapped.cause ?? error,
       stackTrace: mapped.stackTrace ?? stack,
     );
@@ -114,17 +139,17 @@ class SourceHttpInput {
       duplicates++;
       lastFailure = _failureKinds[key];
     } else {
-      _detail(_stage, {
+      _detail(stage, {
         'outcome': 'failed',
-        'requestUrl': _target,
-        'requestHeaders': _outboundHeaders,
+        'requestUrl': transfer?.target ?? _target,
+        'requestHeaders': transfer?.outboundHeaders ?? _outboundHeaders,
         'elapsedMs': _clock.elapsedMilliseconds,
-      });
+      }, transfer: transfer);
       lastFailure = SourceInputFailure(
         error: failure,
         trace: request.trace,
         openAttempt: openAttempt,
-        request: requestNumber,
+        request: transfer?.requestNumber ?? requestNumber,
         stale: !request.sessionActive,
       );
       _failureKinds[key] = lastFailure!;
@@ -187,6 +212,11 @@ class SourceHttpInput {
       'prefixHits': prefixHits,
       'readAheadHits': readAheadHits,
       'readAheadBytes': _readAheadBytes,
+      'prefetchConcurrency': _parallelEnabled ? maxConcurrentRequests : 1,
+      'prefetchBlockBytes': rangeBytes,
+      'activeRequests': _pending.length,
+      'prefetchCancellations': prefetchCancellations,
+      'prefetchFailures': prefetchFailures,
       'requestMs': requestMs,
       'elapsedMs': now,
       'rateBytes': now == _windowAt
@@ -201,6 +231,7 @@ class SourceHttpInput {
   }
 
   final HttpClient _client = HttpClient();
+  late final _subtitleTransfer = _HttpTransfer(this, _client, 0, 0, true);
   bool _wasClosed = false;
   bool get _closed => _wasClosed || !request.sessionActive;
   int? _size;
@@ -208,11 +239,14 @@ class SourceHttpInput {
   Uint8List? _prefix;
   // Keep the sniffed prefix pinned and recent ranges in LRU order. This cache
   // is per input/attempt and never shared between sources or login sessions.
-  static const readAheadSize = 1024 * 1024;
+  static const readAheadSize = 2 * 1024 * 1024;
   static const cacheBudget = 32 * 1024 * 1024;
   final _readAhead = <int, Uint8List>{};
   int _readAheadBytes = 0;
   int get cachedBytes => (_prefix?.length ?? 0) + _readAheadBytes;
+  int get reservedBytes => _transfers
+      .where((transfer) => !transfer.closed)
+      .fold(0, (bytes, transfer) => bytes + transfer.count);
   Future<void> _readTail = Future<void>.value();
   String? format;
   int get size => _size!;
@@ -381,9 +415,26 @@ class SourceHttpInput {
     }
   }
 
+  final _pending = <int, _HttpTransfer>{};
+  final _transfers = <_HttpTransfer>{};
+  final _idleClients = <HttpClient>[];
+  int? _lastReadEnd;
+  bool _parallelEnabled = true;
+
+  /// Stop obsolete background work without invalidating verified cached bytes
+  /// or aborting a native read that libmpv is currently waiting for.
+  void cancelPendingPrefetch({int? preserveOffset}) {
+    for (final transfer in _pending.values.toList()) {
+      if (!transfer.demand &&
+          !(preserveOffset != null && transfer.contains(preserveOffset))) {
+        _pending.remove(transfer.offset);
+        prefetchCancellations++;
+        transfer.cancel();
+      }
+    }
+  }
+
   Future<Uint8List> read(int offset, int count) {
-    // A single transport operation at a time also coalesces concurrent native
-    // reads covered by the same prefetch and preserves request diagnostics.
     final result = _readTail.then((_) => _read(offset, count));
     _readTail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
     return result;
@@ -394,10 +445,14 @@ class SourceHttpInput {
     if (offset < 0 || count <= 0 || count > 262144 || offset >= size) {
       throw const SourceInputException('invalid_range');
     }
+    if (_lastReadEnd != null && offset != _lastReadEnd) {
+      cancelPendingPrefetch(preserveOffset: offset);
+    }
     final prefix = _prefix;
     if (prefix != null && offset < prefix.length) {
       prefixHits++;
       final end = (offset + count).clamp(0, prefix.length);
+      _lastReadEnd = end;
       return Uint8List.sublistView(prefix, offset, end);
     }
     for (final start in _readAhead.keys.toList().reversed) {
@@ -407,67 +462,183 @@ class SourceHttpInput {
         _readAhead[start] = bytes;
         readAheadHits++;
         final relative = offset - start;
-        return Uint8List.sublistView(
-          bytes,
-          relative,
-          (relative + count).clamp(0, bytes.length),
-        );
+        final end = (relative + count).clamp(0, bytes.length);
+        _lastReadEnd = start + end;
+        request.startupProgress.recordBytes(offset, end - relative);
+        _fillWindow(start);
+        return Uint8List.sublistView(bytes, relative, end);
       }
     }
-    final bytes = await _range(offset, readAheadSize.clamp(0, size - offset));
+    var transfer = _pending.values.where((t) => t.contains(offset)).firstOrNull;
+    // Reserve a slot for the actual read before any speculative work.
+    transfer ??= _schedule(offset, demand: true);
+    transfer.demand = true;
+    requestNumber = transfer.requestNumber;
+    _fillWindow(transfer.offset);
+    final bytes = await _consume(transfer);
     if (_closed) throw const SourceInputException('cancelled');
-    while (cachedBytes + bytes.length > cacheBudget && _readAhead.isNotEmpty) {
-      _readAheadBytes -= _readAhead.remove(_readAhead.keys.first)!.length;
+    final relative = offset - transfer.offset;
+    if (relative >= bytes.length) {
+      throw const SourceInputException('truncated');
     }
-    _readAhead[offset] = bytes;
-    _readAheadBytes += bytes.length;
-    return Uint8List.sublistView(bytes, 0, count.clamp(0, bytes.length));
+    final end = (relative + count).clamp(0, bytes.length);
+    _lastReadEnd = transfer.offset + end;
+    request.startupProgress.recordBytes(offset, end - relative);
+    return Uint8List.sublistView(bytes, relative, end);
   }
 
-  Future<Uint8List> _range(int offset, int count) async {
+  void _fillWindow(int start) {
+    if (_closed || !_parallelEnabled) return;
+    for (var i = 1; i < maxConcurrentRequests; i++) {
+      final offset = start + i * rangeBytes;
+      if (offset >= size || _pending.length >= maxConcurrentRequests) break;
+      if (_readAhead.containsKey(offset) ||
+          _pending.values.any((t) => t.contains(offset))) {
+        continue;
+      }
+      _schedule(offset, demand: false);
+    }
+  }
+
+  _HttpTransfer _schedule(int offset, {required bool demand}) {
+    if (_pending.length >= maxConcurrentRequests) cancelPendingPrefetch();
+    final transfer = _newTransfer(
+      offset,
+      rangeBytes.clamp(0, size - offset),
+      demand: demand,
+    );
+    _pending[offset] = transfer;
+    transfer.result = _runTransfer(transfer, cache: true);
+    return transfer;
+  }
+
+  _HttpTransfer _newTransfer(int offset, int count, {required bool demand}) {
+    _trimCache(cacheBudget - reservedBytes - count);
+    final client = _idleClients.isEmpty
+        ? HttpClient()
+        : _idleClients.removeLast();
+    final transfer = _HttpTransfer(this, client, offset, count, demand);
+    client
+      ..autoUncompress = false
+      ..connectionTimeout = const Duration(seconds: 10)
+      ..maxConnectionsPerHost = 1
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionFactory = ((uri, host, port) =>
+          _connect(uri, host, port, transfer));
+    _transfers.add(transfer);
+    return transfer;
+  }
+
+  void _trimCache(int budget) {
+    while (cachedBytes > budget && _readAhead.isNotEmpty) {
+      _readAheadBytes -= _readAhead.remove(_readAhead.keys.first)!.length;
+    }
+  }
+
+  Future<Uint8List> _range(int offset, int count) {
+    final transfer = _newTransfer(offset, count, demand: true);
+    transfer.result = _runTransfer(transfer, cache: false);
+    return _consume(transfer);
+  }
+
+  Future<Uint8List> _consume(_HttpTransfer transfer) async {
+    final result = await transfer.result;
+    if (result.bytes != null) return result.bytes!;
+    if (result.error case SourceInputException(failure: != null)) {
+      throw result.error!;
+    }
+    throw _failure(result.error!, result.stack, transfer);
+  }
+
+  Future<_TransferResult> _runTransfer(
+    _HttpTransfer transfer, {
+    required bool cache,
+  }) async {
     _active++;
     final clock = Stopwatch()..start();
+    var reusable = false;
+    var timedOut = false;
     try {
-      return await _fetch(offset, count).timeout(
-        const Duration(seconds: 25),
-        onTimeout: () {
-          close();
-          throw SourceInputException('timeout', stage: _stage);
-        },
-      );
+      final bytes = await _fetch(transfer.offset, transfer.count, transfer)
+          .timeout(
+            const Duration(seconds: 25),
+            onTimeout: () {
+              timedOut = true;
+              transfer.cancel();
+              throw SourceInputException('timeout', stage: transfer.stage);
+            },
+          );
+      if (transfer.closed) throw const SourceInputException('cancelled');
+      reusable = true;
+      if (cache) {
+        // Reserve room for all in-flight bodies as well as completed ranges.
+        _trimCache(cacheBudget - reservedBytes + transfer.count - bytes.length);
+        _readAheadBytes -= _readAhead.remove(transfer.offset)?.length ?? 0;
+        _readAhead[transfer.offset] = bytes;
+        _readAheadBytes += bytes.length;
+      }
+      return _TransferResult(bytes: bytes);
     } catch (error, stack) {
-      throw _failure(error, stack);
+      if (!transfer.demand && !_closed && (!transfer.cancelled || timedOut)) {
+        // Background failures must not fail playback. Retry on demand using
+        // the single-request path and retain all destination/validator checks.
+        _parallelEnabled = false;
+        prefetchFailures++;
+        cancelPendingPrefetch();
+      }
+      final mapped = transfer.cancelled && error is! SourceInputException
+          ? const SourceInputException('cancelled')
+          : error;
+      return _TransferResult(
+        error: transfer.demand ? _failure(mapped, stack, transfer) : mapped,
+        stack: stack,
+      );
     } finally {
       requestMs += clock.elapsedMilliseconds;
       _active--;
+      if (identical(_pending[transfer.offset], transfer)) {
+        _pending.remove(transfer.offset);
+      }
+      _transfers.remove(transfer);
+      if (reusable &&
+          !transfer.closed &&
+          _idleClients.length < maxConcurrentRequests) {
+        _idleClients.add(transfer.client);
+      } else {
+        transfer.client.close(force: true);
+      }
       _summary(periodic: !_wasClosed);
     }
   }
 
-  Future<Uint8List> _fetch(int offset, int count) async {
+  Future<Uint8List> _fetch(
+    int offset,
+    int count,
+    _HttpTransfer transfer,
+  ) async {
     var raw = request.rawUrl;
     final originalOrigin = Uri.parse(raw).origin;
     var credentialsAllowed = true;
     final visited = <String>{};
     for (var redirects = 0; redirects <= 5; redirects++) {
-      if (_closed) throw const SourceInputException('cancelled');
+      if (transfer.closed) throw const SourceInputException('cancelled');
       PlaybackResourceRequest.validateDestination(raw, embyServer: embyServer);
       if (!visited.add(raw)) throw const SourceInputException('redirect_loop');
       final uri = OpaqueHttpUri(raw);
       credentialsAllowed = credentialsAllowed && uri.origin == originalOrigin;
-      requestNumber = request.trace.nextRequest();
-      _responseStatus = null;
-      _stage = 'connect';
-      _target = raw;
-      _outboundHeaders = {};
+      transfer.requestNumber = request.trace.nextRequest();
+      transfer.responseStatus = null;
+      transfer.stage = 'connect';
+      transfer.target = raw;
+      transfer.outboundHeaders = {};
       TokenRedactor.registerCredentials(raw);
-      _detail('connect', {
+      transfer.detail('connect', {
         'outcome': 'started',
         'requestUrl': raw,
         'host': uri.host,
         'port': uri.port,
       }, sampled: true);
-      final outbound = await _client.getUrl(uri);
+      final outbound = await transfer.client.getUrl(uri);
       outbound.followRedirects = false;
       outbound.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
       outbound.headers.set(
@@ -482,16 +653,16 @@ class SourceHttpInput {
           (name, value) => outbound.headers.set(name, value),
         );
       }
-      _outboundHeaders = _headers(outbound.headers);
-      _detail('request_headers', {
+      transfer.outboundHeaders = _headers(outbound.headers);
+      transfer.detail('request_headers', {
         'requestUrl': raw,
-        'headers': _outboundHeaders,
+        'headers': transfer.outboundHeaders,
       }, sampled: true);
-      _stage = 'range_response';
+      transfer.stage = 'range_response';
       httpRequests++;
       final response = await outbound.close();
-      _responseStatus = response.statusCode;
-      _detail('response_headers', {
+      transfer.responseStatus = response.statusCode;
+      transfer.detail('response_headers', {
         'requestUrl': raw,
         'http': response.statusCode,
         'headers': _headers(response.headers),
@@ -504,16 +675,16 @@ class SourceHttpInput {
           throw const SourceInputException('redirect_limit');
         }
         this.redirects++;
-        _stage = 'redirect';
+        transfer.stage = 'redirect';
         final next = resolveRawLocation(raw, location);
-        _detail('redirect', {
+        transfer.detail('redirect', {
           'fromUrl': raw,
           'location': location,
           'toUrl': next,
           'http': response.statusCode,
         });
         final cross = Uri.parse(next).origin != uri.origin;
-        _stageEvent('redirect', {
+        transfer.stageEvent('redirect', {
           'outcome': 'succeeded',
           'http': response.statusCode,
           'redirects': this.redirects,
@@ -571,14 +742,21 @@ class SourceHttpInput {
       }
       _validator ??= validator;
       _size = total;
-      _stage = 'body_read';
+      transfer.stage = 'body_read';
       final bytes = BytesBuilder(copy: false);
       await for (final chunk in response) {
-        if (_closed || bytes.length + chunk.length > end - start + 1) {
-          throw SourceInputException(_closed ? 'cancelled' : 'body_limit');
+        if (transfer.closed || bytes.length + chunk.length > end - start + 1) {
+          throw SourceInputException(
+            transfer.closed ? 'cancelled' : 'body_limit',
+          );
         }
         networkBytes += chunk.length;
-        request.startupProgress.recordBytes(start + bytes.length, chunk.length);
+        if (transfer.demand) {
+          request.startupProgress.recordBytes(
+            start + bytes.length,
+            chunk.length,
+          );
+        }
         bytes.add(chunk);
       }
       if (bytes.length != end - start + 1) {
@@ -589,7 +767,7 @@ class SourceHttpInput {
         );
       }
       ranges++;
-      _stageEvent('range_response', {
+      transfer.stageEvent('range_response', {
         'outcome': 'succeeded',
         'http': response.statusCode,
         'rangeValid': true,
@@ -603,15 +781,21 @@ class SourceHttpInput {
   Future<ConnectionTask<Socket>> _connect(
     Uri uri,
     String? proxyHost,
-    int? proxyPort,
-  ) async {
-    if (_closed || proxyHost != null) {
+    int? proxyPort, [
+    _HttpTransfer? operation,
+  ]) async {
+    final transfer = operation ?? _subtitleTransfer;
+    if (operation == null) {
+      transfer.requestNumber = requestNumber;
+      transfer.target = _target;
+    }
+    if (transfer.closed || proxyHost != null) {
       throw const SourceInputException('cancelled');
     }
-    _stage = 'dns';
-    _detail('dns', {
+    transfer.stage = 'dns';
+    transfer.detail('dns', {
       'outcome': 'started',
-      'requestUrl': _target,
+      'requestUrl': transfer.target,
       'host': uri.host,
       'port': uri.port,
     });
@@ -622,17 +806,17 @@ class SourceHttpInput {
       throw SourceInputException.from(
         error,
         stage: 'dns',
-        cancelled: _closed,
+        cancelled: transfer.closed,
         stackTrace: stack,
       );
     }
-    _detail('dns', {
+    transfer.detail('dns', {
       'outcome': 'succeeded',
       'host': uri.host,
       'port': uri.port,
       'addresses': addresses.map((a) => a.address).toList(),
     });
-    _stageEvent('dns', {
+    transfer.stageEvent('dns', {
       'outcome': 'succeeded',
       'candidates': addresses.length,
       'family': addresses.map((a) => a.type).toSet().length > 1
@@ -642,9 +826,9 @@ class SourceHttpInput {
           ? 'ipv6'
           : 'ipv4',
     });
-    if (_closed || addresses.isEmpty) {
+    if (transfer.closed || addresses.isEmpty) {
       throw SourceInputException(
-        _closed ? 'cancelled' : 'dns_failed',
+        transfer.closed ? 'cancelled' : 'dns_failed',
         stage: 'dns',
       );
     }
@@ -658,9 +842,9 @@ class SourceHttpInput {
         embyServer: embyServer,
       );
     }
-    _stage = 'connect';
-    _detail('connect_attempt', {
-      'requestUrl': _target,
+    transfer.stage = 'connect';
+    transfer.detail('connect_attempt', {
+      'requestUrl': transfer.target,
       'host': uri.host,
       'ip': addresses.first.address,
       'port': uri.port,
@@ -669,18 +853,18 @@ class SourceHttpInput {
     Socket? active;
     var cancelled = false;
     final future = task.socket.then<Socket>((socket) async {
-      _stageEvent('connect', {'outcome': 'succeeded'});
+      transfer.stageEvent('connect', {'outcome': 'succeeded'});
       active = socket;
-      if (_closed || cancelled) {
+      if (transfer.closed || cancelled) {
         socket.destroy();
         throw const SourceInputException('cancelled');
       }
       if (uri.scheme == 'https') {
-        _stage = 'tls';
+        transfer.stage = 'tls';
         final secured = await SecureSocket.secure(socket, host: uri.host);
-        _stageEvent('tls', {'outcome': 'succeeded'});
+        transfer.stageEvent('tls', {'outcome': 'succeeded'});
         active = secured;
-        if (_closed || cancelled) {
+        if (transfer.closed || cancelled) {
           secured.destroy();
           throw const SourceInputException('cancelled');
         }
@@ -700,6 +884,14 @@ class SourceHttpInput {
     _prefix = null;
     _readAhead.clear();
     _readAheadBytes = 0;
+    for (final transfer in _transfers.toList()) {
+      transfer.cancel();
+    }
+    _pending.clear();
+    for (final client in _idleClients) {
+      client.close(force: true);
+    }
+    _idleClients.clear();
     _client.close(force: true);
     _summary();
   }
@@ -724,6 +916,42 @@ class SourceHttpInput {
     }
     return null;
   }
+}
+
+class _TransferResult {
+  const _TransferResult({this.bytes, this.error, this.stack});
+  final Uint8List? bytes;
+  final Object? error;
+  final StackTrace? stack;
+}
+
+class _HttpTransfer {
+  _HttpTransfer(this.owner, this.client, this.offset, this.count, this.demand);
+  final SourceHttpInput owner;
+  final HttpClient client;
+  final int offset, count;
+  bool demand, cancelled = false;
+  String stage = 'connect';
+  int? responseStatus;
+  int requestNumber = 0;
+  String? target;
+  Map<String, Object?> outboundHeaders = {};
+  late Future<_TransferResult> result;
+  bool get closed => cancelled || owner._closed;
+  bool contains(int position) =>
+      position >= offset && position < offset + count;
+  void cancel() {
+    cancelled = true;
+    client.close(force: true);
+  }
+
+  void detail(
+    String stage,
+    Map<String, Object?> fields, {
+    bool sampled = false,
+  }) => owner._detail(stage, fields, sampled: sampled, transfer: this);
+  void stageEvent(String stage, Map<String, Object?> fields) =>
+      owner._stageEvent(stage, fields, transfer: this);
 }
 
 /// HttpClient uses path/query for the wire request. Keep the opaque spelling

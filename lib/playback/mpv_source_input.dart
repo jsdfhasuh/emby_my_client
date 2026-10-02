@@ -175,6 +175,12 @@ class MpvSourceInput {
     }
   }
 
+  void cancelPendingPrefetch() {
+    for (final input in _inputs.values) {
+      input.cancelPendingPrefetch();
+    }
+  }
+
   void releaseAll() {
     if (_destroyed) return;
     for (final entry in _inputs.entries) {
