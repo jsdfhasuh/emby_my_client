@@ -244,6 +244,7 @@ class PlaybackCacheProfileResolver {
   static const int _maxInt = 9223372036854775807;
   static const int defaultBitrate = 8 * 1000 * 1000;
   static const int defaultStreamBufferBytes = 128 * 1024;
+  static const int _fullReadAheadMetadataCapBytes = 64 * _mib;
 
   ResolvedPlaybackCacheProfile resolve({
     required PlaybackPlan plan,
@@ -436,6 +437,7 @@ class PlaybackCacheProfileResolver {
       forwardSeconds: max(1, duration.inSeconds),
       backwardSeconds: 0,
       sessionTargetBytes: sessionTargetBytes,
+      maximumCapBytes: _fullReadAheadMetadataCapBytes,
     );
     if (metadata == null) {
       return _resolveBounded(

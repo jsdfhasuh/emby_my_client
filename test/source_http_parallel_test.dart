@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:emby_my_client/playback/source_http_input.dart';
@@ -24,6 +25,7 @@ int offsetOf(FixtureRequest request) => int.parse(
 Future<(ProgressiveOrigin, SourceHttpInput)> setup({
   int length = 40 * block,
   bool adaptive = false,
+  Duration demandReadAheadTimeout = const Duration(seconds: 4),
 }) async {
   final bytes = Uint8List(length);
   for (var i = 0; i < length; i++) {
@@ -36,6 +38,7 @@ Future<(ProgressiveOrigin, SourceHttpInput)> setup({
     fixtureRequest('${server.origin}/parallel.avi'),
     embyServer: Uri.parse('https://emby.invalid'),
     rangeBytes: adaptive ? null : block,
+    demandReadAheadTimeout: demandReadAheadTimeout,
   );
   addTearDown(input.close);
   await input.prepare();
@@ -43,6 +46,187 @@ Future<(ProgressiveOrigin, SourceHttpInput)> setup({
 }
 
 void main() {
+  test(
+    'slow advancing read-ahead retries only demanded bytes without failing playback',
+    () async {
+      const prefix = 262144;
+      const count = 65536;
+      final content = Uint8List(10 * block);
+      for (var i = 0; i < content.length; i++) {
+        content[i] = i % 251;
+      }
+      content.setRange(0, 12, progressiveVideo().take(12));
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      final host = interfaces
+          .expand((interface) => interface.addresses)
+          .firstWhere((address) => !address.isLoopback)
+          .address;
+      final server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requests = <String>[];
+      var initialDemandBytes = 0;
+      server.listen((request) {
+        unawaited(() async {
+          final range = request.headers.value(HttpHeaders.rangeHeader)!;
+          requests.add(range);
+          final span = range.substring(6).split('-');
+          final start = int.parse(span[0]);
+          final end = int.parse(span[1]).clamp(0, content.length - 1);
+          final response = request.response;
+          try {
+            response.statusCode = HttpStatus.partialContent;
+            response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes $start-$end/${content.length}',
+            );
+            response.headers.set(HttpHeaders.etagHeader, '"slow-fixture"');
+            response.contentLength = end - start + 1;
+            if (end - start + 1 <= prefix) {
+              response.add(Uint8List.sublistView(content, start, end + 1));
+            } else {
+              // Needed bytes arrive promptly and continue advancing, but the
+              // entire speculative block takes longer than the demand budget.
+              for (var offset = start; offset <= end; offset += count) {
+                final next = (offset + count).clamp(0, end + 1);
+                response.add(Uint8List.sublistView(content, offset, next));
+                await response.flush();
+                if (start == prefix) initialDemandBytes += next - offset;
+                await Future<void>.delayed(const Duration(milliseconds: 25));
+              }
+            }
+            await response.close();
+          } catch (_) {
+            // Slow speculative sockets are deliberately closed by fallback.
+          }
+        }());
+      });
+      final input = SourceHttpInput(
+        fixtureRequest('http://$host:${server.port}/slow.avi'),
+        embyServer: Uri.parse('https://emby.invalid'),
+        demandReadAheadTimeout: const Duration(milliseconds: 250),
+      );
+      addTearDown(input.close);
+      await input.prepare();
+      expect(
+        await input.read(prefix, count).timeout(const Duration(seconds: 2)),
+        content.sublist(prefix, prefix + count),
+      );
+      expect(initialDemandBytes, greaterThanOrEqualTo(count));
+      expect(requests, contains('bytes=$prefix-${prefix + block - 1}'));
+      expect(requests.last, 'bytes=$prefix-${prefix + count - 1}');
+      expect(input.prefetchConcurrency, 1);
+      expect(input.prefetchCancellations, greaterThanOrEqualTo(1));
+      expect(input.failures, 0);
+      expect(input.lastFailure, isNull);
+      final before = requests.length;
+      expect(
+        await input.read(prefix + count, count),
+        content.sublist(prefix + count, prefix + 2 * count),
+      );
+      expect(requests, hasLength(before + 1));
+      expect(
+        requests.last,
+        'bytes=${prefix + count}-${prefix + 2 * count - 1}',
+      );
+      expect(input.failures, 0);
+      expect(
+        input.cachedBytes + input.reservedBytes,
+        lessThanOrEqualTo(SourceHttpInput.cacheBudget),
+      );
+    },
+  );
+
+  test('count-sized fallback rejects a changed source validator', () async {
+    const count = 65536;
+    final (server, input) = await setup(
+      length: 10 * block,
+      demandReadAheadTimeout: const Duration(milliseconds: 250),
+    );
+    final gates = <Completer<FixtureReply?>>[];
+    addTearDown(() {
+      input.close();
+      for (final gate in gates) {
+        if (!gate.isCompleted) gate.complete(null);
+      }
+    });
+    server.intercept = (request) async {
+      if (request.headers['range'] == 'bytes=$block-${block + count - 1}') {
+        expect(request.headers['if-range'], '"fixture-v1"');
+        return (
+          status: 206,
+          headers: {
+            'Content-Range':
+                'bytes $block-${block + count - 1}/${server.bytes.length}',
+            'ETag': '"changed-on-retry"',
+          },
+          body: server.bytes.sublist(block, block + count),
+        );
+      }
+      final gate = Completer<FixtureReply?>();
+      gates.add(gate);
+      return gate.future;
+    };
+    await expectLater(
+      input.read(block, count),
+      throwsA(
+        isA<SourceInputException>().having(
+          (error) => error.code,
+          'code',
+          'source_changed',
+        ),
+      ),
+    );
+    expect(
+      server.requests.last.headers['range'],
+      'bytes=$block-${block + count - 1}',
+    );
+    expect(input.cachedBytes, 262144);
+    expect(input.failures, 1);
+    expect(input.lastFailure?.error.code, 'source_changed');
+  });
+
+  test('close during slow demand wait cannot start its serial retry', () async {
+    const demandTimeout = Duration(milliseconds: 250);
+    final (server, input) = await setup(
+      length: 10 * block,
+      demandReadAheadTimeout: demandTimeout,
+    );
+    final gates = <Completer<FixtureReply?>>[];
+    addTearDown(() {
+      input.close();
+      for (final gate in gates) {
+        if (!gate.isCompleted) gate.complete(null);
+      }
+    });
+    server.intercept = (_) {
+      final gate = Completer<FixtureReply?>();
+      gates.add(gate);
+      return gate.future;
+    };
+    final pending = expectLater(
+      input.read(block, 65536),
+      throwsA(
+        isA<SourceInputException>().having(
+          (error) => error.code,
+          'code',
+          'cancelled',
+        ),
+      ),
+    );
+    await until(() => gates.length == 8);
+    input.close();
+    await pending;
+    final count = server.requests.length;
+    await Future<void>.delayed(
+      demandTimeout + const Duration(milliseconds: 50),
+    );
+    expect(server.requests, hasLength(count));
+    expect(input.failures, 0);
+    expect(input.cachedBytes, 0);
+  });
+
   test(
     'adaptive mixed ranges preserve coverage and budget and reset to 2 MiB on seek',
     () async {

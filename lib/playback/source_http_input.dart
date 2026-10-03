@@ -18,6 +18,7 @@ class SourceHttpInput {
     required this.embyServer,
     int? openAttempt,
     this.maxConcurrentRequests = 8,
+    this.demandReadAheadTimeout = const Duration(seconds: 4),
     int? rangeBytes,
   }) : openAttempt = openAttempt ?? request.trace.currentAttempt,
        _readAheadPolicy = SourceReadAheadPolicy(
@@ -25,6 +26,10 @@ class SourceHttpInput {
          maximumConcurrency: maxConcurrentRequests,
        ) {
     assert(maxConcurrentRequests >= 1 && maxConcurrentRequests <= 8);
+    assert(
+      demandReadAheadTimeout > Duration.zero &&
+          demandReadAheadTimeout <= const Duration(seconds: 4),
+    );
     assert(
       rangeBytes == null || (rangeBytes > 0 && rangeBytes <= 6 * 1024 * 1024),
     );
@@ -39,6 +44,7 @@ class SourceHttpInput {
   final Uri embyServer;
   final int openAttempt;
   final int maxConcurrentRequests;
+  final Duration demandReadAheadTimeout;
   final SourceReadAheadPolicy _readAheadPolicy;
   int get rangeBytes => _readAheadPolicy.rangeBytes;
   int get prefetchConcurrency => _parallelEnabled
@@ -488,10 +494,33 @@ class SourceHttpInput {
     }
     var transfer = _pending.values.where((t) => t.contains(offset)).firstOrNull;
     // Reserve a slot for the actual read before any speculative work.
-    transfer ??= _schedule(offset, demand: true);
+    transfer ??= _schedule(
+      offset,
+      count: _parallelEnabled ? null : count,
+      demand: true,
+    );
     transfer.demand = true;
     requestNumber = transfer.requestNumber;
     _fillWindow(transfer.offset);
+    if (transfer.count > count) {
+      final completed = await transfer.result
+          .then((_) => true)
+          .timeout(demandReadAheadTimeout, onTimeout: () => false);
+      if (!completed) {
+        if (_closed) throw const SourceInputException('cancelled');
+        // A large speculative body must not hold a small native read hostage.
+        // The bridge waits 30s: leave room for one bounded 25s count-sized
+        // retry, and stop competing prefetches on a slow connection. Mark the
+        // abandoned demand as speculative so its cancellation is not a native
+        // input failure. The retry retains the full response/validator checks.
+        transfer.demand = false;
+        _parallelEnabled = false;
+        _readAheadPolicy.failed();
+        _cancelPendingPrefetch();
+        transfer = _schedule(offset, count: count, demand: true);
+        requestNumber = transfer.requestNumber;
+      }
+    }
     final bytes = await _consume(transfer);
     if (_closed) throw const SourceInputException('cancelled');
     final relative = offset - transfer.offset;

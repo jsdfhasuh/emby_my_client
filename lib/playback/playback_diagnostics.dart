@@ -49,6 +49,7 @@ enum PlaybackDiagnosticEvent {
   seekRecoveryStarted('playback_seek_recovery_started'),
   seekRecoverySucceeded('playback_seek_recovery_succeeded'),
   seekRecoveryFailed('playback_seek_recovery_failed'),
+  engineErrorSuppressed('playback_engine_error_suppressed'),
   subtitleApplyRequested('playback_subtitle_apply_requested'),
   subtitleApplied('playback_subtitle_applied'),
   subtitleDisabled('playback_subtitle_disabled'),
@@ -242,6 +243,14 @@ class PlaybackDiagnostics {
     _emit(event, [
       'reason=${reason.name}',
     ], level: PlaybackDiagnosticLevel.warning);
+  }
+
+  void engineErrorSuppressedForCacheSafety() {
+    _emit(
+      PlaybackDiagnosticEvent.engineErrorSuppressed,
+      const ['context=cache_safety_reopen'],
+      level: PlaybackDiagnosticLevel.warning,
+    );
   }
 
   void cacheSessionCleaned() {
