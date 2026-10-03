@@ -9,6 +9,7 @@ import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/library/library_content_profile.dart';
 import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/ui/library_screen.dart';
@@ -17,6 +18,276 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final ipad in [false, true]) {
+    for (final depth in [70, 100, 180]) {
+      testWidgets(
+        'background paged refresh preserves movie position at index $depth (iPad=$ipad)',
+        (tester) async {
+          _setCompactView(tester);
+          if (ipad) tester.view.physicalSize = const Size(1080, 810);
+          final socket = _FakeEmbySocket();
+          final api = _MembershipApi(
+            socket: socket,
+            items: [
+              for (var index = 0; index < 245; index++)
+                _item('item-$index', userData: const EmbyUserData()),
+            ],
+          );
+          await _pumpLibrary(
+            tester,
+            api,
+            const LibraryBrowseState(),
+            platformCapabilities: ipad ? PlatformCapabilities.ipad : null,
+          );
+          await tester.scrollUntilVisible(
+            _itemFinder('item-$depth'),
+            700,
+            scrollable: _verticalScrollable(),
+            maxScrolls: 200,
+          );
+          await tester.pumpAndSettle();
+          final position = tester
+              .state<ScrollableState>(_verticalScrollable())
+              .position;
+          final previousOffset = position.pixels;
+          final navigator = Navigator.of(
+            tester.element(find.byType(LibraryBrowseScreen)),
+          );
+          await _coverLibrary(tester, navigator);
+          await tester.pump(const Duration(seconds: 90));
+
+          api.mediaPageDelay = const Duration(milliseconds: 200);
+          for (var refresh = 0; refresh < 2; refresh++) {
+            socket.emitLibraryChanged(itemsUpdated: ['item-$depth']);
+            await _pumpRealtime(tester, settle: false);
+            await _finishDelayedPages(tester);
+          }
+
+          navigator.pop();
+          await tester.pumpAndSettle();
+          navigator.pop();
+          await tester.pumpAndSettle();
+          expect(position.pixels, closeTo(previousOffset, 1));
+          expect(_itemFinder('item-$depth').hitTestable(), findsOneWidget);
+          await _disposeLibrary(tester, api);
+        },
+      );
+    }
+  }
+
+  testWidgets('a local rescan preserves position behind detail and playback', (
+    tester,
+  ) async {
+    _setCompactView(tester);
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        for (var index = 0; index < 245; index++)
+          _item('item-$index', userData: const EmbyUserData(), isRegular: true),
+      ],
+    );
+    final scanService = LibraryLocalMediaScanService(
+      api: api,
+      scope: ServerScope.fromSession(api.session),
+      delay: (_) => Future<void>.value(),
+    );
+    await _pumpLibrary(
+      tester,
+      api,
+      const LibraryBrowseState(localFilter: LibraryLocalMediaFilter.regular),
+      scanService: scanService,
+    );
+    final position = await _scrollToItem(tester, 'item-180');
+    final previousOffset = position.pixels;
+    final navigator = Navigator.of(
+      tester.element(find.byType(LibraryBrowseScreen)),
+    );
+    await _coverLibrary(tester, navigator);
+    await tester.pump(const Duration(seconds: 90));
+    final gate = Completer<void>();
+    api.localScanGate = gate;
+    socket.emitLibraryChanged(itemsUpdated: ['item-180']);
+    await _pumpRealtime(tester, settle: false);
+    gate.complete();
+    api.localScanGate = null;
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(position.pixels, closeTo(previousOffset, 1));
+    expect(_itemFinder('item-180').hitTestable(), findsOneWidget);
+    await _disposeLibrary(tester, api, scanService: scanService);
+  });
+
+  testWidgets('returning during a refresh keeps the full visible list', (
+    tester,
+  ) async {
+    _setCompactView(tester);
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        for (var index = 0; index < 185; index++)
+          _item('item-$index', userData: const EmbyUserData()),
+      ],
+    );
+    await _pumpLibrary(tester, api, const LibraryBrowseState());
+    final position = await _scrollToItem(tester, 'item-100');
+    final previousOffset = position.pixels;
+    final navigator = Navigator.of(
+      tester.element(find.byType(LibraryBrowseScreen)),
+    );
+    await _coverLibrary(tester, navigator);
+    final gate = Completer<void>();
+    api
+      ..mediaPageGate = gate
+      ..mediaPageDelay = const Duration(milliseconds: 200);
+    socket.emitLibraryChanged(itemsUpdated: ['item-100']);
+    await _pumpRealtime(tester, settle: false);
+
+    for (var route = 0; route < 2; route++) {
+      navigator.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+    expect(_itemFinder('item-100').hitTestable(), findsOneWidget);
+    expect(position.pixels, closeTo(previousOffset, 1));
+    gate.complete();
+    api.mediaPageGate = null;
+    // Check every partial page, as well as the completed replacement result.
+    for (var frame = 0; frame < 16; frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(position.pixels, closeTo(previousOffset, 1));
+      expect(_itemFinder('item-100').hitTestable(), findsOneWidget);
+    }
+    await tester.pumpAndSettle();
+    await _disposeLibrary(tester, api);
+  });
+
+  testWidgets('a failed later page keeps the original position and result', (
+    tester,
+  ) async {
+    _setCompactView(tester);
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        for (var index = 0; index < 185; index++)
+          _item('item-$index', userData: const EmbyUserData()),
+      ],
+    );
+    await _pumpLibrary(tester, api, const LibraryBrowseState());
+    final position = await _scrollToItem(tester, 'item-100');
+    final previousOffset = position.pixels;
+    final debugState =
+        tester.state(find.byType(LibraryBrowseScreen))
+            as LibraryBrowseDebugState;
+    final previousIds = debugState.debugLoadedItemIds;
+    final navigator = Navigator.of(
+      tester.element(find.byType(LibraryBrowseScreen)),
+    );
+    await _coverLibrary(tester, navigator);
+    api
+      ..mediaPageDelay = const Duration(milliseconds: 200)
+      ..failMediaStartIndex = 60;
+    socket.emitLibraryChanged(itemsUpdated: ['item-100']);
+    await _pumpRealtime(tester, settle: false);
+    await _finishDelayedPages(tester);
+
+    navigator.pop();
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(position.pixels, closeTo(previousOffset, 1));
+    expect(debugState.debugLoadedItemIds, previousIds);
+    expect(debugState.debugLoadFailed, isFalse);
+    expect(debugState.debugTotalCount, 185);
+    await _disposeLibrary(tester, api);
+  });
+
+  for (final remainingCount in [70, 0]) {
+    testWidgets(
+      'a background result shrinking to $remainingCount clamps after layout',
+      (tester) async {
+        _setCompactView(tester);
+        final socket = _FakeEmbySocket();
+        final api = _MembershipApi(
+          socket: socket,
+          items: [
+            for (var index = 0; index < 245; index++)
+              _item('item-$index', userData: const EmbyUserData()),
+          ],
+        );
+        await _pumpLibrary(tester, api, const LibraryBrowseState());
+        final position = await _scrollToItem(tester, 'item-180');
+        final navigator = Navigator.of(
+          tester.element(find.byType(LibraryBrowseScreen)),
+        );
+        await _coverLibrary(tester, navigator);
+        api
+          ..retainItems(remainingCount)
+          ..mediaPageDelay = const Duration(milliseconds: 200);
+        socket.emitLibraryChanged(itemsUpdated: ['item-180']);
+        await _pumpRealtime(tester, settle: false);
+        await _finishDelayedPages(tester);
+
+        navigator.pop();
+        await tester.pumpAndSettle();
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+        final debugState =
+            tester.state(find.byType(LibraryBrowseScreen))
+                as LibraryBrowseDebugState;
+        expect(debugState.debugLoadedItemIds, hasLength(remainingCount));
+        if (remainingCount > 0) {
+          expect(
+            _itemFinder('item-${remainingCount - 1}').hitTestable(),
+            findsOneWidget,
+          );
+        }
+        expect(tester.takeException(), isNull);
+        await _disposeLibrary(tester, api);
+      },
+    );
+  }
+
+  testWidgets('a filter change cancels a preserving refresh and its position', (
+    tester,
+  ) async {
+    _setCompactView(tester);
+    final socket = _FakeEmbySocket();
+    final api = _MembershipApi(
+      socket: socket,
+      items: [
+        for (var index = 0; index < 185; index++)
+          _item('item-$index', userData: const EmbyUserData(isFavorite: true)),
+      ],
+    );
+    await _pumpLibrary(tester, api, const LibraryBrowseState());
+    final position = await _scrollToItem(tester, 'item-100');
+    final gate = Completer<void>();
+    api.mediaPageGate = gate;
+    socket.emitLibraryChanged(itemsUpdated: ['item-100']);
+    await _pumpRealtime(tester, settle: false);
+    position.jumpTo(0);
+    await tester.pump();
+    api.mediaPageGate = null;
+    await tester.tap(find.byKey(const ValueKey('library-section-favorites')));
+    await _pumpRealtime(tester, settle: false);
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(position.pixels, 0);
+    expect(_itemFinder('item-0').hitTestable(), findsOneWidget);
+    final debugState =
+        tester.state(find.byType(LibraryBrowseScreen))
+            as LibraryBrowseDebugState;
+    expect(debugState.debugLoadedItemIds, hasLength(60));
+    await _disposeLibrary(tester, api);
+  });
+
   const transitions = [
     _MembershipTransition(
       name: 'unplayed item becomes played',
@@ -663,6 +934,9 @@ class _MembershipApi extends EmbyApi {
   final List<_MediaCall> localCalls = [];
   int userDataCalls = 0;
   int localScanCalls = 0;
+  Duration mediaPageDelay = Duration.zero;
+  Completer<void>? mediaPageGate;
+  int? failMediaStartIndex;
   Completer<void>? localScanGate;
   bool failNextMediaPage = false;
   Completer<Map<String, EmbyUserData>>? deferredUserData;
@@ -670,6 +944,8 @@ class _MembershipApi extends EmbyApi {
   int get mediaCalls => calls.length;
   List<int> get starts =>
       calls.map((call) => call.startIndex).toList(growable: false);
+
+  void retainItems(int count) => _items.removeRange(count, _items.length);
 
   void updateUserData(String id, EmbyUserData userData) {
     final index = _items.indexWhere((item) => item.id == id);
@@ -691,8 +967,13 @@ class _MembershipApi extends EmbyApi {
     String? genreId,
     String? tagId,
   }) async {
-    if (failNextMediaPage) {
+    await mediaPageGate?.future;
+    if (mediaPageDelay > Duration.zero) {
+      await Future<void>.delayed(mediaPageDelay);
+    }
+    if (failNextMediaPage || failMediaStartIndex == startIndex) {
       failNextMediaPage = false;
+      failMediaStartIndex = null;
       calls.add(
         _MediaCall(
           startIndex: startIndex,
@@ -830,6 +1111,7 @@ Future<void> _pumpLibrary(
   _MembershipApi api,
   LibraryBrowseState initialState, {
   LibraryLocalMediaScanService? scanService,
+  PlatformCapabilities? platformCapabilities,
 }) async {
   await api.realtime.start();
   await tester.pumpWidget(
@@ -841,6 +1123,7 @@ Future<void> _pumpLibrary(
         categorySettings: _allCategorySettings,
         initialState: initialState,
         libraryScanService: scanService,
+        platformCapabilities: platformCapabilities,
       ),
     ),
   );
@@ -856,6 +1139,38 @@ Future<void> _pumpRealtime(WidgetTester tester, {bool settle = true}) async {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
   }
+}
+
+Future<void> _coverLibrary(
+  WidgetTester tester,
+  NavigatorState navigator,
+) async {
+  for (final label in ['Detail', 'Player']) {
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(builder: (_) => Scaffold(body: Text(label))),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+}
+
+Future<ScrollPosition> _scrollToItem(WidgetTester tester, String id) async {
+  await tester.scrollUntilVisible(
+    _itemFinder(id),
+    700,
+    scrollable: _verticalScrollable(),
+    maxScrolls: 200,
+  );
+  await tester.pumpAndSettle();
+  return tester.state<ScrollableState>(_verticalScrollable()).position;
+}
+
+Future<void> _finishDelayedPages(WidgetTester tester) async {
+  for (var frame = 0; frame < 24; frame++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  await tester.pumpAndSettle();
 }
 
 Future<void> _disposeLibrary(

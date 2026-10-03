@@ -260,6 +260,16 @@ class _LibraryQuerySnapshot {
   final bool loadFailed;
 }
 
+class _LibraryPositionRestore {
+  const _LibraryPositionRestore({
+    required this.offset,
+    required this.generation,
+  });
+
+  final double offset;
+  final int generation;
+}
+
 Future<EmbyItemPage> _loadLibraryMediaPage({
   required EmbyApi api,
   required String parentId,
@@ -1150,6 +1160,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   int? _activeLoadGeneration;
   Future<void>? _activeReload;
   int? _reloadGeneration;
+  _LibraryQuerySnapshot? _reloadDisplaySnapshot;
+  _LibraryPositionRestore? _pendingPositionRestore;
   bool _hasMore = true;
   bool _loadFailed = false;
   bool _pendingRealtimeLibraryRefresh = false;
@@ -1235,10 +1247,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
 
   bool get _isReloadingCurrentGeneration => _reloadGeneration == _generation;
 
+  List<EmbyItem> get _displayItems => _reloadDisplaySnapshot?.items ?? _items;
+
   LibraryPaginationStrategy get _paginationStrategy =>
       libraryPaginationStrategyFor(_state);
 
-  bool get _positionEnabled => _items.isNotEmpty;
+  bool get _positionEnabled => _displayItems.isNotEmpty;
 
   bool get _alphabetEnabled => _state.alphabetEnabled;
 
@@ -1285,6 +1299,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
 
   bool get _canPlayCompleteResult =>
       !_preparingPlaybackQueue &&
+      !_isReloadingCurrentGeneration &&
       !_loadFailed &&
       !_resultTotalDirty &&
       canPlayCompleteLibraryResult(
@@ -1317,14 +1332,21 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
 
   LibraryResultStatistics get _statistics => LibraryResultStatistics(
     state: _state,
-    loadedCount: _items.length,
+    loadedCount: _displayItems.length,
     totalCount: _usesLocalScan && _scanStatus == LibraryLocalScanStatus.complete
         ? _items.length
-        : _totalCount,
-    scannedCount: _scanSnapshot?.scannedRawCount ?? _nextStartIndex,
+        : _reloadDisplaySnapshot == null
+        ? _totalCount
+        : _reloadDisplaySnapshot!.totalCount,
+    scannedCount:
+        _scanSnapshot?.scannedRawCount ??
+        _reloadDisplaySnapshot?.nextStartIndex ??
+        _nextStartIndex,
     sourceTotalCount: _scanSnapshot?.sourceTotalCount,
     scanStatus: _scanStatus,
-    dirty: _usesLocalScan ? _scanSnapshot?.dirty ?? false : _resultTotalDirty,
+    dirty: _usesLocalScan
+        ? _scanSnapshot?.dirty ?? false
+        : _reloadDisplaySnapshot?.totalDirty ?? _resultTotalDirty,
     unknownClassificationCount: _scanSnapshot?.unknownCount ?? 0,
   );
 
@@ -1465,6 +1487,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     if (_suppressPositionNotifications ||
         _usesLocalScan ||
         _isReloadingCurrentGeneration ||
+        _pendingPositionRestore != null ||
         _loadFailed) {
       return;
     }
@@ -1474,6 +1497,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           !_controller.hasClients ||
           _usesLocalScan ||
           _isReloadingCurrentGeneration ||
+          _pendingPositionRestore != null ||
           _loadFailed ||
           _controller.position.extentAfter >= 700) {
         return;
@@ -1512,7 +1536,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       }
       _positionController.updateLayout(
         constraints: constraints,
-        loadedCount: _items.length,
+        loadedCount: _displayItems.length,
         totalCount: statistics.effectiveTotal,
         geometry: geometry,
       );
@@ -1525,6 +1549,35 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       _controller.jumpTo(0);
     }
     _positionController.clear();
+  }
+
+  void _schedulePendingPositionRestore() {
+    final restore = _pendingPositionRestore;
+    if (restore == null || _isReloadingCurrentGeneration) return;
+    // An obscured route can rebuild without laying out its grid. Only restore
+    // after the replacement sliver has laid out, so its extent is current.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          restore.generation != _generation ||
+          !identical(restore, _pendingPositionRestore) ||
+          !_controller.hasClients) {
+        return;
+      }
+      _pendingPositionRestore = null;
+      final position = _controller.position;
+      final targetOffset = restore.offset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      _suppressPositionNotifications = true;
+      try {
+        if ((targetOffset - position.pixels).abs() > _scrollTolerance) {
+          _controller.jumpTo(targetOffset);
+        }
+      } finally {
+        _suppressPositionNotifications = false;
+        _clearPosition();
+      }
+    });
   }
 
   void _scheduleViewerPositionRestore(String? mediaId) {
@@ -1937,8 +1990,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
         restoreScrollPosition && _items.isNotEmpty && _controller.hasClients;
     final restoreToken = ++_localScanRestoreToken;
     _pendingLocalScanRestoreOffset = preserveVisibleItems
-        ? _controller.offset
+        ? _pendingPositionRestore?.offset ?? _controller.offset
         : null;
+    _pendingPositionRestore = null;
     _pendingLocalScanRestoreGeneration = preserveVisibleItems
         ? _generation
         : null;
@@ -1971,47 +2025,23 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     _pendingLocalScanRestoreOffset = null;
     _pendingLocalScanRestoreGeneration = null;
     _pendingLocalScanRestoreToken = null;
+    _pendingPositionRestore = null;
   }
 
   void _scheduleLocalScanPositionRestore({
     required double offset,
     required int generation,
     required int restoreToken,
-    int remainingAttachAttempts = 2,
   }) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted ||
-          generation != _generation ||
-          restoreToken != _localScanRestoreToken) {
-        return;
-      }
-      if (!_controller.hasClients) {
-        if (remainingAttachAttempts > 0) {
-          _scheduleLocalScanPositionRestore(
-            offset: offset,
-            generation: generation,
-            restoreToken: restoreToken,
-            remainingAttachAttempts: remainingAttachAttempts - 1,
-          );
-        }
-        return;
-      }
-      final targetOffset = offset
-          .clamp(
-            _controller.position.minScrollExtent,
-            _controller.position.maxScrollExtent,
-          )
-          .toDouble();
-      _suppressPositionNotifications = true;
-      try {
-        if ((targetOffset - _controller.offset).abs() > _scrollTolerance) {
-          _controller.jumpTo(targetOffset);
-        }
-      } finally {
-        _suppressPositionNotifications = false;
-        _clearPosition();
-      }
-    });
+    if (!mounted ||
+        generation != _generation ||
+        restoreToken != _localScanRestoreToken) {
+      return;
+    }
+    _pendingPositionRestore = _LibraryPositionRestore(
+      offset: offset,
+      generation: generation,
+    );
   }
 
   void _onLibraryScanChanged() {
@@ -2233,8 +2263,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           )
         : null;
     final previousOffset = restoreScrollPosition && _controller.hasClients
-        ? _controller.offset
+        ? _pendingPositionRestore?.offset ?? _controller.offset
         : null;
+    _pendingPositionRestore = null;
     final generation = ++_generation;
     _reloadGeneration = generation;
     late final Future<void> trackedReload;
@@ -2262,6 +2293,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   }) async {
     if (!mounted || generation != _generation) return;
     setState(() {
+      // Keep the complete previous grid visible while _items accumulates the
+      // replacement pages. Partial results must not shrink the scroll extent.
+      _reloadDisplaySnapshot = failureSnapshot;
       _items.clear();
       _seenItemIds.clear();
       _nextStartIndex = 0;
@@ -2312,20 +2346,14 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       });
       restoredAfterFailure = true;
     }
-    if (previousOffset != null && mounted && generation == _generation) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || generation != _generation || !_controller.hasClients) {
-          return;
-        }
-        final offset = previousOffset
-            .clamp(0.0, _controller.position.maxScrollExtent)
-            .toDouble();
-        _suppressPositionNotifications = true;
-        try {
-          _controller.jumpTo(offset);
-        } finally {
-          _suppressPositionNotifications = false;
-          _clearPosition();
+    if (mounted && generation == _generation) {
+      setState(() {
+        _reloadDisplaySnapshot = null;
+        if (previousOffset != null) {
+          _pendingPositionRestore = _LibraryPositionRestore(
+            offset: previousOffset,
+            generation: generation,
+          );
         }
       });
     }
@@ -2386,6 +2414,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     _activeReload = null;
     setState(() {
       _state = next;
+      _reloadDisplaySnapshot = null;
       _items.clear();
       _seenItemIds.clear();
       _nextStartIndex = 0;
@@ -2787,10 +2816,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   }
 
   Widget _buildGrid(LibraryGridGeometry geometry) {
+    final items = _displayItems;
     final grid = SliverGrid(
       gridDelegate: geometry,
       delegate: SliverChildBuilderDelegate((context, index) {
-        final item = _items[index];
+        final item = items[index];
         return switch (_state.scope) {
           LibraryBrowseScope.directory => LibraryDirectoryEntryCard(
             key: ValueKey('library-group-${item.id}'),
@@ -2810,7 +2840,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           LibraryBrowseScope.favorites ||
           LibraryBrowseScope.facet => _buildMediaEntryCard(item),
         };
-      }, childCount: _items.length),
+      }, childCount: items.length),
     );
     return SliverPadding(
       padding: geometry.padding,
@@ -2819,6 +2849,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           _latestGridConstraints = constraints;
           _latestGridGeometry = geometry;
           _schedulePositionUpdate(constraints: constraints, geometry: geometry);
+          _schedulePendingPositionRestore();
           return grid;
         },
       ),
@@ -2937,21 +2968,28 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
                         ),
                       ),
                     ),
-                  if (_items.isEmpty && _loading)
-                    const SliverFillRemaining(
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else if (_items.isEmpty && _loadFailed)
-                    SliverFillRemaining(
-                      child: _FixedLibraryErrorState(onRetry: _retryLoad),
-                    )
-                  else if (_items.isEmpty)
-                    SliverFillRemaining(
-                      child: EmptyState(icon: _emptyIcon, title: _emptyTitle),
+                  if (_displayItems.isEmpty)
+                    SliverLayoutBuilder(
+                      builder: (context, constraints) {
+                        _schedulePendingPositionRestore();
+                        return SliverFillRemaining(
+                          child: _loading
+                              ? const Center(child: CircularProgressIndicator())
+                              : _loadFailed
+                              ? _FixedLibraryErrorState(onRetry: _retryLoad)
+                              : EmptyState(
+                                  icon: _emptyIcon,
+                                  title: _emptyTitle,
+                                ),
+                        );
+                      },
                     )
                   else
                     _buildGrid(geometry),
-                  if (_items.isNotEmpty && (_loading || _loadFailed))
+                  if (_displayItems.isNotEmpty &&
+                      (_loading ||
+                          _loadFailed ||
+                          _isReloadingCurrentGeneration))
                     SliverToBoxAdapter(
                       child: Padding(
                         padding: const EdgeInsets.all(20),
