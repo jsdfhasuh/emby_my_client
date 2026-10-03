@@ -86,7 +86,7 @@ void main() {
     expect(
       () => PlaybackResourceRequest(
         rawUrl: request.rawUrl,
-        headers: const {},
+        headers: const <String, String>{},
         identity: request.identity,
         embyServer: request.embyServer,
       ),
@@ -297,7 +297,7 @@ void main() {
       expect(request.allowsNativeFallback, isFalse);
       input.close();
       a.intercept = (_) async =>
-          (status: 200, headers: const {}, body: <int>[]);
+          (status: 200, headers: const <String, String>{}, body: <int>[]);
       final retry = SourceHttpInput(request, embyServer: request.embyServer);
       addTearDown(retry.close);
       await expectLater(retry.prepare(), throwsA(isA<SourceInputException>()));
@@ -389,7 +389,7 @@ void main() {
       await input.prepare();
       server.intercept = (wire) async =>
           wire.headers['range']!.startsWith('bytes=${2 * block}-')
-          ? (status: 403, headers: const {}, body: <int>[])
+          ? (status: 403, headers: const <String, String>{}, body: <int>[])
           : null;
       expect(
         await input.read(block, 65536),
@@ -400,7 +400,7 @@ void main() {
       expect(input.failures, 0);
       input.close();
       server.intercept = (_) async =>
-          (status: 200, headers: const {}, body: <int>[]);
+          (status: 200, headers: const <String, String>{}, body: <int>[]);
       final retry = SourceHttpInput(request, embyServer: request.embyServer);
       addTearDown(retry.close);
       await expectLater(retry.prepare(), throwsA(isA<SourceInputException>()));
