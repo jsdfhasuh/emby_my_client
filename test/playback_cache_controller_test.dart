@@ -1219,7 +1219,7 @@ void main() {
 
     expect(engine.openCalls, 2);
     expect(controller.state.phase, PlaybackPhase.failed);
-    expect(controller.state.errorMessage, '缓存调整失败，请返回后重试');
+    expect(controller.state.errorMessage, '播放失败，请返回后重试');
     expect(
       diagnostics.where(
         (line) => line.contains('event=playback_engine_error_suppressed'),
