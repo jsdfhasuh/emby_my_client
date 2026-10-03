@@ -250,15 +250,21 @@ class MediaKitPlaybackEngine
       if (native is! NativePlayer) {
         throw const SourceInputException('native_unavailable');
       }
-      _sourceInput ??= await MpvSourceInput.create(
-        native,
-        onReadFailure: (failure) {
-          if (!_disposeStarted && !identical(_sourceFailure, failure)) {
-            _sourceFailure = failure;
-            _sourceErrors.add(failure);
-          }
-        },
-      );
+      try {
+        _sourceInput ??= await MpvSourceInput.create(
+          native,
+          onReadFailure: (failure) {
+            if (!_disposeStarted && !identical(_sourceFailure, failure)) {
+              _sourceFailure = failure;
+              _sourceErrors.add(failure);
+            }
+          },
+        );
+      } on SourceInputException {
+        rethrow;
+      } catch (_) {
+        throw const SourceInputException('native_registration');
+      }
       check();
       final input = await _sourceInput!.prepare(request, attempt);
       check();
@@ -270,6 +276,12 @@ class MediaKitPlaybackEngine
         attempt: attempt,
         revision: revision,
       );
+    } catch (_) {
+      if (revision == _inputRevision) {
+        _preparedSource = null;
+        _sourceInput?.releaseAll();
+      }
+      rethrow;
     } finally {
       if (revision == _inputRevision) _preparingSource = false;
     }
@@ -301,9 +313,16 @@ class MediaKitPlaybackEngine
           openAttempt = input.attempt;
           revision = input.revision;
           _preparedSource = null;
-          if (revision != _inputRevision || _isRetiring || _disposeStarted) {
-            return;
+          void checkCurrent() {
+            if (revision != _inputRevision ||
+                _isRetiring ||
+                _disposeStarted ||
+                !request.sessionActive) {
+              throw const SourceInputException('cancelled');
+            }
           }
+
+          checkCurrent();
           final native = player.platform as NativePlayer;
           stage = 'native_open';
           _hasOpenedMedia = true;
@@ -314,17 +333,21 @@ class MediaKitPlaybackEngine
           });
           await player.stop();
           await player.pause();
+          checkCurrent();
           for (final name in [..._sourceOptions.keys, 'demuxer-lavf-format']) {
+            checkCurrent();
             _sourceOptionDefaults.putIfAbsent(name, () => '');
             if (!_sourceMode) {
               _sourceOptionDefaults[name] = await native.getProperty(name);
             }
           }
+          checkCurrent();
           _sourceMode = true;
           for (final entry in {
             ..._sourceOptions,
             'demuxer-lavf-format': input.format,
           }.entries) {
+            checkCurrent();
             try {
               await native.setProperty(entry.key, entry.value);
             } catch (_) {
@@ -335,9 +358,11 @@ class MediaKitPlaybackEngine
               throw const SourceInputException('native_policy_option');
             }
           }
+          checkCurrent();
           // The remote URL/credentials never enter Media or native global headers.
           Media(input.uri.toString(), httpHeaders: const {});
           await native.command(['loadfile', input.uri.toString(), 'replace']);
+          checkCurrent();
           request.trace.emit('strm_native', {
             'openAttempt': openAttempt,
             'stage': 'native_open',

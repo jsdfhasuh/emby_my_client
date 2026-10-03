@@ -786,10 +786,21 @@ class PlaybackPlan {
     this.transportKind = PlaybackTransportKind.unknown,
     this.sourceSizeBytes,
     this.sourceRequest,
-  }) : assert(sourceRequest == null || !usesServerAuthentication),
+    this.progressiveRequest,
+  }) : assert(sourceRequest == null || progressiveRequest == null),
+       assert(progressiveRequest == null || method != PlayMethod.transcode),
+       assert(sourceRequest == null || !usesServerAuthentication),
        assert(sourceRequest == null || method == PlayMethod.directPlay);
 
   final PlaybackResourceRequest? sourceRequest;
+
+  /// Optional optimization for an ordinary Emby server-media plan. Unlike a
+  /// STRM snapshot, this keeps the original native URL and reporting semantics
+  /// so a rejected/failed controlled input can fall back without re-resolving.
+  final PlaybackResourceRequest? progressiveRequest;
+  PlaybackResourceRequest? get controlledInputRequest =>
+      sourceRequest ?? progressiveRequest;
+  bool get usesControlledInput => controlledInputRequest != null;
   bool get isSourceDirect => sourceRequest != null;
   PlaybackRouteKind get routeKind => isSourceDirect
       ? PlaybackRouteKind.sourceDirect
@@ -821,8 +832,8 @@ class PlaybackPlan {
   /// Refine cache evidence from the same controlled input that will be opened.
   /// Keep URL, credentials, stream metadata and reporting identity unchanged.
   PlaybackPlan withVerifiedSourceInput(VerifiedSourceInput input) {
-    if (!isSourceDirect ||
-        !identical(input.request, sourceRequest) ||
+    if (!usesControlledInput ||
+        !identical(input.request, controlledInputRequest) ||
         !input.request.sessionActive ||
         input.sizeBytes <= 0) {
       throw StateError('Verified input does not belong to this source');
@@ -837,6 +848,7 @@ class PlaybackPlan {
       method: method,
       usesServerAuthentication: usesServerAuthentication,
       sourceRequest: sourceRequest,
+      progressiveRequest: progressiveRequest,
       mediaStreams: mediaStreams,
       transcodingReasons: transcodingReasons,
       availableMediaSources: availableMediaSources,
@@ -879,6 +891,8 @@ class PlaybackPlan {
     Duration? duration,
     PlaybackTransportKind? transportKind,
     int? sourceSizeBytes,
+    bool clearProgressiveRequest = false,
+    bool clearSourceSizeBytes = false,
     List<Map<String, dynamic>>? mediaStreams,
     List<String>? transcodingReasons,
     List<PlaybackMediaSource>? availableMediaSources,
@@ -891,6 +905,7 @@ class PlaybackPlan {
             mediaStreams != null ||
             sourceProtocol != null ||
             sourceSizeBytes != null ||
+            clearSourceSizeBytes ||
             duration != null ||
             container != null)) {
       throw StateError('Source snapshot must be replaced atomically');
@@ -921,8 +936,29 @@ class PlaybackPlan {
       sourceProtocol: sourceProtocol ?? this.sourceProtocol,
       duration: duration ?? this.duration,
       transportKind: transportKind ?? this.transportKind,
-      sourceSizeBytes: sourceSizeBytes ?? this.sourceSizeBytes,
+      sourceSizeBytes: clearSourceSizeBytes
+          ? null
+          : sourceSizeBytes ?? this.sourceSizeBytes,
       sourceRequest: sourceRequest,
+      // URL/method/source metadata changes require fresh admission from the
+      // resolver. Track/reporting-only changes may retain the same input.
+      progressiveRequest:
+          clearProgressiveRequest ||
+              (uri != null && uri != this.uri) ||
+              (mediaSourceId != null && mediaSourceId != this.mediaSourceId) ||
+              (method != null && method != this.method) ||
+              (usesServerAuthentication != null &&
+                  usesServerAuthentication != this.usesServerAuthentication) ||
+              sourceProtocol != null ||
+              duration != null ||
+              container != null ||
+              liveStreamId != null ||
+              clearPlaySessionId ||
+              (playSessionId != null && playSessionId != this.playSessionId) ||
+              (transportKind != null &&
+                  transportKind != PlaybackTransportKind.progressiveHttp)
+          ? null
+          : progressiveRequest,
       mediaStreams: mediaStreams ?? this.mediaStreams,
       transcodingReasons: transcodingReasons ?? this.transcodingReasons,
       availableMediaSources:

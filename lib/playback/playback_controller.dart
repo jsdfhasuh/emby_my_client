@@ -162,6 +162,17 @@ class PlaybackController extends ChangeNotifier {
   PlaybackCacheCoordinator? _cacheCoordinator;
   PlaybackCacheFallbackReason? _forcedCacheFallbackReason;
   bool _runtimeRecoveryScheduled = false;
+  // The optional HTTP adapter gets one fallback for the whole item session,
+  // shared with the existing bounded automatic-open budget.
+  bool _progressiveInputDisabled = false;
+  bool _pendingProgressiveFallback = false;
+  ({
+    PlaybackPlan plan,
+    PlaybackResourceRequest request,
+    Duration position,
+    int generation,
+  })?
+  _deferredProgressiveFallback;
   DateTime? _lastExecutedSeekAt;
   DateTime? _stablePlaybackSince;
   Duration? _lastStabilityPosition;
@@ -295,6 +306,9 @@ class PlaybackController extends ChangeNotifier {
           return;
         }
 
+        if (_progressiveInputDisabled && plan.progressiveRequest != null) {
+          plan = _withoutProgressiveInput(plan);
+        }
         final resume = _resumePositionForPlan(plan, resumePosition);
         _selectedMediaSourceId = plan.mediaSourceId;
         if (!continueReporting) reporter.activate(plan);
@@ -324,11 +338,11 @@ class PlaybackController extends ChangeNotifier {
           await _withDeadline(
             _operationCoordinator.runTrackedNativeOperation(
               kind: PlaybackNativeOperationKind.open,
-              operation: () => openingPlan.isSourceDirect
+              operation: () => openingPlan.usesControlledInput
                   ? (boundEngine is SourceDirectPlaybackEngine
                         ? (boundEngine as SourceDirectPlaybackEngine)
                               .openSource(
-                                openingPlan.sourceRequest!,
+                                openingPlan.controlledInputRequest!,
                                 play: resume == Duration.zero && playAfterReady,
                               )
                         : Future<void>.error(
@@ -454,6 +468,10 @@ class PlaybackController extends ChangeNotifier {
         if (plan != null) await _stopReporterSafely();
         return;
       } catch (error) {
+        // A logical timeout does not mean the native operation has settled.
+        // Neither optimization fallback nor transcode may race that operation.
+        engineOpenTimedOut =
+            engineOpenTimedOut || error is PlaybackNativeOperationTimedOut;
         if (error is SourceInputException) {
           (error.failure ??
                   SourceInputFailure(
@@ -467,8 +485,62 @@ class PlaybackController extends ChangeNotifier {
         }
         if (!_isCurrent(token)) return;
         _discardReadyWaitAfterStartupError();
+        final progressive = plan?.progressiveRequest;
+        if (!engineOpenTimedOut &&
+            progressive != null &&
+            progressive.sessionActive &&
+            progressive.allowsNativeFallback &&
+            error is! _PlaybackOperationTimedOut &&
+            _mayFallbackProgressiveInput(error) &&
+            !_progressiveInputDisabled &&
+            _tryReserveAutomaticOpen(
+              AutomaticPlaybackOpenReason.progressiveInputFallback,
+            )) {
+          _progressiveInputDisabled = true;
+          preparedPlan = _withoutProgressiveInput(plan!);
+          continueReporting = true;
+          _setState(
+            _state.copyWith(
+              phase: PlaybackPhase.resolving,
+              plan: preparedPlan,
+              isBuffering: true,
+              clearError: true,
+            ),
+          );
+          // Keep the reporting cycle and use exactly the original server plan.
+          // Unlike best-effort teardown, this stop must actually settle first.
+          try {
+            await _stopForControlledRestart(
+              _state.position,
+              preserveReporting: true,
+              requireSettledStop: true,
+            );
+            _throwIfStale(token);
+            await _cleanupCacheSessionSafely();
+            _throwIfStale(token);
+            _requireProgressiveFallback(progressive);
+            _lastSourceFailure = null;
+            playAfterReady = _desiredPlaying;
+            DiagnosticLog.instance.info(
+              'player',
+              'event=progressive_input_fallback stage=startup',
+            );
+            continue;
+          } on _PlaybackCancelled {
+            return;
+          } catch (_) {
+            // Stop failure/timeout must reach terminal cleanup, never another
+            // open against a still-running input.
+            engineOpenTimedOut = true;
+          }
+        }
+        final safeAlternateInput =
+            progressive == null ||
+            (progressive.allowsNativeFallback &&
+                _mayFallbackProgressiveInput(error));
         final canRetryCacheInMemory =
             !engineOpenTimedOut &&
+            safeAlternateInput &&
             plan != null &&
             _state.diskCacheFailureObserved &&
             _state.cacheProfile?.runtimeMode == PlaybackCacheRuntimeMode.disk &&
@@ -488,19 +560,22 @@ class PlaybackController extends ChangeNotifier {
               clearError: true,
             ),
           );
-          if (plan.isSourceDirect) {
+          if (plan.usesControlledInput) {
             preparedPlan = plan;
             continueReporting = true;
+          } else {
+            continueReporting = false;
           }
           await _stopForControlledRestart(
             _state.position,
-            preserveReporting: plan.isSourceDirect,
+            preserveReporting: plan.usesControlledInput,
           );
           await _cleanupCacheSessionSafely();
           continue;
         }
         final canRetry =
             !engineOpenTimedOut &&
+            safeAlternateInput &&
             !retriedWithTranscode &&
             resolver.canForceTranscode &&
             plan != null &&
@@ -527,6 +602,7 @@ class PlaybackController extends ChangeNotifier {
           );
           await _stopCacheCoordinator();
           await _stopForControlledRestart(_state.position);
+          continueReporting = false;
           await _cleanupCacheSessionSafely();
           continue;
         }
@@ -573,28 +649,95 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  void _requireProgressiveFallback(PlaybackResourceRequest request) {
+    if (!request.sessionActive) throw const _PlaybackCancelled();
+    if (!request.allowsNativeFallback) {
+      throw const SourceInputException('destination');
+    }
+  }
+
+  // A failed security/authentication/source-identity check is not evidence
+  // that handing the URL to a less constrained transport would be safe.
+  bool _mayFallbackProgressiveInput(Object error) {
+    if (error is TimeoutException) return true; // Settled readiness wait only.
+    if (error is! SourceInputException) return false;
+    if (error.reason == 'range_unsupported') {
+      return error.safeHttp == null ||
+          const {200, 206}.contains(error.safeHttp);
+    }
+    return const {
+      'unsupported_container',
+      'native_unavailable',
+      'native_api_version',
+      'native_registration',
+      'native_policy_option',
+      'truncated',
+      'timeout',
+    }.contains(error.code);
+  }
+
+  PlaybackPlan _withoutProgressiveInput(PlaybackPlan plan) => plan.copyWith(
+    clearProgressiveRequest: true,
+    // Do not carry evidence from a failed/changed byte stream into fallback.
+    clearSourceSizeBytes: true,
+  );
+
   Future<PlaybackPlan> _prepareCacheForPlan(
     PlaybackPlan plan,
     int token, {
     Duration readAheadAnchor = Duration.zero,
   }) async {
-    if (plan.isSourceDirect) {
-      // Never reuse transport evidence from a prior native open/recovery.
-      plan = plan.copyWith(transportKind: PlaybackTransportKind.unknown);
+    final request = plan.controlledInputRequest;
+    if (request != null) {
       final sourceEngine = engine;
-      if (sourceEngine is SourceDirectPreparationEngine) {
-        VerifiedSourceInput? verified;
-        final request = plan.sourceRequest!;
-        await _operationCoordinator.runTrackedNativeOperation(
-          kind: PlaybackNativeOperationKind.open,
-          operation: () async {
-            verified = await (sourceEngine as SourceDirectPreparationEngine)
-                .prepareSource(request);
-          },
-          barrierTimeout: openTimeout,
-        );
-        _throwIfStale(token);
-        plan = plan.withVerifiedSourceInput(verified!);
+      final optional = plan.progressiveRequest != null;
+      if (!request.sessionActive) throw const _PlaybackCancelled();
+      if (optional &&
+          (sourceEngine is! SourceDirectPreparationEngine ||
+              sourceEngine is! SourceDirectPlaybackEngine)) {
+        _requireProgressiveFallback(request);
+        plan = _withoutProgressiveInput(plan);
+      } else if (sourceEngine is SourceDirectPreparationEngine) {
+        try {
+          VerifiedSourceInput? verified;
+          await _operationCoordinator.runTrackedNativeOperation(
+            kind: PlaybackNativeOperationKind.open,
+            operation: () async {
+              verified = await (sourceEngine as SourceDirectPreparationEngine)
+                  .prepareSource(request);
+            },
+            barrierTimeout: openTimeout,
+          );
+          _throwIfStale(token);
+          if (!request.sessionActive) throw const _PlaybackCancelled();
+          plan = plan.withVerifiedSourceInput(verified!);
+        } catch (error) {
+          _throwIfStale(token);
+          if (!request.sessionActive ||
+              error is _PlaybackCancelled ||
+              (error is SourceInputException && error.reason == 'cancelled')) {
+            throw const _PlaybackCancelled();
+          }
+          if (!optional ||
+              error is PlaybackNativeOperationTimedOut ||
+              !request.allowsNativeFallback ||
+              !_mayFallbackProgressiveInput(error)) {
+            rethrow;
+          }
+          // No native media opened and prepareSource has settled. The adapter
+          // closes failed HTTP inputs itself. Continue without a new resolve,
+          // reporter activation, or automatic-open allowance.
+          _progressiveInputDisabled = true;
+          plan = _withoutProgressiveInput(plan);
+          _lastSourceFailure = null;
+          DiagnosticLog.instance.info(
+            'player',
+            'event=progressive_input_fallback stage=prepare',
+          );
+        }
+      } else if (plan.isSourceDirect) {
+        // Unverified STRM transport cannot promote cache eligibility.
+        plan = plan.copyWith(transportKind: PlaybackTransportKind.unknown);
       }
     }
     final cacheEngine = engine is PlaybackCacheEngine
@@ -970,12 +1113,48 @@ class PlaybackController extends ChangeNotifier {
     _lifecycleSuspended = false;
     _lifecycleQuiescenceOperation = null;
     if (_pendingRecoveryFingerprint != null) _scheduleRuntimeRecovery();
+    _resumeDeferredProgressiveFallback();
+  }
+
+  void _resumeDeferredProgressiveFallback() {
+    final pending = _deferredProgressiveFallback;
+    if (pending == null || _lifecycleSuspended) return;
+    _deferredProgressiveFallback = null;
+    if (!_isCurrent(pending.generation)) return;
+    unawaited(
+      _operationCoordinator.runControlOperation(
+        priority: PlaybackControlOperationPriority.runtimeRecovery,
+        operation: (lease) async {
+          if (!lease.isCurrent || !_isCurrent(pending.generation)) return;
+          if (_lifecycleSuspended) {
+            _deferredProgressiveFallback = pending;
+            return;
+          }
+          try {
+            _requireProgressiveFallback(pending.request);
+            await _startPlayback(
+              resumePosition: pending.position,
+              playAfterReady: _desiredPlaying,
+              preparedPlan: pending.plan,
+              continueReporting: true,
+              transcodeFallbackReason:
+                  AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
+              openingStatusMessage: '正在恢复播放…',
+            ).timeout(recoveryPolicy.recoveryAttemptTimeout);
+          } catch (_) {
+            if (lease.isCurrent && !_disposed && !_shuttingDown) {
+              _failProgressiveRecovery(null);
+            }
+          }
+        },
+      ),
+    );
   }
 
   Future<void> handleMemoryPressure() async {
     final coordinator = _cacheCoordinator;
     if (coordinator == null) {
-      if (_state.plan?.isSourceDirect == true &&
+      if (_state.plan?.usesControlledInput == true &&
           _state.phase == PlaybackPhase.ready &&
           !_lifecycleSuspended &&
           !_retiring) {
@@ -1580,6 +1759,10 @@ class PlaybackController extends ChangeNotifier {
     SourceInputFailure failure, {
     required int engineGeneration,
   }) {
+    if (_state.plan?.usesControlledInput != true) {
+      failure.record(staleOverride: true);
+      return;
+    }
     if (trace != null &&
         (!identical(trace, failure.trace) ||
             failure.openAttempt != trace!.currentAttempt)) {
@@ -1612,7 +1795,10 @@ class PlaybackController extends ChangeNotifier {
   void _applySourceFailure(SourceInputFailure failure) {
     _lastSourceFailure = failure;
     final eligible = failure.error.allowsSeekRecovery;
-    final scheduled = eligible && _requestRuntimeRecovery('partial file');
+    final scheduled = _state.plan?.progressiveRequest != null
+        ? _mayFallbackProgressiveInput(failure.error) &&
+              _requestRuntimeRecovery('partial file', progressiveFallback: true)
+        : eligible && _requestRuntimeRecovery('partial file');
     failure.record(recoverable: scheduled, recoveryExecuted: false);
     if (scheduled) return;
     if (_state.phase == PlaybackPhase.ready) {
@@ -1653,7 +1839,12 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
     if (_state.phase == PlaybackPhase.ready) {
-      if (_requestRuntimeRecovery(error)) return;
+      if (_requestRuntimeRecovery(
+        error,
+        progressiveFallback: _state.plan?.progressiveRequest != null,
+      )) {
+        return;
+      }
       if (fingerprint != null &&
           session.hasUsed(
             AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
@@ -2007,7 +2198,9 @@ class PlaybackController extends ChangeNotifier {
     _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
     final wasPlaying = _desiredPlaying;
-    final retained = _state.plan?.isSourceDirect == true ? _state.plan : null;
+    final retained = _state.plan?.usesControlledInput == true
+        ? _state.plan
+        : null;
     _advanceGeneration();
     _progressTimer?.cancel();
     _cancelCacheCoordinator();
@@ -2046,6 +2239,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _stopForControlledRestart(
     Duration position, {
     bool preserveReporting = false,
+    bool requireSettledStop = false,
   }) async {
     if (!preserveReporting) {
       try {
@@ -2076,6 +2270,7 @@ class PlaybackController extends ChangeNotifier {
         'playback',
         'event=playback_engine_stop_failed operation=controlled_restart',
       );
+      if (requireSettledStop) rethrow;
     }
   }
 
@@ -2179,7 +2374,10 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  bool _requestRuntimeRecovery(String rawFailure) {
+  bool _requestRuntimeRecovery(
+    String rawFailure, {
+    bool progressiveFallback = false,
+  }) {
     final fingerprint = _approvedRecoveryFingerprint(rawFailure);
     if (fingerprint == null) return false;
     if (_state.phase == PlaybackPhase.recoveryPending ||
@@ -2191,8 +2389,18 @@ class PlaybackController extends ChangeNotifier {
     }
     final plan = _state.plan;
     final lastSeek = _lastExecutedSeekAt;
-    if (plan == null ||
-        (!plan.isSourceDirect &&
+    if (plan == null) return false;
+    if (progressiveFallback) {
+      if (plan.progressiveRequest == null ||
+          !plan.progressiveRequest!.sessionActive ||
+          !plan.progressiveRequest!.allowsNativeFallback ||
+          _progressiveInputDisabled ||
+          session.hasUsed(
+            AutomaticPlaybackOpenReason.progressiveInputFallback,
+          )) {
+        return false;
+      }
+    } else if ((!plan.isSourceDirect &&
             plan.transportKind != PlaybackTransportKind.progressiveHttp) ||
         lastSeek == null ||
         _seekBecameStable ||
@@ -2202,7 +2410,8 @@ class PlaybackController extends ChangeNotifier {
       return false;
     }
     final now = _clock();
-    if (now.difference(lastSeek) > recoveryPolicy.seekRecoveryWindow) {
+    if (!progressiveFallback &&
+        now.difference(lastSeek!) > recoveryPolicy.seekRecoveryWindow) {
       return false;
     }
     final lastFingerprint = _recoveryFingerprintLastSeen[fingerprint];
@@ -2213,6 +2422,7 @@ class PlaybackController extends ChangeNotifier {
     }
     _recoveryFingerprintLastSeen[fingerprint] = now;
     _pendingRecoveryFingerprint = fingerprint;
+    _pendingProgressiveFallback = progressiveFallback;
     _stablePlaybackSince = null;
     _setState(
       _state.copyWith(
@@ -2240,6 +2450,7 @@ class PlaybackController extends ChangeNotifier {
     }
     _runtimeRecoveryScheduled = true;
     final fingerprint = _pendingRecoveryFingerprint!;
+    final progressiveFallback = _pendingProgressiveFallback;
     unawaited(
       _operationCoordinator
           .runControlOperation(
@@ -2250,14 +2461,22 @@ class PlaybackController extends ChangeNotifier {
                   recoveryPolicy.recoveryAttemptTimeout,
                   onTimeout: () {
                     if (!lease.isCurrent || _disposed || _shuttingDown) return;
-                    _invalidateCurrentControllerOperation();
-                    _setRuntimeRecoveryFailed(fingerprint);
+                    if (progressiveFallback) {
+                      _failProgressiveRecovery(fingerprint);
+                    } else {
+                      _invalidateCurrentControllerOperation();
+                      _setRuntimeRecoveryFailed(fingerprint);
+                    }
                   },
                 );
               } catch (_) {
                 if (lease.isCurrent && !_disposed && !_shuttingDown) {
-                  _invalidateCurrentControllerOperation();
-                  _setRuntimeRecoveryFailed(fingerprint);
+                  if (progressiveFallback) {
+                    _failProgressiveRecovery(fingerprint);
+                  } else {
+                    _invalidateCurrentControllerOperation();
+                    _setRuntimeRecoveryFailed(fingerprint);
+                  }
                 }
               }
             },
@@ -2279,18 +2498,38 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
     _pendingRecoveryFingerprint = null;
+    final progressiveFallback = _pendingProgressiveFallback;
+    _pendingProgressiveFallback = false;
     final plan = _state.plan;
     if (plan == null ||
         !_tryReserveAutomaticOpen(
-          AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
+          progressiveFallback
+              ? AutomaticPlaybackOpenReason.progressiveInputFallback
+              : AutomaticPlaybackOpenReason.runtimeSameMethodRecovery,
         )) {
       _setRuntimeRecoveryFailed(fingerprint);
       return;
+    }
+    final fallbackRequest = progressiveFallback
+        ? plan.progressiveRequest
+        : null;
+    if (progressiveFallback) {
+      if (fallbackRequest == null) {
+        _setRuntimeRecoveryFailed(fingerprint);
+        return;
+      }
+      _requireProgressiveFallback(fallbackRequest);
     }
     _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
     final wasPlaying = _desiredPlaying;
     final wasTranscoding = plan.method == PlayMethod.transcode;
+    if (progressiveFallback) _progressiveInputDisabled = true;
+    final retained = progressiveFallback
+        ? _withoutProgressiveInput(plan)
+        : plan.usesControlledInput
+        ? plan
+        : null;
     _advanceGeneration();
     _progressTimer?.cancel();
     _cancelCacheCoordinator();
@@ -2308,26 +2547,45 @@ class PlaybackController extends ChangeNotifier {
     );
     await _stopForControlledRestart(
       position,
-      preserveReporting: plan.isSourceDirect,
+      preserveReporting: retained != null,
+      requireSettledStop: progressiveFallback,
     );
     if (!lease.isCurrent || _disposed || _shuttingDown) {
       _recordRuntimeRecoveryCancelled();
       return;
     }
     await _cleanupCacheSessionSafely();
-    if (_disposed || _shuttingDown || _lifecycleSuspended || !lease.isCurrent) {
+    if (_disposed || _shuttingDown || !lease.isCurrent) {
       _recordRuntimeRecoveryCancelled();
+      return;
+    }
+    if (fallbackRequest != null) _requireProgressiveFallback(fallbackRequest);
+    if (_lifecycleSuspended) {
+      if (progressiveFallback) {
+        // The one-shot allowance was already consumed and the old input stopped.
+        // Retain a generation-bound continuation instead of losing the reopen
+        // or attempting to consume the allowance a second time after resume.
+        _deferredProgressiveFallback = (
+          plan: retained!,
+          request: fallbackRequest!,
+          position: position,
+          generation: _generation,
+        );
+        _setState(_state.copyWith(phase: PlaybackPhase.recoveryPending));
+      } else {
+        _recordRuntimeRecoveryCancelled();
+      }
       return;
     }
     await _startPlayback(
       resumePosition: position,
-      playAfterReady: wasPlaying,
+      playAfterReady: progressiveFallback ? _desiredPlaying : wasPlaying,
       forceTranscodeInitially: wasTranscoding,
       transcodeFallbackReason:
           AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
       openingStatusMessage: '正在恢复播放…',
-      preparedPlan: plan.isSourceDirect ? plan : null,
-      continueReporting: plan.isSourceDirect,
+      preparedPlan: retained,
+      continueReporting: retained != null,
     );
     if (_disposed || _shuttingDown || !lease.isCurrent) {
       _recordRuntimeRecoveryCancelled();
@@ -2344,6 +2602,14 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
     _setRuntimeRecoveryFailed(fingerprint);
+  }
+
+  void _failProgressiveRecovery(PlaybackRecoveryFingerprint? fingerprint) {
+    // A timed-out open may still complete natively. Revoke output permission
+    // immediately, so its late completion cannot restart audio/video.
+    final quiescence = quiesce();
+    _setRuntimeRecoveryFailed(fingerprint);
+    unawaited(_awaitQuiescenceSafely(quiescence));
   }
 
   void _setRuntimeRecoveryFailed(PlaybackRecoveryFingerprint? fingerprint) {
@@ -3393,8 +3659,8 @@ class PlaybackController extends ChangeNotifier {
     if (completer == null) {
       throw StateError('Playback ready wait was not initialized');
     }
-    if (plan.isSourceDirect) {
-      await plan.sourceRequest!.startupProgress.waitUntilReady(
+    if (plan.usesControlledInput) {
+      await plan.controlledInputRequest!.startupProgress.waitUntilReady(
         completer.future,
         idleTimeout: sourceReadyIdleTimeout,
         totalTimeout: sourceReadyTimeout,
@@ -3492,6 +3758,7 @@ class PlaybackController extends ChangeNotifier {
       revision == _lifecycleQuiescenceRevision;
 
   int _advanceGeneration() {
+    _deferredProgressiveFallback = null;
     _generation++;
     final boundResolver = resolver;
     if (boundResolver is EmbyStreamResolver) boundResolver.cancelPending();

@@ -1213,6 +1213,15 @@ class EmbyApi {
             maxStreamingBitrate: maxStreamingBitrate,
             forceTranscode: forceTranscode,
             authorizedInfo: info,
+            progressiveIdentity: PlaybackResourceIdentity(
+              scope: ServerScope.fromSession(session),
+              apiSession: this,
+              itemId: item.id,
+              sourceId: selectedId,
+              itemSession: itemSession,
+              generation: generation,
+            ),
+            progressiveTrace: diagnosticTrace,
           );
         }
         // The fixed source changed evidence; no server video is opened.
@@ -1474,6 +1483,8 @@ class EmbyApi {
     int maxStreamingBitrate = 120000000,
     bool forceTranscode = false,
     PlaybackInfoResult? authorizedInfo,
+    PlaybackResourceIdentity? progressiveIdentity,
+    StrmTrace? progressiveTrace,
   }) async {
     DiagnosticLog.instance.info(
       'playback',
@@ -1574,6 +1585,56 @@ class EmbyApi {
       usesServerAuthentication: _usesServerAuthentication(uri),
     );
     final duration = _playbackDuration(item: item, source: source);
+    final transportKind = classifyPlaybackTransport(
+      method: method,
+      uri: uri,
+      sourceProtocol: source.protocol,
+      container: source.container,
+      liveStreamId: source.liveStreamId,
+      duration: duration,
+      sourceUri: Uri.tryParse(source.path ?? ''),
+    );
+    PlaybackResourceRequest? progressiveRequest;
+    if (progressiveIdentity != null &&
+        identical(progressiveIdentity.apiSession, this) &&
+        progressiveIdentity.scope == ServerScope.fromSession(session) &&
+        progressiveIdentity.itemId == item.id &&
+        progressiveIdentity.sourceId == source.id &&
+        !StrmDirectPlayPolicy.hasStrmEvidence(source) &&
+        (method == PlayMethod.directPlay ||
+            method == PlayMethod.directStream) &&
+        transportKind == PlaybackTransportKind.progressiveHttp &&
+        duration > Duration.zero &&
+        !source.isInfiniteStream &&
+        !source.requiresOpening &&
+        source.openToken == null &&
+        source.liveStreamId == null &&
+        _usesServerAuthentication(uri) &&
+        const {
+          'mp4',
+          'm4v',
+          'mov',
+          'mkv',
+          'matroska',
+          'avi',
+          'ts',
+          'mpegts',
+        }.contains(source.container?.trim().toLowerCase())) {
+      try {
+        progressiveRequest = PlaybackResourceRequest.progressive(
+          rawUrl: uri.toString(),
+          headers: playbackHeaders,
+          identity: progressiveIdentity,
+          embyServer: Uri.parse(session.serverUrl),
+          // A source-switch preflight must not revoke the still-playing source.
+          // Native input revisions own replacement; API disposal revokes all.
+          isSessionActive: () => !_disposed,
+          trace: progressiveTrace,
+        );
+      } on PlaybackResolveException {
+        // An optimization must not reject an otherwise valid ordinary plan.
+      }
+    }
     return PlaybackPlan(
       uri: uri,
       mediaSourceId: source.id,
@@ -1591,15 +1652,8 @@ class EmbyApi {
       sourceProtocol: source.protocol,
       duration: duration,
       sourceSizeBytes: source.size,
-      transportKind: classifyPlaybackTransport(
-        method: method,
-        uri: uri,
-        sourceProtocol: source.protocol,
-        container: source.container,
-        liveStreamId: source.liveStreamId,
-        duration: duration,
-        sourceUri: Uri.tryParse(source.path ?? ''),
-      ),
+      transportKind: transportKind,
+      progressiveRequest: progressiveRequest,
       mediaStreams: mergeMediaStreams(source.mediaStreams, item.mediaStreams),
       transcodingReasons: source.transcodingReasons,
       availableMediaSources: sources,
