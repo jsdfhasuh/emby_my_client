@@ -26,6 +26,188 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final mode in [
+    PlaybackCacheMode.automatic,
+    PlaybackCacheMode.aggressive,
+    PlaybackCacheMode.fullReadAhead,
+    PlaybackCacheMode.memoryOnly,
+  ]) {
+    test(
+      'verified finite STRM honors ${mode.name} before native open',
+      () async {
+        final events = <String>[];
+        final source = fixtureRequest('https://source.invalid/video.mp4');
+        final engine = _PreparingCacheEngine(events: events);
+        final storage = _CacheStorage(events);
+        final controller = _controller(
+          engine: engine,
+          storage: storage,
+          resolver: _Resolver(sourceRequest: source, sizeBytes: 42),
+          cacheSettings: PlaybackCacheSettings(mode: mode),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(controller.state.plan!.sourceRequest, same(source));
+        expect(controller.state.plan!.sourceSizeBytes, 4 << 30);
+        expect(
+          controller.state.plan!.transportKind,
+          PlaybackTransportKind.progressiveHttp,
+        );
+        final disk = mode != PlaybackCacheMode.memoryOnly;
+        expect(
+          engine.lastProfile!.runtimeMode,
+          disk
+              ? PlaybackCacheRuntimeMode.disk
+              : PlaybackCacheRuntimeMode.memory,
+        );
+        expect(storage.prepares, disk ? 1 : 0);
+        expect(events.indexOf('verify'), lessThan(events.indexOf('configure')));
+        expect(events.indexOf('configure'), lessThan(events.indexOf('open')));
+        if (mode == PlaybackCacheMode.fullReadAhead) {
+          expect(
+            engine.lastProfile!.readAheadStrategy,
+            PlaybackCacheReadAheadStrategy.mediaEnd,
+          );
+        }
+      },
+    );
+  }
+
+  for (final duration in [null, Duration.zero]) {
+    test(
+      'verified STRM without finite duration stays in memory ($duration)',
+      () async {
+        final events = <String>[];
+        final engine = _PreparingCacheEngine(events: events);
+        final storage = _CacheStorage(events);
+        final controller = _controller(
+          engine: engine,
+          storage: storage,
+          resolver: _Resolver(
+            sourceRequest: fixtureRequest('https://source.invalid/video'),
+            duration: duration,
+          ),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(
+          controller.state.cacheRuntimeMode,
+          PlaybackCacheRuntimeMode.memoryFallback,
+        );
+        expect(
+          controller.state.cacheFallbackReason,
+          PlaybackCacheFallbackReason.liveOrUnknownLength,
+        );
+        expect(storage.prepares, 0);
+      },
+    );
+  }
+
+  test(
+    'live STRM cannot become disk eligible from a finite range alone',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events);
+      final storage = _CacheStorage(events);
+      final controller = _controller(
+        engine: engine,
+        storage: storage,
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+          liveStreamId: 'live',
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(storage.prepares, 0);
+      expect(
+        controller.state.cacheRuntimeMode,
+        PlaybackCacheRuntimeMode.memoryFallback,
+      );
+    },
+  );
+
+  test(
+    'failed range verification cannot create disk cache or fall back to server',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events)
+        ..prepareError = const SourceInputException('range_unsupported');
+      final storage = _CacheStorage(events);
+      final controller = _controller(
+        engine: engine,
+        storage: storage,
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(engine.openCalls, 0);
+      expect(storage.prepares, 0);
+      expect(engine.configuredProfiles, isEmpty);
+    },
+  );
+
+  test('verified STRM still falls back when disk space is low', () async {
+    final events = <String>[];
+    final engine = _PreparingCacheEngine(events: events);
+    final storage = _CacheStorage(events)..freeBytes = 64 << 20;
+    final controller = _controller(
+      engine: engine,
+      storage: storage,
+      resolver: _Resolver(
+        sourceRequest: fixtureRequest('https://source.invalid/video'),
+      ),
+    );
+    addTearDown(controller.shutdown);
+    await controller.start();
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.memoryFallback,
+    );
+    expect(
+      controller.state.cacheFallbackReason,
+      PlaybackCacheFallbackReason.lowSpace,
+    );
+    expect(storage.activeSessions, 0);
+  });
+
+  test(
+    'cache recreation prepares source again on replacement engine',
+    () async {
+      final events = <String>[];
+      final source = fixtureRequest('https://source.invalid/video');
+      final first = _PreparingCacheEngine(
+        events: events,
+        requireRecreationAfterOpen: true,
+      );
+      final second = _PreparingCacheEngine(events: events)
+        ..verifiedBytes = 5 << 30;
+      final controller = _controller(
+        engine: first,
+        storage: _CacheStorage(events),
+        resolver: _Resolver(sourceRequest: source),
+        engineRecreator: (_) async => second,
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      await controller.handleMemoryPressure();
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(second.openCalls, 1);
+      expect(controller.state.plan!.sourceSizeBytes, 5 << 30);
+      expect(controller.state.plan!.sourceRequest, same(source));
+      expect(
+        events.where((event) => event == 'verify').length,
+        greaterThanOrEqualTo(3),
+      );
+    },
+  );
+
   for (final reason in [
     'truncated',
     'source_denied',
@@ -796,6 +978,337 @@ void main() {
     },
   );
 
+  test('memory pressure recovery suppresses stale connection errors', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      diagnostics: _diagnostics(diagnostics),
+    );
+    final observedErrors = <String>[];
+    controller.addListener(() {
+      final error = controller.state.errorMessage;
+      if (error != null) observedErrors.add(error);
+    });
+    await controller.start();
+    final snapshotGate = Completer<void>();
+    engine.snapshotOperation = snapshotGate.future;
+
+    final pressure = controller.handleMemoryPressure();
+    await _waitUntil(() => engine.snapshotReads >= 2);
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(observedErrors, isEmpty);
+
+    snapshotGate.complete();
+    await pressure;
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(
+      diagnostics,
+      contains(
+        contains(
+          'event=playback_engine_error_suppressed '
+          'context=cache_safety_reopen',
+        ),
+      ),
+    );
+
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '无法连接媒体流');
+    expect(observedErrors, ['无法连接媒体流']);
+    await controller.shutdown();
+  });
+
+  test('cache safety does not suppress replacement engine errors', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+    );
+    await controller.start();
+    final pressureSnapshotGate = Completer<void>();
+    final replacementSnapshotGate = Completer<void>();
+    engine.snapshotOperation = pressureSnapshotGate.future;
+    engine.onOpen = () {
+      if (engine.openCalls == 2) {
+        engine.snapshotOperation = replacementSnapshotGate.future;
+      }
+    };
+
+    final pressure = controller.handleMemoryPressure();
+    await _waitUntil(() => engine.snapshotReads >= 2);
+    pressureSnapshotGate.complete();
+    await _waitUntil(
+      () =>
+          engine.openCalls == 2 &&
+          controller.state.phase == PlaybackPhase.ready,
+    );
+
+    engine.errorController.add('network connection failed');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '无法连接媒体流');
+
+    replacementSnapshotGate.complete();
+    await pressure;
+    await controller.shutdown();
+  });
+
+  test(
+    'deferred cache safety errors surface when reopen is unavailable',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final session = PlaybackItemSession.forTest('deferred-safety-error');
+      expect(
+        session.tryReserveAutomaticOpen(
+          AutomaticPlaybackOpenReason.cacheSafetyReopen,
+        ),
+        isTrue,
+      );
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        session: session,
+      );
+      await controller.start();
+
+      final snapshotReadsBefore = engine.snapshotReads;
+      final snapshotGate = Completer<void>();
+      engine.snapshotOperation = snapshotGate.future;
+      final pressure = controller.handleMemoryPressure();
+      await _waitUntil(() => engine.snapshotReads > snapshotReadsBefore);
+
+      engine.errorController.add('network connection failed');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.errorMessage, isNull);
+
+      snapshotGate.complete();
+      await pressure;
+
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, '无法连接媒体流');
+      expect(engine.openCalls, 1);
+      await controller.shutdown();
+    },
+  );
+
+  test('memory pressure recovery defers typed source failures', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _PreparingCacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      resolver: _Resolver(
+        sourceRequest: fixtureRequest('https://source.invalid/video'),
+      ),
+      diagnostics: _diagnostics(diagnostics),
+    );
+    final observedErrors = <String>[];
+    controller.addListener(() {
+      final error = controller.state.errorMessage;
+      if (error != null) observedErrors.add(error);
+    });
+    await controller.start();
+    expect(controller.state.cacheRuntimeMode, PlaybackCacheRuntimeMode.disk);
+    final snapshotReadsBefore = engine.snapshotReads;
+    final snapshotGate = Completer<void>();
+    engine.snapshotOperation = snapshotGate.future;
+
+    final pressure = controller.handleMemoryPressure();
+    await _waitUntil(() => engine.snapshotReads > snapshotReadsBefore);
+    final failure = _cacheSourceFailure();
+    engine.sourceFailures.add(failure);
+    engine.sourceFailures.add(failure);
+    engine.errorController.add('source_input_failed');
+
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(observedErrors, isEmpty);
+
+    snapshotGate.complete();
+    await pressure;
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(observedErrors, isEmpty);
+    expect(
+      diagnostics.where(
+        (line) => line.contains('event=playback_engine_error_suppressed'),
+      ),
+      hasLength(1),
+    );
+    await controller.shutdown();
+    await engine.sourceFailures.close();
+  });
+
+  test(
+    'cache safety does not defer replacement typed source failures',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events);
+      final reporter = _GatedStartReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+        ),
+        reporter: reporter,
+      );
+      await controller.start();
+      final replacementStartGate = Completer<void>();
+      reporter.startGate = replacementStartGate.future;
+      var pressureCompleted = false;
+      final pressure = controller.handleMemoryPressure().whenComplete(() {
+        pressureCompleted = true;
+      });
+      await _waitUntil(() => reporter.startCalls == 2);
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(pressureCompleted, isFalse);
+
+      engine.sourceFailures.add(_cacheSourceFailure());
+      engine.errorController.add('source_input_failed');
+
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, '源站读取失败，请返回后重试');
+      replacementStartGate.complete();
+      await pressure;
+      await controller.shutdown();
+      await engine.sourceFailures.close();
+    },
+  );
+
+  test('cache safety keeps replacement typed startup failures fatal', () async {
+    final events = <String>[];
+    final diagnostics = <String>[];
+    final engine = _PreparingCacheEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      resolver: _Resolver(
+        sourceRequest: fixtureRequest('https://source.invalid/video'),
+      ),
+      diagnostics: _diagnostics(diagnostics),
+    );
+    await controller.start();
+    engine.onOpen = () {
+      if (engine.openCalls == 2) {
+        engine.sourceFailures.add(_cacheSourceFailure());
+      }
+    };
+
+    await controller.handleMemoryPressure();
+
+    expect(engine.openCalls, 2);
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '播放失败，请返回后重试');
+    expect(
+      diagnostics.where(
+        (line) => line.contains('event=playback_engine_error_suppressed'),
+      ),
+      isEmpty,
+    );
+    await controller.shutdown();
+    await engine.sourceFailures.close();
+  });
+
+  test(
+    'deferred typed source failures surface when reopen is unavailable',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events);
+      final session = PlaybackItemSession.forTest(
+        'deferred-typed-safety-error',
+      );
+      expect(
+        session.tryReserveAutomaticOpen(
+          AutomaticPlaybackOpenReason.cacheSafetyReopen,
+        ),
+        isTrue,
+      );
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+        ),
+        session: session,
+      );
+      await controller.start();
+      final snapshotReadsBefore = engine.snapshotReads;
+      final snapshotGate = Completer<void>();
+      engine.snapshotOperation = snapshotGate.future;
+      final pressure = controller.handleMemoryPressure();
+      await _waitUntil(() => engine.snapshotReads > snapshotReadsBefore);
+
+      // A typed failure must supersede a less specific native error, without
+      // being lost to the event-deduplication guard when it is replayed.
+      engine.errorController.add('network connection failed');
+      final failure = _cacheSourceFailure();
+      engine.sourceFailures.add(failure);
+      engine.sourceFailures.add(failure);
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(controller.state.errorMessage, isNull);
+
+      snapshotGate.complete();
+      await pressure;
+
+      expect(engine.openCalls, 1);
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, '源站读取失败，请返回后重试');
+      await controller.shutdown();
+      await engine.sourceFailures.close();
+    },
+  );
+
+  test('resume seek timeout is not reported as a connection failure', () {
+    expect(
+      PlaybackController.friendlyPlaybackError(
+        TimeoutException('Resume seek did not settle'),
+      ),
+      '恢复播放位置超时，请重试',
+    );
+  });
+
+  test('resume seek settle timeout keeps its specific startup error', () async {
+    final events = <String>[];
+    final engine = _CacheEngine(events: events, emitPositionOnSeek: false);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      item: _item.copyWith(
+        userData: const EmbyUserData(playbackPositionTicks: 3000000000),
+      ),
+      resumeVerificationTimeout: const Duration(milliseconds: 10),
+    );
+
+    await controller.start();
+
+    expect(controller.state.phase, PlaybackPhase.failed);
+    expect(controller.state.errorMessage, '直连失败，服务器转码也不可用：恢复播放位置超时，请重试');
+    expect(controller.state.errorMessage, isNot(contains('连接')));
+    expect(engine.seekCalls, 2);
+    await controller.shutdown();
+  });
+
   test('repeated memory pressure requests perform one safety reopen', () async {
     final events = <String>[];
     final engine = _CacheEngine(events: events);
@@ -1434,6 +1947,7 @@ PlaybackController _controller({
   PlaybackDiagnostics? diagnostics,
   PlaybackReporter? reporter,
   Duration readyTimeout = const Duration(seconds: 18),
+  Duration resumeVerificationTimeout = const Duration(seconds: 2),
   Duration cacheCleanupTimeout = const Duration(seconds: 3),
   PlaybackClock? clock,
 }) => PlaybackController(
@@ -1449,6 +1963,7 @@ PlaybackController _controller({
   testOverrides: testOverrides,
   diagnostics: diagnostics,
   readyTimeout: readyTimeout,
+  resumeVerificationTimeout: resumeVerificationTimeout,
   cacheCleanupTimeout: cacheCleanupTimeout,
   progressInterval: const Duration(hours: 1),
   cacheStatePollInterval: const Duration(hours: 1),
@@ -1523,6 +2038,7 @@ class _CacheEngine
     this.snapshot,
     this.requireRecreationAfterOpen = false,
     this.keepSubtitleStreamOpenAfterDispose = false,
+    this.emitPositionOnSeek = true,
     this.seekGate,
     this.stopGate,
     this.noReadyOnOpen = const {},
@@ -1535,6 +2051,7 @@ class _CacheEngine
   Future<void>? snapshotOperation;
   final bool requireRecreationAfterOpen;
   final bool keepSubtitleStreamOpenAfterDispose;
+  final bool emitPositionOnSeek;
   final Completer<void>? seekGate;
   final Completer<void>? stopGate;
   final Set<int> noReadyOnOpen;
@@ -1712,7 +2229,7 @@ class _CacheEngine
       maxConcurrentSeeks = concurrentSeeks;
     }
     await seekGate?.future;
-    positionController.add(position);
+    if (emitPositionOnSeek) positionController.add(position);
     concurrentSeeks--;
   }
 
@@ -1740,9 +2257,35 @@ class _CacheEngine
   }
 }
 
+class _PreparingCacheEngine extends _CacheEngine
+    implements SourceDirectPreparationEngine {
+  _PreparingCacheEngine({
+    required super.events,
+    super.requireRecreationAfterOpen,
+  });
+  int verifiedBytes = 4 << 30;
+  Object? prepareError;
+  @override
+  Future<VerifiedSourceInput> prepareSource(
+    PlaybackResourceRequest request,
+  ) async {
+    events.add('verify');
+    if (prepareError != null) throw prepareError!;
+    return VerifiedSourceInput(request: request, sizeBytes: verifiedBytes);
+  }
+}
+
 class _Resolver implements PlaybackStreamResolver {
-  const _Resolver({this.sourceRequest});
+  const _Resolver({
+    this.sourceRequest,
+    this.duration = const Duration(hours: 1),
+    this.sizeBytes,
+    this.liveStreamId,
+  });
   final PlaybackResourceRequest? sourceRequest;
+  final Duration? duration;
+  final int? sizeBytes;
+  final String? liveStreamId;
 
   @override
   bool get canForceTranscode => true;
@@ -1767,7 +2310,9 @@ class _Resolver implements PlaybackStreamResolver {
     transcodingReasons: const [],
     availableMediaSources: const [],
     bitrate: 8 * 1000 * 1000,
-    duration: const Duration(hours: 1),
+    duration: duration,
+    sourceSizeBytes: sizeBytes,
+    liveStreamId: liveStreamId,
     transportKind: PlaybackTransportKind.progressiveHttp,
   );
 
@@ -1810,6 +2355,25 @@ class _SubtitleResolver implements PlaybackStreamResolver {
 
   @override
   Uri resolveExternalUrl(String rawUrl) => Uri.parse(rawUrl);
+}
+
+SourceInputFailure _cacheSourceFailure() => SourceInputFailure(
+  error: const SourceInputException('unknown'),
+  trace: StrmTrace(),
+  openAttempt: 1,
+  request: 2,
+  stale: false,
+);
+
+class _GatedStartReporter extends _Reporter {
+  int startCalls = 0;
+  Future<void>? startGate;
+
+  @override
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {
+    startCalls++;
+    await startGate;
+  }
 }
 
 class _Reporter implements PlaybackReporter {

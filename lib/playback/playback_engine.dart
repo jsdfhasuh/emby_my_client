@@ -111,10 +111,17 @@ abstract interface class PlaybackNativeResourceOwner {
   void retainUntilNativeDisposal(Future<void> Function() release);
 }
 
+/// Preflight the controlled input before configuring the native disk cache.
+/// The prepared input must be reused by openSource on this same engine.
+abstract interface class SourceDirectPreparationEngine {
+  Future<VerifiedSourceInput> prepareSource(PlaybackResourceRequest request);
+}
+
 class MediaKitPlaybackEngine
     implements
         PlaybackEngine,
         SourceDirectPlaybackEngine,
+        SourceDirectPreparationEngine,
         SourceFailureEmitter,
         PlaybackNativeResourceOwner,
         PlaybackCacheEngine,
@@ -148,6 +155,8 @@ class MediaKitPlaybackEngine
   void retainUntilNativeDisposal(Future<void> Function() release) =>
       _resourceReleases.add(release);
   MpvSourceInput? _sourceInput;
+  _PreparedSource? _preparedSource;
+  bool _preparingSource = false;
   int _inputRevision = 0;
   Future<void> _subtitleNativeTail = Future<void>.value();
   final _sourceErrors = StreamController<SourceInputFailure>.broadcast(
@@ -195,51 +204,114 @@ class MediaKitPlaybackEngine
   };
 
   @override
+  Future<VerifiedSourceInput> prepareSource(
+    PlaybackResourceRequest request,
+  ) async {
+    late _PreparedSource prepared;
+    await _runNativeOperation(
+      kind: PlaybackNativeOperationKind.open,
+      operation: () async {
+        prepared = await _prepareSourceInput(request);
+      },
+    );
+    return VerifiedSourceInput(request: request, sizeBytes: prepared.sizeBytes);
+  }
+
+  Future<_PreparedSource> _prepareSourceInput(
+    PlaybackResourceRequest request,
+  ) async {
+    if (_isRetiring || _disposeStarted || !request.sessionActive) {
+      throw const SourceInputException('cancelled');
+    }
+    final existing = _preparedSource;
+    if (existing != null && identical(existing.request, request)) {
+      return existing;
+    }
+    final revision = ++_inputRevision;
+    final attempt = request.trace.nextOpen();
+    _preparedSource = null;
+    _preparingSource = true;
+    _flushSourceDuplicates();
+    _sourceFailure = null;
+    _nativeFailureDuplicates = 0;
+    void check() {
+      if (revision != _inputRevision ||
+          _isRetiring ||
+          _disposeStarted ||
+          !request.sessionActive) {
+        throw const SourceInputException('cancelled');
+      }
+    }
+
+    try {
+      await _subtitleNativeTail;
+      check();
+      final native = player.platform;
+      if (native is! NativePlayer) {
+        throw const SourceInputException('native_unavailable');
+      }
+      _sourceInput ??= await MpvSourceInput.create(
+        native,
+        onReadFailure: (failure) {
+          if (!_disposeStarted && !identical(_sourceFailure, failure)) {
+            _sourceFailure = failure;
+            _sourceErrors.add(failure);
+          }
+        },
+      );
+      check();
+      final input = await _sourceInput!.prepare(request, attempt);
+      check();
+      return _preparedSource = _PreparedSource(
+        request: request,
+        uri: input.uri,
+        format: input.format,
+        sizeBytes: input.sizeBytes,
+        attempt: attempt,
+        revision: revision,
+      );
+    } finally {
+      if (revision == _inputRevision) _preparingSource = false;
+    }
+  }
+
+  void _cancelSourcePreparation() {
+    if (!_preparingSource && _preparedSource == null) return;
+    _inputRevision++;
+    _preparingSource = false;
+    _preparedSource = null;
+    _sourceInput?.releaseAll();
+  }
+
+  @override
   Future<void> openSource(
     PlaybackResourceRequest request, {
     required bool play,
   }) {
     if (_isRetiring || _disposeStarted) return Future<void>.value();
     final epoch = _quiescenceEpoch;
-    final openAttempt = request.trace.nextOpen();
-    _flushSourceDuplicates();
-    _sourceFailure = null;
-    _nativeFailureDuplicates = 0;
-    request.trace.emit('strm_native', {
-      'openAttempt': openAttempt,
-      'stage': 'native_open',
-      'outcome': 'started',
-    });
-    final revision = ++_inputRevision;
-    _hasOpenedMedia = true;
+    var openAttempt = request.trace.currentAttempt;
+    var revision = _inputRevision;
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.open,
       operation: () async {
         var stage = 'native_register';
         try {
-          await _subtitleNativeTail;
+          final input = await _prepareSourceInput(request);
+          openAttempt = input.attempt;
+          revision = input.revision;
+          _preparedSource = null;
           if (revision != _inputRevision || _isRetiring || _disposeStarted) {
             return;
           }
-          final native = player.platform;
-          if (native is! NativePlayer) {
-            throw const SourceInputException('native_unavailable');
-          }
-          _sourceInput ??= await MpvSourceInput.create(
-            native,
-            onReadFailure: (failure) {
-              if (!_disposeStarted && !identical(_sourceFailure, failure)) {
-                _sourceFailure = failure;
-                _sourceErrors.add(failure);
-              }
-            },
-          );
-          stage = 'body_read';
-          final input = await _sourceInput!.prepare(request, openAttempt);
-          if (revision != _inputRevision || _isRetiring || _disposeStarted) {
-            return;
-          }
+          final native = player.platform as NativePlayer;
           stage = 'native_open';
+          _hasOpenedMedia = true;
+          request.trace.emit('strm_native', {
+            'openAttempt': openAttempt,
+            'stage': 'native_open',
+            'outcome': 'started',
+          });
           await player.stop();
           await player.pause();
           for (final name in [..._sourceOptions.keys, 'demuxer-lavf-format']) {
@@ -304,6 +376,7 @@ class MediaKitPlaybackEngine
   }
 
   Future<void> _restoreSourceOptions() async {
+    _cancelSourcePreparation();
     _sourceInput?.releaseAll();
     _flushSourceDuplicates();
     _sourceFailure = null;
@@ -508,6 +581,7 @@ class MediaKitPlaybackEngine
 
   @override
   Future<void> quiesce() {
+    _cancelSourcePreparation();
     if (_disposeStarted) {
       return _disposeOperation ?? Future<void>.value();
     }
@@ -548,6 +622,7 @@ class MediaKitPlaybackEngine
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.seek,
       operation: () async {
+        _sourceInput?.cancelPendingPrefetch();
         await player.seek(position);
         if (_mustReassertQuiescence(quiescenceEpoch)) await _pauseOutput();
       },
@@ -843,6 +918,8 @@ class MediaKitPlaybackEngine
   Future<void> stop() {
     if (_disposeStarted) return Future<void>.value();
     _inputRevision++;
+    _preparedSource = null;
+    _preparingSource = false;
     _flushSourceDuplicates();
     _sourceInput?.releaseAll();
     return _runNativeOperation(
@@ -869,6 +946,7 @@ class MediaKitPlaybackEngine
   }
 
   Future<void> _dispose(Future<void>? quiescence) async {
+    _cancelSourcePreparation();
     _sourceInput?.releaseAll();
     if (quiescence != null) await quiescence;
     if (_retirementState == PlaybackRetirementState.quiescing) {
@@ -903,4 +981,21 @@ class MediaKitPlaybackEngine
       rethrow;
     }
   }
+}
+
+class _PreparedSource {
+  const _PreparedSource({
+    required this.request,
+    required this.uri,
+    required this.format,
+    required this.sizeBytes,
+    required this.attempt,
+    required this.revision,
+  });
+  final PlaybackResourceRequest request;
+  final Uri uri;
+  final String format;
+  final int sizeBytes;
+  final int attempt;
+  final int revision;
 }

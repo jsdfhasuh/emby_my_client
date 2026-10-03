@@ -351,6 +351,8 @@ void main() {
       expect(profile.sessionTargetBytes, greaterThan(4 << 30));
       expect(profile.sessionTargetBytes, greaterThan(9 << 30));
       expect(profile.readAheadAnchor, const Duration(minutes: 5));
+      expect(profile.metadataBudgetCapBytes, 64 << 20);
+      expect(profile.totalMetadataBytes, lessThanOrEqualTo(64 << 20));
     });
 
     test(

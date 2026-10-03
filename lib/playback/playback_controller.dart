@@ -19,6 +19,7 @@ import 'external_subtitle_loader.dart';
 import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
+import 'playback_resource_request.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_recovery_policy.dart';
 import 'playback_session_reporter.dart';
@@ -49,6 +50,8 @@ class PlaybackController extends ChangeNotifier {
     PlaybackDiagnostics? diagnostics,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
+    this.sourceReadyIdleTimeout = const Duration(seconds: 15),
+    this.sourceReadyTimeout = const Duration(seconds: 120),
     this.openTimeout = const Duration(seconds: 18),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
     this.seekCallTimeout = const Duration(seconds: 8),
@@ -100,6 +103,8 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackCacheStorage cacheStorage;
   final PlaybackDiagnostics _diagnostics;
   final Duration readyTimeout;
+  final Duration sourceReadyIdleTimeout;
+  final Duration sourceReadyTimeout;
   final Duration openTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
@@ -181,6 +186,13 @@ class PlaybackController extends ChangeNotifier {
   PlaybackCacheRuntimeMode? _lastNativeConfirmedMode;
   int _cacheFailureObservationGeneration = 0;
   final Set<PlaybackCacheSafetyReason> _cacheSafetyDiagnosticsWritten = {};
+  int _memoryPressureHandlingCount = 0;
+  int _cacheSafetyReopenPendingCount = 0;
+  int? _cacheSafetyErrorSuppressionGeneration;
+  String? _cacheSafetyDeferredEngineError;
+  int? _cacheSafetyDeferredEngineErrorGeneration;
+  SourceInputFailure? _cacheSafetyDeferredSourceFailure;
+  int? _cacheSafetyDeferredSourceFailureGeneration;
   late final PlaybackCacheEvidenceAccumulator _cacheEvidence =
       PlaybackCacheEvidenceAccumulator(
         sessionId: session.id,
@@ -286,7 +298,8 @@ class PlaybackController extends ChangeNotifier {
         final resume = _resumePositionForPlan(plan, resumePosition);
         _selectedMediaSourceId = plan.mediaSourceId;
         if (!continueReporting) reporter.activate(plan);
-        await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
+        plan = await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
+        reporter.updatePlan(plan);
         _throwIfStale(token);
         _setState(
           _state.copyWith(
@@ -357,7 +370,7 @@ class PlaybackController extends ChangeNotifier {
             statusMessage: currentOpeningStatusMessage,
           ),
         );
-        await _waitUntilReady(token);
+        await _waitUntilReady(token, plan);
         _throwIfStale(token);
         if (plan.method == PlayMethod.directPlay) {
           await _applySelectedDirectPlayTracks(plan, token);
@@ -372,8 +385,24 @@ class PlaybackController extends ChangeNotifier {
               : resume;
           _setState(_state.copyWith(phase: PlaybackPhase.seekingResume));
           final result = await seekAbsolute(target, source: SeekSource.resume);
-          if (result.disposition != SeekDisposition.executed) {
-            throw TimeoutException('Resume seek did not settle');
+          switch (result.disposition) {
+            case SeekDisposition.executed:
+            case SeekDisposition.superseded:
+              break;
+            case SeekDisposition.cancelled:
+              throw const _PlaybackCancelled();
+            case SeekDisposition.failed:
+              switch (result.failureKind) {
+                case SeekFailureKind.callTimeout ||
+                    SeekFailureKind.settleTimeout:
+                  throw TimeoutException('Resume seek did not settle');
+                case SeekFailureKind.higherPriorityOperation ||
+                    SeekFailureKind.staleSession:
+                  throw const _PlaybackCancelled();
+                case SeekFailureKind.engineError:
+                case null:
+                  throw StateError('Resume seek failed');
+              }
           }
           _throwIfStale(token);
           if (playAfterReady) {
@@ -544,11 +573,30 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _prepareCacheForPlan(
+  Future<PlaybackPlan> _prepareCacheForPlan(
     PlaybackPlan plan,
     int token, {
     Duration readAheadAnchor = Duration.zero,
   }) async {
+    if (plan.isSourceDirect) {
+      // Never reuse transport evidence from a prior native open/recovery.
+      plan = plan.copyWith(transportKind: PlaybackTransportKind.unknown);
+      final sourceEngine = engine;
+      if (sourceEngine is SourceDirectPreparationEngine) {
+        VerifiedSourceInput? verified;
+        final request = plan.sourceRequest!;
+        await _operationCoordinator.runTrackedNativeOperation(
+          kind: PlaybackNativeOperationKind.open,
+          operation: () async {
+            verified = await (sourceEngine as SourceDirectPreparationEngine)
+                .prepareSource(request);
+          },
+          barrierTimeout: openTimeout,
+        );
+        _throwIfStale(token);
+        plan = plan.withVerifiedSourceInput(verified!);
+      }
+    }
     final cacheEngine = engine is PlaybackCacheEngine
         ? engine as PlaybackCacheEngine
         : null;
@@ -734,6 +782,7 @@ class PlaybackController extends ChangeNotifier {
       _testCacheFailureObservationPending = false;
       _handleEngineLog('Failed to create file cache');
     }
+    return plan;
   }
 
   Future<void> playOrPause() async {
@@ -925,15 +974,27 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> handleMemoryPressure() async {
     final coordinator = _cacheCoordinator;
-    if (coordinator != null) {
+    if (coordinator == null) {
+      if (_state.plan?.isSourceDirect == true &&
+          _state.phase == PlaybackPhase.ready &&
+          !_lifecycleSuspended &&
+          !_retiring) {
+        // Source input needs the memory-pressure cap even without disk monitoring.
+        await _handleCacheSafetyReopen(
+          PlaybackCacheSafetyReason.memoryPressure,
+        );
+      }
+      return;
+    }
+    if (!coordinator.isActive || coordinator.safetyReopenRequested) return;
+    final errorSuppressionGeneration = _generation;
+    _beginCacheSafetyErrorSuppression(errorSuppressionGeneration);
+    _memoryPressureHandlingCount++;
+    try {
       await coordinator.handleMemoryPressure();
-    } else if (_state.plan?.isSourceDirect == true &&
-        _state.phase == PlaybackPhase.ready &&
-        !_lifecycleSuspended &&
-        !_retiring) {
-      // Progressive source input uses a bounded memory profile even when disk
-      // monitoring is unavailable. Memory pressure still needs the 64 MiB cap.
-      await _handleCacheSafetyReopen(PlaybackCacheSafetyReason.memoryPressure);
+    } finally {
+      _memoryPressureHandlingCount--;
+      _clearCacheSafetyErrorSuppressionIfIdle(errorSuppressionGeneration);
     }
   }
 
@@ -1455,7 +1516,7 @@ class PlaybackController extends ChangeNotifier {
           failure,
         ) {
           if (!eventIsCurrent() || failure.stale || failure.cancelled) return;
-          _handleSourceFailure(failure);
+          _handleSourceFailure(failure, engineGeneration: token);
         }),
       );
     }
@@ -1498,7 +1559,7 @@ class PlaybackController extends ChangeNotifier {
       }),
       boundEngine.errorStream.listen((error) {
         if (!eventIsCurrent()) return;
-        _handleEngineError(error);
+        _handleEngineError(error, engineGeneration: token);
       }),
       boundEngine.logStream.listen((log) {
         if (!eventIsCurrent()) return;
@@ -1515,7 +1576,10 @@ class PlaybackController extends ChangeNotifier {
     ]);
   }
 
-  void _handleSourceFailure(SourceInputFailure failure) {
+  void _handleSourceFailure(
+    SourceInputFailure failure, {
+    required int engineGeneration,
+  }) {
     if (trace != null &&
         (!identical(trace, failure.trace) ||
             failure.openAttempt != trace!.currentAttempt)) {
@@ -1532,6 +1596,21 @@ class PlaybackController extends ChangeNotifier {
       pending.completeError(failure.error);
       return;
     }
+    if (_shouldDeferCacheSafetyError(engineGeneration)) {
+      if (_cacheSafetyDeferredSourceFailureGeneration != engineGeneration) {
+        _cacheSafetyDeferredSourceFailure = failure;
+        _cacheSafetyDeferredSourceFailureGeneration = engineGeneration;
+      } else {
+        _cacheSafetyDeferredSourceFailure ??= failure;
+      }
+      _diagnostics.engineErrorSuppressedForCacheSafety();
+      return;
+    }
+    _applySourceFailure(failure);
+  }
+
+  void _applySourceFailure(SourceInputFailure failure) {
+    _lastSourceFailure = failure;
     final eligible = failure.error.allowsSeekRecovery;
     final scheduled = eligible && _requestRuntimeRecovery('partial file');
     failure.record(recoverable: scheduled, recoveryExecuted: false);
@@ -1547,7 +1626,7 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  void _handleEngineError(String error) {
+  void _handleEngineError(String error, {required int engineGeneration}) {
     if (_lastSourceFailure != null) return;
     final fingerprint = _approvedRecoveryFingerprint(error);
     final diagnosticFingerprint = _engineDiagnosticFingerprint(error);
@@ -1561,6 +1640,16 @@ class PlaybackController extends ChangeNotifier {
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(error);
+      return;
+    }
+    if (_shouldDeferCacheSafetyError(engineGeneration)) {
+      if (_cacheSafetyDeferredEngineErrorGeneration != engineGeneration) {
+        _cacheSafetyDeferredEngineError = error;
+        _cacheSafetyDeferredEngineErrorGeneration = engineGeneration;
+      } else {
+        _cacheSafetyDeferredEngineError ??= error;
+      }
+      _diagnostics.engineErrorSuppressedForCacheSafety();
       return;
     }
     if (_state.phase == PlaybackPhase.ready) {
@@ -1822,7 +1911,19 @@ class PlaybackController extends ChangeNotifier {
       PlaybackCacheSafetyReason.memoryPressure =>
         PlaybackCacheFallbackReason.memoryPressure,
     };
-    return _operationCoordinator.runControlOperation(
+    final errorSuppressionGeneration = _generation;
+    _beginCacheSafetyErrorSuppression(errorSuppressionGeneration);
+    _cacheSafetyReopenPendingCount++;
+    if (_state.phase == PlaybackPhase.ready) {
+      _setState(
+        _state.copyWith(
+          isBuffering: true,
+          statusMessage: '正在调整缓存…',
+          clearError: true,
+        ),
+      );
+    }
+    final operation = _operationCoordinator.runControlOperation(
       priority: PlaybackControlOperationPriority.cacheSafety,
       operation: (lease) async {
         if (_disposed || _shuttingDown || _engineDisposed || !lease.isCurrent) {
@@ -1845,6 +1946,59 @@ class PlaybackController extends ChangeNotifier {
         );
       },
     );
+    return operation.whenComplete(() {
+      if (_cacheSafetyReopenPendingCount > 0) {
+        _cacheSafetyReopenPendingCount--;
+      }
+      _clearCacheSafetyErrorSuppressionIfIdle(errorSuppressionGeneration);
+    });
+  }
+
+  void _beginCacheSafetyErrorSuppression(int generation) {
+    if (_cacheSafetyErrorSuppressionGeneration == generation) return;
+    _cacheSafetyErrorSuppressionGeneration = generation;
+    _cacheSafetyDeferredEngineError = null;
+    _cacheSafetyDeferredEngineErrorGeneration = null;
+    _cacheSafetyDeferredSourceFailure = null;
+    _cacheSafetyDeferredSourceFailureGeneration = null;
+  }
+
+  bool _shouldDeferCacheSafetyError(int engineGeneration) =>
+      _state.phase == PlaybackPhase.ready &&
+      engineGeneration == _cacheSafetyErrorSuppressionGeneration &&
+      (_memoryPressureHandlingCount > 0 || _cacheSafetyReopenPendingCount > 0);
+
+  void _clearCacheSafetyErrorSuppressionIfIdle(int generation) {
+    if (_memoryPressureHandlingCount == 0 &&
+        _cacheSafetyReopenPendingCount == 0 &&
+        _cacheSafetyErrorSuppressionGeneration == generation) {
+      _cacheSafetyErrorSuppressionGeneration = null;
+      final deferredError =
+          _cacheSafetyDeferredEngineErrorGeneration == generation
+          ? _cacheSafetyDeferredEngineError
+          : null;
+      final deferredSourceFailure =
+          _cacheSafetyDeferredSourceFailureGeneration == generation
+          ? _cacheSafetyDeferredSourceFailure
+          : null;
+      _cacheSafetyDeferredEngineError = null;
+      _cacheSafetyDeferredEngineErrorGeneration = null;
+      _cacheSafetyDeferredSourceFailure = null;
+      _cacheSafetyDeferredSourceFailureGeneration = null;
+      if (_generation == generation &&
+          _state.phase == PlaybackPhase.ready &&
+          !_disposed &&
+          !_shuttingDown) {
+        if (deferredSourceFailure != null) {
+          // The event was already deduplicated when deferred. Replay its typed
+          // policy directly rather than dropping it as a duplicate, and prefer
+          // it over a less specific native error from the same failed input.
+          _applySourceFailure(deferredSourceFailure);
+        } else if (deferredError != null) {
+          _handleEngineError(deferredError, engineGeneration: generation);
+        }
+      }
+    }
   }
 
   Future<void> _performCacheSafetyReopen(
@@ -1995,7 +2149,7 @@ class PlaybackController extends ChangeNotifier {
   void _injectApprovedSeekFailureIfPending() {
     if (!_testSeekFailurePending || _state.phase != PlaybackPhase.ready) return;
     _testSeekFailurePending = false;
-    _handleEngineError('partial file');
+    _handleEngineError('partial file', engineGeneration: _generation);
   }
 
   void _updateStablePlayback(Duration position) {
@@ -3233,11 +3387,19 @@ class PlaybackController extends ChangeNotifier {
     if (completer != null && !completer.isCompleted) completer.complete();
   }
 
-  Future<void> _waitUntilReady(int token) async {
+  Future<void> _waitUntilReady(int token, PlaybackPlan plan) async {
     _throwIfStale(token);
     final completer = _readyCompleter;
     if (completer == null) {
       throw StateError('Playback ready wait was not initialized');
+    }
+    if (plan.isSourceDirect) {
+      await plan.sourceRequest!.startupProgress.waitUntilReady(
+        completer.future,
+        idleTimeout: sourceReadyIdleTimeout,
+        totalTimeout: sourceReadyTimeout,
+      );
+      return;
     }
     await completer.future.timeout(
       readyTimeout,
@@ -3720,6 +3882,12 @@ class PlaybackController extends ChangeNotifier {
 
   static String friendlyPlaybackError(Object error) {
     final message = error.toString().toLowerCase();
+    if (message.contains('resume seek did not settle')) {
+      return '恢复播放位置超时，请重试';
+    }
+    if (message.contains('resume seek failed')) {
+      return '恢复播放位置失败，请重试';
+    }
     if (message.contains('failed to resolve hostname') ||
         message.contains('no address associated with hostname') ||
         message.contains('unknown host')) {
