@@ -22,7 +22,9 @@ Map<String, dynamic> _source({
 }) => {
   'Id': id,
   'Protocol': 'File',
-  'Path': '/media/movie.$container',
+  // Physical-file evidence is independent of the negotiated output container.
+  // Unknown/segmented output formats still originate from an ordinary file.
+  'Path': '/media/movie.mkv',
   'Container': container,
   'RunTimeTicks': 36000000000,
   'Size': 128 * 1024 * 1024,
