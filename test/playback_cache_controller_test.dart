@@ -26,6 +26,188 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final mode in [
+    PlaybackCacheMode.automatic,
+    PlaybackCacheMode.aggressive,
+    PlaybackCacheMode.fullReadAhead,
+    PlaybackCacheMode.memoryOnly,
+  ]) {
+    test(
+      'verified finite STRM honors ${mode.name} before native open',
+      () async {
+        final events = <String>[];
+        final source = fixtureRequest('https://source.invalid/video.mp4');
+        final engine = _PreparingCacheEngine(events: events);
+        final storage = _CacheStorage(events);
+        final controller = _controller(
+          engine: engine,
+          storage: storage,
+          resolver: _Resolver(sourceRequest: source, sizeBytes: 42),
+          cacheSettings: PlaybackCacheSettings(mode: mode),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(controller.state.plan!.sourceRequest, same(source));
+        expect(controller.state.plan!.sourceSizeBytes, 4 << 30);
+        expect(
+          controller.state.plan!.transportKind,
+          PlaybackTransportKind.progressiveHttp,
+        );
+        final disk = mode != PlaybackCacheMode.memoryOnly;
+        expect(
+          engine.lastProfile!.runtimeMode,
+          disk
+              ? PlaybackCacheRuntimeMode.disk
+              : PlaybackCacheRuntimeMode.memory,
+        );
+        expect(storage.prepares, disk ? 1 : 0);
+        expect(events.indexOf('verify'), lessThan(events.indexOf('configure')));
+        expect(events.indexOf('configure'), lessThan(events.indexOf('open')));
+        if (mode == PlaybackCacheMode.fullReadAhead) {
+          expect(
+            engine.lastProfile!.readAheadStrategy,
+            PlaybackCacheReadAheadStrategy.mediaEnd,
+          );
+        }
+      },
+    );
+  }
+
+  for (final duration in [null, Duration.zero]) {
+    test(
+      'verified STRM without finite duration stays in memory ($duration)',
+      () async {
+        final events = <String>[];
+        final engine = _PreparingCacheEngine(events: events);
+        final storage = _CacheStorage(events);
+        final controller = _controller(
+          engine: engine,
+          storage: storage,
+          resolver: _Resolver(
+            sourceRequest: fixtureRequest('https://source.invalid/video'),
+            duration: duration,
+          ),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(
+          controller.state.cacheRuntimeMode,
+          PlaybackCacheRuntimeMode.memoryFallback,
+        );
+        expect(
+          controller.state.cacheFallbackReason,
+          PlaybackCacheFallbackReason.liveOrUnknownLength,
+        );
+        expect(storage.prepares, 0);
+      },
+    );
+  }
+
+  test(
+    'live STRM cannot become disk eligible from a finite range alone',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events);
+      final storage = _CacheStorage(events);
+      final controller = _controller(
+        engine: engine,
+        storage: storage,
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+          liveStreamId: 'live',
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(storage.prepares, 0);
+      expect(
+        controller.state.cacheRuntimeMode,
+        PlaybackCacheRuntimeMode.memoryFallback,
+      );
+    },
+  );
+
+  test(
+    'failed range verification cannot create disk cache or fall back to server',
+    () async {
+      final events = <String>[];
+      final engine = _PreparingCacheEngine(events: events)
+        ..prepareError = const SourceInputException('range_unsupported');
+      final storage = _CacheStorage(events);
+      final controller = _controller(
+        engine: engine,
+        storage: storage,
+        resolver: _Resolver(
+          sourceRequest: fixtureRequest('https://source.invalid/video'),
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(engine.openCalls, 0);
+      expect(storage.prepares, 0);
+      expect(engine.configuredProfiles, isEmpty);
+    },
+  );
+
+  test('verified STRM still falls back when disk space is low', () async {
+    final events = <String>[];
+    final engine = _PreparingCacheEngine(events: events);
+    final storage = _CacheStorage(events)..freeBytes = 64 << 20;
+    final controller = _controller(
+      engine: engine,
+      storage: storage,
+      resolver: _Resolver(
+        sourceRequest: fixtureRequest('https://source.invalid/video'),
+      ),
+    );
+    addTearDown(controller.shutdown);
+    await controller.start();
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(
+      controller.state.cacheRuntimeMode,
+      PlaybackCacheRuntimeMode.memoryFallback,
+    );
+    expect(
+      controller.state.cacheFallbackReason,
+      PlaybackCacheFallbackReason.lowSpace,
+    );
+    expect(storage.activeSessions, 0);
+  });
+
+  test(
+    'cache recreation prepares source again on replacement engine',
+    () async {
+      final events = <String>[];
+      final source = fixtureRequest('https://source.invalid/video');
+      final first = _PreparingCacheEngine(
+        events: events,
+        requireRecreationAfterOpen: true,
+      );
+      final second = _PreparingCacheEngine(events: events)
+        ..verifiedBytes = 5 << 30;
+      final controller = _controller(
+        engine: first,
+        storage: _CacheStorage(events),
+        resolver: _Resolver(sourceRequest: source),
+        engineRecreator: (_) async => second,
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      await controller.handleMemoryPressure();
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(second.openCalls, 1);
+      expect(controller.state.plan!.sourceSizeBytes, 5 << 30);
+      expect(controller.state.plan!.sourceRequest, same(source));
+      expect(
+        events.where((event) => event == 'verify').length,
+        greaterThanOrEqualTo(3),
+      );
+    },
+  );
+
   for (final reason in [
     'truncated',
     'source_denied',
@@ -1740,9 +1922,35 @@ class _CacheEngine
   }
 }
 
+class _PreparingCacheEngine extends _CacheEngine
+    implements SourceDirectPreparationEngine {
+  _PreparingCacheEngine({
+    required super.events,
+    super.requireRecreationAfterOpen,
+  });
+  int verifiedBytes = 4 << 30;
+  Object? prepareError;
+  @override
+  Future<VerifiedSourceInput> prepareSource(
+    PlaybackResourceRequest request,
+  ) async {
+    events.add('verify');
+    if (prepareError != null) throw prepareError!;
+    return VerifiedSourceInput(request: request, sizeBytes: verifiedBytes);
+  }
+}
+
 class _Resolver implements PlaybackStreamResolver {
-  const _Resolver({this.sourceRequest});
+  const _Resolver({
+    this.sourceRequest,
+    this.duration = const Duration(hours: 1),
+    this.sizeBytes,
+    this.liveStreamId,
+  });
   final PlaybackResourceRequest? sourceRequest;
+  final Duration? duration;
+  final int? sizeBytes;
+  final String? liveStreamId;
 
   @override
   bool get canForceTranscode => true;
@@ -1767,7 +1975,9 @@ class _Resolver implements PlaybackStreamResolver {
     transcodingReasons: const [],
     availableMediaSources: const [],
     bitrate: 8 * 1000 * 1000,
-    duration: const Duration(hours: 1),
+    duration: duration,
+    sourceSizeBytes: sizeBytes,
+    liveStreamId: liveStreamId,
     transportKind: PlaybackTransportKind.progressiveHttp,
   );
 

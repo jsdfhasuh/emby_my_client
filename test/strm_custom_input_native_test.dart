@@ -12,6 +12,9 @@ import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_session_bootstrap.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_policy.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -19,6 +22,48 @@ import 'source_http_input_test.dart' show fixtureRequest;
 import 'support/progressive_fixture.dart';
 
 void main() {
+  test(
+    'source preflight is reused until stop and cancelled during retirement',
+    () async {
+      MediaKit.ensureInitialized();
+      final origin = await ProgressiveOrigin.start();
+      addTearDown(origin.close);
+      final player = Player(
+        configuration: const PlayerConfiguration(vo: 'null'),
+      );
+      final engine = MediaKitPlaybackEngine(player);
+      addTearDown(engine.dispose);
+      final request = fixtureRequest('${origin.origin}/video');
+      expect(
+        (await engine.prepareSource(request)).sizeBytes,
+        origin.bytes.length,
+      );
+      await engine.prepareSource(request);
+      expect(origin.requests, hasLength(1));
+      expect(request.trace.currentAttempt, 1);
+      await engine.stop();
+      await engine.prepareSource(request);
+      expect(origin.requests, hasLength(2));
+      expect(request.trace.currentAttempt, 2);
+      await engine.stop();
+
+      final entered = Completer<void>();
+      final response = Completer<FixtureReply?>();
+      origin.intercept = (_) {
+        entered.complete();
+        return response.future;
+      };
+      final pending = expectLater(
+        engine.prepareSource(request),
+        throwsA(isA<SourceInputException>()),
+      );
+      await entered.future;
+      await engine.quiesce();
+      await pending.timeout(const Duration(seconds: 2));
+      response.complete(null);
+    },
+  );
+
   test(
     'actual bridge retains truncated HTTP failure before native error',
     () async {
@@ -157,6 +202,10 @@ void main() {
       await (player.platform as NativePlayer).setProperty('vid', 'auto');
       await (player.platform as NativePlayer).setProperty('ao', 'null');
       final engine = MediaKitPlaybackEngine(player);
+      final cacheRoot = await Directory.systemTemp.createTemp(
+        'strm-native-cache-',
+      );
+      addTearDown(() => cacheRoot.delete(recursive: true));
       final controller = PlaybackSessionBootstrap.createOnlineController(
         api: api,
         trace: trace,
@@ -165,6 +214,10 @@ void main() {
         engine: engine,
         session: PlaybackItemSession.forTest('native-source'),
         settings: const PlaybackSettings(),
+        cacheStorage: PlatformPlaybackCacheStorage(
+          rootResolver: () async => cacheRoot,
+          freeBytesResolver: (_) async => 20 << 30,
+        ),
       );
       addTearDown(controller.shutdown);
       await controller.start(
@@ -179,6 +232,25 @@ void main() {
             '${controller.state.errorMessage}\n${nativeErrors.join('\n')}\n${nativeLogs.join('\n')}',
       );
       expect(controller.state.plan!.isSourceDirect, isTrue);
+      expect(
+        controller.state.plan!.transportKind,
+        PlaybackTransportKind.progressiveHttp,
+      );
+      expect(controller.state.plan!.sourceSizeBytes, source.bytes.length);
+      expect(controller.state.cacheRuntimeMode, PlaybackCacheRuntimeMode.disk);
+      PlaybackCacheEngineSnapshot? cacheSnapshot;
+      for (var i = 0; i < 100; i++) {
+        cacheSnapshot = await engine.readCacheSnapshot();
+        if ((cacheSnapshot?.fileCacheBytes ?? 0) > 0) break;
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(cacheSnapshot?.cacheOnDisk, isTrue);
+      expect(cacheSnapshot?.fileCacheBytes, greaterThan(0));
+      // Cache configuration must reuse the sniffed input rather than probing twice.
+      expect(
+        source.requests.where((r) => r.headers['range'] == 'bytes=0-262143'),
+        hasLength(1),
+      );
       final directory = await Directory.systemTemp.createTemp(
         'strm-native-sub-test-',
       );
@@ -240,6 +312,7 @@ void main() {
         isFalse,
       );
       await controller.shutdown();
+      expect(await cacheRoot.list().toList(), isEmpty);
       expect(
         requests.where((r) => r.path == '/Sessions/Playing'),
         hasLength(1),

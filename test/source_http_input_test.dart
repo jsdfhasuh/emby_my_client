@@ -1,5 +1,6 @@
 import 'package:emby_my_client/core/strm_diagnostics.dart';
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/playback/playback_resource_request.dart';
@@ -29,6 +30,163 @@ PlaybackResourceRequest fixtureRequest(
 
 void main() {
   test(
+    'tail index uses 1 MiB fetches for 64 KiB reads and caches seeks',
+    () async {
+      const mib = 1024 * 1024;
+      final content = Uint8List(20 * mib + 137);
+      for (var i = 0; i < content.length; i++) {
+        content[i] = i % 251;
+      }
+      content.setRange(0, 12, progressiveVideo().take(12));
+      final server = await ProgressiveOrigin.start(content: content);
+      addTearDown(server.close);
+      final input = SourceHttpInput(
+        fixtureRequest('${server.origin}/large.avi'),
+        maxConcurrentRequests: 1,
+        rangeBytes: 1024 * 1024,
+        embyServer: Uri.parse('https://emby.invalid'),
+      );
+      addTearDown(input.close);
+      await input.prepare();
+      for (var offset = 4 * mib; offset < 20 * mib; offset += 65536) {
+        expect(
+          await input.read(offset, 65536),
+          content.sublist(offset, offset + 65536),
+        );
+      }
+      expect(
+        server.requests,
+        hasLength(17),
+      ); // Prefix + 16 MiB, not 256 requests.
+      expect(input.readAheadHits, 240);
+      expect(
+        await input.read(4 * mib + 12, 16),
+        content.sublist(4 * mib + 12, 4 * mib + 28),
+      );
+      expect(await input.read(0, 16), content.sublist(0, 16));
+      expect(server.requests, hasLength(17));
+      expect(await input.read(20 * mib, 65536), content.sublist(20 * mib));
+      expect(
+        server.requests.last.headers['range'],
+        'bytes=${20 * mib}-${content.length - 1}',
+      );
+      expect(input.cachedBytes, lessThanOrEqualTo(SourceHttpInput.cacheBudget));
+    },
+  );
+
+  test(
+    'cache evicts old ranges within budget while retaining the prefix',
+    () async {
+      const mib = 1024 * 1024;
+      final content = Uint8List(40 * mib)
+        ..setRange(0, 12, progressiveVideo().take(12));
+      final server = await ProgressiveOrigin.start(content: content);
+      addTearDown(server.close);
+      final input = SourceHttpInput(
+        fixtureRequest('${server.origin}/large.avi'),
+        maxConcurrentRequests: 1,
+        rangeBytes: 1024 * 1024,
+        embyServer: Uri.parse('https://emby.invalid'),
+      );
+      addTearDown(input.close);
+      await input.prepare();
+      for (var offset = mib; offset <= 35 * mib; offset += mib) {
+        await input.read(offset, 16);
+        expect(
+          input.cachedBytes,
+          lessThanOrEqualTo(SourceHttpInput.cacheBudget),
+        );
+      }
+      final count = server.requests.length;
+      await input.read(0, 16);
+      await input.read(35 * mib, 16);
+      expect(server.requests, hasLength(count));
+      await input.read(mib, 16);
+      expect(server.requests, hasLength(count + 1));
+      input.close();
+      expect(input.cachedBytes, 0);
+      await expectLater(
+        input.read(0, 16),
+        throwsA(isA<SourceInputException>()),
+      );
+    },
+  );
+
+  test(
+    'overlapping concurrent reads share one fetch; close cancels queued reads',
+    () async {
+      final server = await ProgressiveOrigin.start();
+      addTearDown(server.close);
+      final input = SourceHttpInput(
+        fixtureRequest('${server.origin}/video.avi'),
+        embyServer: Uri.parse('https://emby.invalid'),
+      );
+      addTearDown(input.close);
+      await input.prepare();
+      final values = await Future.wait([
+        input.read(300000, 1000),
+        input.read(301000, 1000),
+      ]);
+      expect(values[0], server.bytes.sublist(300000, 301000));
+      expect(values[1], server.bytes.sublist(301000, 302000));
+      expect(server.requests, hasLength(2));
+      final arrived = Completer<void>();
+      final gate = Completer<FixtureReply?>();
+      server.intercept = (_) {
+        arrived.complete();
+        return gate.future;
+      };
+      final pending = expectLater(
+        input.read(270000, 1000),
+        throwsA(isA<SourceInputException>()),
+      );
+      final queued = expectLater(
+        input.read(280000, 1000),
+        throwsA(isA<SourceInputException>()),
+      );
+      await arrived.future;
+      input.close();
+      await Future.wait([pending, queued]);
+      gate.complete(null);
+      expect(server.requests, hasLength(3));
+      expect(input.cachedBytes, 0);
+    },
+  );
+
+  test(
+    'prefetch rejects a changed source and does not cache its bytes',
+    () async {
+      final server = await ProgressiveOrigin.start();
+      addTearDown(server.close);
+      final input = SourceHttpInput(
+        fixtureRequest('${server.origin}/video.avi'),
+        embyServer: Uri.parse('https://emby.invalid'),
+      );
+      addTearDown(input.close);
+      await input.prepare();
+      server.intercept = (_) async => (
+        status: 206,
+        headers: {
+          'Content-Range': 'bytes 300000-300099/${server.bytes.length}',
+          'ETag': '"changed"',
+        },
+        body: server.bytes.sublist(300000, 300100),
+      );
+      await expectLater(
+        input.read(300000, 100),
+        throwsA(
+          isA<SourceInputException>().having(
+            (e) => e.code,
+            'code',
+            'source_changed',
+          ),
+        ),
+      );
+      expect(input.cachedBytes, 262144);
+    },
+  );
+
+  test(
     'wire preserves opaque signature; Range seek reads exact bytes',
     () async {
       final server = await ProgressiveOrigin.start();
@@ -46,7 +204,10 @@ void main() {
         await input.read(400000, 5000),
         server.bytes.sublist(400000, 405000),
       );
-      expect(server.requests.last.headers['range'], 'bytes=400000-404999');
+      expect(
+        server.requests.last.headers['range'],
+        'bytes=400000-${server.bytes.length - 1}',
+      );
       expect(await input.read(200, 1000), server.bytes.sublist(200, 1200));
     },
   );

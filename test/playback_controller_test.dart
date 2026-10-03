@@ -23,6 +23,60 @@ import 'support/progressive_fixture.dart';
 
 void main() {
   test(
+    'source startup keeps reading past ordinary readiness deadline',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, remoteStrm: true);
+      addTearDown(api.dispose);
+      final engine = _FakeEngine();
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        readyTimeout: const Duration(milliseconds: 20),
+        sourceReadyIdleTimeout: const Duration(milliseconds: 200),
+      );
+      addTearDown(controller.shutdown);
+      final start = controller.start(subtitleDisabled: true);
+      await _waitUntil(
+        () => controller.state.phase == PlaybackPhase.waitingForReady,
+      );
+      final request = controller.state.plan!.sourceRequest!;
+      for (var i = 0; i < 5; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        request.startupProgress.recordBytes(9000000000 + i * 1048576, 1048576);
+        expect(controller.state.phase, PlaybackPhase.waitingForReady);
+      }
+      engine.durationController.add(const Duration(hours: 1));
+      await start;
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(engine.openUris, hasLength(1));
+    },
+  );
+
+  test(
+    'shutdown cancels source readiness without waiting for idle timeout',
+    () async {
+      final requests = <RequestOptions>[];
+      final api = _api(requests, remoteStrm: true);
+      addTearDown(api.dispose);
+      final controller = _controller(
+        api: api,
+        engine: _FakeEngine(),
+        item: _plainItem,
+        sourceReadyIdleTimeout: const Duration(seconds: 15),
+      );
+      final start = controller.start(subtitleDisabled: true);
+      await _waitUntil(
+        () => controller.state.phase == PlaybackPhase.waitingForReady,
+      );
+      await controller.shutdown();
+      await start.timeout(const Duration(seconds: 1));
+      expect(controller.state.phase, PlaybackPhase.idle);
+    },
+  );
+
+  test(
     'source runtime seek recovery reuses snapshot and reporting cycle',
     () async {
       final requests = <RequestOptions>[];
@@ -1973,6 +2027,7 @@ PlaybackController _controller({
   required _FakeEngine engine,
   required EmbyItem item,
   Duration readyTimeout = const Duration(seconds: 1),
+  Duration? sourceReadyIdleTimeout,
   Duration trackWaitTimeout = const Duration(seconds: 2),
   Duration lateSubtitleTrackWaitTimeout = const Duration(seconds: 8),
   Duration seekCallTimeout = const Duration(seconds: 8),
@@ -1996,6 +2051,8 @@ PlaybackController _controller({
   reporter: reporter ?? PlaybackSessionReporter(api: api, item: item),
   playbackHeaders: api.playbackHeaders,
   readyTimeout: readyTimeout,
+  sourceReadyIdleTimeout: sourceReadyIdleTimeout ?? readyTimeout,
+  sourceReadyTimeout: const Duration(seconds: 3),
   trackWaitTimeout: trackWaitTimeout,
   lateSubtitleTrackWaitTimeout: lateSubtitleTrackWaitTimeout,
   seekCallTimeout: seekCallTimeout,
