@@ -247,6 +247,7 @@ enum AutomaticPlaybackOpenReason {
   cacheSafetyReopen,
   runtimeSameMethodRecovery,
   runtimeTranscodeRecovery,
+  progressiveInputFallback,
 }
 
 enum PlaybackControlOperationPriority {

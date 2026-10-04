@@ -49,11 +49,31 @@ class PlaybackResourceRequest {
     this.isSessionActive,
     StrmTrace? trace,
     this.diagnosticTask,
-  }) : trace = trace ?? StrmTrace(),
+  }) : isProgressive = false,
+       trace = trace ?? StrmTrace(),
        headers = _validateHeaders(headers) {
     TokenRedactor.registerCredentials(rawUrl);
     TokenRedactor.registerCredentials(jsonEncode(headers));
     validateDestination(rawUrl, embyServer: embyServer);
+  }
+
+  /// A selected ordinary Emby progressive plan, never a STRM source path.
+  /// Callers must first establish finite, non-live progressive eligibility
+  /// from the same selected plan and bind its API/item attempt in [identity].
+  PlaybackResourceRequest.progressive({
+    required this.rawUrl,
+    required Map<String, String> headers,
+    required this.identity,
+    required this.embyServer,
+    this.isSessionActive,
+    StrmTrace? trace,
+    this.diagnosticTask,
+  }) : isProgressive = true,
+       trace = trace ?? StrmTrace(),
+       headers = _validateHeaders(headers, allowEmbyAuthentication: true) {
+    TokenRedactor.registerCredentials(rawUrl);
+    TokenRedactor.registerCredentials(jsonEncode(headers));
+    _validateProgressiveInitial();
   }
 
   final StrmTrace trace;
@@ -63,13 +83,239 @@ class PlaybackResourceRequest {
   final Map<String, String> headers;
   final PlaybackResourceIdentity identity;
   final Uri embyServer;
+  final bool isProgressive;
+  bool _nativeFallbackRevoked = false;
+
+  /// Sticky evidence for the entire selected request, including failed opens.
+  /// A native retry cannot safely replay authenticated URLs after a redirect
+  /// has demonstrated that their chain crosses the server's authority.
+  bool get allowsNativeFallback => isProgressive && !_nativeFallbackRevoked;
+
+  /// A policy/authentication/source-identity rejection remains disqualifying
+  /// even when it came from a suppressed speculative transfer.
+  void revokeNativeFallback() {
+    if (isProgressive) _nativeFallbackRevoked = true;
+  }
+
+  void markCrossOriginRedirect() {
+    revokeNativeFallback();
+  }
+
   final bool Function()? isSessionActive;
   bool get sessionActive => isSessionActive?.call() ?? true;
 
   @override
-  String toString() => 'PlaybackResourceRequest(sourceDirect)';
+  String toString() => isProgressive
+      ? 'PlaybackResourceRequest(progressive)'
+      : 'PlaybackResourceRequest(sourceDirect)';
+
+  /// Validate every request, including redirects, against this exact input's
+  /// authority. A separate input constructor argument cannot widen it.
+  void validateTarget(String raw) {
+    if (!isProgressive) {
+      validateDestination(raw, embyServer: embyServer);
+      return;
+    }
+    final uri = _validateNetworkDestination(raw);
+    final path = _progressivePath(
+      uri,
+      raw: raw,
+      strict: uri.origin == embyServer.origin,
+    );
+    if (_segmentedPath(path)) _invalid();
+    if (uri.origin == embyServer.origin) {
+      if (path != _progressivePath(Uri.parse(rawUrl), raw: rawUrl)) _invalid();
+      _validateSelectedQuery(uri, redirect: true);
+    } else if (RegExp(
+      r'(^|/)(videos/[^/]+/(stream|master|main|hls|hls1)(\.|/|$)|items/[^/]+/(download|file)(/|$))',
+      caseSensitive: false,
+    ).hasMatch(path)) {
+      _invalid();
+    }
+  }
+
+  /// DNS validation uses the same literal-address rules as admission without
+  /// pretending the resolved IP is a newly authorized server URL.
+  void validateResolvedAddress(InternetAddress address) {
+    final host = address.type == InternetAddressType.IPv6
+        ? '[${address.address}]'
+        : address.address;
+    _validateNetworkDestination('http://$host/');
+  }
+
+  /// Once a redirect chain leaves the authenticated origin, credentials are
+  /// not restored on return. Preserve unrelated opaque URL signing syntax.
+  String redirectTarget(String raw, {required bool credentialsAllowed}) {
+    if (!isProgressive || credentialsAllowed) return raw;
+    _validateNetworkDestination(raw);
+    final question = raw.indexOf('?');
+    if (question < 0) return raw;
+    final original = Uri.parse(rawUrl);
+    final secrets = <String>{
+      for (final entry in original.queryParametersAll.entries)
+        if (_credentialQueryKeys.contains(entry.key.toLowerCase()))
+          ...entry.value.where((value) => value.isNotEmpty),
+      for (final entry in headers.entries)
+        if (_credentialHeaderKeys.contains(entry.key.toLowerCase()) &&
+            entry.value.isNotEmpty)
+          entry.value,
+    };
+    try {
+      final kept = raw.substring(question + 1).split('&').where((part) {
+        final equals = part.indexOf('=');
+        final name = Uri.decodeQueryComponent(
+          equals < 0 ? part : part.substring(0, equals),
+        ).toLowerCase();
+        final value = equals < 0
+            ? ''
+            : Uri.decodeQueryComponent(part.substring(equals + 1));
+        return !_credentialQueryKeys.contains(name) && !secrets.contains(value);
+      }).toList();
+      return '${raw.substring(0, question)}${kept.isEmpty ? '' : '?${kept.join('&')}'}';
+    } on FormatException {
+      _invalid();
+    }
+  }
+
+  static const _credentialQueryKeys = {
+    'api_key',
+    'api-key',
+    'apikey',
+    'token',
+    'accesstoken',
+    'x-emby-token',
+    'x-mediabrowser-token',
+    'x-emby-authorization',
+    'authorization',
+    'access_token',
+  };
+  static const _credentialHeaderKeys = {
+    'x-emby-token',
+    'x-mediabrowser-token',
+    'x-emby-authorization',
+    'authorization',
+    'cookie',
+  };
+
+  void _validateProgressiveInitial() {
+    final uri = _validateNetworkDestination(rawUrl);
+    _validateNetworkDestination(embyServer.toString());
+    if (embyServer.hasQuery ||
+        embyServer.hasFragment ||
+        uri.origin != embyServer.origin ||
+        identity.itemId.isEmpty ||
+        RegExp(r'[/\\%?#\s]').hasMatch(identity.itemId) ||
+        identity.sourceId.isEmpty) {
+      _invalid();
+    }
+    final base = _progressivePath(embyServer).replaceFirst(RegExp(r'/+$'), '');
+    final path = _progressivePath(uri, raw: rawUrl);
+    final segments = path.startsWith('$base/')
+        ? path.substring(base.length + 1).split('/')
+        : const <String>[];
+    // Base paths and item IDs are exact, while Emby's resource names are
+    // case-insensitive. Only the selected item's progressive stream is eligible.
+    if (segments.length != 3 ||
+        segments[0].toLowerCase() != 'videos' ||
+        segments[1] != identity.itemId ||
+        !RegExp(
+          r'^stream(?:\.(?:mp4|m4v|mov|mkv|webm|avi|ts|m2ts|mts))?$',
+          caseSensitive: false,
+        ).hasMatch(segments[2])) {
+      _invalid();
+    }
+    _validateSelectedQuery(uri);
+  }
+
+  void _validateSelectedQuery(Uri uri, {bool redirect = false}) {
+    try {
+      final selected = <String, List<String>>{
+        for (final entry in Uri.parse(rawUrl).queryParametersAll.entries)
+          entry.key.toLowerCase(): entry.value,
+      };
+      final target = <String, List<String>>{};
+      for (final entry in uri.queryParametersAll.entries) {
+        final name = entry.key.toLowerCase();
+        if (target.containsKey(name)) _invalid();
+        target[name] = entry.value;
+        if (name == 'mediasourceid' &&
+            entry.value.any((value) => value != identity.sourceId)) {
+          _invalid();
+        }
+        if (name == 'livestreamid' ||
+            (name == 'transcodingprotocol' &&
+                entry.value.any(
+                  (value) =>
+                      const {'hls', 'dash'}.contains(value.toLowerCase()),
+                ))) {
+          _invalid();
+        }
+      }
+      if (redirect) {
+        for (final key in const {
+          'mediasourceid',
+          'playsessionid',
+          'static',
+          'audiostreamindex',
+          'subtitlestreamindex',
+          'starttimeticks',
+        }) {
+          if (jsonEncode(selected[key]) != jsonEncode(target[key])) _invalid();
+        }
+      }
+    } on FormatException {
+      _invalid();
+    }
+  }
+
+  static String _progressivePath(Uri uri, {String? raw, bool strict = true}) {
+    try {
+      var encoded = uri.path;
+      if (raw != null) {
+        final start = raw.indexOf(RegExp(r'[/?#]'), raw.indexOf('://') + 3);
+        final question = raw.indexOf('?', start < 0 ? 0 : start);
+        encoded = start < 0 || raw[start] != '/'
+            ? ''
+            : raw.substring(start, question < 0 ? raw.length : question);
+      }
+      final path = Uri.decodeComponent(encoded);
+      if (strict &&
+          (RegExp(r'[\x00-\x20\x7f\\%]').hasMatch(path) ||
+              path.split('/').any((part) => part == '.' || part == '..') ||
+              RegExp(r'%2f|%5c', caseSensitive: false).hasMatch(encoded))) {
+        _invalid();
+      }
+      return path;
+    } on FormatException {
+      _invalid();
+    }
+  }
+
+  static bool _segmentedPath(String path) => RegExp(
+    r'\.(strm|m3u8?|mpd|ismc?)(/|$)|(^|/)(hls|hls1|dash|manifest)(/|\.|$)',
+    caseSensitive: false,
+  ).hasMatch(path);
 
   static void validateDestination(String raw, {required Uri embyServer}) {
+    final uri = _validateNetworkDestination(raw);
+    if (uri.origin == embyServer.origin) {
+      var base = embyServer.path.replaceFirst(RegExp(r'/+$'), '');
+      if (base == '/') base = '';
+      final path = Uri.decodeComponent(uri.path).toLowerCase();
+      final prefix = '${base.toLowerCase()}/';
+      if (path.startsWith(prefix)) {
+        final resource = path.substring(prefix.length);
+        if (RegExp(
+              r'^videos/[^/]+/(stream|master|main|hls|hls1)(\.|/|$)',
+            ).hasMatch(resource) ||
+            RegExp(r'^items/[^/]+/(download|file)(/|$)').hasMatch(resource)) {
+          _invalid();
+        }
+      }
+    }
+  }
+
+  static Uri _validateNetworkDestination(String raw) {
     final uri = Uri.tryParse(raw);
     if (raw.isEmpty ||
         RegExp(r'[\x00-\x20\x7f\\]').hasMatch(raw) ||
@@ -115,24 +361,13 @@ class PlaybackResourceRequest {
       // interpretation (127.1, integer, octal, hexadecimal).
       _invalid();
     }
-    if (uri.origin == embyServer.origin) {
-      var base = embyServer.path.replaceFirst(RegExp(r'/+$'), '');
-      if (base == '/') base = '';
-      final path = Uri.decodeComponent(uri.path).toLowerCase();
-      final prefix = '${base.toLowerCase()}/';
-      if (path.startsWith(prefix)) {
-        final resource = path.substring(prefix.length);
-        if (RegExp(
-              r'^videos/[^/]+/(stream|master|main|hls|hls1)(\.|/|$)',
-            ).hasMatch(resource) ||
-            RegExp(r'^items/[^/]+/(download|file)(/|$)').hasMatch(resource)) {
-          _invalid();
-        }
-      }
-    }
+    return uri;
   }
 
-  static Map<String, String> _validateHeaders(Map<String, String> headers) {
+  static Map<String, String> _validateHeaders(
+    Map<String, String> headers, {
+    bool allowEmbyAuthentication = false,
+  }) {
     final names = <String>{};
     const reserved = {
       'host',
@@ -147,15 +382,18 @@ class PlaybackResourceRequest {
       'trailer',
       'upgrade',
       'range',
-      'x-emby-token',
-      'x-emby-authorization',
-      'x-mediabrowser-token',
     };
     for (final entry in headers.entries) {
       final key = entry.key.toLowerCase();
       if (!RegExp(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$").hasMatch(entry.key) ||
           RegExp(r'[\x00-\x1f\x7f]').hasMatch(entry.value) ||
           reserved.contains(key) ||
+          (!allowEmbyAuthentication &&
+              const {
+                'x-emby-token',
+                'x-emby-authorization',
+                'x-mediabrowser-token',
+              }.contains(key)) ||
           !names.add(key)) {
         _invalid();
       }

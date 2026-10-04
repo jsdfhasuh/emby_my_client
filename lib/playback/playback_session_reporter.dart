@@ -36,7 +36,7 @@ class PlaybackSessionReporter implements PlaybackReporter {
     _cycle = _PlaybackReportingCycle(
       plan,
       _retirement,
-      trace ?? plan.sourceRequest?.trace,
+      trace ?? plan.controlledInputRequest?.trace,
     );
   }
 

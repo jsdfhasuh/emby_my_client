@@ -124,6 +124,37 @@ class SourceHttpInput {
     return result;
   }
 
+  void _recordPolicyFailure(
+    Object error, {
+    required String stage,
+    int? status,
+  }) {
+    if (!request.isProgressive) return;
+    if (error is PlaybackResolveException) {
+      request.revokeNativeFallback();
+      return;
+    }
+    // Do not map cancellation here: a concurrently closed transfer may already
+    // have observed a disqualifying response, which must remain sticky.
+    final failure = SourceInputException.from(error, stage: stage);
+    if (const {
+          'destination',
+          'tls_certificate',
+          'tls_downgrade',
+          'redirect_limit',
+          'redirect_loop',
+          'redirect_location',
+          'source_denied',
+          'source_changed',
+          'invalid_range',
+          'body_limit',
+        }.contains(failure.reason) ||
+        (failure.reason == 'range_unsupported' &&
+            !const {200, 206}.contains(failure.safeHttp ?? status))) {
+      request.revokeNativeFallback();
+    }
+  }
+
   SourceInputException _failure(
     Object error, [
     StackTrace? stack,
@@ -131,6 +162,7 @@ class SourceHttpInput {
   ]) {
     final stage = transfer?.stage ?? _stage;
     final status = transfer?.responseStatus ?? _responseStatus;
+    _recordPolicyFailure(error, stage: stage, status: status);
     final mapped = SourceInputException.from(
       error is PlaybackResolveException
           ? const SourceInputException('destination')
@@ -283,10 +315,9 @@ class SourceHttpInput {
       final visited = <String>{};
       for (var jumps = 0; jumps <= 5; jumps++) {
         if (_closed) throw const SourceInputException('cancelled');
-        PlaybackResourceRequest.validateDestination(
-          raw,
-          embyServer: embyServer,
-        );
+        includeHeaders = includeHeaders && Uri.parse(raw).origin == origin;
+        raw = request.redirectTarget(raw, credentialsAllowed: includeHeaders);
+        request.validateTarget(raw);
         if (!visited.add(raw)) {
           throw const SourceInputException('redirect_loop');
         }
@@ -328,20 +359,33 @@ class SourceHttpInput {
         }, sampled: response.statusCode == 200);
         if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
           final location = response.headers.value(HttpHeaders.locationHeader);
-          await response.listen((_) {}).cancel();
-          if (location == null || jumps == 5) {
-            throw const SourceInputException('redirect_limit');
+          late final String next;
+          var cross = false;
+          try {
+            if (location == null) {
+              throw const SourceInputException('redirect_limit');
+            }
+            next = resolveRawLocation(raw, location);
+            cross = Uri.parse(next).origin != uri.origin;
+            if (cross) request.markCrossOriginRedirect();
+            if (jumps == 5) throw const SourceInputException('redirect_limit');
+          } catch (error) {
+            _recordPolicyFailure(error, stage: 'redirect');
+            rethrow;
+          } finally {
+            // Record redirect evidence before cancellation can yield to a
+            // timeout/stop and its fallback decision. Never drain this body.
+            await response.listen((_) {}).cancel();
           }
+          if (_closed) throw const SourceInputException('cancelled');
           redirects++;
           _stage = 'redirect';
-          final next = resolveRawLocation(raw, location);
           _detail('redirect', {
             'fromUrl': raw,
             'location': location,
             'toUrl': next,
             'http': response.statusCode,
           });
-          final cross = Uri.parse(next).origin != uri.origin;
           _stageEvent('redirect', {
             'outcome': 'succeeded',
             'http': response.statusCode,
@@ -357,8 +401,7 @@ class SourceHttpInput {
         }
         if (response.statusCode != 200 ||
             response.contentLength > 10 * 1024 * 1024) {
-          await response.listen((_) {}).cancel();
-          throw SourceInputException(
+          final failure = SourceInputException(
             response.statusCode == 401 || response.statusCode == 403
                 ? 'source_denied'
                 : response.contentLength > 10 * 1024 * 1024
@@ -367,6 +410,9 @@ class SourceHttpInput {
             stage: 'subtitle_download',
             httpStatus: response.statusCode,
           );
+          _recordPolicyFailure(failure, stage: 'subtitle_download');
+          await response.listen((_) {}).cancel();
+          throw failure;
         }
         _stage = 'body_read';
         final bytes = BytesBuilder(copy: false);
@@ -465,6 +511,7 @@ class SourceHttpInput {
   Future<Uint8List> _read(int offset, int count) async {
     if (_closed) throw const SourceInputException('cancelled');
     if (offset < 0 || count <= 0 || count > 262144 || offset >= size) {
+      request.revokeNativeFallback();
       throw const SourceInputException('invalid_range');
     }
     if (_lastReadEnd != null && offset != _lastReadEnd) {
@@ -713,6 +760,11 @@ class SourceHttpInput {
       }
       return _TransferResult(bytes: bytes);
     } catch (error, stack) {
+      _recordPolicyFailure(
+        error,
+        stage: transfer.stage,
+        status: transfer.responseStatus,
+      );
       if (!transfer.closed || timedOut) _readAheadPolicy.failed();
       if (!transfer.demand && !_closed && (!transfer.cancelled || timedOut)) {
         // Background failures must not fail playback. Retry on demand using
@@ -757,10 +809,12 @@ class SourceHttpInput {
     final visited = <String>{};
     for (var redirects = 0; redirects <= 5; redirects++) {
       if (transfer.closed) throw const SourceInputException('cancelled');
-      PlaybackResourceRequest.validateDestination(raw, embyServer: embyServer);
+      credentialsAllowed =
+          credentialsAllowed && Uri.parse(raw).origin == originalOrigin;
+      raw = request.redirectTarget(raw, credentialsAllowed: credentialsAllowed);
+      request.validateTarget(raw);
       if (!visited.add(raw)) throw const SourceInputException('redirect_loop');
       final uri = OpaqueHttpUri(raw);
-      credentialsAllowed = credentialsAllowed && uri.origin == originalOrigin;
       transfer.requestNumber = request.trace.nextRequest();
       transfer.responseStatus = null;
       transfer.stage = 'connect';
@@ -804,21 +858,35 @@ class SourceHttpInput {
       }, sampled: response.statusCode == 206);
       if (const [301, 302, 303, 307, 308].contains(response.statusCode)) {
         final location = response.headers.value(HttpHeaders.locationHeader);
-        // Cancel, don't drain an unbounded redirect body.
-        await response.listen((_) {}).cancel();
-        if (location == null || redirects == 5) {
-          throw const SourceInputException('redirect_limit');
+        late final String next;
+        var cross = false;
+        try {
+          if (location == null) {
+            throw const SourceInputException('redirect_limit');
+          }
+          next = resolveRawLocation(raw, location);
+          cross = Uri.parse(next).origin != uri.origin;
+          if (cross) request.markCrossOriginRedirect();
+          if (redirects == 5) {
+            throw const SourceInputException('redirect_limit');
+          }
+        } catch (error) {
+          _recordPolicyFailure(error, stage: 'redirect');
+          rethrow;
+        } finally {
+          // Sticky evidence must precede this await: stop/timeout can decide
+          // whether a native retry is safe while cancellation is unsettled.
+          await response.listen((_) {}).cancel();
         }
+        if (transfer.closed) throw const SourceInputException('cancelled');
         this.redirects++;
         transfer.stage = 'redirect';
-        final next = resolveRawLocation(raw, location);
         transfer.detail('redirect', {
           'fromUrl': raw,
           'location': location,
           'toUrl': next,
           'http': response.statusCode,
         });
-        final cross = Uri.parse(next).origin != uri.origin;
         transfer.stageEvent('redirect', {
           'outcome': 'succeeded',
           'http': response.statusCode,
@@ -841,14 +909,16 @@ class SourceHttpInput {
       if (response.statusCode != 206 ||
           range == null ||
           (encoding != null && encoding != 'identity')) {
-        await response.listen((_) {}).cancel();
-        throw SourceInputException(
+        final failure = SourceInputException(
           response.statusCode == 401 || response.statusCode == 403
               ? 'source_denied'
               : 'range_unsupported',
           stage: 'range_response',
           httpStatus: response.statusCode,
         );
+        _recordPolicyFailure(failure, stage: 'range_response');
+        await response.listen((_) {}).cancel();
+        throw failure;
       }
       final start = int.parse(range[1]!);
       final end = int.parse(range[2]!);
@@ -858,22 +928,26 @@ class SourceHttpInput {
           end >= offset + count ||
           total <= end ||
           (_size != null && _size != total)) {
-        await response.listen((_) {}).cancel();
-        throw SourceInputException(
+        final failure = SourceInputException(
           'source_changed',
           httpStatus: response.statusCode,
         );
+        _recordPolicyFailure(failure, stage: 'range_response');
+        await response.listen((_) {}).cancel();
+        throw failure;
       }
       final etag = response.headers.value(HttpHeaders.etagHeader);
       final validator = etag != null && !etag.startsWith('W/')
           ? etag
           : response.headers.value(HttpHeaders.lastModifiedHeader);
       if (_validator != null && validator != _validator) {
-        await response.listen((_) {}).cancel();
-        throw SourceInputException(
+        final failure = SourceInputException(
           'source_changed',
           httpStatus: response.statusCode,
         );
+        _recordPolicyFailure(failure, stage: 'range_response');
+        await response.listen((_) {}).cancel();
+        throw failure;
       }
       _validator ??= validator;
       _size = total;
@@ -969,13 +1043,7 @@ class SourceHttpInput {
     }
     // Validate resolved addresses too: DNS must not bypass the literal checks.
     for (final address in addresses) {
-      final host = address.type == InternetAddressType.IPv6
-          ? '[${address.address}]'
-          : address.address;
-      PlaybackResourceRequest.validateDestination(
-        'http://$host/',
-        embyServer: embyServer,
-      );
+      request.validateResolvedAddress(address);
     }
     transfer.stage = 'connect';
     transfer.detail('connect_attempt', {

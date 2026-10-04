@@ -1840,7 +1840,9 @@ void main() {
     final api = _api(requests);
     final diagnostics = <String>[];
     final session = PlaybackItemSession.forTest('sensitive-session-id');
-    for (final reason in AutomaticPlaybackOpenReason.values) {
+    for (final reason in AutomaticPlaybackOpenReason.values.take(
+      PlaybackItemSession.maximumAutomaticOpenCount,
+    )) {
       expect(session.tryReserveAutomaticOpen(reason), isTrue);
     }
     final controller = _controller(

@@ -517,13 +517,22 @@ void main() {
 
   test('automatic open reasons are one-shot and bounded', () {
     final session = PlaybackItemSession.forTest('session');
-    for (final reason in AutomaticPlaybackOpenReason.values) {
+    for (final reason in AutomaticPlaybackOpenReason.values.take(
+      PlaybackItemSession.maximumAutomaticOpenCount,
+    )) {
       expect(session.tryReserveAutomaticOpen(reason), isTrue);
       expect(session.tryReserveAutomaticOpen(reason), isFalse);
     }
     expect(
       session.automaticOpenCount,
       PlaybackItemSession.maximumAutomaticOpenCount,
+    );
+    expect(
+      session.tryReserveAutomaticOpen(
+        AutomaticPlaybackOpenReason.progressiveInputFallback,
+      ),
+      isFalse,
+      reason: 'Adding optional input fallback must not expand the open budget',
     );
   });
 }

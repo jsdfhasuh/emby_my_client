@@ -80,7 +80,7 @@ class EmbyStreamResolver implements PlaybackStreamResolver {
         'task': generation,
         'elapsedMs': watch.elapsedMilliseconds,
         'route': plan.isSourceDirect ? 'source_direct' : 'server',
-        'inputMode': plan.isSourceDirect ? 'stream_cb' : 'player',
+        'inputMode': plan.usesControlledInput ? 'stream_cb' : 'player',
         'fixedSource': true,
       });
       return plan;
