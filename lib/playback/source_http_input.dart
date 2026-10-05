@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'playback_resource_request.dart';
 import 'source_input_failure.dart';
 import 'source_read_ahead_policy.dart';
+import 'source_socket_connector.dart';
 import 'strm_direct_play_policy.dart';
 export 'source_input_failure.dart';
 
@@ -1046,22 +1047,30 @@ class SourceHttpInput {
       request.validateResolvedAddress(address);
     }
     transfer.stage = 'connect';
-    transfer.detail('connect_attempt', {
-      'requestUrl': transfer.target,
-      'host': uri.host,
-      'ip': addresses.first.address,
-      'port': uri.port,
-    });
-    final task = await Socket.startConnect(addresses.first, uri.port);
+    final task = connectSourceAddresses(
+      addresses,
+      uri.port,
+      onAttempt: (address) => transfer.detail('connect_attempt', {
+        'requestUrl': transfer.target,
+        'host': uri.host,
+        'ip': address.address,
+        'port': uri.port,
+      }),
+    );
     Socket? active;
     var cancelled = false;
     final future = task.socket.then<Socket>((socket) async {
-      transfer.stageEvent('connect', {'outcome': 'succeeded'});
       active = socket;
       if (transfer.closed || cancelled) {
         socket.destroy();
         throw const SourceInputException('cancelled');
       }
+      transfer.stageEvent('connect', {
+        'outcome': 'succeeded',
+        'family': socket.remoteAddress.type == InternetAddressType.IPv6
+            ? 'ipv6'
+            : 'ipv4',
+      });
       if (uri.scheme == 'https') {
         transfer.stage = 'tls';
         final secured = await SecureSocket.secure(socket, host: uri.host);
