@@ -16,6 +16,7 @@ on:
       - 'native/**'
       - 'scripts/android/**'
       - 'scripts/ios/**'
+      - 'scripts/release/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
       - 'Gemfile'
@@ -168,6 +169,9 @@ jobs:
 
       - name: Test
         run: flutter test
+
+      - name: Test release artifact preparation
+        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
 
       - name: Verify playback cache event safety
         run: >-
@@ -733,3 +737,68 @@ jobs:
             build/ios/artifacts/*.plist
             build/ios/artifacts/entitlements-fakesign/**
             build/ios/artifacts/entitlements-final/**
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [quality-and-android, ios-device-build]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download universal Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-debug-apk-${{ github.run_number }}
+          path: build/release-input/android-universal
+
+      - name: Download split Android APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: android-debug-split-apks-${{ github.run_number }}
+          path: build/release-input/android-split
+
+      - name: Download iPadOS IPA and checksum
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-core-ipa-${{ github.run_number }}
+          path: build/release-input/ios
+
+      - name: Verify and prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/prepare_release.py \
+            --artifacts-dir build/release-input \
+            --output-dir build/release \
+            --notes-path build/release-notes.md \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --commit "$GITHUB_SHA" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Publish packages to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="build-$GITHUB_RUN_NUMBER"
+          title="Emby Client build #$GITHUB_RUN_NUMBER"
+          if target="$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)"; then
+            if [[ "$target" != "$GITHUB_SHA" ]]; then
+              echo "Existing release targets a different commit: $target" >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title "$title" --notes-file build/release-notes.md --draft
+          fi
+          gh release upload "$tag" build/release/* --clobber
+          gh release edit "$tag" --title "$title" \
+            --notes-file build/release-notes.md --draft=false --latest
+          release_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag"
+          printf '## Download packages\n\n[GitHub Release](%s)\n' "$release_url" >> "$GITHUB_STEP_SUMMARY"

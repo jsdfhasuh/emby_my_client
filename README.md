@@ -19,6 +19,15 @@
 [Moonfin-Core](https://github.com/Moonfin-Client/Moonfin-Core)
 的服务器适配层和媒体流解析思路，当前项目保持为独立、精简的 Android 实现。
 
+## 下载构建
+
+安装包在 [GitHub Releases](https://github.com/jsdfhasuh/emby_my_client/releases/latest)
+中下载。`main` 每次构建通过测试、Android 原生检查和 iPadOS 打包检查后，会自动发布
+`build-构建号`，附上通用及分架构 Debug APK、TrollStore IPA 和 SHA-256 校验文件。
+PR 和失败构建不会发布，原始诊断产物仍保留在 Actions Artifacts 中。
+
+Android APK 使用调试签名；iPadOS IPA 面向 TrollStore，不是 App Store 安装包。
+
 ## 开发
 
 需要 Flutter 3.38 或更高版本，以及可用的 Android SDK。
