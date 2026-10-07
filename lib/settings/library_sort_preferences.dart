@@ -12,16 +12,22 @@ const defaultLibrarySortPreference = LibrarySortPreference(
 );
 
 class LibrarySortPreference {
-  const LibrarySortPreference({required this.sortBy, required this.sortOrder});
+  const LibrarySortPreference({
+    required this.sortBy,
+    required this.sortOrder,
+    this.scope = LibraryBrowseScope.media,
+  });
 
   final LibrarySortBy sortBy;
   final LibrarySortOrder sortOrder;
+  final LibraryBrowseScope scope;
 
   bool get isDefault => this == defaultLibrarySortPreference;
 
   Map<String, String> toJson() => {
     'sortBy': sortBy.name,
     'sortOrder': sortOrder.name,
+    'scope': scope.name,
   };
 
   static LibrarySortPreference? fromJson(Object? value) {
@@ -29,7 +35,16 @@ class LibrarySortPreference {
     final sortBy = _sortByFromName(value['sortBy']);
     final sortOrder = _sortOrderFromName(value['sortOrder']);
     if (sortBy == null || sortOrder == null) return null;
-    return LibrarySortPreference(sortBy: sortBy, sortOrder: sortOrder);
+    // Older records contain only sorting; facet detail pages are not root tabs.
+    final scope = LibraryBrowseScope.values
+        .where((candidate) => candidate != LibraryBrowseScope.facet)
+        .where((candidate) => candidate.name == value['scope'])
+        .firstOrNull;
+    return LibrarySortPreference(
+      sortBy: sortBy,
+      sortOrder: sortOrder,
+      scope: scope ?? LibraryBrowseScope.media,
+    );
   }
 
   @override
@@ -37,10 +52,11 @@ class LibrarySortPreference {
       identical(this, other) ||
       other is LibrarySortPreference &&
           sortBy == other.sortBy &&
-          sortOrder == other.sortOrder;
+          sortOrder == other.sortOrder &&
+          scope == other.scope;
 
   @override
-  int get hashCode => Object.hash(sortBy, sortOrder);
+  int get hashCode => Object.hash(sortBy, sortOrder, scope);
 }
 
 LibrarySortBy? _sortByFromName(Object? value) {

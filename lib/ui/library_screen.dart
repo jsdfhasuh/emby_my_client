@@ -326,6 +326,7 @@ Future<LibraryBrowseState> restoreLibraryRootSortState({
     );
     if (preference == null) return defaults;
     return defaults.copyWith(
+      scope: preference.scope,
       sortBy: preference.sortBy,
       sortOrder: preference.sortOrder,
     );
@@ -1154,6 +1155,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   late final LibraryScrollPositionController _positionController;
   late final RealtimeRefreshBinding _realtimeRefresh;
   late LibraryBrowseState _state;
+  late LibrarySortPreference _rootPreference;
 
   bool _loading = false;
   Future<void>? _activeLoad;
@@ -1219,12 +1221,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
 
   bool get _isRoot => widget._pageKind == _LibraryBrowsePageKind.root;
 
-  bool get _canPersistRootSort =>
-      _isRoot &&
-      switch (_state.scope) {
-        LibraryBrowseScope.media || LibraryBrowseScope.favorites => true,
-        _ => false,
-      };
+  bool get _canPersistRootSort => _isRoot && _state.scope.supportsSorting;
 
   Set<LibraryBrowseScope> get _visibleScopes =>
       widget.profile.visibleScopes(widget.categorySettings);
@@ -1406,10 +1403,21 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   @override
   void initState() {
     super.initState();
+    _rootPreference = LibrarySortPreference(
+      scope: widget.initialState.scope,
+      sortBy: widget.initialState.sortBy,
+      sortOrder: widget.initialState.sortOrder,
+    );
     _state = reduceLibraryBrowseState(
       widget.initialState,
       _capabilitiesEvent(),
     );
+    if (_isRoot && _state.scope.supportsSorting) {
+      _state = _state.copyWith(
+        sortBy: _rootPreference.sortBy,
+        sortOrder: _rootPreference.sortOrder,
+      );
+    }
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     widget.libraryScanService?.addListener(_onLibraryScanChanged);
@@ -2362,15 +2370,15 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     }
   }
 
-  Future<void> _saveRootSortPreference(LibraryBrowseState state) async {
+  Future<void> _saveRootSortPreference(LibrarySortPreference preference) async {
     final store = widget.sortPreferenceStore;
     final libraryId = widget.view.id.trim();
-    if (!_canPersistRootSort || store == null || libraryId.isEmpty) return;
+    if (!_isRoot || store == null || libraryId.isEmpty) return;
     try {
       await store.save(
         ServerScope.fromSession(widget.api.session),
         libraryId,
-        LibrarySortPreference(sortBy: state.sortBy, sortOrder: state.sortOrder),
+        preference,
       );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
@@ -2403,10 +2411,38 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
 
   void _dispatch(LibraryBrowseEvent event) {
     final shouldSaveSort = _canPersistRootSort && event is LibrarySortChanged;
+    final shouldSaveScope =
+        _isRoot &&
+        event is LibraryScopeSelected &&
+        event.scope != LibraryBrowseScope.facet;
     final shouldClearSort = _isRoot && event is LibraryBrowseReset;
-    final next = reduceLibraryBrowseState(_state, event);
-    if (shouldSaveSort) unawaited(_saveRootSortPreference(next));
-    if (shouldClearSort) unawaited(_clearRootSortPreference());
+    var next = reduceLibraryBrowseState(_state, event);
+    if (shouldClearSort) {
+      _rootPreference = defaultLibrarySortPreference;
+      unawaited(_clearRootSortPreference());
+    } else if (_isRoot &&
+        next.scope != _state.scope &&
+        next.scope.supportsSorting) {
+      // Category/tag lists normalize their sort; keep the user's media sort.
+      next = normalizeLibraryBrowseState(
+        next.copyWith(
+          sortBy: _rootPreference.sortBy,
+          sortOrder: _rootPreference.sortOrder,
+        ),
+      );
+    }
+    if (shouldSaveSort || shouldSaveScope) {
+      _rootPreference = LibrarySortPreference(
+        scope: next.scope,
+        sortBy: next.scope.supportsSorting
+            ? next.sortBy
+            : _rootPreference.sortBy,
+        sortOrder: next.scope.supportsSorting
+            ? next.sortOrder
+            : _rootPreference.sortOrder,
+      );
+      unawaited(_saveRootSortPreference(_rootPreference));
+    }
     if (identical(next, _state) || next == _state) return;
     _cancelPendingLocalScanPositionRestore();
     _generation++;

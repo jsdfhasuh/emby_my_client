@@ -89,7 +89,7 @@ void main() {
     await _dispose(tester, api);
   });
 
-  testWidgets('hiding the selected directory returns to media defaults', (
+  testWidgets('hiding the selected directory preserves sorting in media', (
     tester,
   ) async {
     final api = _VisibilityApi();
@@ -117,7 +117,7 @@ void main() {
     expect(api.calls, hasLength(2));
     expect(api.calls.last.scope, LibraryBrowseScope.media);
     expect(api.calls.last.mediaType, LibraryMediaType.all);
-    expect(api.calls.last.sortBy, LibrarySortBy.name);
+    expect(api.calls.last.sortBy, LibrarySortBy.runtime);
     await _dispose(tester, api);
   });
 

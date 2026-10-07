@@ -53,6 +53,67 @@ void main() {
     expect(value?.sortOrder, LibrarySortOrder.ascending);
   });
 
+  test(
+    'default sorting still persists a non-default tab across store instances',
+    () async {
+      final store = SharedPreferencesLibrarySortPreferenceStore(
+        preferences: backend.preferences,
+      );
+      const preference = LibrarySortPreference(
+        scope: LibraryBrowseScope.directory,
+        sortBy: LibrarySortBy.name,
+        sortOrder: LibrarySortOrder.ascending,
+      );
+      await store.save(_firstScope, _libraryA, preference);
+      final reopened = SharedPreferencesLibrarySortPreferenceStore(
+        preferences: backend.preferences,
+      );
+      expect(await reopened.load(_firstScope, _libraryA), preference);
+    },
+  );
+
+  test('legacy sorting records restore the media tab', () async {
+    await backend.preferences.setString(
+      _key(_firstScope),
+      jsonEncode({
+        _libraryA: {'sortBy': 'playCount', 'sortOrder': 'descending'},
+      }),
+    );
+    final store = SharedPreferencesLibrarySortPreferenceStore(
+      preferences: backend.preferences,
+    );
+    expect(await store.load(_firstScope, _libraryA), _playCountDescending);
+  });
+
+  test('invalid root tabs fall back to media without discarding sorting', () {
+    for (final scope in ['unknown', 'facet', 42]) {
+      expect(
+        LibrarySortPreference.fromJson({
+          'scope': scope,
+          'sortBy': 'playCount',
+          'sortOrder': 'descending',
+        }),
+        _playCountDescending,
+      );
+    }
+  });
+
+  test('every root tab round trips with sorting', () async {
+    final store = SharedPreferencesLibrarySortPreferenceStore(
+      preferences: backend.preferences,
+    );
+    for (final scope in LibraryBrowseScope.values) {
+      if (scope == LibraryBrowseScope.facet) continue;
+      final preference = LibrarySortPreference(
+        scope: scope,
+        sortBy: LibrarySortBy.dateAdded,
+        sortOrder: LibrarySortOrder.descending,
+      );
+      await store.save(_firstScope, _libraryA, preference);
+      expect(await store.load(_firstScope, _libraryA), preference);
+    }
+  });
+
   test('does not persist the default name ascending preference', () async {
     final store = SharedPreferencesLibrarySortPreferenceStore(
       preferences: backend.preferences,

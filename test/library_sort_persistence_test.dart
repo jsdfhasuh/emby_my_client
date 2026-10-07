@@ -128,6 +128,7 @@ void main() {
     expect(
       await store.load(_scope, _library.id),
       const LibrarySortPreference(
+        scope: LibraryBrowseScope.favorites,
         sortBy: LibrarySortBy.playCount,
         sortOrder: LibrarySortOrder.ascending,
       ),
@@ -135,7 +136,7 @@ void main() {
   });
 
   testWidgets(
-    'root directory sorting does not overwrite the stored media sort',
+    'root directory sorting persists the last selected sort and scope',
     (tester) async {
       final store = MemoryLibrarySortPreferenceStore();
       final api = _SortApi();
@@ -163,7 +164,154 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(await store.load(_scope, _library.id), _playCountDescending);
+      expect(
+        await store.load(_scope, _library.id),
+        const LibrarySortPreference(
+          scope: LibraryBrowseScope.directory,
+          sortBy: LibrarySortBy.dateAdded,
+          sortOrder: LibrarySortOrder.ascending,
+        ),
+      );
+    },
+  );
+
+  for (final collectionType in ['movies', 'homevideos', 'photos']) {
+    for (final fromHome in [true, false]) {
+      testWidgets(
+        '$collectionType restores directory and sorting on reentry from '
+        '${fromHome ? 'home' : 'libraries'}',
+        (tester) async {
+          final store = MemoryLibrarySortPreferenceStore();
+          final library = EmbyItem(
+            id: _library.id,
+            name: _library.name,
+            type: 'CollectionFolder',
+            collectionType: collectionType,
+            imageTags: const {},
+            backdropImageTags: const [],
+            genres: const [],
+            userData: const EmbyUserData(),
+          );
+          final api = _SortApi(library: library);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData.dark(useMaterial3: true),
+              home: Scaffold(
+                body: fromHome
+                    ? HomeScreen(
+                        api: api,
+                        categorySettings: _allCategories,
+                        sortPreferenceStore: store,
+                      )
+                    : LibraryScreen(
+                        api: api,
+                        categorySettings: _allCategories,
+                        sortPreferenceStore: store,
+                      ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(library.name));
+          await tester.pumpAndSettle();
+          expect(api.mediaCalls.single.sortBy, LibrarySortBy.name);
+          expect(api.mediaCalls.single.sortOrder, LibrarySortOrder.ascending);
+          expect(api.directoryCalls, isEmpty);
+
+          await tester.tap(
+            find.byKey(const ValueKey('library-section-directories')),
+          );
+          await tester.pumpAndSettle();
+          await _selectSort(tester, 'dateAdded');
+          await tester.tap(
+            find.byKey(const ValueKey('library-sort-direction-button')),
+          );
+          await tester.pumpAndSettle();
+          await tester.pageBack();
+          await tester.pumpAndSettle();
+          api.mediaCalls.clear();
+          api.directoryCalls.clear();
+
+          await tester.tap(find.text(library.name));
+          await tester.pumpAndSettle();
+          expect(api.mediaCalls, isEmpty);
+          expect(api.directoryCalls.single.sortBy, LibrarySortBy.dateAdded);
+          expect(
+            api.directoryCalls.single.sortOrder,
+            LibrarySortOrder.descending,
+          );
+
+          await tester.tap(find.byKey(const ValueKey('library-section-media')));
+          await tester.pumpAndSettle();
+          expect(api.mediaCalls.single.sortBy, LibrarySortBy.dateAdded);
+          expect(api.mediaCalls.single.sortOrder, LibrarySortOrder.descending);
+          await tester.pageBack();
+          await tester.pumpAndSettle();
+          api.mediaCalls.clear();
+          api.directoryCalls.clear();
+          await tester.tap(find.text(library.name));
+          await tester.pumpAndSettle();
+          expect(api.directoryCalls, isEmpty);
+          expect(api.mediaCalls.single.sortBy, LibrarySortBy.dateAdded);
+          expect(api.mediaCalls.single.sortOrder, LibrarySortOrder.descending);
+        },
+      );
+    }
+  }
+
+  for (final scope in [LibraryBrowseScope.genres, LibraryBrowseScope.tags]) {
+    testWidgets(
+      '${scope.name} remembers its tab without losing media sorting',
+      (tester) async {
+        final store = MemoryLibrarySortPreferenceStore();
+        final api = _SortApi();
+        await tester.pumpWidget(_rootApp(api, store));
+        await tester.pumpAndSettle();
+        await _selectSort(tester, 'dateAdded');
+        await tester.tap(find.byKey(ValueKey('library-section-${scope.name}')));
+        await tester.pumpAndSettle();
+        final restored = await restoreLibraryRootSortState(
+          api: api,
+          libraryId: _library.id,
+          store: store,
+        );
+        expect(restored.scope, scope);
+        expect(restored.sortBy, LibrarySortBy.dateAdded);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(_rootApp(api, store, initialState: restored));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('library-section-media')));
+        await tester.pumpAndSettle();
+        expect(api.mediaCalls.last.sortBy, LibrarySortBy.dateAdded);
+        expect(
+          (await store.load(_scope, _library.id))?.scope,
+          LibraryBrowseScope.media,
+        );
+      },
+    );
+  }
+
+  testWidgets(
+    'hidden restored directory falls back to media with saved sorting',
+    (tester) async {
+      final api = _SortApi();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LibraryBrowseScreen.root(
+            api: api,
+            view: _library,
+            categorySettings: const LibraryCategorySettings(showFolders: false),
+            initialState: const LibraryBrowseState.directory(
+              sortBy: LibrarySortBy.dateAdded,
+              sortOrder: LibrarySortOrder.descending,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(api.directoryCalls, isEmpty);
+      expect(api.mediaCalls.single.sortBy, LibrarySortBy.dateAdded);
+      expect(api.mediaCalls.single.sortOrder, LibrarySortOrder.descending);
     },
   );
 
@@ -204,6 +352,33 @@ void main() {
     await _reset(tester);
 
     expect(await store.load(_scope, _library.id), isNull);
+  });
+
+  testWidgets('reset clears both the selected tab and remembered sorting', (
+    tester,
+  ) async {
+    final store = MemoryLibrarySortPreferenceStore();
+    final api = _SortApi();
+    await tester.pumpWidget(_rootApp(api, store));
+    await tester.pumpAndSettle();
+    await _selectSort(tester, 'dateAdded');
+    await tester.tap(find.byKey(const ValueKey('library-section-directories')));
+    await tester.pumpAndSettle();
+
+    await _reset(tester);
+    expect(await store.load(_scope, _library.id), isNull);
+    expect(
+      await restoreLibraryRootSortState(
+        api: api,
+        libraryId: _library.id,
+        store: store,
+      ),
+      const LibraryBrowseState(),
+    );
+    await tester.tap(find.byKey(const ValueKey('library-section-directories')));
+    await tester.pumpAndSettle();
+    expect(api.directoryCalls.last.sortBy, LibrarySortBy.name);
+    expect(api.directoryCalls.last.sortOrder, LibrarySortOrder.ascending);
   });
 
   testWidgets('preference load and save failures do not block browsing', (
@@ -478,20 +653,40 @@ class _CountingNavigatorObserver extends NavigatorObserver {
 }
 
 class _SortApi extends EmbyApi {
-  _SortApi() : super(_session, dio: Dio());
+  _SortApi({this.library = _library}) : super(_session, dio: Dio());
 
+  final EmbyItem library;
   final List<_MediaCall> mediaCalls = [];
+  final List<_MediaCall> directoryCalls = [];
 
   @override
   Future<HomeData> getHomeBase() async =>
-      const HomeData(views: [_library], resume: [], latestSections: []);
+      HomeData(views: [library], resume: const [], latestSections: const []);
 
   @override
   Future<HomeLatestSection?> getHomeLatestSection(EmbyItem library) async =>
       null;
 
   @override
-  Future<List<EmbyItem>> getViews() async => const [_library];
+  Future<List<EmbyItem>> getViews() async => [library];
+
+  @override
+  Future<EmbyItemPage> getLibraryGenres({
+    required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
+    int startIndex = 0,
+    int limit = 60,
+  }) async =>
+      const EmbyItemPage(items: [], rawItemCount: 0, totalRecordCount: 0);
+
+  @override
+  Future<EmbyItemPage> getLibraryTags({
+    required String parentId,
+    LibraryContentProfile profile = LibraryContentProfile.unknown,
+    int startIndex = 0,
+    int limit = 60,
+  }) async =>
+      const EmbyItemPage(items: [], rawItemCount: 0, totalRecordCount: 0);
 
   @override
   Future<EmbyItemPage> getLibraryMediaItems({
@@ -525,8 +720,16 @@ class _SortApi extends EmbyApi {
     int limit = 60,
     LibrarySortBy sortBy = LibrarySortBy.name,
     LibrarySortOrder sortOrder = LibrarySortOrder.ascending,
-  }) async =>
-      const EmbyItemPage(items: [_movie], rawItemCount: 1, totalRecordCount: 1);
+  }) async {
+    directoryCalls.add(
+      _MediaCall(sortBy: sortBy, sortOrder: sortOrder, parentId: parentId),
+    );
+    return const EmbyItemPage(
+      items: [_movie],
+      rawItemCount: 1,
+      totalRecordCount: 1,
+    );
+  }
 }
 
 class _MediaCall {
