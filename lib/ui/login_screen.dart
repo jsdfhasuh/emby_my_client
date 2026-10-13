@@ -244,6 +244,7 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _submit() async {
+    if (_isSubmitting) return;
     FocusScope.of(context).unfocus();
     if (!(_formKey.currentState?.validate() ?? false)) return;
     setState(() {
@@ -400,7 +401,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                               onTapOutside: _handleFieldTapOutside,
                               onFieldSubmitted: (_) => _submit(),
                               decoration: InputDecoration(
-                                labelText: '密码',
+                                labelText: '密码（可留空）',
+                                hintText: '账号未设置密码时留空',
                                 prefixIcon: const Icon(Icons.lock_outline),
                                 suffixIcon: IconButton(
                                   tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
@@ -414,10 +416,6 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                                   ),
                                 ),
                               ),
-                              validator: (value) =>
-                                  value == null || value.isEmpty
-                                  ? '请输入密码'
-                                  : null,
                             ),
                           ),
                           if (_error != null) ...[

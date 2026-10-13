@@ -397,9 +397,10 @@ void main() {
         await tester.pump();
       }
 
-      for (final text in const ['请输入服务器地址', '请输入用户名', '请输入密码']) {
+      for (final text in const ['请输入服务器地址', '请输入用户名']) {
         expect(find.text(text), findsOneWidget);
       }
+      expect(find.text('请输入密码'), findsNothing);
       final buttonRect = tester.getRect(
         find.byKey(const ValueKey<String>('login-submit-button')),
       );

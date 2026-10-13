@@ -63,45 +63,50 @@ void main() {
     );
   });
 
-  testWidgets('add server mode submits credentials through addAccount', (
-    tester,
-  ) async {
-    final controller = _FakeAccountsController([_accountA]);
-    addTearDown(controller.dispose);
-    await tester.pumpWidget(_app(controller));
+  for (final password in ['', 'fixture-password']) {
+    testWidgets(
+      'add server mode submits password "$password" through addAccount',
+      (tester) async {
+        final controller = _FakeAccountsController([_accountA]);
+        addTearDown(controller.dispose);
+        await tester.pumpWidget(_app(controller));
 
-    await tester.tap(
-      find.byKey(const ValueKey<String>('add-server-account-button')),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(
+          find.byKey(const ValueKey<String>('add-server-account-button')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('添加服务器账户'), findsOneWidget);
-    expect(find.text('添加并切换'), findsOneWidget);
-    await tester.enterText(
-      find.byKey(const ValueKey<String>('login-server-field')),
-      'https://new.example.test',
-    );
-    await tester.enterText(
-      find.byKey(const ValueKey<String>('login-username-field')),
-      'charlie',
-    );
-    await tester.enterText(
-      find.byKey(const ValueKey<String>('login-password-field')),
-      'fixture-password',
-    );
-    await tester.tap(find.byKey(const ValueKey<String>('login-submit-button')));
-    await tester.pumpAndSettle();
+        expect(find.text('添加服务器账户'), findsOneWidget);
+        expect(find.text('添加并切换'), findsOneWidget);
+        await tester.enterText(
+          find.byKey(const ValueKey<String>('login-server-field')),
+          'https://new.example.test',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey<String>('login-username-field')),
+          'charlie',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey<String>('login-password-field')),
+          password,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey<String>('login-submit-button')),
+        );
+        await tester.pumpAndSettle();
 
-    expect(controller.addCalls, [
-      (
-        serverUrl: 'https://new.example.test',
-        username: 'charlie',
-        password: 'fixture-password',
-      ),
-    ]);
-    expect(find.text('服务器管理'), findsOneWidget);
-  });
+        expect(controller.addCalls, [
+          (
+            serverUrl: 'https://new.example.test',
+            username: 'charlie',
+            password: password,
+          ),
+        ]);
+        expect(find.text('服务器管理'), findsOneWidget);
+      },
+    );
+  }
 
   testWidgets('reauthentication pre-fills the server and username', (
     tester,
@@ -129,6 +134,17 @@ void main() {
     );
     expect(serverField.controller?.text, _accountB.session.serverUrl);
     expect(usernameField.controller?.text, _accountB.session.username);
+
+    await tester.tap(find.byKey(const ValueKey<String>('login-submit-button')));
+    await tester.pumpAndSettle();
+    expect(controller.addCalls, [
+      (
+        serverUrl: _accountB.session.serverUrl,
+        username: _accountB.session.username,
+        password: '',
+      ),
+    ]);
+    expect(find.text('服务器管理'), findsOneWidget);
   });
 
   testWidgets('remove can keep scoped downloads and local settings', (

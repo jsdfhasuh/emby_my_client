@@ -23,6 +23,100 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(sqfliteFfiInit);
 
+  for (final addAccount in [false, true]) {
+    for (final passwordValue in ['', '  fixture password  ']) {
+      test(
+        'mode=$addAccount waits for server authentication and preserves password "$passwordValue"',
+        () async {
+          final storage = _FakeSessionStorage()
+            ..values['emby_device_id_v1'] = 'existing-device';
+          final tracker = _ClientTracker();
+          final gate = Completer<EmbySession>();
+          final called = Completer<void>();
+          final controller = _controller(
+            storage,
+            clients: tracker.registry,
+            authenticator:
+                ({
+                  required serverUrl,
+                  required username,
+                  required password,
+                  required deviceId,
+                  required deviceName,
+                }) {
+                  expect(username, 'user');
+                  expect(password, passwordValue);
+                  called.complete();
+                  return gate.future;
+                },
+          );
+          addTearDown(controller.dispose);
+          final submit = addAccount ? controller.addAccount : controller.signIn;
+          final pending = submit(
+            serverUrl: _session.serverUrl,
+            username: ' user ',
+            password: passwordValue,
+          );
+          await called.future;
+          expect(controller.isSignedIn, isFalse);
+          expect(storage.writeCalls, 0);
+          expect(tracker.registry.scopes, isEmpty);
+
+          gate.complete(_session);
+          await pending;
+          expect(controller.session, same(_session));
+          expect(controller.isSignedIn, isTrue);
+          expect(storage.values, contains('emby_server_accounts_v1'));
+        },
+      );
+    }
+
+    for (final failure in [
+      const EmbyApiException('用户名或密码错误，或账号没有登录权限', statusCode: 401),
+      const EmbyApiException(
+        '无法连接 Emby 服务器，请检查地址和网络',
+        isConnectionFailure: true,
+      ),
+    ]) {
+      test(
+        'mode=$addAccount does not save an empty-password session on ${failure.message}',
+        () async {
+          final storage = _FakeSessionStorage()
+            ..values['emby_device_id_v1'] = 'existing-device';
+          final tracker = _ClientTracker();
+          final controller = _controller(
+            storage,
+            clients: tracker.registry,
+            authenticator:
+                ({
+                  required serverUrl,
+                  required username,
+                  required password,
+                  required deviceId,
+                  required deviceName,
+                }) async {
+                  expect(password, '');
+                  throw failure;
+                },
+          );
+          addTearDown(controller.dispose);
+          final submit = addAccount ? controller.addAccount : controller.signIn;
+          await expectLater(
+            submit(
+              serverUrl: _session.serverUrl,
+              username: 'user',
+              password: '',
+            ),
+            throwsA(same(failure)),
+          );
+          expect(controller.isSignedIn, isFalse);
+          expect(storage.writeCalls, 0);
+          expect(tracker.registry.scopes, isEmpty);
+        },
+      );
+    }
+  }
+
   test(
     'authentication failure leaves session, client, downloads, and realtime untouched',
     () async {
