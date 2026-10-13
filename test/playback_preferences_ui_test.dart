@@ -88,6 +88,8 @@ void main() {
 
     final entry = find.byKey(const ValueKey('playback-preferences-entry'));
     await tester.ensureVisible(entry);
+    await tester.pumpAndSettle();
+    expect(entry.hitTestable(), findsOneWidget);
     await tester.tap(entry);
     await tester.pumpAndSettle();
 
