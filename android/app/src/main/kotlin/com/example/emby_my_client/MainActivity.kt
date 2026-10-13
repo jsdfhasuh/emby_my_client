@@ -24,6 +24,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private var channel: MethodChannel? = null
+    private var updates: AppUpdateChannel? = null
     private var isPlaying = false
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -53,6 +54,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        updates = AppUpdateChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
@@ -96,6 +98,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        updates?.close()
+        updates = null
         try {
             unregisterReceiver(pipReceiver)
         } catch (_: IllegalArgumentException) {

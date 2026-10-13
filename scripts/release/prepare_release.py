@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +15,16 @@ APK_NAMES = (
     "app-armeabi-v7a-debug.apk",
     "app-x86_64-debug.apk",
 )
+SIGNING_RECEIPT = "ANDROID-SIGNING.json"
+ANDROID_APPLICATION_ID = "com.jsdfhasuh.emoemby"
+ANDROID_LABEL = "Emo Emby 稳定版"
+
+
+def certificate_pin() -> str:
+    value = Path(__file__).with_name("android-signing-certificate.sha256").read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("Invalid pinned Android signing certificate")
+    return value
 
 
 def sha256(path: Path) -> str:
@@ -55,6 +66,12 @@ def prepare_release(
     digests = {path.name: sha256(path) for path in binaries}
     if record is None or record[1].lower() != digests[ipa_name]:
         raise ValueError("IPA checksum does not match the selected build")
+    receipt = json.loads(find_asset(SIGNING_RECEIPT).read_text(encoding="utf-8"))
+    if (receipt.get("format") != 2 or receipt.get("certificateSha256") != certificate_pin()
+            or receipt.get("applicationId") != ANDROID_APPLICATION_ID
+            or receipt.get("runNumber") != run_number
+            or receipt.get("apks") != {name: digests[name] for name in APK_NAMES}):
+        raise ValueError("Android packages lack a matching fixed-signature verification record")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     assets = []
@@ -74,10 +91,15 @@ def prepare_release(
         f"Commit: `{commit}`\n\n"
         f"[Build and test results]({run_url})\n\n"
         "## Downloads\n"
-        "- `app-debug.apk`: universal Android APK (debug-signed).\n"
+        "- `app-debug.apk`: universal Android debug build, signed with the fixed app key.\n"
         "- `app-*-debug.apk`: smaller Android APKs for each CPU architecture.\n"
         "- `emby-ios-core-*.ipa`: iPadOS IPA for TrollStore; not an App Store package.\n"
         "- `SHA256SUMS.txt`: SHA-256 checksums for all installable packages.\n\n"
+        f"Android certificate SHA-256: `{certificate_pin()}`.\n\n"
+        f"Android app: **{ANDROID_LABEL}** (`{ANDROID_APPLICATION_ID}`).\n\n"
+        "This stable app installs separately from the old com.example.embyclient app. "
+        "Sign in again; old downloads/settings stay in the old app and are not automatically migrated. "
+        "Keep the old app and its data.\n\n"
         "Both platform builds and the existing automated checks passed. "
         "This is an automated test build, not a claim of real-device acceptance.\n",
         encoding="utf-8",

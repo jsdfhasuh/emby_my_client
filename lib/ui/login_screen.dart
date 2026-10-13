@@ -11,6 +11,7 @@ import '../models/discovered_server.dart';
 import '../platform/platform_capabilities.dart';
 import '../state/app_controller.dart';
 import 'safe_diagnostic_export_screen.dart';
+import 'app_update_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({
@@ -542,8 +543,24 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                     color: Colors.black,
                   ),
                 ),
+                const Spacer(),
+                SizedBox(
+                  height: logoSize,
+                  width: 48,
+                  child: IconButton(
+                    key: const ValueKey('login-app-update-entry'),
+                    tooltip: '版本与更新',
+                    icon: const Icon(Icons.info_outline),
+                    onPressed: _isSubmitting
+                        ? null
+                        : () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const AppUpdateScreen(),
+                            ),
+                          ),
+                  ),
+                ),
                 if (_isIpadOS) ...[
-                  const Spacer(),
                   if (useCompactDiagnostics)
                     IconButton(
                       key: const ValueKey<String>(

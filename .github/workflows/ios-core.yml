@@ -179,12 +179,19 @@ jobs:
           test/playback_cache_evidence_test.dart
           test/playback_diagnostics_test.dart
 
+      - name: Derive application version
+        run: python3 scripts/release/build_version.py --run-number "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build Android debug APKs
         shell: bash
         run: |
           set -euo pipefail
-          flutter build apk --debug
-          flutter build apk --debug --split-per-abi
+          flutter build apk --debug --build-name "$APP_VERSION_NAME" --build-number "$ANDROID_VERSION_CODE"
+          flutter build apk --debug --split-per-abi --build-name "$APP_VERSION_NAME" --build-number "$ANDROID_VERSION_CODE"
+
+      - name: Test Android APK update compatibility policy
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
 
       - name: Run Android native libmpv capability smoke test
         shell: bash
@@ -662,8 +669,13 @@ jobs:
           bash scripts/ios/validate_project_settings.sh
           bash scripts/ios/validate_entitlements.sh --xcode
 
+      - name: Derive application version
+        run: python3 scripts/release/build_version.py --run-number "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build unsigned device Runner.app
-        run: bundle exec flutter build ios --release --no-codesign --build-number "$GITHUB_RUN_NUMBER"
+        run: |
+          set -euo pipefail
+          bundle exec flutter build ios --release --no-codesign --build-name "$APP_VERSION_NAME" --build-number "$IOS_BUILD_NUMBER"
 
       - name: Check lock drift after iOS build
         shell: bash
@@ -749,23 +761,46 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Prepare fixed Android signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          android_sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          "$android_sdk_root/cmdline-tools/latest/bin/sdkmanager" --install 'build-tools;35.0.0'
+          echo "EMO_APKSIGNER=$android_sdk_root/build-tools/35.0.0/apksigner" >> "$GITHUB_ENV"
+
       - name: Download universal Android APK
         uses: actions/download-artifact@v4
         with:
           name: android-debug-apk-${{ github.run_number }}
-          path: build/release-input/android-universal
+          path: build/signing-input/android-universal
 
       - name: Download split Android APKs
         uses: actions/download-artifact@v4
         with:
           name: android-debug-split-apks-${{ github.run_number }}
-          path: build/release-input/android-split
+          path: build/signing-input/android-split
 
       - name: Download iPadOS IPA and checksum
         uses: actions/download-artifact@v4
         with:
           name: ios-core-ipa-${{ github.run_number }}
           path: build/release-input/ios
+
+      - name: Sign Android packages with the fixed app certificate
+        shell: bash
+        env:
+          ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/release/sign_android_release.py \
+            --artifacts-dir build/signing-input \
+            --output-dir build/release-input/android-signed \
+            --apksigner "$EMO_APKSIGNER" \
+            --aapt "$(dirname "$EMO_APKSIGNER")/aapt" \
+            --run-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify and prepare release assets
         shell: bash

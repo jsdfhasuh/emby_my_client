@@ -26,7 +26,13 @@
 `build-构建号`，附上通用及分架构 Debug APK、TrollStore IPA 和 SHA-256 校验文件。
 PR 和失败构建不会发布，原始诊断产物仍保留在 Actions Artifacts 中。
 
-Android APK 使用调试签名；iPadOS IPA 面向 TrollStore，不是 App Store 安装包。
+公开 Release 的 Android APK 由发布步骤使用固定签名，缺少签名 Secrets 或证书不符时停止发布。
+它们仍是 Debug 构建；iPadOS IPA 面向 TrollStore，不是 App Store 安装包。
+旧版随机调试签名不能被新签名直接覆盖，请先保留旧应用及数据。
+稳定版名称为 **Emo Emby 稳定版**，Android 包名固定为 `com.jsdfhasuh.emoemby`，
+可与旧版 `com.example.embyclient` 并存。新版需重新登录，旧下载和设置不会自动迁移。
+请安装公开 Release 的最终 APK；Actions 中的原始调试产物不是固定签名安装包。
+签名配置和更新限制见 [版本与手动更新说明](docs/implementation/2026-10-app-updates.md)。
 
 ## 开发
 
@@ -51,8 +57,9 @@ flutter build apk --debug
 flutter build apk --debug --split-per-abi
 ```
 
-调试 APK 使用调试签名。正式发布前需要更换
-`applicationId`、应用图标，并配置 Android release 签名。
+本地 Debug APK 使用开发用调试签名；公开 APK 由受信任的发布 job 重新签名并验证。
+本地 Release 构建不再回退到调试签名。长期签名密钥保存在源码之外，
+由所有者亲自配置 GitHub Secrets；仓库仅保存公开证书指纹。
 
 ## 人物作品与大型媒体库导航里程碑
 

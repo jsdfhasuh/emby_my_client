@@ -9,6 +9,7 @@ import '../playback/playback_settings_repository.dart';
 import '../settings/library_category_settings.dart';
 import 'playback_cache_settings_screen.dart';
 import 'playback_preferences_screen.dart';
+import 'app_update_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -173,6 +174,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         body: ListView(
           padding: const EdgeInsets.symmetric(vertical: 12),
           children: [
+            AppUpdateEntry(enabled: !_deletingAccountData),
+            const Divider(),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
               child: Text(

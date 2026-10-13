@@ -1,9 +1,10 @@
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from prepare_release import APK_NAMES, prepare_release
+from prepare_release import ANDROID_APPLICATION_ID, APK_NAMES, SIGNING_RECEIPT, certificate_pin, prepare_release
 
 
 class PrepareReleaseTest(unittest.TestCase):
@@ -27,6 +28,12 @@ class PrepareReleaseTest(unittest.TestCase):
         self.checksum = self.files[self.ipa_name].with_suffix(".ipa.sha256")
         digest = hashlib.sha256(self.files[self.ipa_name].read_bytes()).hexdigest()
         self.checksum.write_text(f"{digest}  {self.ipa_name}\n", encoding="utf-8")
+        self.signing_receipt = self.inputs / SIGNING_RECEIPT
+        self.signing_receipt.write_text(json.dumps({
+            "format": 2, "certificateSha256": certificate_pin(),
+            "applicationId": ANDROID_APPLICATION_ID, "runNumber": 175,
+            "apks": {name: hashlib.sha256(self.files[name].read_bytes()).hexdigest() for name in APK_NAMES},
+        }), encoding="utf-8")
 
     def prepare(self, **overrides):
         arguments = {
@@ -52,9 +59,11 @@ class PrepareReleaseTest(unittest.TestCase):
         for record in records:
             digest, name = record.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.output / name).read_bytes()).hexdigest())
-        self.assertIn(self.commit, self.notes.read_text())
-        self.assertIn("debug-signed", self.notes.read_text())
-        self.assertIn("TrollStore", self.notes.read_text())
+        notes = self.notes.read_text(encoding="utf-8")
+        self.assertIn(self.commit, notes)
+        self.assertIn("fixed app key", notes)
+        self.assertIn(certificate_pin(), notes)
+        self.assertIn("TrollStore", notes)
 
     def test_missing_apk_fails_before_creating_release_output(self):
         self.files[APK_NAMES[0]].unlink()
@@ -105,6 +114,34 @@ class PrepareReleaseTest(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.prepare()
         self.assertEqual(existing.read_bytes(), b"keep")
+
+    def test_missing_fixed_signing_record_blocks_publication(self):
+        self.signing_receipt.unlink()
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_changed_apk_after_signing_blocks_publication(self):
+        self.files[APK_NAMES[0]].write_bytes(b"changed after signing")
+        with self.assertRaisesRegex(ValueError, "fixed-signature"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_wrong_certificate_record_blocks_publication(self):
+        record = json.loads(self.signing_receipt.read_text())
+        record["certificateSha256"] = "0" * 64
+        self.signing_receipt.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "fixed-signature"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_old_package_or_wrong_build_receipt_blocks_publication(self):
+        original = json.loads(self.signing_receipt.read_text())
+        for overrides in ({"applicationId": "com.example.embyclient"}, {"runNumber": 174}):
+            self.signing_receipt.write_text(json.dumps({**original, **overrides}))
+            with self.assertRaisesRegex(ValueError, "fixed-signature"):
+                self.prepare()
+            self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
