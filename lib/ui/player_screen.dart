@@ -42,6 +42,7 @@ import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
 import '../realtime/emby_event.dart';
 import 'player_system_ui.dart';
+import 'player_playback_backend.dart';
 
 abstract interface class PlayerSystemControls {
   Future<double> readBrightness();
@@ -200,8 +201,7 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  late Player _player;
-  late VideoController _videoController;
+  late PlayerPlaybackBackend _playbackBackend;
   late final PictureInPictureController _pipController;
   late final PlatformCapabilities _capabilities =
       widget.capabilities ?? PlatformCapabilities.current();
@@ -264,6 +264,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlayerCloseCoordinator _closeCoordinator;
   bool _playbackResourcesReleased = false;
   bool _playbackInitializationStarted = false;
+  bool _playbackOptionsOpen = false;
   late int? _sessionSubtitleSelection;
   double? _lastMetricsWidth;
   double? _lastMetricsHeight;
@@ -348,10 +349,23 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _createPlayer() {
     _trickplayResourceGeneration++;
-    _player = Player(
+    final factory = PlayerPlaybackBackendScope.maybeFactory(context);
+    if (factory != null) {
+      _playbackBackend = factory();
+      return;
+    }
+    final player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
     );
-    _videoController = VideoController(_player);
+    final videoController = VideoController(player);
+    _playbackBackend = PlayerPlaybackBackend(
+      engine: MediaKitPlaybackEngine(player),
+      buildVideo: (fit) => Video(
+        controller: videoController,
+        fit: fit,
+        controls: NoVideoControls,
+      ),
+    );
   }
 
   Future<void> _initializePlayback() async {
@@ -392,7 +406,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       controller = PlaybackController(
         item: _currentItem,
-        engine: MediaKitPlaybackEngine(_player),
+        engine: _playbackBackend.engine,
         resolver: OfflinePlaybackResolver(offlineItem),
         reporter: OfflinePlaybackReporter(
           item: offlineItem,
@@ -415,7 +429,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         entry: 'fullscreen',
         api: widget.api,
         item: _currentItem,
-        engine: MediaKitPlaybackEngine(_player),
+        engine: _playbackBackend.engine,
         engineRecreator: _recreatePlaybackEngine,
         session: _itemSession,
         settings: _settings,
@@ -469,7 +483,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (!mounted) throw StateError('Player route is unavailable');
           _createPlayer();
           setState(() {});
-          return MediaKitPlaybackEngine(_player);
+          return _playbackBackend.engine;
         },
       );
 
@@ -639,7 +653,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     } else {
       try {
-        await _player.dispose();
+        await _playbackBackend.engine.dispose();
       } catch (error) {
         DiagnosticLog.instance.warning(
           'player',
@@ -1370,68 +1384,91 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _showPlaybackOptions() async {
+    if (_playbackOptionsOpen || _playbackResourcesReleased) return;
     final controller = _playbackController;
     final plan = controller?.state.plan;
     if (controller == null || plan == null) return;
+    _playbackOptionsOpen = true;
     _controlsTimer?.cancel();
+    var selectionAccepted = false;
+    bool closeForSelection(BuildContext sheetContext) {
+      // The parent owns this modal. A callback already queued by a gesture can
+      // outlive the sheet or run again while its exit animation is in flight.
+      if (selectionAccepted ||
+          !mounted ||
+          !sheetContext.mounted ||
+          _playbackResourcesReleased ||
+          !identical(controller, _playbackController) ||
+          ModalRoute.of(sheetContext)?.isCurrent != true) {
+        return false;
+      }
+      selectionAccepted = true;
+      Navigator.of(sheetContext).pop();
+      return true;
+    }
+
     final audioTracks = _trackMapper.fromPlan(plan, 'audio');
     final subtitleTracks = _trackMapper.fromPlan(plan, 'subtitle');
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF171A1C),
-      isScrollControlled: true,
-      builder: (sheetContext) => DefaultTabController(
-        length: 5,
-        child: SafeArea(
-          child: SizedBox(
-            height: MediaQuery.sizeOf(sheetContext).height * 0.82,
-            child: Column(
-              children: [
-                const TabBar(
-                  tabs: [
-                    Tab(text: '画质'),
-                    Tab(text: '音轨'),
-                    Tab(text: '字幕'),
-                    Tab(text: '章节'),
-                    Tab(text: '播放'),
-                  ],
-                ),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      _buildQualityOptions(sheetContext, plan),
-                      ListenableBuilder(
-                        listenable: controller,
-                        builder: (context, _) => _buildAudioOptions(
-                          sheetContext,
-                          plan,
-                          audioTracks,
-                          controller.state,
-                        ),
-                      ),
-                      ListenableBuilder(
-                        listenable: controller,
-                        builder: (context, _) => PlaybackSubtitleOptions(
-                          tracks: subtitleTracks,
-                          playbackState: controller.state,
-                          onSelect: (index) {
-                            Navigator.pop(sheetContext);
-                            unawaited(_selectSubtitleStream(index));
-                          },
-                        ),
-                      ),
-                      _buildChapterOptions(sheetContext),
-                      _buildPlayerOptions(sheetContext),
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: const Color(0xFF171A1C),
+        isScrollControlled: true,
+        builder: (sheetContext) => DefaultTabController(
+          length: 5,
+          child: SafeArea(
+            child: SizedBox(
+              height: MediaQuery.sizeOf(sheetContext).height * 0.82,
+              child: Column(
+                children: [
+                  const TabBar(
+                    tabs: [
+                      Tab(text: '画质'),
+                      Tab(text: '音轨'),
+                      Tab(text: '字幕'),
+                      Tab(text: '章节'),
+                      Tab(text: '播放'),
                     ],
                   ),
-                ),
-              ],
+                  Expanded(
+                    child: TabBarView(
+                      children: [
+                        _buildQualityOptions(sheetContext, plan),
+                        ListenableBuilder(
+                          listenable: controller,
+                          builder: (context, _) => _buildAudioOptions(
+                            audioTracks,
+                            controller.state,
+                            closeForSelection: () =>
+                                closeForSelection(sheetContext),
+                          ),
+                        ),
+                        ListenableBuilder(
+                          listenable: controller,
+                          builder: (context, _) => PlaybackSubtitleOptions(
+                            tracks: subtitleTracks,
+                            playbackState: controller.state,
+                            onSelect: (index) {
+                              if (!closeForSelection(sheetContext)) return;
+                              unawaited(_selectSubtitleStream(index));
+                            },
+                          ),
+                        ),
+                        _buildChapterOptions(sheetContext),
+                        _buildPlayerOptions(sheetContext),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-      ),
-    );
-    _restartControlsTimer();
+      );
+    } finally {
+      _playbackOptionsOpen = false;
+      if (mounted && !_playbackResourcesReleased) _restartControlsTimer();
+    }
   }
 
   Future<void> _enterPictureInPicture() async {
@@ -1506,11 +1543,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildAudioOptions(
-    BuildContext sheetContext,
-    PlaybackPlan plan,
     List<PlaybackTrack> tracks,
-    PlaybackState playbackState,
-  ) => ListView(
+    PlaybackState playbackState, {
+    required bool Function() closeForSelection,
+  }) => ListView(
     children: [
       for (final track in tracks)
         ListTile(
@@ -1536,7 +1572,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       AudioSelectionStatus.applied
               ? null
               : () {
-                  Navigator.pop(sheetContext);
+                  if (!closeForSelection()) return;
                   unawaited(
                     _playbackController?.selectAudioStream(track.index),
                   );
@@ -1904,13 +1940,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Center(
-                child: Video(
-                  controller: _videoController,
-                  fit: _videoFit,
-                  controls: NoVideoControls,
-                ),
-              ),
+              Center(child: _playbackBackend.buildVideo(_videoFit)),
               if (_buffering && _error == null) _buildBuffering(),
               if (_error != null) _buildError(),
               IgnorePointer(

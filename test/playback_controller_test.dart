@@ -2228,6 +2228,24 @@ void _subtitleRegressionTests() {
           contains('serverFields=language,codec,title,displayTitle'),
         );
         expect(line, contains('engineFields=language,codec,title'));
+        expect(line, contains('conflictFieldsScope=allTracksUnion'));
+        expect(
+          line,
+          contains(
+            'track0=rejected:language.same,codec.same,title.conflict,channels.missingBoth',
+          ),
+        );
+        expect(line, contains('planTransport=offlineLocal'));
+        expect(line, contains('planInput=file'));
+        expect(line, contains('selectedSourceLookup=unique'));
+        expect(line, contains('selectedSourceStreamLookup=unique'));
+        expect(
+          line,
+          contains(
+            'planSourceFields=language.same,codec.same,title.same,channels.missingBoth',
+          ),
+        );
+        expect(line, contains('nativeSourceIdentity=unverified'));
         for (final raw in [
           privateValue,
           'private-display-label',

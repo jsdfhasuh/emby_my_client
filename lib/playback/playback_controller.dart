@@ -3164,6 +3164,7 @@ class PlaybackController extends ChangeNotifier {
             result: _trackMapper
                 .match(track, _state.subtitleTracks)
                 .asUnavailable(TrackMappingReason.externalLocationMissing),
+            source: _trackMapper.sourceEvidence(plan, resolvedSubtitleIndex),
           );
           throw StateError('External subtitle location unavailable');
         }
@@ -3285,6 +3286,7 @@ class PlaybackController extends ChangeNotifier {
           streamIndex: resolvedSubtitleIndex,
           generation: token,
           result: mapping,
+          source: _trackMapper.sourceEvidence(plan, resolvedSubtitleIndex),
         );
         throw StateError('Unable to map Emby subtitle track');
       }
@@ -3551,6 +3553,10 @@ class PlaybackController extends ChangeNotifier {
           result: mapping.status == TrackMappingStatus.matched
               ? mapping.asUnavailable(TrackMappingReason.trackWaitTimedOut)
               : mapping,
+          source: _trackMapper.sourceEvidence(
+            plan,
+            identity.resolvedStreamIndex,
+          ),
         );
       }
     }

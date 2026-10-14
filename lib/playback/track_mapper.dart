@@ -48,6 +48,42 @@ enum TrackMappingReason {
 
 enum TrackMetadataField { language, codec, title, channels, displayTitle }
 
+enum TrackFieldComparison {
+  same,
+  conflict,
+  missingLeft,
+  missingRight,
+  missingBoth,
+}
+
+/// Contains only comparison outcomes, never track IDs or metadata values.
+class TrackCandidateEvidence {
+  const TrackCandidateEvidence({required this.fields, required this.eligible});
+  final Map<TrackMetadataField, TrackFieldComparison> fields;
+  final bool eligible;
+}
+
+enum TrackSourceLookup { missing, unique, ambiguous }
+
+enum TrackPlanInput { file, http, other }
+
+class TrackSourceEvidence {
+  const TrackSourceEvidence({
+    required this.transport,
+    required this.input,
+    required this.sourceLookup,
+    required this.streamLookup,
+    required this.planSourceFields,
+  });
+  final PlaybackTransportKind transport;
+  final TrackPlanInput input;
+  final TrackSourceLookup sourceLookup;
+  final TrackSourceLookup streamLookup;
+  // Plan metadata compared with the selected source's metadata. This does not
+  // establish that either metadata snapshot describes the native input file.
+  final Map<TrackMetadataField, TrackFieldComparison> planSourceFields;
+}
+
 class TrackMappingResult {
   const TrackMappingResult(
     this.status, {
@@ -58,6 +94,7 @@ class TrackMappingResult {
     this.serverFields = const {},
     this.engineFields = const {},
     this.conflictFields = const {},
+    this.trackEvidence = const [],
   });
   final TrackMappingStatus status;
   final String? engineId;
@@ -67,6 +104,7 @@ class TrackMappingResult {
   final Set<TrackMetadataField> serverFields;
   final Set<TrackMetadataField> engineFields;
   final Set<TrackMetadataField> conflictFields;
+  final List<TrackCandidateEvidence> trackEvidence;
 
   TrackMappingResult asUnavailable(TrackMappingReason reason) =>
       TrackMappingResult(
@@ -77,6 +115,7 @@ class TrackMappingResult {
         serverFields: serverFields,
         engineFields: engineFields,
         conflictFields: conflictFields,
+        trackEvidence: trackEvidence,
       );
 }
 
@@ -127,6 +166,7 @@ class TrackMapper {
     final engineFields = <TrackMetadataField>{};
     final conflicts = <TrackMetadataField>{};
     final matching = <EngineTrack>[];
+    final trackEvidence = <TrackCandidateEvidence>[];
     for (final track in tracks) {
       final fields = <TrackMetadataField, Object?>{
         TrackMetadataField.language: _language(track.language),
@@ -136,10 +176,12 @@ class TrackMapper {
       };
       var evidence = false;
       var conflict = false;
+      final comparisons = <TrackMetadataField, TrackFieldComparison>{};
       for (final field in fields.keys) {
         final actual = fields[field];
         if (actual != null) engineFields.add(field);
         final expected = server[field];
+        comparisons[field] = _compare(expected, actual);
         if (expected == null || actual == null) continue;
         evidence = true;
         if (expected != actual) {
@@ -148,6 +190,12 @@ class TrackMapper {
         }
       }
       if (evidence && !conflict) matching.add(track);
+      trackEvidence.add(
+        TrackCandidateEvidence(
+          fields: Map.unmodifiable(comparisons),
+          eligible: evidence && !conflict,
+        ),
+      );
     }
     final status = switch (matching.length) {
       0 => TrackMappingStatus.unavailable,
@@ -176,8 +224,61 @@ class TrackMapper {
       serverFields: Set.unmodifiable(serverFields),
       engineFields: Set.unmodifiable(engineFields),
       conflictFields: Set.unmodifiable(conflicts),
+      trackEvidence: List.unmodifiable(trackEvidence),
     );
   }
+
+  TrackSourceEvidence sourceEvidence(PlaybackPlan plan, int streamIndex) {
+    final sources = plan.availableMediaSources
+        .where((source) => source.id == plan.mediaSourceId)
+        .toList();
+    final streams = sources.length == 1
+        ? fromStreams(
+            sources.single.mediaStreams,
+            'subtitle',
+          ).where((track) => track.index == streamIndex).toList()
+        : <PlaybackTrack>[];
+    final planTrack = findByIndex(plan, 'subtitle', streamIndex);
+    final sourceTrack = streams.length == 1 ? streams.single : null;
+    Map<TrackMetadataField, Object?> fields(PlaybackTrack? track) => {
+      TrackMetadataField.language: _language(track?.language),
+      TrackMetadataField.codec: _codec(track?.codec),
+      TrackMetadataField.title: _text(track?.originalTitle),
+      TrackMetadataField.channels: track?.channels,
+    };
+    final expected = fields(planTrack);
+    final actual = fields(sourceTrack);
+    TrackSourceLookup lookup(int count) => count == 0
+        ? TrackSourceLookup.missing
+        : count == 1
+        ? TrackSourceLookup.unique
+        : TrackSourceLookup.ambiguous;
+    return TrackSourceEvidence(
+      transport: plan.transportKind,
+      input: plan.uri.scheme == 'file'
+          ? TrackPlanInput.file
+          : {'http', 'https'}.contains(plan.uri.scheme)
+          ? TrackPlanInput.http
+          : TrackPlanInput.other,
+      sourceLookup: lookup(sources.length),
+      streamLookup: lookup(streams.length),
+      planSourceFields: Map.unmodifiable({
+        for (final field in expected.keys)
+          field: _compare(expected[field], actual[field]),
+      }),
+    );
+  }
+
+  static TrackFieldComparison _compare(Object? expected, Object? actual) =>
+      expected == null
+      ? actual == null
+            ? TrackFieldComparison.missingBoth
+            : TrackFieldComparison.missingLeft
+      : actual == null
+      ? TrackFieldComparison.missingRight
+      : expected == actual
+      ? TrackFieldComparison.same
+      : TrackFieldComparison.conflict;
 
   static bool isRealTrack(EngineTrack track) =>
       !{'', 'auto', 'no'}.contains(track.id.trim().toLowerCase());

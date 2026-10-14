@@ -63,12 +63,7 @@ class PlaybackSubtitleOptions extends StatelessWidget {
             : _isSubtitleDisabled
             ? const Icon(Icons.check, color: Color(0xFF80CBC4))
             : null,
-        onTap: _isApplying || _isSubtitleDisabled
-            ? null
-            : () {
-                Navigator.pop(context);
-                onSelect(null);
-              },
+        onTap: _isApplying || _isSubtitleDisabled ? null : () => onSelect(null),
       ),
       for (final track in tracks)
         ListTile(
@@ -98,10 +93,7 @@ class PlaybackSubtitleOptions extends StatelessWidget {
               : null,
           onTap: _isApplying || _isTrackApplied(track)
               ? null
-              : () {
-                  Navigator.pop(context);
-                  onSelect(track.index);
-                },
+              : () => onSelect(track.index),
         ),
     ],
   );

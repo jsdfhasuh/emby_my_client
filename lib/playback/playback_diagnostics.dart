@@ -480,6 +480,7 @@ class PlaybackDiagnostics {
     required int streamIndex,
     required int generation,
     required TrackMappingResult result,
+    required TrackSourceEvidence source,
   }) {
     _emit(
       PlaybackDiagnosticEvent.subtitleMappingFailed,
@@ -495,6 +496,26 @@ class PlaybackDiagnostics {
         'serverFields=${_trackFields(result.serverFields)}',
         'engineFields=${_trackFields(result.engineFields)}',
         'conflictFields=${_trackFields(result.conflictFields)}',
+        'conflictFieldsScope=allTracksUnion',
+        'comparisonBasis=normalizedRawMetadata',
+        'trackComparisonSides=server,native',
+        'trackIdentity=realTrackOrdinal',
+        'displayTitleRole=labelOnly',
+        'trackEvidenceCount=${result.trackEvidence.length.clamp(0, 16)}',
+        'trackEvidenceOmitted=${(result.trackEvidence.length - 16).clamp(0, 9999)}',
+        for (
+          var index = 0;
+          index < result.trackEvidence.length && index < 16;
+          index++
+        )
+          'track$index=${result.trackEvidence[index].eligible ? 'eligible' : 'rejected'}:${_trackComparisons(result.trackEvidence[index].fields)}',
+        'planTransport=${source.transport.name}',
+        'planInput=${source.input.name}',
+        'selectedSourceLookup=${source.sourceLookup.name}',
+        'selectedSourceStreamLookup=${source.streamLookup.name}',
+        'planSourceFields=${_trackComparisons(source.planSourceFields)}',
+        'planSourceComparisonSides=plan,selectedSource',
+        'nativeSourceIdentity=unverified',
       ],
       level: PlaybackDiagnosticLevel.warning,
     );
@@ -506,6 +527,13 @@ class PlaybackDiagnostics {
             .where(fields.contains)
             .map((field) => field.name)
             .join(',');
+
+  static String _trackComparisons(
+    Map<TrackMetadataField, TrackFieldComparison> fields,
+  ) => TrackMetadataField.values
+      .where(fields.containsKey)
+      .map((field) => '${field.name}.${fields[field]!.name}')
+      .join(',');
 
   void subtitleApplyCancelled({required int generation}) {
     _emit(PlaybackDiagnosticEvent.subtitleApplyCancelled, [

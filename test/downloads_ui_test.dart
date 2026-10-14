@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/data/browse_cache.dart';
@@ -9,13 +10,23 @@ import 'package:emby_my_client/downloads/download_preflight.dart';
 import 'package:emby_my_client/downloads/download_repository.dart';
 import 'package:emby_my_client/downloads/download_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
+import 'package:emby_my_client/playback/cache/playback_cache_storage_scope.dart';
+import 'package:emby_my_client/playback/playback_settings_repository.dart';
+import 'package:emby_my_client/playback/playback_settings_scope.dart';
 import 'package:emby_my_client/ui/downloads/downloads_screen.dart';
 import 'package:emby_my_client/ui/item_detail_screen.dart';
 import 'package:emby_my_client/ui/player_screen.dart';
+import 'package:emby_my_client/ui/player_playback_backend.dart';
+import 'package:emby_my_client/ui/widgets/playback_timeline.dart';
+import 'package:emby_my_client/ui/widgets/playback_subtitle_options.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'support/route_playback_engine.dart';
+
 void main() {
+  _subtitleRouteTests();
   testWidgets('stale browsing data does not block online playback', (
     tester,
   ) async {
@@ -396,6 +407,275 @@ void main() {
   });
 }
 
+void _subtitleRouteTests() {
+  for (final action in [
+    'success',
+    'engineFailure',
+    'metadataConflict',
+    'disable',
+    'audio',
+  ]) {
+    for (final repeat in [false, true]) {
+      testWidgets(
+        'offline player sheet preserves route: $action repeat=$repeat',
+        (tester) async {
+          final fixture = await _mountOfflinePlayer(tester, action: action);
+          await tester.tap(find.byTooltip('播放设置'));
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(action == 'audio' ? '音轨' : '字幕'));
+          await tester.pumpAndSettle();
+          final label = action == 'disable'
+              ? '关闭字幕'
+              : action == 'audio'
+              ? 'Route audio'
+              : 'Route subtitle';
+          final tile = find.widgetWithText(ListTile, label);
+          final callback = tester.widget<ListTile>(tile).onTap!;
+          fixture.logs.clear();
+          fixture.engine.subtitleSelections.clear();
+          fixture.engine.audioSelections.clear();
+
+          await tester.tap(tile);
+          if (repeat) {
+            // A second gesture may already be queued before the pop animation.
+            callback();
+            await tester.pump(const Duration(milliseconds: 80));
+            callback();
+          }
+          await _flushRoute(tester);
+          expect(
+            fixture.observer.popped,
+            hasLength(1),
+            reason: 'Only the sheet may pop',
+          );
+          expect(
+            fixture.observer.popped.single,
+            isA<ModalBottomSheetRoute<dynamic>>(),
+          );
+          expect(find.byType(PlayerScreen), findsOneWidget);
+          expect(find.byType(PlaybackSubtitleOptions), findsNothing);
+          expect(fixture.engine.stops, 0);
+          expect(fixture.engine.disposals, 0);
+          expect(fixture.engine.isPlaying, isTrue);
+          expect(
+            fixture.logs.where(
+              (line) =>
+                  line.contains('event=player_route_dispose') ||
+                  line.contains('event=player_exit_requested'),
+            ),
+            isEmpty,
+          );
+          if (action == 'audio') {
+            expect(fixture.engine.audioSelections, ['7']);
+          } else {
+            expect(
+              fixture.logs.where(
+                (line) =>
+                    line.contains('event=playback_subtitle_apply_requested'),
+              ),
+              hasLength(1),
+            );
+            expect(
+              fixture.engine.subtitleSelections,
+              action == 'metadataConflict'
+                  ? isEmpty
+                  : [action == 'disable' ? null : '42'],
+            );
+          }
+          fixture.engine.positions.add(const Duration(seconds: 42));
+          await tester.pump();
+          expect(
+            tester
+                .widget<PlaybackTimeline>(find.byType(PlaybackTimeline))
+                .value,
+            const Duration(seconds: 42).inMilliseconds,
+          );
+          if (action == 'engineFailure' || action == 'metadataConflict') {
+            await tester.tap(find.byTooltip('播放设置'));
+            await tester.pump(const Duration(milliseconds: 350));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('字幕'));
+            await tester.pumpAndSettle();
+            expect(find.textContaining('字幕加载失败'), findsOneWidget);
+            expect(
+              tester
+                  .widget<ListTile>(
+                    find.widgetWithText(ListTile, 'Route subtitle'),
+                  )
+                  .onTap,
+              isNotNull,
+            );
+          }
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+  for (final phase in ['closing', 'dismissed', 'playerDisposed']) {
+    testWidgets('offline player ignores subtitle callback: $phase', (
+      tester,
+    ) async {
+      final fixture = await _mountOfflinePlayer(tester);
+      await tester.tap(find.byTooltip('播放设置'));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('字幕'));
+      await tester.pumpAndSettle();
+      final tile = find.widgetWithText(ListTile, 'Route subtitle');
+      final callback = tester.widget<ListTile>(tile).onTap!;
+      Navigator.of(tester.element(tile)).pop();
+      if (phase != 'closing') await tester.pumpAndSettle();
+      if (phase == 'playerDisposed') {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await _flushRoute(tester);
+      }
+      fixture.logs.clear();
+      callback();
+      await _flushRoute(tester);
+      expect(fixture.observer.popped, hasLength(1));
+      expect(
+        find.byType(PlayerScreen),
+        phase == 'playerDisposed' ? findsNothing : findsOneWidget,
+      );
+      expect(fixture.engine.disposals, phase == 'playerDisposed' ? 1 : 0);
+      expect(fixture.engine.stops, phase == 'playerDisposed' ? 1 : 0);
+      expect(
+        fixture.logs.where(
+          (line) => line.contains('event=playback_subtitle_apply_requested'),
+        ),
+        isEmpty,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+  testWidgets(
+    'offline player opens only one settings sheet for repeated requests',
+    (tester) async {
+      final fixture = await _mountOfflinePlayer(tester);
+      final button = tester.widget<IconButton>(
+        find.byWidgetPredicate(
+          (widget) => widget is IconButton && widget.tooltip == '播放设置',
+        ),
+      );
+      await tester.tap(find.byTooltip('播放设置'));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      button.onPressed!();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet, skipOffstage: false), findsOneWidget);
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await _flushRoute(tester);
+      expect(fixture.observer.popped, hasLength(1));
+      expect(find.byType(PlayerScreen), findsOneWidget);
+      expect(fixture.engine.disposals, 0);
+    },
+  );
+}
+
+Future<void> _flushRoute(WidgetTester tester) async {
+  for (var i = 0; i < 12; i++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 5)),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
+Future<
+  ({
+    RoutePlaybackEngine engine,
+    _FullPlayerRouteObserver observer,
+    List<String> logs,
+  })
+>
+_mountOfflinePlayer(WidgetTester tester, {String action = 'success'}) async {
+  await tester.binding.setSurfaceSize(const Size(1000, 700));
+  late final _UiHarness harness;
+  await tester.runAsync(() async {
+    harness = await _UiHarness.create(
+      withCompletedDownload: true,
+      mediaStreams: [
+        {
+          'Type': 'Subtitle',
+          'Index': 2,
+          'DisplayTitle': 'Route subtitle',
+          'Language': 'chi',
+          'Codec': 'srt',
+          'IsDefault': action == 'disable',
+        },
+        {
+          'Type': 'Audio',
+          'Index': 1,
+          'DisplayTitle': 'Route audio',
+          'Language': 'eng',
+          'Codec': 'aac',
+        },
+      ],
+    );
+  });
+  final engine = RoutePlaybackEngine()
+    ..failSubtitle = action == 'engineFailure'
+    ..conflictingMetadata = action == 'metadataConflict';
+  final observer = _FullPlayerRouteObserver();
+  final logs = <String>[];
+  DiagnosticLog.instance.setTestSink(logs.add);
+  final settings = PlaybackSettingsRepository(storage: _RouteSettingsStorage());
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _flushRoute(tester);
+    await tester.runAsync(harness.dispose);
+    settings.dispose();
+    DiagnosticLog.instance.setTestSink(null);
+    await tester.binding.setSurfaceSize(null);
+  });
+  await tester.pumpWidget(
+    PlayerPlaybackBackendScope(
+      create: () => PlayerPlaybackBackend(
+        engine: engine,
+        buildVideo: (_) => const ColoredBox(color: Colors.black),
+      ),
+      child: PlaybackSettingsRepositoryScope(
+        repository: settings,
+        child: PlaybackCacheStorageScope(
+          storage: PlatformPlaybackCacheStorage(
+            rootResolver: () async => harness.directory,
+            freeBytesResolver: (_) async => 1000000000,
+          ),
+          child: MaterialApp(
+            navigatorObservers: [observer],
+            home: DownloadsScreen(api: harness.api, downloads: harness.service),
+          ),
+        ),
+      ),
+    ),
+  );
+  await _flushRoute(tester);
+  await tester.tap(find.byTooltip('离线播放'));
+  await _flushRoute(tester);
+  expect(find.byType(PlayerScreen), findsOneWidget);
+  expect(engine.openedUri?.scheme, 'file');
+  expect(engine.isPlaying, isTrue);
+  expect(engine.disposals, 0);
+  return (engine: engine, observer: observer, logs: logs);
+}
+
+class _RouteSettingsStorage implements PlaybackSettingsStorage {
+  @override
+  Future<String?> read(String key) async => null;
+  @override
+  Future<void> write(String key, String value) async {}
+  @override
+  Future<void> delete(String key) async {}
+}
+
+class _FullPlayerRouteObserver extends NavigatorObserver {
+  final popped = <Route<dynamic>>[];
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      popped.add(route);
+}
+
 class _PlayerRouteObserver extends NavigatorObserver {
   MaterialPageRoute<dynamic>? playerRoute;
   @override
@@ -422,6 +702,7 @@ class _UiHarness {
     bool withCorruptDownload = false,
     bool withWaitingDownload = false,
     bool withStorageWaitingDownload = false,
+    List<Map<String, dynamic>>? mediaStreams,
   }) async {
     final directory = await Directory.systemTemp.createTemp('emby-ui-test-');
     final store = _MemoryDownloadStore();
@@ -447,7 +728,7 @@ class _UiHarness {
         metadata: OfflineMediaMetadata.fromItem(
           _item,
           _item.mediaSources.single,
-        ),
+        ).copyWith(mediaStreams: mediaStreams),
         createdAt: now,
         updatedAt: now,
         expectedBytes: _mediaBytes.length,
