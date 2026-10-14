@@ -74,20 +74,36 @@ void main() {
       );
     });
 
-    test('raw title conflicts and unknown codec differences still reject', () {
-      expect(
-        mapper.match(track({'Title': 'original', 'Language': 'chi'}), const [
-          EngineTrack(id: '2', title: 'different', language: 'zho'),
-        ]).status,
-        TrackMappingStatus.unavailable,
-      );
-      expect(
-        mapper.match(track({'Language': 'chi', 'Codec': 'ass'}), const [
-          EngineTrack(id: '2', language: 'zho', codec: 'ssa'),
-        ]).status,
-        TrackMappingStatus.unavailable,
-      );
-    });
+    test(
+      'raw title conflicts reject; native Matroska ASS SSA is contextual',
+      () {
+        expect(
+          mapper.match(track({'Title': 'original', 'Language': 'chi'}), const [
+            EngineTrack(id: '2', title: 'different', language: 'zho'),
+          ]).status,
+          TrackMappingStatus.unavailable,
+        );
+        expect(
+          mapper.match(
+            track({'Language': 'chi', 'Codec': 'ass'}),
+            const [EngineTrack(id: '2', language: 'zho', codec: 'ssa')],
+            context: SubtitleMappingContext.fromMpv(
+              demuxer: 'mkv',
+              tracks: [
+                {
+                  'id': 2,
+                  'type': 'sub',
+                  'external': false,
+                  'lang': 'zho',
+                  'codec': 'ssa',
+                },
+              ],
+            ),
+          ).status,
+          TrackMappingStatus.matched,
+        );
+      },
+    );
   });
 
   test('maps typed Emby audio and subtitle metadata', () {

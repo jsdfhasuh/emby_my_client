@@ -59,6 +59,74 @@ String _log(TrackMappingResult result, {PlaybackPlan? plan}) {
 
 void main() {
   test(
+    'codec diagnostics distinguish names and contextual canonical families',
+    () {
+      const server = PlaybackTrack(
+        index: 2,
+        type: 'Subtitle',
+        codec: 'SSA',
+        title: 'original',
+      );
+      const native = EngineTrack(id: '42', codec: 'ass', title: 'different');
+      final context = SubtitleMappingContext.fromMpv(
+        demuxer: 'mkv',
+        tracks: [
+          {
+            'id': 42,
+            'type': 'sub',
+            'external': false,
+            'codec': 'ass',
+            'title': 'different',
+          },
+        ],
+      );
+      final result = _mapper.match(server, [native], context: context);
+      final line = _log(result);
+      expect(line, contains('serverCodec=ssa'));
+      expect(line, contains(';codec=ass,assSsa,assSsa,mpvMatroskaEmbedded'));
+      expect(line, contains('codec.same,title.conflict'));
+      expect(line, contains('planSourceEvidence=metadataSelfConsistencyOnly'));
+      expect(line, contains('nativeSourceIdentity=unverified'));
+      final strict = _log(_mapper.match(server, [native]));
+      expect(strict, contains(';codec=ass,ssa,ass,strict'));
+      expect(strict, contains('codec.conflict'));
+    },
+  );
+
+  test(
+    'unknown and missing codec diagnostics never reveal arbitrary values or conflate identity',
+    () {
+      for (final raw in [
+        null,
+        '',
+        'und',
+        'https://private/path?token=secret',
+        'ass\nsecret',
+        'ssa-secret',
+        'assSsa',
+        'ass_ssa',
+      ]) {
+        final result = _mapper.match(
+          PlaybackTrack(index: 2, type: 'Subtitle', codec: raw),
+          const [EngineTrack(id: '42', codec: 'another-secret-codec')],
+        );
+        expect(result.engineId, isNull);
+        final line = _log(result);
+        expect(
+          line,
+          contains(
+            'serverCodec=${[null, '', 'und'].contains(raw) ? 'missing' : 'other'}',
+          ),
+        );
+        expect(line, contains(';codec=other,'));
+        expect(line, isNot(contains('secret')));
+        expect(line, isNot(contains('https://')));
+        expect(line, isNot(contains('private/path')));
+      }
+    },
+  );
+
+  test(
     'three rejected candidates retain different conflicts instead of union per track',
     () {
       final server = _mapper.fromStreams([_stream], 'subtitle').single;

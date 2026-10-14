@@ -2043,6 +2043,95 @@ void _subtitleRegressionTests() {
   const real = [EngineTrack(id: '42', language: 'zho', codec: 'subrip')];
   group('subtitle regression', () {
     test(
+      'cached MKV plan and source agreement cannot authorize SSA ASS compatibility',
+      () async {
+        final fixture = await _offlineSubtitleCase(
+          streams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'Language': 'chi',
+              'Codec': 'ssa',
+            },
+          ],
+          tracks: const [EngineTrack(id: '42', language: 'zho', codec: 'ass')],
+        );
+        await fixture.controller.start();
+        expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+        expect(fixture.controller.state.phase, PlaybackPhase.ready);
+        final line = fixture.logs.singleWhere(
+          (line) => line.contains('event=playback_subtitle_mapping_failed'),
+        );
+        expect(line, contains('serverCodec=ssa'));
+        expect(line, contains(';codec=ass,ssa,ass,strict'));
+        expect(line, contains('planSourceFields=language.same,codec.same'));
+        expect(
+          line,
+          contains('planSourceEvidence=metadataSelfConsistencyOnly'),
+        );
+        expect(line, contains('nativeSourceIdentity=unverified'));
+        expect(fixture.requests, isEmpty);
+      },
+    );
+
+    test(
+      'offline SSA default and manual selection require native Matroska evidence',
+      () async {
+        final fixture = await _offlineSubtitleCase(
+          streams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'Language': 'chi',
+              'Codec': 'ssa',
+            },
+          ],
+          tracks: const [EngineTrack(id: '42', language: 'zho', codec: 'ass')],
+        );
+        fixture.engine.subtitleMappingContext = SubtitleMappingContext.fromMpv(
+          demuxer: 'mkv',
+          tracks: [
+            {
+              'id': 42,
+              'type': 'sub',
+              'external': false,
+              'lang': 'zho',
+              'codec': 'ass',
+            },
+          ],
+        );
+        await fixture.controller.start();
+        expect(fixture.engine.selectedSubtitleTrackIds, ['42']);
+        await fixture.controller.selectSubtitleStream(null);
+        await fixture.controller.selectSubtitleStream(2);
+        expect(fixture.engine.selectedSubtitleTrackIds, ['42', null, '42']);
+        expect(fixture.controller.state.phase, PlaybackPhase.ready);
+        expect(fixture.requests, isEmpty);
+      },
+    );
+
+    test(
+      'disabling while native identity read is pending prevents stale selection',
+      () async {
+        final fixture = await _offlineSubtitleCase(tracks: real);
+        final gate = Completer<SubtitleMappingContext>();
+        fixture.engine.subtitleContextOperation = gate.future;
+        final start = fixture.controller.start();
+        await _waitUntil(() => fixture.engine.subtitleContextReads > 0);
+        final disable = fixture.controller.selectSubtitleStream(null);
+        gate.complete(const SubtitleMappingContext.unknown());
+        await Future.wait([start, disable]);
+        expect(fixture.engine.selectedSubtitleTrackIds, [null]);
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.disabled,
+        );
+      },
+    );
+
+    test(
       'offline default and manual selection use metadata, never Emby index',
       () async {
         final fixture = await _offlineSubtitleCase(tracks: real);
@@ -2704,7 +2793,18 @@ class _FakeEngine
     implements
         PlaybackEngine,
         SourceDirectPlaybackEngine,
+        SubtitleMappingContextProvider,
         PlaybackNativeResourceOwner {
+  SubtitleMappingContext subtitleMappingContext =
+      const SubtitleMappingContext.unknown();
+  Future<SubtitleMappingContext>? subtitleContextOperation;
+  int subtitleContextReads = 0;
+  @override
+  Future<SubtitleMappingContext> readSubtitleMappingContext() {
+    subtitleContextReads++;
+    return subtitleContextOperation ?? Future.value(subtitleMappingContext);
+  }
+
   final externalSubtitleEntered = Completer<void>();
   final List<Future<void> Function()> resources = [];
   @override

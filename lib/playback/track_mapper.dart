@@ -56,11 +56,41 @@ enum TrackFieldComparison {
   missingBoth,
 }
 
-/// Contains only comparison outcomes, never track IDs or metadata values.
+/// Allowlisted diagnostic vocabulary. Arbitrary codec strings remain private.
+enum TrackCodecLabel {
+  missing,
+  other,
+  ass,
+  ssa,
+  assSsa,
+  srt,
+  subrip,
+  pgs,
+  hdmvPgsSubtitle,
+  dvdSubtitle,
+  webvtt,
+  movText,
+  text,
+}
+
+enum TrackCodecContext { strict, mpvMatroskaEmbedded }
+
+/// Only fixed comparisons and codec labels; never IDs or free-form metadata.
 class TrackCandidateEvidence {
-  const TrackCandidateEvidence({required this.fields, required this.eligible});
+  const TrackCandidateEvidence({
+    required this.fields,
+    required this.eligible,
+    required this.nativeCodec,
+    required this.serverCodecFamily,
+    required this.nativeCodecFamily,
+    required this.codecContext,
+  });
   final Map<TrackMetadataField, TrackFieldComparison> fields;
   final bool eligible;
+  final TrackCodecLabel nativeCodec;
+  final TrackCodecLabel serverCodecFamily;
+  final TrackCodecLabel nativeCodecFamily;
+  final TrackCodecContext codecContext;
 }
 
 enum TrackSourceLookup { missing, unique, ambiguous }
@@ -95,6 +125,7 @@ class TrackMappingResult {
     this.engineFields = const {},
     this.conflictFields = const {},
     this.trackEvidence = const [],
+    this.serverCodec = TrackCodecLabel.missing,
   });
   final TrackMappingStatus status;
   final String? engineId;
@@ -105,6 +136,7 @@ class TrackMappingResult {
   final Set<TrackMetadataField> engineFields;
   final Set<TrackMetadataField> conflictFields;
   final List<TrackCandidateEvidence> trackEvidence;
+  final TrackCodecLabel serverCodec;
 
   TrackMappingResult asUnavailable(TrackMappingReason reason) =>
       TrackMappingResult(
@@ -116,6 +148,7 @@ class TrackMappingResult {
         engineFields: engineFields,
         conflictFields: conflictFields,
         trackEvidence: trackEvidence,
+        serverCodec: serverCodec,
       );
 }
 
@@ -148,8 +181,9 @@ class TrackMapper {
 
   TrackMappingResult match(
     PlaybackTrack? serverTrack,
-    List<EngineTrack> engineTracks,
-  ) {
+    List<EngineTrack> engineTracks, {
+    SubtitleMappingContext context = const SubtitleMappingContext.unknown(),
+  }) {
     final tracks = engineTracks.where(isRealTrack).toList(growable: false);
     final server = <TrackMetadataField, Object?>{
       TrackMetadataField.language: _language(serverTrack?.language),
@@ -168,9 +202,14 @@ class TrackMapper {
     final matching = <EngineTrack>[];
     final trackEvidence = <TrackCandidateEvidence>[];
     for (final track in tracks) {
+      final assSsa =
+          serverTrack?.type.toLowerCase() == 'subtitle' &&
+          serverTrack?.isExternal == false &&
+          context.isMpvMatroskaEmbedded(track);
+      final expectedCodec = _codec(serverTrack?.codec, assSsa: assSsa);
       final fields = <TrackMetadataField, Object?>{
         TrackMetadataField.language: _language(track.language),
-        TrackMetadataField.codec: _codec(track.codec),
+        TrackMetadataField.codec: _codec(track.codec, assSsa: assSsa),
         TrackMetadataField.title: _text(track.title),
         TrackMetadataField.channels: track.channels,
       };
@@ -180,7 +219,9 @@ class TrackMapper {
       for (final field in fields.keys) {
         final actual = fields[field];
         if (actual != null) engineFields.add(field);
-        final expected = server[field];
+        final expected = field == TrackMetadataField.codec
+            ? expectedCodec
+            : server[field];
         comparisons[field] = _compare(expected, actual);
         if (expected == null || actual == null) continue;
         evidence = true;
@@ -194,6 +235,12 @@ class TrackMapper {
         TrackCandidateEvidence(
           fields: Map.unmodifiable(comparisons),
           eligible: evidence && !conflict,
+          nativeCodec: _codecLabel(_text(track.codec)),
+          serverCodecFamily: _codecLabel(expectedCodec),
+          nativeCodecFamily: _codecLabel(fields[TrackMetadataField.codec]),
+          codecContext: assSsa
+              ? TrackCodecContext.mpvMatroskaEmbedded
+              : TrackCodecContext.strict,
         ),
       );
     }
@@ -225,6 +272,7 @@ class TrackMapper {
       engineFields: Set.unmodifiable(engineFields),
       conflictFields: Set.unmodifiable(conflicts),
       trackEvidence: List.unmodifiable(trackEvidence),
+      serverCodec: _codecLabel(_text(serverTrack?.codec)),
     );
   }
 
@@ -299,11 +347,30 @@ class TrackMapper {
     final value => value,
   };
 
-  // Restrict aliases to the same subtitle format. Do not collapse distinct
-  // formats (for example ASS/SSA) or language regions/scripts to guess a track.
-  static String? _codec(String? value) => switch (_text(value)) {
-    'srt' || 'subrip' => 'subrip',
-    final value => value,
+  // ASS/SSA compatibility is only native Matroska track identity, not format
+  // equivalence for conversion, external loading, audio or other demuxers.
+  // mpv v0.36.0 demux/demux_mkv.c:1705-1710 maps both tags to "ass".
+  static Object? _codec(String? value, {bool assSsa = false}) =>
+      switch (_text(value)) {
+        'srt' || 'subrip' => 'subrip',
+        'ass' || 'ssa' when assSsa => TrackCodecLabel.assSsa,
+        final value => value,
+      };
+
+  static TrackCodecLabel _codecLabel(Object? value) => switch (value) {
+    null => TrackCodecLabel.missing,
+    TrackCodecLabel.assSsa => TrackCodecLabel.assSsa,
+    'ass' => TrackCodecLabel.ass,
+    'ssa' => TrackCodecLabel.ssa,
+    'srt' => TrackCodecLabel.srt,
+    'subrip' => TrackCodecLabel.subrip,
+    'pgs' => TrackCodecLabel.pgs,
+    'hdmv_pgs_subtitle' => TrackCodecLabel.hdmvPgsSubtitle,
+    'dvd_subtitle' => TrackCodecLabel.dvdSubtitle,
+    'webvtt' => TrackCodecLabel.webvtt,
+    'mov_text' => TrackCodecLabel.movText,
+    'text' => TrackCodecLabel.text,
+    _ => TrackCodecLabel.other,
   };
 
   PlaybackTrack? findByIndex(PlaybackPlan plan, String type, int index) =>

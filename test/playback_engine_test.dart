@@ -9,6 +9,24 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
 void main() {
+  test(
+    'non-native backend cannot claim native Matroska subtitle context',
+    () async {
+      final engine = _createEngine(
+        _FakePlatformPlayer(),
+        _FakePlaybackOutputQuiescer(),
+      );
+      addTearDown(engine.dispose);
+      final context = await engine.readSubtitleMappingContext();
+      expect(
+        context.isMpvMatroskaEmbedded(
+          const EngineTrack(id: '42', codec: 'ass'),
+        ),
+        isFalse,
+      );
+    },
+  );
+
   test('optional mpv property failures do not escape', () async {
     final calls = <String>[];
     final writer = SafeNativePropertyWriter((property, value) async {

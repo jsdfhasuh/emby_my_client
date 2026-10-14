@@ -60,6 +60,98 @@ class EngineTrack {
   final bool isDefault;
 }
 
+/// Evidence from the active native input, never from a filename or cached plan.
+class SubtitleMappingContext {
+  const SubtitleMappingContext.unknown() : _embedded = const [];
+  const SubtitleMappingContext._(this._embedded);
+
+  final List<EngineTrack> _embedded;
+
+  static Future<SubtitleMappingContext> readMpv({
+    required Future<String?> Function() readDemuxer,
+    required Future<Object?> Function() readTracks,
+    required bool Function() isCurrent,
+    Duration timeout = const Duration(seconds: 1),
+  }) async {
+    var active = true;
+    bool current() => active && isCurrent();
+    Future<SubtitleMappingContext> read() async {
+      if (!current()) return const SubtitleMappingContext.unknown();
+      final demuxer = await readDemuxer();
+      if (!current() || demuxer != 'mkv') {
+        return const SubtitleMappingContext.unknown();
+      }
+      final tracks = await readTracks();
+      if (!current()) return const SubtitleMappingContext.unknown();
+      return SubtitleMappingContext.fromMpv(demuxer: demuxer, tracks: tracks);
+    }
+
+    try {
+      return await read().timeout(timeout);
+    } catch (_) {
+      // Optional evidence: unavailable/failed reads retain strict matching.
+      // Native error text and track-list values must not enter diagnostics.
+      return const SubtitleMappingContext.unknown();
+    } finally {
+      active = false;
+    }
+  }
+
+  factory SubtitleMappingContext.fromMpv({
+    required String? demuxer,
+    required Object? tracks,
+  }) {
+    // mpv's Matroska demuxer maps S_TEXT/SSA and S_TEXT/ASS to "ass".
+    // Other demuxers (including lavf) have not been established here.
+    if (demuxer != 'mkv' || tracks is! List) {
+      return const SubtitleMappingContext.unknown();
+    }
+    final embedded = <EngineTrack>[];
+    final seen = <String>{};
+    final duplicate = <String>{};
+    for (final row in tracks) {
+      if (row is! Map || row['type'] != 'sub') continue;
+      final id = row['id'];
+      if (id is! int || id <= 0) continue;
+      final key = id.toString();
+      if (!seen.add(key)) duplicate.add(key);
+      if (row['external'] != false) continue;
+      if ([
+        row['title'],
+        row['lang'],
+        row['codec'],
+      ].any((value) => value != null && value is! String)) {
+        continue;
+      }
+      embedded.add(
+        EngineTrack(
+          id: key,
+          title: row['title'] as String?,
+          language: row['lang'] as String?,
+          codec: row['codec'] as String?,
+        ),
+      );
+    }
+    return SubtitleMappingContext._(
+      List.unmodifiable(
+        embedded.where((track) => !duplicate.contains(track.id)),
+      ),
+    );
+  }
+
+  bool isMpvMatroskaEmbedded(EngineTrack track) => _embedded.any(
+    (native) =>
+        native.id == track.id &&
+        native.title == track.title &&
+        native.language == track.language &&
+        native.codec == track.codec,
+  );
+}
+
+abstract interface class SubtitleMappingContextProvider {
+  Future<SubtitleMappingContext> readSubtitleMappingContext();
+}
+
 abstract interface class PlaybackEngine {
   Stream<Duration> get positionStream;
   Stream<Duration> get durationStream;
@@ -124,6 +216,7 @@ class MediaKitPlaybackEngine
         SourceDirectPreparationEngine,
         SourceFailureEmitter,
         PlaybackNativeResourceOwner,
+        SubtitleMappingContextProvider,
         PlaybackCacheEngine,
         PlaybackCacheIdentitySnapshotReader {
   MediaKitPlaybackEngine(
@@ -150,6 +243,23 @@ class MediaKitPlaybackEngine
   }
 
   final Player player;
+
+  @override
+  Future<SubtitleMappingContext> readSubtitleMappingContext() async {
+    final native = player.platform;
+    if (native is! NativePlayer) {
+      return const SubtitleMappingContext.unknown();
+    }
+    final revision = _inputRevision;
+    final access = MediaKitNativePlaybackPropertyAccess(native);
+    return SubtitleMappingContext.readMpv(
+      readDemuxer: () => access.getString('current-demuxer'),
+      readTracks: () => access.getNativeNode('track-list'),
+      isCurrent: () =>
+          revision == _inputRevision && !_isRetiring && !_disposeStarted,
+    );
+  }
+
   final List<Future<void> Function()> _resourceReleases = [];
   @override
   void retainUntilNativeDisposal(Future<void> Function() release) =>

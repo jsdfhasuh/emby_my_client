@@ -3277,7 +3277,12 @@ class PlaybackController extends ChangeNotifier {
         return;
       }
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-      final mapping = _trackMapper.match(track, tracks);
+      final context = boundEngine is SubtitleMappingContextProvider
+          ? await (boundEngine as SubtitleMappingContextProvider)
+                .readSubtitleMappingContext()
+          : const SubtitleMappingContext.unknown();
+      _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+      final mapping = _trackMapper.match(track, tracks, context: context);
       final engineId = mapping.engineId;
       if (engineId == null) {
         _diagnostics.subtitleMappingFailed(

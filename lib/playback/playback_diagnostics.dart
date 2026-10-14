@@ -501,6 +501,8 @@ class PlaybackDiagnostics {
         'trackComparisonSides=server,native',
         'trackIdentity=realTrackOrdinal',
         'displayTitleRole=labelOnly',
+        'serverCodec=${result.serverCodec.name}',
+        'codecEvidenceOrder=nativeName,serverFamily,nativeFamily,context',
         'trackEvidenceCount=${result.trackEvidence.length.clamp(0, 16)}',
         'trackEvidenceOmitted=${(result.trackEvidence.length - 16).clamp(0, 9999)}',
         for (
@@ -508,18 +510,24 @@ class PlaybackDiagnostics {
           index < result.trackEvidence.length && index < 16;
           index++
         )
-          'track$index=${result.trackEvidence[index].eligible ? 'eligible' : 'rejected'}:${_trackComparisons(result.trackEvidence[index].fields)}',
+          'track$index=${result.trackEvidence[index].eligible ? 'eligible' : 'rejected'}:${_trackComparisons(result.trackEvidence[index].fields)}'
+              ';codec=${_trackCodecEvidence(result.trackEvidence[index])}',
         'planTransport=${source.transport.name}',
         'planInput=${source.input.name}',
         'selectedSourceLookup=${source.sourceLookup.name}',
         'selectedSourceStreamLookup=${source.streamLookup.name}',
         'planSourceFields=${_trackComparisons(source.planSourceFields)}',
         'planSourceComparisonSides=plan,selectedSource',
+        'planSourceEvidence=metadataSelfConsistencyOnly',
         'nativeSourceIdentity=unverified',
       ],
       level: PlaybackDiagnosticLevel.warning,
     );
   }
+
+  static String _trackCodecEvidence(TrackCandidateEvidence evidence) =>
+      '${evidence.nativeCodec.name},${evidence.serverCodecFamily.name},'
+      '${evidence.nativeCodecFamily.name},${evidence.codecContext.name}';
 
   static String _trackFields(Set<TrackMetadataField> fields) => fields.isEmpty
       ? 'none'

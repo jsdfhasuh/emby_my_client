@@ -3,7 +3,26 @@ import 'dart:async';
 import 'package:emby_my_client/playback/playback_engine.dart';
 
 /// Only the native media boundary is fake; route tests use the real controller.
-class RoutePlaybackEngine implements PlaybackEngine {
+class RoutePlaybackEngine
+    implements PlaybackEngine, SubtitleMappingContextProvider {
+  bool matroskaFamily = false;
+
+  @override
+  Future<SubtitleMappingContext> readSubtitleMappingContext() async =>
+      matroskaFamily
+      ? SubtitleMappingContext.fromMpv(
+          demuxer: 'mkv',
+          tracks: [
+            {
+              'id': 42,
+              'type': 'sub',
+              'external': false,
+              'lang': 'zho',
+              'codec': 'ass',
+            },
+          ],
+        )
+      : const SubtitleMappingContext.unknown();
   final positions = StreamController<Duration>.broadcast(sync: true);
   final durations = StreamController<Duration>.broadcast(sync: true);
   final playing = StreamController<bool>.broadcast(sync: true);
@@ -51,7 +70,7 @@ class RoutePlaybackEngine implements PlaybackEngine {
       EngineTrack(
         id: '42',
         language: conflictingMetadata ? 'eng' : 'zho',
-        codec: 'subrip',
+        codec: matroskaFamily ? 'ass' : 'subrip',
       ),
     ]);
     audio.add(const [EngineTrack(id: '7', language: 'eng', codec: 'aac')]);

@@ -410,6 +410,7 @@ void main() {
 void _subtitleRouteTests() {
   for (final action in [
     'success',
+    'codecFamily',
     'engineFailure',
     'metadataConflict',
     'disable',
@@ -601,7 +602,7 @@ _mountOfflinePlayer(WidgetTester tester, {String action = 'success'}) async {
           'Index': 2,
           'DisplayTitle': 'Route subtitle',
           'Language': 'chi',
-          'Codec': 'srt',
+          'Codec': action == 'codecFamily' ? 'ssa' : 'srt',
           'IsDefault': action == 'disable',
         },
         {
@@ -615,6 +616,7 @@ _mountOfflinePlayer(WidgetTester tester, {String action = 'success'}) async {
     );
   });
   final engine = RoutePlaybackEngine()
+    ..matroskaFamily = action == 'codecFamily'
     ..failSubtitle = action == 'engineFailure'
     ..conflictingMetadata = action == 'metadataConflict';
   final observer = _FullPlayerRouteObserver();
