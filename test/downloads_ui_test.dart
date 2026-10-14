@@ -16,6 +16,50 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('stale browsing data does not block online playback', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    late final _UiHarness harness;
+    await tester.runAsync(() async {
+      harness = await _UiHarness.create();
+    });
+    addTearDown(harness.dispose);
+    harness.api.browseState.cached(
+      'fixture',
+      BrowseSnapshot({}, DateTime.utc(2026)),
+      disconnected: false,
+    );
+    final observer = _PlayerRouteObserver();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorObservers: [observer],
+        home: ItemDetailScreen(
+          api: harness.api,
+          initialItem: _item,
+          downloads: harness.service,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final play = find.text('播放');
+    await tester.ensureVisible(play);
+    await tester.tap(play);
+    for (var i = 0; i < 50 && observer.playerRoute == null; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+      );
+    }
+    final route = observer.playerRoute;
+    expect(route, isNotNull);
+    final player = route!.builder(observer.navigator!.context) as PlayerScreen;
+    expect(player.offlineItem, isNull);
+    observer.navigator!.removeRoute(route);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   for (final offline in [false, true]) {
     testWidgets(
       'normal detail play opens the downloaded file, offline=$offline',

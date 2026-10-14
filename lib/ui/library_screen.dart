@@ -2495,8 +2495,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   }
 
   Future<void> _playAll({bool shuffle = false}) async {
-    if (widget.api.browseState.offline ||
-        widget.api.browseState.hasStalePages) {
+    if (widget.api.browseState.offline) {
       final candidates = _playableItems.toList();
       if (shuffle) candidates.shuffle();
       final downloads = widget.downloads;

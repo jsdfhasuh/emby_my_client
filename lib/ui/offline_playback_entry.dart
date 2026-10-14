@@ -25,7 +25,7 @@ Future<bool> openCachedPlayback(
       : null;
   if (!context.mounted || !api.isSessionActive) return true;
   if (local == null || local.scope != api.scope) {
-    if (!api.browseState.offline && !api.browseState.hasStalePages) {
+    if (!api.browseState.offline) {
       return false;
     }
     ScaffoldMessenger.of(
