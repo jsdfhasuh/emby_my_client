@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -39,7 +40,7 @@ void main() {
             },
           ),
         );
-      final api = EmbyApi(_session, dio: dio);
+      final api = _AssetApi(dio);
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'emby-assets-test-',
@@ -70,13 +71,15 @@ void main() {
       final external = metadata.mediaStreams.where(
         (stream) => stream['IsExternal'] == true,
       );
-      expect(external, hasLength(1));
-      final subtitlePath = external.single['DeliveryUrl']!.toString();
+      expect(external, hasLength(2));
+      final subtitlePath = external.first['DeliveryUrl']!.toString();
       expect(path.isWithin(assetRoot, subtitlePath), isTrue);
       expect(await File(subtitlePath).readAsBytes(), _subtitleBytes);
       expect(
-        metadata.mediaStreams.any((stream) => stream['Index'] == 4),
-        isFalse,
+        metadata.mediaStreams.singleWhere(
+          (stream) => stream['Index'] == 4,
+        )['OfflineSubtitleState'],
+        'failed',
       );
       final partialFiles = await directory
           .list(recursive: true, followLinks: false)
@@ -112,7 +115,7 @@ void main() {
           },
         ),
       );
-    final api = EmbyApi(_session, dio: dio);
+    final api = _AssetApi(dio, streams: const []);
     addTearDown(api.dispose);
     final directory = await Directory.systemTemp.createTemp(
       'emby-assets-reject-test-',
@@ -200,15 +203,20 @@ const _session = EmbySession(
 );
 
 const _imageBytes = <int>[0xFF, 0xD8, 0xFF, 0xD9];
-const _subtitleBytes = <int>[
-  0x31,
-  0x0A,
-  0x30,
-  0x30,
-  0x3A,
-  0x30,
-  0x30,
-  0x3A,
-  0x30,
-  0x30,
-];
+final _subtitleBytes = utf8.encode(
+  '1\n00:00:00,000 --> 00:00:01,000\nFixture\n',
+);
+
+class _AssetApi extends EmbyApi {
+  _AssetApi(Dio dio, {this.streams}) : super(_session, dio: dio);
+  final List<Map<String, dynamic>>? streams;
+  @override
+  Future<PlaybackMediaSource> getDownloadMediaSource(
+    String itemId,
+    String sourceId, {
+    CancelToken? cancelToken,
+  }) async => PlaybackMediaSource.fromJson({
+    'Id': sourceId,
+    'MediaStreams': streams ?? _task().metadata.mediaStreams,
+  });
+}

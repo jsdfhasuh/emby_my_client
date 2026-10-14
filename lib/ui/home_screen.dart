@@ -20,6 +20,7 @@ import 'home_shell_navigation.dart';
 import 'library_screen.dart';
 import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
+import 'offline_playback_entry.dart';
 import 'widgets/media_widgets.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -223,6 +224,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _play(EmbyItem item) async {
+    if (await openCachedPlayback(
+          context,
+          api: widget.api,
+          downloads: widget.downloads,
+          item: item,
+        ) ||
+        !mounted) {
+      return;
+    }
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(api: widget.api, item: item),

@@ -11,6 +11,7 @@ import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
 import '../settings/library_sort_preferences.dart';
 import 'local_database.dart';
+import '../images/emby_image_cache.dart';
 
 class AccountDataCleanup {
   AccountDataCleanup({
@@ -21,7 +22,9 @@ class AccountDataCleanup {
     LibrarySortPreferenceStore? librarySortPreferenceStore,
     SearchHistoryStore? searchHistoryStore,
     PlaybackSettingsRepository? playbackSettingsRepository,
+    Future<void> Function(ServerScope)? clearImages,
   }) : _database = database,
+       _clearImages = clearImages ?? embyImageCacheManager.clearScope,
        _directoryResolver = directoryResolver ?? defaultDownloadDirectory,
        _downloadSettingsStore =
            downloadSettingsStore ?? SharedPreferencesDownloadSettingsStore(),
@@ -37,6 +40,7 @@ class AccountDataCleanup {
            playbackSettingsRepository ?? PlaybackSettingsRepository();
 
   final LocalDatabase _database;
+  final Future<void> Function(ServerScope) _clearImages;
   final Future<Directory> Function(ServerScope scope) _directoryResolver;
   final DownloadSettingsStore _downloadSettingsStore;
   final LibraryCategorySettingsStore _libraryCategorySettingsStore;
@@ -74,6 +78,7 @@ class AccountDataCleanup {
     }
 
     await _database.deleteScopeData(scope);
+    await _clearImages(scope);
     await Future.wait([
       _downloadSettingsStore.clear(scope),
       _libraryCategorySettingsStore.clear(scope),

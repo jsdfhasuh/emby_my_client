@@ -33,7 +33,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       throw const FileSystemException('Offline media file is missing');
     }
     final defaultSubtitleStreamIndex = _defaultSubtitleStreamIndex(
-      offlineItem.metadata.mediaStreams,
+      offlineItem.metadata.playbackStreams,
     );
     final resolvedSubtitleStreamIndex = subtitleDisabled
         ? null
@@ -43,7 +43,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       supportsDirectPlay: true,
       supportsDirectStream: false,
       supportsTranscoding: false,
-      mediaStreams: offlineItem.metadata.mediaStreams,
+      mediaStreams: offlineItem.metadata.playbackStreams,
       transcodingReasons: const [],
       container: offlineItem.metadata.container,
       defaultSubtitleStreamIndex: defaultSubtitleStreamIndex,
@@ -61,7 +61,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       sourceProtocol: 'File',
       duration: Duration(microseconds: (item.runTimeTicks ?? 0) ~/ 10),
       transportKind: PlaybackTransportKind.offlineLocal,
-      mediaStreams: offlineItem.metadata.mediaStreams,
+      mediaStreams: offlineItem.metadata.playbackStreams,
       transcodingReasons: const [],
       availableMediaSources: [source],
     );

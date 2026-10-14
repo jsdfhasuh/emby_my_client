@@ -8,6 +8,7 @@ import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/data/local_database.dart';
 import 'package:emby_my_client/downloads/download_executor.dart';
+import 'package:emby_my_client/downloads/download_assets.dart';
 import 'package:emby_my_client/downloads/download_integrity.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/downloads/download_preflight.dart';
@@ -22,6 +23,64 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
   setUpAll(sqfliteFfiInit);
+
+  test(
+    'subtitle repair updates the old completed record without another video transfer',
+    () async {
+      final assets = _RepairAssets();
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      expect(task.metadata.subtitlesNeedRepair, isTrue);
+      expect(task.lastErrorCode, 'subtitlesIncomplete');
+      expect(await harness.service.offlineItem(task.itemId), isNotNull);
+      final before = await File(task.finalPath).readAsBytes();
+      assets.succeed = true;
+      await harness.service.repairSubtitles(task.id);
+      final repaired = harness.service.taskForItem(task.itemId)!;
+      expect(repaired.isComplete, isTrue);
+      expect(repaired.metadata.subtitlesNeedRepair, isFalse);
+      expect(repaired.lastErrorCode, isNull);
+      expect(assets.calls, 2);
+      expect(transport.calls, hasLength(1));
+      expect(await File(task.finalPath).readAsBytes(), before);
+      expect(
+        (await harness.repository.offlineItem(
+          _scope,
+          task.itemId,
+        ))!.metadata.playbackStreams.single['OfflineSubtitleState'],
+        'available',
+      );
+    },
+  );
+
+  test(
+    'deleting during subtitle repair cancels it and cannot resurrect the download',
+    () async {
+      final assets = _RepairAssets();
+      final harness = await _Harness.create(
+        _FakeTransport(handler: (_) async => _response(_mediaBytes)),
+        assetService: assets,
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      assets.waitForCancel = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await assets.started.future;
+      await harness.service.delete(task.id);
+      await repair;
+      expect(harness.service.taskForItem(task.itemId), isNull);
+      expect(await harness.repository.offlineItem(_scope, task.itemId), isNull);
+      expect(await File(task.finalPath).exists(), isFalse);
+    },
+  );
 
   test('late A transfer is drained before B downloads the same item', () async {
     final responseGate = Completer<DownloadResponse>();
@@ -1918,6 +1977,7 @@ class _Harness {
 
   static Future<_Harness> create(
     DownloadTransport transport, {
+    DownloadAssetService? assetService,
     bool initialize = true,
     DownloadPreflight? preflight,
     DownloadSettingsStore? settingsStore,
@@ -1939,6 +1999,7 @@ class _Harness {
       scope: _scope,
       repository: repository,
       transport: transport,
+      assetService: assetService,
       directoryResolver: (_) async => directory,
       retryDelay: retryDelay ?? (_) async {},
       preflight: preflight,
@@ -1963,6 +2024,44 @@ class _Harness {
     await api.dispose();
     await database.close();
     if (await directory.exists()) await directory.delete(recursive: true);
+  }
+}
+
+class _RepairAssets implements DownloadAssetService {
+  int calls = 0;
+  bool succeed = false;
+  bool waitForCancel = false;
+  final started = Completer<void>();
+  @override
+  Future<OfflineMediaMetadata> downloadAssets(
+    DownloadTaskRecord task,
+    Directory downloadDirectory, {
+    CancelToken? cancelToken,
+  }) async {
+    calls++;
+    if (waitForCancel) {
+      started.complete();
+      throw await cancelToken!.whenCancel;
+    }
+    if (!succeed) throw const SocketException('fixture assets offline');
+    final subtitle = File(
+      path.join(downloadDirectory.path, 'assets', 'subtitle.srt'),
+    );
+    await subtitle.parent.create(recursive: true);
+    await subtitle.writeAsString('1\n00:00:00,000 --> 00:00:01,000\nFixture\n');
+    return task.metadata.copyWith(
+      subtitleDiscoveryComplete: true,
+      mediaStreams: [
+        {
+          'Index': 3,
+          'Type': 'Subtitle',
+          'IsExternal': true,
+          'Codec': 'subrip',
+          'OfflineSubtitleState': 'available',
+          'DeliveryUrl': subtitle.path,
+        },
+      ],
+    );
   }
 }
 

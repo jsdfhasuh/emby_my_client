@@ -16,7 +16,7 @@ class LocalDatabase {
   }) : _factory = factory,
        _pathResolver = pathResolver ?? _defaultPath;
 
-  static const schemaVersion = 4;
+  static const schemaVersion = 5;
   static const fileName = 'emby_client.db';
 
   final DatabaseFactory? _factory;
@@ -24,6 +24,11 @@ class LocalDatabase {
   final bool singleInstance;
   Database? _database;
   Future<Database>? _opening;
+  final Map<ServerScope, int> _scopeVersions = {};
+  int scopeVersion(ServerScope scope) => _scopeVersions[scope] ?? 0;
+  void invalidateScope(ServerScope scope) {
+    _scopeVersions[scope] = scopeVersion(scope) + 1;
+  }
 
   bool get isOpen => _database?.isOpen ?? false;
 
@@ -42,9 +47,15 @@ class LocalDatabase {
   ) async => (await open()).transaction(operation);
 
   Future<void> deleteScopeData(ServerScope scope) async {
+    invalidateScope(scope);
     await transaction((database) async {
       final where = 'server_id = ? AND user_id = ?';
       final whereArgs = [scope.serverId, scope.userId];
+      await database.delete(
+        'browse_snapshots',
+        where: where,
+        whereArgs: whereArgs,
+      );
       await database.delete(
         'offline_progress',
         where: where,
@@ -211,6 +222,16 @@ class LocalDatabase {
           await database.execute(
             'ALTER TABLE download_tasks ADD COLUMN integrity_digest TEXT',
           );
+          break;
+        case 5:
+          await database.execute('''
+            CREATE TABLE browse_snapshots (
+              server_id TEXT NOT NULL, user_id TEXT NOT NULL,
+              request_key TEXT NOT NULL, payload TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+              PRIMARY KEY (server_id, user_id, request_key)
+            )
+          ''');
           break;
       }
     }

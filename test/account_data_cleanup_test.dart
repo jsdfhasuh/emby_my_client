@@ -101,7 +101,9 @@ void main() {
         const PlaybackSettingsPatch(maxStreamingBitrate: 2000000),
       );
 
+      final clearedImageScopes = <ServerScope>[];
       final cleanup = AccountDataCleanup(
+        clearImages: (scope) async => clearedImageScopes.add(scope),
         database: database,
         directoryResolver: (scope) async =>
             Directory(path.join(root.path, scope.databaseKey)),
@@ -113,6 +115,7 @@ void main() {
       );
 
       await cleanup.delete(scope: _firstScope, session: _firstSession);
+      expect(clearedImageScopes, [_firstScope]);
 
       expect(await firstDirectory.exists(), isFalse);
       expect(await secondFile.readAsBytes(), [2]);
@@ -121,6 +124,7 @@ void main() {
         'download_tasks',
         'offline_items',
         'offline_progress',
+        'browse_snapshots',
       ]) {
         expect(await _scopeCount(database, table, _firstScope), 0);
         expect(await _scopeCount(database, table, _secondScope), 1);
@@ -175,6 +179,7 @@ void main() {
       addTearDown(database.close);
       await _seedDatabase(database, _firstScope, 'first');
       final cleanup = AccountDataCleanup(
+        clearImages: (_) async {},
         database: database,
         directoryResolver: (_) async => root,
         downloadSettingsStore: MemoryDownloadSettingsStore(),
@@ -212,6 +217,7 @@ void main() {
       addTearDown(database.close);
       await _seedDatabase(database, _firstScope, 'first');
       final cleanup = AccountDataCleanup(
+        clearImages: (_) async {},
         database: database,
         directoryResolver: (_) async => Directory(scopePath),
         downloadSettingsStore: MemoryDownloadSettingsStore(),
@@ -239,6 +245,14 @@ Future<void> _seedDatabase(
   String suffix,
 ) async {
   await database.transaction((executor) async {
+    await executor.insert('browse_snapshots', {
+      'server_id': scope.serverId,
+      'user_id': scope.userId,
+      'request_key': 'fixture',
+      'payload': '{}',
+      'size_bytes': 2,
+      'updated_at_ms': 1,
+    });
     await executor.insert('server_capabilities', {
       'server_id': scope.serverId,
       'user_id': scope.userId,

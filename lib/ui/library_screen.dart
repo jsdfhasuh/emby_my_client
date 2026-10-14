@@ -34,6 +34,8 @@ import 'item_detail_screen.dart';
 import 'home_shell_navigation.dart';
 import 'photos/photo_viewer_screen.dart';
 import 'player_screen.dart';
+import 'offline_playback_entry.dart';
+import 'widgets/offline_browse_banner.dart';
 import 'widgets/library_alphabet_navigation.dart';
 import 'widgets/library_directory_entry_card.dart';
 import 'widgets/library_mixed_entry_card.dart';
@@ -2493,6 +2495,28 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   }
 
   Future<void> _playAll({bool shuffle = false}) async {
+    if (widget.api.browseState.offline ||
+        widget.api.browseState.hasStalePages) {
+      final candidates = _playableItems.toList();
+      if (shuffle) candidates.shuffle();
+      final downloads = widget.downloads;
+      final candidate = candidates
+          .where((item) => downloads?.taskForItem(item.id)?.isComplete == true)
+          .firstOrNull;
+      if (candidate != null) {
+        await openCachedPlayback(
+          context,
+          api: widget.api,
+          downloads: downloads,
+          item: candidate,
+        );
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('当前已缓存列表没有已下载视频')));
+      }
+      return;
+    }
     if (!_canPlayCompleteResult) return;
     setState(() => _preparingPlaybackQueue = true);
     final state = _state;
@@ -2926,6 +2950,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     final title = _state.facet?.name ?? widget.view.name;
     final navigationActions = widget.navigationActions;
     return Scaffold(
+      bottomNavigationBar: OfflineBrowseBanner(
+        api: widget.api,
+        onRetry: () => unawaited(_refresh()),
+      ),
       appBar: largeIPadLandscape && navigationActions != null
           ? LargeScreenPageChrome(
               title: title,

@@ -318,6 +318,11 @@ class _DownloadTaskHandler extends TaskHandler {
         if (taskId != null) await service.resume(taskId);
       case DownloadExecutorCommand.delete:
         if (taskId != null) await service.delete(taskId);
+      case DownloadExecutorCommand.repairSubtitles:
+        await service.refresh();
+        // Keep the command queue available so delete/shutdown can cancel the
+        // asset transfer while it is in progress.
+        if (taskId != null) unawaited(service.repairSubtitles(taskId));
       case DownloadExecutorCommand.settingsChanged:
         await service.reloadSettings();
       case DownloadExecutorCommand.wake:

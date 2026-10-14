@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/data/browse_cache.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/downloads/download_preflight.dart';
 import 'package:emby_my_client/downloads/download_repository.dart';
@@ -10,10 +11,97 @@ import 'package:emby_my_client/downloads/download_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/ui/downloads/downloads_screen.dart';
 import 'package:emby_my_client/ui/item_detail_screen.dart';
+import 'package:emby_my_client/ui/player_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final offline in [false, true]) {
+    testWidgets(
+      'normal detail play opens the downloaded file, offline=$offline',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(800, 1200));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        late final _UiHarness harness;
+        await tester.runAsync(() async {
+          harness = await _UiHarness.create(withCompletedDownload: true);
+        });
+        addTearDown(harness.dispose);
+        if (offline) {
+          harness.api.browseState.cached(
+            'fixture',
+            BrowseSnapshot({}, DateTime.utc(2026)),
+            disconnected: true,
+          );
+        }
+        final observer = _PlayerRouteObserver();
+        await tester.pumpWidget(
+          MaterialApp(
+            navigatorObservers: [observer],
+            home: ItemDetailScreen(
+              api: harness.api,
+              initialItem: _item,
+              downloads: harness.service,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final play = find.text('播放');
+        await tester.ensureVisible(play);
+        await tester.tap(play);
+        // Resolve the local file checks before building the native player. This
+        // asserts the real UI route/arguments, not native rendering or decoding.
+        for (var i = 0; i < 50 && observer.playerRoute == null; i++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)),
+          );
+        }
+        final route = observer.playerRoute;
+        expect(route, isNotNull);
+        final player =
+            route!.builder(observer.navigator!.context) as PlayerScreen;
+        expect(player.offlineItem?.itemId, _item.id);
+        expect(player.offlineItem?.mediaSourceId, 'source-1');
+        expect(player.offlineItem?.scope, _scope);
+        expect(player.downloads, same(harness.service));
+        observer.navigator!.removeRoute(route);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'normal detail play clearly rejects an undownloaded item offline',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 1200));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      late final _UiHarness harness;
+      await tester.runAsync(() async {
+        harness = await _UiHarness.create();
+      });
+      addTearDown(harness.dispose);
+      harness.api.browseState.cached(
+        'fixture',
+        BrowseSnapshot({}, DateTime.utc(2026)),
+        disconnected: true,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ItemDetailScreen(
+            api: harness.api,
+            initialItem: _item,
+            downloads: harness.service,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放'));
+      await tester.pumpAndSettle();
+      expect(find.text('此视频尚无可用的本地下载，联网后可播放'), findsOneWidget);
+      expect(find.byType(PlayerScreen), findsNothing);
+    },
+  );
   testWidgets('detail presents a download action for a playable item', (
     tester,
   ) async {
@@ -64,7 +152,9 @@ void main() {
     await tester.pump();
 
     expect(find.text('Offline Test'), findsOneWidget);
-    expect(find.text('可离线播放 · 12 B / 12 B'), findsOneWidget);
+    expect(find.textContaining('视频可离线播放 · 12 B / 12 B'), findsOneWidget);
+    expect(find.textContaining('字幕待检查，可补下载'), findsOneWidget);
+    expect(find.byTooltip('检查并补下载字幕'), findsOneWidget);
     expect(find.text('媒体文件占用 12 B'), findsOneWidget);
     expect(find.text('1 个可离线播放'), findsOneWidget);
     expect(find.byTooltip('离线播放'), findsOneWidget);
@@ -260,6 +350,16 @@ void main() {
     expect(find.byTooltip('暂停'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+}
+
+class _PlayerRouteObserver extends NavigatorObserver {
+  MaterialPageRoute<dynamic>? playerRoute;
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute != null && route is MaterialPageRoute<dynamic>) {
+      playerRoute = route;
+    }
+  }
 }
 
 class _UiHarness {

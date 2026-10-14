@@ -12,6 +12,7 @@ import '../core/sign_in_diagnostics.dart';
 import '../data/account_data_cleanup.dart';
 import '../data/client_registry.dart';
 import '../data/emby_api.dart';
+import '../data/browse_cache.dart';
 import '../data/local_database.dart';
 import '../data/server_capabilities_repository.dart';
 import '../data/session_store.dart';
@@ -1207,6 +1208,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     late final EmbyApi api;
     api = EmbyApi(
       session,
+      browseCache: _localDatabaseAvailable
+          ? BrowseCacheRepository(_database)
+          : null,
       deviceName: _capabilities.embyDeviceName,
       onSessionExpired: () => _expireSession(scope, api),
       onRemoteCapabilitiesReported: () => _confirmRemoteControl(scope, api),

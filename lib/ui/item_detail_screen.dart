@@ -18,6 +18,8 @@ import '../realtime/realtime_refresh_binding.dart';
 import 'home_shell_navigation.dart';
 import 'person_detail_screen.dart';
 import 'player_screen.dart';
+import 'offline_playback_entry.dart';
+import 'widgets/offline_browse_banner.dart';
 import 'widgets/media_widgets.dart';
 import 'widgets/person_widgets.dart';
 
@@ -68,6 +70,8 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   bool _loadFailed = false;
   bool _loading = true;
   bool _loadingEpisodes = false;
+  bool _episodesUnavailable = false;
+  int _episodesGeneration = 0;
 
   PlatformCapabilities get _platformCapabilities =>
       widget.platformCapabilities ?? PlatformCapabilities.current();
@@ -110,21 +114,30 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   }
 
   Future<void> _load() async {
+    final generation = ++_episodesGeneration;
     setState(() {
       _loading = true;
       _loadFailed = false;
+      _episodesUnavailable = false;
     });
     try {
       final item = await widget.api.getItem(widget.initialItem.id);
+      if (!mounted || generation != _episodesGeneration) return;
+      _item = item;
       var seasons = <EmbyItem>[];
       var episodes = <EmbyItem>[];
       String? seasonId;
       if (item.isSeries) {
         seasons = await widget.api.getSeasons(item.id);
-        seasonId = seasons.firstOrNull?.id;
+        seasonId = seasons.any((season) => season.id == _seasonId)
+            ? _seasonId
+            : seasons.firstOrNull?.id;
+        if (!mounted || generation != _episodesGeneration) return;
+        _seasons = seasons;
+        _seasonId = seasonId;
         episodes = await widget.api.getEpisodes(item.id, seasonId: seasonId);
       }
-      if (!mounted) return;
+      if (!mounted || generation != _episodesGeneration) return;
       setState(() {
         _item = item;
         _seasons = seasons;
@@ -133,26 +146,40 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
       });
     } catch (error, stackTrace) {
       _logFailure('Item detail initial load failed', error, stackTrace);
-      if (mounted) setState(() => _loadFailed = true);
+      if (mounted && generation == _episodesGeneration) {
+        setState(() {
+          _loadFailed = _item == null;
+          _episodesUnavailable = _item?.isSeries == true;
+        });
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && generation == _episodesGeneration) {
+        setState(() => _loading = false);
+      }
     }
   }
 
   Future<void> _selectSeason(String seasonId) async {
     final item = _item;
     if (item == null || seasonId == _seasonId) return;
+    final generation = ++_episodesGeneration;
     setState(() {
       _seasonId = seasonId;
       _loadingEpisodes = true;
+      _episodesUnavailable = false;
+      _episodes = const [];
     });
     try {
       final episodes = await widget.api.getEpisodes(
         item.id,
         seasonId: seasonId,
       );
-      if (mounted) setState(() => _episodes = episodes);
+      if (mounted && generation == _episodesGeneration) {
+        setState(() => _episodes = episodes);
+      }
     } catch (error, stackTrace) {
+      if (!mounted || generation != _episodesGeneration) return;
+      if (mounted) setState(() => _episodesUnavailable = true);
       _showOperationFailure(
         event: 'Item detail season load failed',
         message: '剧集加载失败，请重试',
@@ -160,11 +187,22 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
         stackTrace: stackTrace,
       );
     } finally {
-      if (mounted) setState(() => _loadingEpisodes = false);
+      if (mounted && generation == _episodesGeneration) {
+        setState(() => _loadingEpisodes = false);
+      }
     }
   }
 
   Future<void> _play(EmbyItem item) async {
+    if (await openCachedPlayback(
+          context,
+          api: widget.api,
+          downloads: widget.downloads,
+          item: item,
+        ) ||
+        !mounted) {
+      return;
+    }
     _invalidateGenreNavigation();
     final series = _item;
     final queue = item.type == 'Episode' && series?.isSeries == true
@@ -402,6 +440,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
     if (_loadFailed || _item == null) {
       return Scaffold(
         appBar: AppBar(),
+        bottomNavigationBar: OfflineBrowseBanner(
+          api: widget.api,
+          onRetry: _load,
+        ),
         body: _ItemDetailLoadError(onRetry: _load),
       );
     }
@@ -448,6 +490,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
     final navigationActions = widget.navigationActions;
 
     return Scaffold(
+      bottomNavigationBar: OfflineBrowseBanner(api: widget.api, onRetry: _load),
       appBar: navigationActions == null
           ? AppBar(
               title: Text(
@@ -587,6 +630,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
     final technical = technicalPresentationForItem(item);
 
     return Scaffold(
+      bottomNavigationBar: OfflineBrowseBanner(api: widget.api, onRetry: _load),
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
@@ -946,6 +990,16 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
             padding: EdgeInsets.symmetric(vertical: 26),
             child: Center(child: CircularProgressIndicator()),
           )
+        else if (_episodesUnavailable)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            child: Column(
+              children: [
+                const Text('此季剧集暂不可用；未缓存的内容需联网后查看'),
+                TextButton(onPressed: _load, child: const Text('重试')),
+              ],
+            ),
+          )
         else if (_episodes.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 28),
@@ -1303,13 +1357,31 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
         final onPressed = starting || status == DownloadStatus.cancelling
             ? null
             : () => _handleDownload(item, task);
-        return filled
+        final action = filled
             ? IconButton.filledTonal(
                 tooltip: tooltip,
                 onPressed: onPressed,
                 icon: icon,
               )
             : IconButton(tooltip: tooltip, onPressed: onPressed, icon: icon);
+        if (task == null || !task.isComplete) return action;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            action,
+            IconButton(
+              tooltip: '${task.metadata.subtitleStatusText}；检查并补下载字幕',
+              onPressed: downloads.isRepairingSubtitles(task.id)
+                  ? null
+                  : () => downloads.repairSubtitles(task.id),
+              icon: Icon(
+                task.metadata.subtitlesNeedRepair
+                    ? Icons.subtitles_off_outlined
+                    : Icons.subtitles_outlined,
+              ),
+            ),
+          ],
+        );
       },
     );
   }

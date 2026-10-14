@@ -91,6 +91,8 @@ class DownloadService extends ChangeNotifier {
   }
 
   DownloadSettings get settings => _settings;
+  bool isRepairingSubtitles(String taskId) =>
+      _tasks[taskId]?.lastErrorCode == 'subtitleRepairing';
   bool get hasActiveWork =>
       _operations.isNotEmpty ||
       _tasks.values.any(
@@ -177,6 +179,10 @@ class DownloadService extends ChangeNotifier {
         );
         await _repository.saveTask(task);
       } else if (task.status == DownloadStatus.completed) {
+        if (!executorRunning && task.lastErrorCode == 'subtitleRepairing') {
+          task = task.copyWith(lastErrorCode: 'subtitlesIncomplete');
+          await _repository.saveTask(task);
+        }
         final errorCode = await _completedFileError(task, finalFile);
         if (errorCode != null) {
           task = await _invalidateCompletedFile(task, finalFile, errorCode);
@@ -547,6 +553,64 @@ class DownloadService extends ChangeNotifier {
       ),
     );
     await resume(taskId);
+  }
+
+  /// Repairs assets only; the completed video file is never downloaded again.
+  Future<void> repairSubtitles(String taskId) async {
+    _ensureActive();
+    if (_operations.containsKey(taskId)) return;
+    final task = _tasks[taskId];
+    if (task == null || !task.isComplete) return;
+    final executor = _executor;
+    if (executor != null && await executor.isRunning) {
+      if (isRepairingSubtitles(taskId)) return;
+      await _save(task.copyWith(lastErrorCode: 'subtitleRepairing'));
+      try {
+        await executor.send(
+          DownloadExecutorCommand.repairSubtitles,
+          taskId: taskId,
+        );
+      } catch (_) {
+        await _save(task.copyWith(lastErrorCode: 'subtitlesIncomplete'));
+        rethrow;
+      }
+      return;
+    }
+    final token = CancelToken();
+    _cancelTokens[taskId] = token;
+    final operation = _repairSubtitles(task, token);
+    _operations[taskId] = operation;
+    try {
+      await operation;
+    } finally {
+      _operations.remove(taskId);
+      _cancelTokens.remove(taskId);
+      _requestedActions.remove(taskId);
+      _notify();
+    }
+  }
+
+  Future<void> _repairSubtitles(
+    DownloadTaskRecord task,
+    CancelToken token,
+  ) async {
+    try {
+      if (await offlineItem(task.itemId) == null) return;
+      _throwIfInterrupted(task.id, token);
+      await _save(task.copyWith(lastErrorCode: 'subtitleRepairing'));
+      await _preflight.verifyNetwork(wifiOnly: _settings.wifiOnly);
+      await _commitExistingFile(
+        task,
+        File(task.finalPath),
+        alreadyValidated: true,
+      );
+    } catch (_) {
+      if (_requestedActions[task.id] == _RequestedAction.delete) {
+        await _removeTaskAndFiles(_tasks[task.id] ?? task);
+      } else if (_tasks.containsKey(task.id)) {
+        await _save(task.copyWith(lastErrorCode: 'subtitlesIncomplete'));
+      }
+    }
   }
 
   Future<void> delete(String taskId) async {
@@ -1285,6 +1349,7 @@ class DownloadService extends ChangeNotifier {
       metadata = await _assetService.downloadAssets(
         task,
         await _directoryResolver(scope),
+        cancelToken: _cancelTokens[task.id],
       );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
@@ -1293,13 +1358,19 @@ class DownloadService extends ChangeNotifier {
         error: error,
         stackTrace: stackTrace,
       );
+      metadata = metadata.copyWith(subtitleDiscoveryComplete: false);
     }
+    final cancellation = _cancelTokens[task.id];
+    if (cancellation != null) _throwIfInterrupted(task.id, cancellation);
     final completed = task.copyWith(
       status: DownloadStatus.completed,
       downloadedBytes: length,
       expectedBytes: length,
       metadata: metadata,
-      clearLastErrorCode: true,
+      lastErrorCode: metadata.subtitlesNeedRepair
+          ? 'subtitlesIncomplete'
+          : null,
+      clearLastErrorCode: !metadata.subtitlesNeedRepair,
       updatedAt: completedAt,
     );
     final item = OfflineMediaItem(

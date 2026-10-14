@@ -20,6 +20,7 @@ import 'home_shell_navigation.dart';
 import 'library_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
+import 'widgets/offline_browse_banner.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key, required this.controller});
@@ -196,28 +197,31 @@ class _HomeShellState extends State<HomeShell> {
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.account_circle_outlined),
-              title: Text(session.username),
-              subtitle: Text(session.serverName),
-            ),
-            const Divider(height: 1),
-            for (final item in const [
-              ('servers', Icons.dns_outlined, '服务器管理'),
-              ('settings', Icons.settings_outlined, '设置'),
-              ('logs', Icons.description_outlined, '诊断日志'),
-              ('clear-image-cache', Icons.delete_sweep_outlined, '清理图片缓存'),
-              ('logout', Icons.logout, '退出登录'),
-            ])
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               ListTile(
-                leading: Icon(item.$2),
-                title: Text(item.$3),
-                onTap: () => Navigator.of(sheetContext).pop(item.$1),
+                leading: const Icon(Icons.account_circle_outlined),
+                title: Text(session.username),
+                subtitle: Text(session.serverName),
               ),
-          ],
+              const Divider(height: 1),
+              for (final item in const [
+                ('servers', Icons.dns_outlined, '服务器管理'),
+                ('settings', Icons.settings_outlined, '设置'),
+                ('logs', Icons.description_outlined, '诊断日志'),
+                ('browse-cache', Icons.offline_pin_outlined, '浏览缓存'),
+                ('clear-image-cache', Icons.delete_sweep_outlined, '清理图片缓存'),
+                ('logout', Icons.logout, '退出登录'),
+              ])
+                ListTile(
+                  leading: Icon(item.$2),
+                  title: Text(item.$3),
+                  onTap: () => Navigator.of(sheetContext).pop(item.$1),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -281,10 +285,62 @@ class _HomeShellState extends State<HomeShell> {
       );
       return;
     }
+    if (value == 'browse-cache') {
+      final api = widget.controller.api;
+      final cache = api.browseCache;
+      if (cache == null) return;
+      try {
+        final usage = await cache.usage(api.scope);
+        final images = await embyImageCacheManager.inspectUsage(
+          scope: api.scope,
+        );
+        if (!mounted || !api.isSessionActive) return;
+        final clear = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('当前账户的浏览缓存'),
+            content: Text(
+              '已保存 ${usage.entries} 个页面快照，'
+              '${(usage.bytes / 1048576).toStringAsFixed(1)} MB；'
+              '${images.objectCount} 张图片，${(images.bytes / 1048576).toStringAsFixed(1)} MB。\n\n'
+              '只缓存已访问内容。页面上限 64 MB，图片总上限 256 MB；较早缓存可能被清理。'
+              '断网时可浏览已缓存内容，未缓存的页面需联网。\n\n'
+              '清理浏览缓存不会删除已下载视频、字幕和下载关联图片。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('关闭'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('清理浏览缓存'),
+              ),
+            ],
+          ),
+        );
+        if (clear != true || !api.isSessionActive) return;
+        await cache.clear(api.scope);
+        await embyImageCacheManager.clearScope(api.scope);
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('已清理当前账户的浏览缓存')));
+        }
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('缓存操作失败，请重试')));
+        }
+      }
+      return;
+    }
     if (value != 'clear-image-cache') return;
     try {
-      final usage = await embyImageCacheManager.inspectUsage();
-      await embyImageCacheManager.clearAll();
+      final scope = widget.controller.api.scope;
+      final usage = await embyImageCacheManager.inspectUsage(scope: scope);
+      await embyImageCacheManager.clearScope(scope);
       PaintingBinding.instance.imageCache
         ..clear()
         ..clearLiveImages();
@@ -429,6 +485,14 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
               const PopupMenuItem(
+                value: 'browse-cache',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.offline_pin_outlined),
+                  title: Text('浏览缓存'),
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'logout',
                 child: ListTile(
                   contentPadding: EdgeInsets.zero,
@@ -441,7 +505,14 @@ class _HomeShellState extends State<HomeShell> {
           const SizedBox(width: 4),
         ],
       ),
-      body: IndexedStack(index: _index, children: pages),
+      body: Column(
+        children: [
+          OfflineBrowseBanner(api: api),
+          Expanded(
+            child: IndexedStack(index: _index, children: pages),
+          ),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (index) => setState(() => _index = index),

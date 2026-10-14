@@ -19,6 +19,7 @@ import '../playback/playback_resource_request.dart';
 import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
 import 'emby_user_data_service.dart';
+import 'browse_cache.dart';
 
 bool isLocalNetworkAddress(String raw) {
   var value = raw.trim();
@@ -85,6 +86,7 @@ class EmbyApi {
     FutureOr<void> Function()? onRemoteCapabilitiesReported,
     FutureOr<void> Function()? onRealtimeConnected,
     EmbySocketConnector? realtimeConnector,
+    this.browseCache,
   }) : _deviceName = deviceName,
        _dio = dio ?? _createDio(session, deviceName),
        _onSessionExpired = onSessionExpired,
@@ -119,6 +121,9 @@ class EmbyApi {
       'ProductionYear,ProviderIds,ParentId,Path,Container,Chapters,Trickplay';
 
   final EmbySession session;
+  ServerScope get scope => ServerScope.fromSession(session);
+  final BrowseCacheRepository? browseCache;
+  final BrowseCacheState browseState = BrowseCacheState();
   final String _deviceName;
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
@@ -167,6 +172,7 @@ class EmbyApi {
     required CancelToken cancelToken,
     int offset = 0,
     String? etag,
+    bool followRedirects = true,
   }) async {
     final headers = <String, String>{
       'Accept-Encoding': 'identity',
@@ -179,9 +185,13 @@ class EmbyApi {
         cancelToken: cancelToken,
         options: Options(
           responseType: ResponseType.stream,
+          followRedirects: followRedirects,
           headers: headers,
           validateStatus: (status) =>
-              status == 200 || status == 206 || status == 416,
+              status == 200 ||
+              status == 206 ||
+              status == 416 ||
+              (!followRedirects && [301, 302, 303, 307, 308].contains(status)),
         ),
       );
     } on DioException catch (error) {
@@ -375,6 +385,7 @@ class EmbyApi {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    browseState.dispose();
     await realtime.dispose();
     _dio.close(force: true);
   }
@@ -478,7 +489,7 @@ class EmbyApi {
       if (playedFilter.apiValue != null) playedFilter.apiValue!,
     ];
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'ParentId': parentId,
@@ -535,8 +546,9 @@ class EmbyApi {
       if (playedFilter.apiValue != null) playedFilter.apiValue!,
     ];
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
+        options: Options(extra: {'skipBrowseCache': true}),
         queryParameters: {
           'ParentId': parentId,
           'StartIndex': startIndex,
@@ -568,7 +580,7 @@ class EmbyApi {
     browse.LibrarySortOrder sortOrder = browse.LibrarySortOrder.ascending,
   }) async {
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'ParentId': parentId,
@@ -646,7 +658,7 @@ class EmbyApi {
     required LibraryContentProfile profile,
   }) async {
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         path,
         queryParameters: {
           'UserId': session.userId,
@@ -717,7 +729,7 @@ class EmbyApi {
       return const EmbyItemPage(items: [], totalRecordCount: 0);
     }
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'SearchTerm': query,
@@ -765,7 +777,7 @@ class EmbyApi {
       throw ArgumentError('genreId and tagId cannot both be set.');
     }
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'ParentId': parentId,
@@ -794,7 +806,7 @@ class EmbyApi {
     int limit = 60,
   }) async {
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'ParentId': parentId,
@@ -815,7 +827,7 @@ class EmbyApi {
 
   Future<EmbyItem> getItem(String itemId) async {
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items/$itemId',
         queryParameters: {'Fields': _detailItemFields},
       ),
@@ -834,7 +846,7 @@ class EmbyApi {
       throw ArgumentError.value(personId, 'personId', '人物 ID 不能为空');
     }
     final response = await _request(
-      () => _dio.get<dynamic>(
+      () => _browseGet(
         '/Users/${session.userId}/Items',
         queryParameters: {
           'PersonIds': normalizedPersonId,
@@ -985,6 +997,7 @@ class EmbyApi {
       return;
     }
     _imageAuthenticationFailureReported = true;
+    browseState.authFailed();
     final callback = _onSessionExpired;
     if (callback != null) unawaited(Future<void>.sync(callback));
   }
@@ -1688,6 +1701,50 @@ class EmbyApi {
     ).replace(queryParameters: {'MediaSourceId': ?mediaSourceId});
   }
 
+  /// Fresh discovery for an existing original-file download. Never selects a
+  /// different source or opens a live stream/transcoding session.
+  Future<PlaybackMediaSource> getDownloadMediaSource(
+    String itemId,
+    String sourceId, {
+    CancelToken? cancelToken,
+  }) async {
+    final response = await _request(
+      () => _browseGet(
+        '/Users/${session.userId}/Items/$itemId',
+        queryParameters: {'Fields': _detailItemFields},
+        cancelToken: cancelToken,
+        options: Options(extra: {'skipBrowseCache': true}),
+      ),
+    );
+    final item = EmbyItem.fromJson(_map(response.data));
+    final source = item.mediaSources.where((s) => s.id == sourceId).firstOrNull;
+    if (item.id != itemId || source == null) {
+      throw const EmbyApiException('原下载媒体源已不可用');
+    }
+    late final PlaybackInfoResult info;
+    try {
+      info = await getPlaybackInfo(
+        item,
+        mediaSourceId: sourceId,
+        cancelToken: cancelToken,
+        forDownload: true,
+      );
+    } on EmbyApiException catch (error) {
+      // Older servers may not implement negotiation. Fresh selected-source
+      // metadata still identifies tracks for the documented subtitle endpoint.
+      if ([400, 404, 405, 422].contains(error.statusCode) &&
+          source.mediaStreams.isNotEmpty) {
+        return source;
+      }
+      rethrow;
+    }
+    final discovered = info.mediaSources
+        .where((s) => s.id == sourceId)
+        .firstOrNull;
+    if (discovered == null) throw const EmbyApiException('原下载媒体源已不可用');
+    return discovered;
+  }
+
   Future<PlaybackInfoResult> getPlaybackInfo(
     EmbyItem item, {
     String? mediaSourceId,
@@ -1699,6 +1756,7 @@ class EmbyApi {
     CancelToken? cancelToken,
     Duration? timeout,
     StrmTrace? trace,
+    bool forDownload = false,
   }) async {
     final requestedSubtitleIndex = subtitleDisabled ? -1 : subtitleStreamIndex;
     final commonBody = <String, dynamic>{
@@ -1710,10 +1768,10 @@ class EmbyApi {
       'SubtitleStreamIndex': requestedSubtitleIndex,
       'EnableDirectPlay': !forceTranscode,
       'EnableDirectStream': !forceTranscode,
-      'EnableTranscoding': true,
+      'EnableTranscoding': !forDownload,
       'AllowVideoStreamCopy': true,
       'AllowAudioStreamCopy': true,
-      'AutoOpenLiveStream': true,
+      'AutoOpenLiveStream': !forDownload,
     }..removeWhere((_, value) => value == null);
 
     final fullBody = Map<String, dynamic>.from(commonBody)
@@ -1724,6 +1782,10 @@ class EmbyApi {
       'StartTimeTicks': item.userData.playbackPositionTicks,
       'AudioStreamIndex': ?audioStreamIndex,
       'SubtitleStreamIndex': ?requestedSubtitleIndex,
+      if (forDownload) ...{
+        'EnableTranscoding': false,
+        'AutoOpenLiveStream': false,
+      },
       if (forceTranscode) ...{
         'EnableDirectPlay': false,
         'EnableDirectStream': false,
@@ -1882,7 +1944,7 @@ class EmbyApi {
     Map<String, dynamic>? query,
   }) async {
     final response = await _request(
-      () => _dio.get<dynamic>(path, queryParameters: query),
+      () => _browseGet(path, queryParameters: query),
     );
     final data = response.data;
     final rawItems = data is List
@@ -1893,6 +1955,150 @@ class EmbyApi {
         .map((e) => EmbyItem.fromJson(Map<String, dynamic>.from(e)))
         .where((item) => item.id.isNotEmpty)
         .toList();
+  }
+
+  Future<Response<dynamic>> _browseGet(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+    CancelToken? cancelToken,
+  }) async {
+    final cache = browseCache;
+    final eligible =
+        cache != null &&
+        options?.extra?['skipBrowseCache'] != true &&
+        (path.startsWith('/Users/${session.userId}/Items') ||
+            path == '/Users/${session.userId}/Views' ||
+            RegExp(r'^/Shows/[^/]+/(Seasons|Episodes)$').hasMatch(path) ||
+            [
+              '/Genres',
+              '/MusicGenres',
+              '/Tags',
+              '/Studios',
+              '/Persons',
+              '/Items/Filters',
+              '/Items/Filters2',
+            ].contains(path));
+    if (!eligible) {
+      return _dio.get<dynamic>(
+        path,
+        queryParameters: queryParameters,
+        options: options,
+        cancelToken: cancelToken,
+      );
+    }
+    final key = BrowseCacheRepository.requestKey(path, queryParameters);
+    final generation = cache.generation(scope);
+    BrowseSnapshot? snapshot;
+    try {
+      snapshot = await cache.load(scope, key);
+      if (snapshot != null && !_validBrowseData(snapshot.data, path)) {
+        snapshot = null;
+      }
+    } catch (_) {
+      browseState.storageFailed();
+    }
+    if (_disposed) throw StateError('Server session is closed');
+    try {
+      final request = _dio.get<dynamic>(
+        path,
+        queryParameters: queryParameters,
+        cancelToken: cancelToken,
+        options: snapshot == null
+            ? options
+            : (options ?? Options()).copyWith(
+                receiveTimeout: const Duration(seconds: 3),
+                sendTimeout: const Duration(seconds: 3),
+              ),
+      );
+      final response = snapshot == null
+          ? await request
+          : await request.timeout(
+              const Duration(seconds: 4),
+              onTimeout: () => throw DioException(
+                requestOptions: RequestOptions(path: path),
+                type: DioExceptionType.connectionTimeout,
+              ),
+            );
+      if (_disposed) throw StateError('Server session is closed');
+      if (!_validBrowseData(response.data, path)) {
+        if (snapshot != null &&
+            !browseState.authenticationRequired &&
+            cache.generation(scope) == generation) {
+          browseState.cached(key, snapshot, disconnected: false);
+          return Response(
+            data: snapshot.data,
+            requestOptions: response.requestOptions,
+            statusCode: 200,
+            extra: {'offlineSnapshot': true},
+          );
+        }
+        throw const EmbyApiException('服务器返回了无效的浏览数据');
+      }
+      browseState.online(key);
+      try {
+        await cache.save(
+          scope,
+          key,
+          response.data,
+          expectedGeneration: generation,
+          isActive: () => !_disposed,
+        );
+        browseState.storageRecovered();
+      } catch (_) {
+        browseState.storageFailed();
+      }
+      return response;
+    } on DioException catch (error) {
+      if (_disposed || error.type == DioExceptionType.cancel) rethrow;
+      final status = error.response?.statusCode;
+      if (status == 401 || status == 403) {
+        browseState.authFailed();
+        rethrow;
+      }
+      final network =
+          error.type == DioExceptionType.connectionError ||
+          error.type == DioExceptionType.connectionTimeout ||
+          error.type == DioExceptionType.receiveTimeout ||
+          error.type == DioExceptionType.sendTimeout ||
+          (error.type == DioExceptionType.unknown &&
+              (error.error is SocketException || error.error is HttpException));
+      if ((!network && (status == null || status < 500)) ||
+          browseState.authenticationRequired) {
+        rethrow;
+      }
+      // Clear/account removal invalidates already-read fallback data too.
+      if (cache.generation(scope) != generation) snapshot = null;
+      browseState.cached(key, snapshot, disconnected: network);
+      if (snapshot == null) {
+        throw const EmbyApiException('此页面或分页尚未缓存，联网后可用');
+      }
+      return Response(
+        data: snapshot.data,
+        requestOptions: error.requestOptions,
+        statusCode: 200,
+        extra: {'offlineSnapshot': true},
+      );
+    }
+  }
+
+  static bool _validBrowseData(dynamic data, String path) {
+    bool hasId(dynamic item) =>
+        item is Map &&
+        item['Id'] is String &&
+        (item['Id'] as String).isNotEmpty;
+    if (data is List) {
+      return data.every(hasId);
+    }
+    if (data is! Map) return false;
+    if (path.startsWith('/Items/Filters')) {
+      return data.containsKey('Genres') || data.containsKey('Tags');
+    }
+    if (data['Items'] is List) {
+      return (data['Items'] as List).every(hasId);
+    }
+    return hasId(data) &&
+        data['Id'] == Uri.decodeComponent(path.split('/').last);
   }
 
   Future<Response<dynamic>> _request(
@@ -1909,6 +2115,7 @@ class EmbyApi {
         stackTrace: stack,
       );
       final friendly = _friendlyError(error);
+      if (friendly.isAuthenticationFailure) browseState.authFailed();
       if (!_disposed &&
           friendly.isAuthenticationFailure &&
           _onSessionExpired != null) {

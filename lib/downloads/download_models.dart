@@ -31,6 +31,7 @@ class OfflineMediaMetadata {
     this.container,
     this.primaryImageTag,
     this.primaryImagePath,
+    this.subtitleDiscoveryComplete = false,
   }) : mediaStreams = List.unmodifiable(mediaStreams);
 
   factory OfflineMediaMetadata.fromItem(
@@ -47,7 +48,17 @@ class OfflineMediaMetadata {
     parentIndexNumber: item.parentIndexNumber,
     container: source.container,
     primaryImageTag: item.imageTags['Primary'],
-    mediaStreams: source.mediaStreams,
+    mediaStreams: source.mediaStreams
+        .map((original) {
+          final stream = Map<String, dynamic>.from(original);
+          if (isExternalSubtitle(stream)) {
+            // Discovery uses the active account, never persisted signed URLs.
+            stream.remove('DeliveryUrl');
+            stream.remove('Path');
+          }
+          return stream;
+        })
+        .toList(growable: false),
   );
 
   final String name;
@@ -62,6 +73,46 @@ class OfflineMediaMetadata {
   final String? primaryImageTag;
   final String? primaryImagePath;
   final List<Map<String, dynamic>> mediaStreams;
+  final bool subtitleDiscoveryComplete;
+
+  static bool isExternalSubtitle(Map<String, dynamic> stream) =>
+      stream['Type']?.toString().toLowerCase() == 'subtitle' &&
+      stream['IsExternal'] == true;
+
+  bool get subtitlesNeedRepair =>
+      !subtitleDiscoveryComplete ||
+      mediaStreams
+          .where(isExternalSubtitle)
+          .any((stream) => stream['OfflineSubtitleState'] != 'available');
+
+  String get subtitleStatusText {
+    if (!subtitleDiscoveryComplete) return '字幕待检查，可补下载';
+    final external = mediaStreams.where(isExternalSubtitle).toList();
+    final missing = external
+        .where((stream) => stream['OfflineSubtitleState'] != 'available')
+        .length;
+    if (missing > 0) return '缺少 $missing 条字幕，可重试';
+    if (external.isNotEmpty) return '字幕已保存';
+    return mediaStreams.any(
+          (s) => s['Type']?.toString().toLowerCase() == 'subtitle',
+        )
+        ? '内嵌字幕随原视频保留'
+        : '服务器未提供字幕';
+  }
+
+  List<Map<String, dynamic>> get playbackStreams => mediaStreams
+      .where(
+        (stream) =>
+            !isExternalSubtitle(stream) ||
+            stream['OfflineSubtitleState'] == 'available' ||
+            (stream['OfflineSubtitleState'] == null &&
+                isLocalAssetPath(stream['DeliveryUrl'])),
+      )
+      .toList(growable: false);
+
+  static bool isLocalAssetPath(Object? value) =>
+      value is String &&
+      (value.startsWith('/') || RegExp(r'^[A-Za-z]:[\\/]').hasMatch(value));
 
   List<String> get assetPaths {
     final result = <String>[];
@@ -71,7 +122,9 @@ class OfflineMediaMetadata {
       final deliveryUrl = stream['DeliveryUrl'];
       if (stream['Type']?.toString().toLowerCase() == 'subtitle' &&
           stream['IsExternal'] == true &&
-          deliveryUrl is String) {
+          deliveryUrl is String &&
+          (isLocalAssetPath(deliveryUrl) ||
+              (!deliveryUrl.contains('://') && !deliveryUrl.contains('?')))) {
         result.add(deliveryUrl);
       }
     }
@@ -82,6 +135,7 @@ class OfflineMediaMetadata {
     List<Map<String, dynamic>>? mediaStreams,
     String? primaryImagePath,
     bool clearPrimaryImagePath = false,
+    bool? subtitleDiscoveryComplete,
   }) => OfflineMediaMetadata(
     name: name,
     itemType: itemType,
@@ -97,6 +151,8 @@ class OfflineMediaMetadata {
         ? null
         : primaryImagePath ?? this.primaryImagePath,
     mediaStreams: mediaStreams ?? this.mediaStreams,
+    subtitleDiscoveryComplete:
+        subtitleDiscoveryComplete ?? this.subtitleDiscoveryComplete,
   );
 
   Map<String, dynamic> toJson() => {
@@ -112,6 +168,7 @@ class OfflineMediaMetadata {
     if (primaryImageTag != null) 'primaryImageTag': primaryImageTag,
     if (primaryImagePath != null) 'primaryImagePath': primaryImagePath,
     'mediaStreams': mediaStreams,
+    'subtitleDiscoveryComplete': subtitleDiscoveryComplete,
   };
 
   factory OfflineMediaMetadata.fromJson(Map<String, dynamic> json) =>
@@ -127,6 +184,7 @@ class OfflineMediaMetadata {
         container: _string(json['container']),
         primaryImageTag: _string(json['primaryImageTag']),
         primaryImagePath: _string(json['primaryImagePath']),
+        subtitleDiscoveryComplete: json['subtitleDiscoveryComplete'] == true,
         mediaStreams: (json['mediaStreams'] as List<dynamic>? ?? const [])
             .whereType<Map>()
             .map((stream) => Map<String, dynamic>.from(stream))
@@ -326,7 +384,7 @@ class OfflineMediaItem {
           supportsDirectPlay: true,
           supportsDirectStream: false,
           supportsTranscoding: false,
-          mediaStreams: metadata.mediaStreams,
+          mediaStreams: metadata.playbackStreams,
           transcodingReasons: const [],
           container: metadata.container,
         ),

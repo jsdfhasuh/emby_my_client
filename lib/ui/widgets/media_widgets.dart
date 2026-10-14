@@ -52,7 +52,27 @@ class EmbyImage extends StatelessWidget {
           alignment: alignment,
           fadeInDuration: fadeInDuration,
           placeholder: (_, _) => placeholder,
-          errorWidget: (_, _, _) => placeholder,
+          errorWidget: (_, _, _) => Tooltip(
+            message: '图片未缓存或暂不可用',
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                placeholder,
+                const Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Text(
+                      '图片暂不可用',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 10, color: Color(0xFFADB5B7)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         );
       },
     );

@@ -324,6 +324,16 @@ class _DownloadRow extends StatelessWidget {
             const SizedBox(width: 4),
             if (task.isComplete)
               IconButton(
+                tooltip: downloads.isRepairingSubtitles(task.id)
+                    ? '正在补下载字幕'
+                    : '检查并补下载字幕',
+                onPressed: downloads.isRepairingSubtitles(task.id)
+                    ? null
+                    : () => downloads.repairSubtitles(task.id),
+                icon: const Icon(Icons.subtitles_outlined),
+              ),
+            if (task.isComplete)
+              IconButton(
                 tooltip: '离线播放',
                 onPressed: onPlay,
                 icon: const Icon(Icons.play_arrow_rounded),
@@ -409,7 +419,9 @@ String _statusText(DownloadTaskRecord task) {
       '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.waitingForStorage => '等待存储空间 · $size',
     DownloadStatus.paused => '已暂停 · $size',
-    DownloadStatus.completed => '可离线播放 · $size',
+    DownloadStatus.completed =>
+      '视频可离线播放 · $size\n'
+          '${task.lastErrorCode == 'subtitleRepairing' ? '正在补下载字幕' : task.metadata.subtitleStatusText}',
     DownloadStatus.failed => '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.cancelling => '正在删除',
   };

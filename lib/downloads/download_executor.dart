@@ -1,6 +1,13 @@
 import 'dart:async';
 
-enum DownloadExecutorCommand { pause, resume, delete, settingsChanged, wake }
+enum DownloadExecutorCommand {
+  pause,
+  resume,
+  delete,
+  settingsChanged,
+  wake,
+  repairSubtitles,
+}
 
 class DownloadCommandQueue {
   Future<void> _tail = Future<void>.value();

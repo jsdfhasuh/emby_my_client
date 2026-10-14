@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
+import '../core/server_scope.dart';
+import 'persistent_image_file_system.dart';
 
 const embyImageCacheBudgetBytes = 256 * 1024 * 1024;
 
@@ -13,14 +16,24 @@ EmbyImageCacheManager get embyImageCacheManager =>
 class EmbyImageCacheManager extends CacheManager with ImageCacheManager {
   EmbyImageCacheManager({
     FileService? fileService,
+    FileSystem? fileSystem,
+    CacheInfoRepository? repository,
     this.maxCacheBytes = embyImageCacheBudgetBytes,
     this.cleanupDelay = const Duration(seconds: 2),
   }) : assert(maxCacheBytes > 0),
        super(
          Config(
-           'embyImageCacheV1',
-           stalePeriod: const Duration(days: 14),
-           maxNrOfCacheObjects: 240,
+           'embyBrowseImagesV2',
+           stalePeriod: const Duration(days: 36500),
+           maxNrOfCacheObjects: 5000,
+           fileSystem: fileSystem ?? PersistentImageFileSystem(),
+           repo:
+               repository ??
+               (Platform.isAndroid || Platform.isIOS || Platform.isMacOS
+                   ? CacheObjectProvider(databaseName: 'embyBrowseImagesV2')
+                   : JsonCacheInfoRepository(
+                       databaseName: 'embyBrowseImagesV2',
+                     )),
            fileService: fileService ?? SameOriginImageFileService(),
          ),
        );
@@ -30,6 +43,8 @@ class EmbyImageCacheManager extends CacheManager with ImageCacheManager {
 
   Timer? _cleanupTimer;
   Future<EmbyImageCacheUsage>? _budgetOperation;
+  final Map<String, int> _scopeEpochs = {};
+  String _namespace(String? key) => key?.split(':').elementAtOrNull(1) ?? '';
 
   @override
   Stream<FileResponse> getFileStream(
@@ -38,12 +53,18 @@ class EmbyImageCacheManager extends CacheManager with ImageCacheManager {
     Map<String, String>? headers,
     bool withProgress = false,
   }) async* {
+    final namespace = _namespace(key);
+    final epoch = _scopeEpochs[namespace] ?? 0;
     await for (final response in super.getFileStream(
       url,
       key: key,
       headers: headers,
       withProgress: withProgress,
     )) {
+      if ((_scopeEpochs[namespace] ?? 0) != epoch) {
+        if (key != null) await removeFile(key);
+        continue;
+      }
       if (response is FileInfo && response.source == FileSource.Online) {
         _scheduleBudgetEnforcement();
       }
@@ -58,22 +79,31 @@ class EmbyImageCacheManager extends CacheManager with ImageCacheManager {
     Map<String, String>? authHeaders,
     bool force = false,
   }) async {
+    final namespace = _namespace(key);
+    final epoch = _scopeEpochs[namespace] ?? 0;
     final result = await super.downloadFile(
       url,
       key: key,
       authHeaders: authHeaders,
       force: force,
     );
+    if ((_scopeEpochs[namespace] ?? 0) != epoch) {
+      if (key != null) await removeFile(key);
+      throw const FileSystemException('Image cache was cleared');
+    }
     _scheduleBudgetEnforcement();
     return result;
   }
 
-  Future<EmbyImageCacheUsage> inspectUsage() async {
+  Future<EmbyImageCacheUsage> inspectUsage({ServerScope? scope}) async {
     await config.repo.open();
     final objects = await config.repo.getAllObjects();
     var bytes = 0;
     var count = 0;
     for (final object in objects) {
+      if (scope != null && _namespace(object.key) != scope.cacheNamespace) {
+        continue;
+      }
       final file = await config.fileSystem.createFile(object.relativePath);
       if (!await file.exists()) continue;
       bytes += object.length ?? await file.length();
@@ -98,6 +128,16 @@ class EmbyImageCacheManager extends CacheManager with ImageCacheManager {
     _cleanupTimer = null;
     await _budgetOperation;
     await emptyCache();
+  }
+
+  Future<void> clearScope(ServerScope scope) async {
+    final namespace = scope.cacheNamespace;
+    _scopeEpochs[namespace] = (_scopeEpochs[namespace] ?? 0) + 1;
+    await _budgetOperation;
+    await config.repo.open();
+    for (final object in await config.repo.getAllObjects()) {
+      if (_namespace(object.key) == namespace) await removeFile(object.key);
+    }
   }
 
   Future<EmbyImageCacheUsage> _enforceBudget() async {
