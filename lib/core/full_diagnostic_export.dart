@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'diagnostic_log.dart';
+import 'export_credential_redactor.dart';
 import 'token_redactor.dart';
 import 'safe_diagnostic_export.dart';
 
@@ -25,7 +26,7 @@ class FullDiagnosticExportException implements Exception {
   String toString() => code;
 }
 
-enum FullDiagnosticShareOutcome { completed, cancelled }
+enum FullDiagnosticShareOutcome { completed, cancelled, opened, saved }
 
 abstract interface class FullDiagnosticShareGateway {
   Future<FullDiagnosticShareOutcome> share(
@@ -36,7 +37,9 @@ abstract interface class FullDiagnosticShareGateway {
 
 class MethodChannelFullDiagnosticShareGateway
     implements FullDiagnosticShareGateway {
-  const MethodChannelFullDiagnosticShareGateway();
+  const MethodChannelFullDiagnosticShareGateway({this.save = false});
+
+  final bool save;
 
   static const channel = MethodChannel('emby_my_client/full_diagnostic_export');
 
@@ -47,12 +50,14 @@ class MethodChannelFullDiagnosticShareGateway
   }) async {
     try {
       final outcome = await channel.invokeMethod<String>(
-        'fullShare',
+        save ? 'fullSave' : 'fullShare',
         <String, Object>{'content': report.content, ...anchor.toArguments()},
       );
       return switch (outcome) {
         'completed' => FullDiagnosticShareOutcome.completed,
         'cancelled' => FullDiagnosticShareOutcome.cancelled,
+        'opened' => FullDiagnosticShareOutcome.opened,
+        'saved' => FullDiagnosticShareOutcome.saved,
         _ => throw const FullDiagnosticExportException(
           FullDiagnosticExportException.unsafe,
         ),
@@ -100,6 +105,7 @@ class FullDiagnosticExportService {
     SafeDiagnosticMetadataProvider? metadataProvider,
     String? appVersion,
     String? buildNumber,
+    String platform = 'iPadOS',
   }) : _readLog = readLog ?? DiagnosticLog.instance.read,
        _metadataProvider =
            metadataProvider ??
@@ -109,6 +115,7 @@ class FullDiagnosticExportService {
            : SafeDiagnosticMetadata(
                appVersion: appVersion ?? '',
                buildNumber: buildNumber ?? '',
+               platform: platform,
              );
 
   final Future<String> Function() _readLog;
@@ -126,7 +133,9 @@ class FullDiagnosticExportService {
     final sourceTruncated = rawLog.contains(DiagnosticLog.truncationMarker);
     late final String redactedLog;
     try {
-      redactedLog = FullDiagnosticRedactor.redact(DiagnosticLog.redact(rawLog));
+      redactedLog = metadata.platform == 'Android'
+          ? ExportCredentialRedactor.redact(rawLog)
+          : FullDiagnosticRedactor.redact(DiagnosticLog.redact(rawLog));
     } on FullDiagnosticExportException {
       rethrow;
     } catch (_) {
@@ -197,7 +206,8 @@ class FullDiagnosticExportService {
   }
 
   static void _validateMetadata(SafeDiagnosticMetadata metadata) {
-    if (!RegExp(r'^\d+\.\d+\.\d+$').hasMatch(metadata.appVersion) ||
+    if (!{'iPadOS', 'Android'}.contains(metadata.platform) ||
+        !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(metadata.appVersion) ||
         !RegExp(r'^\d+$').hasMatch(metadata.buildNumber)) {
       throw const FullDiagnosticExportException(
         FullDiagnosticExportException.unsafe,
@@ -231,8 +241,8 @@ class FullDiagnosticExportService {
       'generatedAtUtc=${generatedAtUtc.toUtc().toIso8601String()}',
       'appVersion=${metadata.appVersion}',
       'buildNumber=${metadata.buildNumber}',
-      'platform=iPadOS',
-      'redaction=token-only-v1',
+      'platform=${metadata.platform}',
+      'redaction=${metadata.platform == 'Android' ? 'credentials-v1' : 'token-only-v1'}',
       'truncated=false',
       'sha256=$placeholder',
     ].join('\n');
@@ -251,8 +261,8 @@ class FullDiagnosticExportService {
       'generatedAtUtc=${generatedAtUtc.toUtc().toIso8601String()}',
       'appVersion=${metadata.appVersion}',
       'buildNumber=${metadata.buildNumber}',
-      'platform=iPadOS',
-      'redaction=token-only-v1',
+      'platform=${metadata.platform}',
+      'redaction=${metadata.platform == 'Android' ? 'credentials-v1' : 'token-only-v1'}',
       'truncated=$truncated',
       'sha256=$digest',
       body,
@@ -311,15 +321,20 @@ class FullDiagnosticExportService {
     }
     final body = lines.skip(keys.length).join('\n');
     if (header['schema'] != 'emby-full-diagnostics/v1' ||
-        header['platform'] != 'iPadOS' ||
-        header['redaction'] != 'token-only-v1' ||
+        !{'iPadOS', 'Android'}.contains(header['platform']) ||
+        header['redaction'] !=
+            (header['platform'] == 'Android'
+                ? 'credentials-v1'
+                : 'token-only-v1') ||
         !_isUtcTimestamp(header['generatedAtUtc']!) ||
         !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(header['appVersion']!) ||
         !RegExp(r'^\d+$').hasMatch(header['buildNumber']!) ||
         !{'true', 'false'}.contains(header['truncated']) ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(header['sha256']!) ||
         sha256.convert(utf8.encode(body)).toString() != header['sha256'] ||
-        FullDiagnosticRedactor.containsSensitiveContent(body)) {
+        (header['platform'] == 'Android'
+            ? ExportCredentialRedactor.redact(body) != body
+            : FullDiagnosticRedactor.containsSensitiveContent(body))) {
       throw const FullDiagnosticExportException(
         FullDiagnosticExportException.unsafe,
       );

@@ -390,7 +390,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpAndSettle();
   });
 
-  testWidgets('Android diagnostics page has no full export entry', (
+  testWidgets('Android diagnostics page exposes full export entry', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -399,7 +399,7 @@ request headers: {"Authorization":"Bearer fixture"}
       ),
     );
     await tester.pump();
-    expect(find.byTooltip('导出完整调试日志'), findsNothing);
+    expect(find.byTooltip('导出完整调试日志'), findsOneWidget);
   });
 }
 

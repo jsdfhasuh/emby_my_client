@@ -560,7 +560,10 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                           ),
                   ),
                 ),
-                if (_isIpadOS) ...[
+                if ({
+                  'ios',
+                  'android',
+                }.contains(_capabilities.platformName)) ...[
                   if (useCompactDiagnostics)
                     IconButton(
                       key: const ValueKey<String>(

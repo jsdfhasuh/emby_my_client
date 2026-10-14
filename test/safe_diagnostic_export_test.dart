@@ -805,9 +805,7 @@ void main() {
     expect(find.text('fixture-user'), findsOneWidget);
   });
 
-  testWidgets('Android login does not expose the iPad safe diagnostics entry', (
-    tester,
-  ) async {
+  testWidgets('Android login exposes safe diagnostics entry', (tester) async {
     final controller = _CountingLoginController();
     addTearDown(controller.dispose);
     await tester.pumpWidget(
@@ -823,11 +821,11 @@ void main() {
 
     expect(
       find.byKey(const ValueKey<String>('login-safe-diagnostics-button')),
-      findsNothing,
+      findsOneWidget,
     );
   });
 
-  testWidgets('Android diagnostic log page has no iPad export entry', (
+  testWidgets('Android diagnostic log page exposes safe export entry', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -836,7 +834,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.byTooltip('安全登录诊断'), findsNothing);
+    expect(find.byTooltip('安全登录诊断'), findsOneWidget);
   });
 }
 

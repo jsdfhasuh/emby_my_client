@@ -101,7 +101,7 @@ class _FullDiagnosticExportScreenState
         _errorCode = null;
       });
     }
-    if (_capabilities.platformName != 'ios') {
+    if (!{'ios', 'android'}.contains(_capabilities.platformName)) {
       if (!mounted) return;
       setState(() {
         _report = null;
@@ -140,7 +140,7 @@ class _FullDiagnosticExportScreenState
     }
   }
 
-  Future<void> _shareReport() async {
+  Future<void> _shareReport({bool save = false}) async {
     final report = _report;
     if (report == null || report.lineCount == 0) return;
     if (_sharing) {
@@ -155,7 +155,7 @@ class _FullDiagnosticExportScreenState
         barrierDismissible: false,
         builder: (context) => AlertDialog(
           title: const Text('导出完整调试日志？'),
-          content: const Text('完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。'),
+          content: Text(_privacyDescription),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -169,9 +169,17 @@ class _FullDiagnosticExportScreenState
         ),
       );
       if (confirmed != true || !mounted) return;
-      final outcome = await _shareGateway.share(report, anchor: anchor);
+      final outcome =
+          await (save
+                  ? const MethodChannelFullDiagnosticShareGateway(save: true)
+                  : _shareGateway)
+              .share(report, anchor: anchor);
       if (!mounted) return;
-      if (outcome == FullDiagnosticShareOutcome.completed) {
+      if (outcome == FullDiagnosticShareOutcome.saved) {
+        _showMessage('诊断文件已保存');
+      } else if (outcome == FullDiagnosticShareOutcome.opened) {
+        _showMessage('已打开系统分享面板；请自行选择目标，未自动发送');
+      } else if (outcome == FullDiagnosticShareOutcome.completed) {
         _showMessage('完整调试日志已准备分享');
       } else {
         _showMessage('已取消导出');
@@ -228,6 +236,10 @@ class _FullDiagnosticExportScreenState
   String _failureMessage(String code) =>
       '完整调试日志操作失败（${_normalizeErrorCode(code)}）';
 
+  String get _privacyDescription => _capabilities.platformName == 'android'
+      ? '导出副本会隐藏密码、Token、授权头、Cookie 和 URL 参数值。仍可能包含服务器地址、媒体标识、路径及错误栈，请预览后自行选择保存或分享目标。本地原始日志保持不变。'
+      : '完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。';
+
   void _showMessage(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -240,10 +252,18 @@ class _FullDiagnosticExportScreenState
       appBar: AppBar(
         title: const Text('完整调试日志'),
         actions: [
+          if (_capabilities.platformName == 'android')
+            IconButton(
+              tooltip: '保存完整调试日志',
+              onPressed: !_loading && !_sharing && (_report?.lineCount ?? 0) > 0
+                  ? () => _shareReport(save: true)
+                  : null,
+              icon: const Icon(Icons.save_alt),
+            ),
           _buildExportAction(),
           IconButton(
             tooltip: '刷新',
-            onPressed: _loading ? null : _load,
+            onPressed: _loading || _sharing ? null : _load,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -306,7 +326,7 @@ class _FullDiagnosticExportScreenState
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
-          const Text('完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。'),
+          Text(_privacyDescription),
           const SizedBox(height: 18),
           Wrap(
             spacing: 18,

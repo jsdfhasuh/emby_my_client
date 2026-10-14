@@ -29,10 +29,12 @@ class SafeDiagnosticMetadata {
   const SafeDiagnosticMetadata({
     required this.appVersion,
     required this.buildNumber,
+    this.platform = 'iPadOS',
   });
 
   final String appVersion;
   final String buildNumber;
+  final String platform;
 }
 
 abstract interface class SafeDiagnosticMetadataProvider {
@@ -59,6 +61,7 @@ class MethodChannelSafeDiagnosticMetadataProvider
       return SafeDiagnosticMetadata(
         appVersion: appVersion,
         buildNumber: buildNumber,
+        platform: values?['platform'] as String? ?? 'iPadOS',
       );
     } on SafeDiagnosticExportException {
       rethrow;
@@ -77,7 +80,7 @@ abstract interface class SafeDiagnosticShareGateway {
   });
 }
 
-enum SafeDiagnosticShareOutcome { completed, cancelled }
+enum SafeDiagnosticShareOutcome { completed, cancelled, opened, saved }
 
 class SafeDiagnosticPopoverAnchor {
   const SafeDiagnosticPopoverAnchor({
@@ -102,7 +105,9 @@ class SafeDiagnosticPopoverAnchor {
 
 class MethodChannelSafeDiagnosticShareGateway
     implements SafeDiagnosticShareGateway {
-  const MethodChannelSafeDiagnosticShareGateway();
+  const MethodChannelSafeDiagnosticShareGateway({this.save = false});
+
+  final bool save;
 
   @override
   Future<SafeDiagnosticShareOutcome> share(
@@ -111,13 +116,15 @@ class MethodChannelSafeDiagnosticShareGateway
   }) async {
     try {
       final outcome = await MethodChannelSafeDiagnosticMetadataProvider.channel
-          .invokeMethod<String>('share', <String, Object>{
+          .invokeMethod<String>(save ? 'save' : 'share', <String, Object>{
             'content': report.content,
             ...anchor.toArguments(),
           });
       return switch (outcome) {
         'completed' => SafeDiagnosticShareOutcome.completed,
         'cancelled' => SafeDiagnosticShareOutcome.cancelled,
+        'opened' => SafeDiagnosticShareOutcome.opened,
+        'saved' => SafeDiagnosticShareOutcome.saved,
         _ => throw const SafeDiagnosticExportException(
           SafeDiagnosticExportException.unsafe,
         ),
@@ -167,6 +174,7 @@ class SafeDiagnosticExportService {
     SafeDiagnosticMetadataProvider? metadataProvider,
     String? appVersion,
     String? buildNumber,
+    String platform = 'iPadOS',
   }) : _source = source ?? DiagnosticLog.instance,
        _metadataProvider =
            metadataProvider ??
@@ -176,6 +184,7 @@ class SafeDiagnosticExportService {
            : SafeDiagnosticMetadata(
                appVersion: appVersion ?? '',
                buildNumber: buildNumber ?? '',
+               platform: platform,
              );
 
   final SafeDiagnosticEventSource _source;
@@ -271,7 +280,7 @@ class SafeDiagnosticExportService {
         generatedAtUtc is! String ||
         appVersion is! String ||
         buildNumber is! String ||
-        platform != 'iPadOS' ||
+        !{'iPadOS', 'Android'}.contains(platform) ||
         recordCount is! int ||
         truncated is! bool ||
         recordsValue is! List ||
@@ -330,7 +339,8 @@ class SafeDiagnosticExportService {
   }
 
   static void _validateMetadata(SafeDiagnosticMetadata metadata) {
-    if (!RegExp(r'^\d+\.\d+\.\d+$').hasMatch(metadata.appVersion) ||
+    if (!{'iPadOS', 'Android'}.contains(metadata.platform) ||
+        !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(metadata.appVersion) ||
         !RegExp(r'^\d+$').hasMatch(metadata.buildNumber)) {
       throw const SafeDiagnosticExportException(
         SafeDiagnosticExportException.unsafe,
@@ -348,7 +358,7 @@ class SafeDiagnosticExportService {
     'generatedAtUtc': generatedAtUtc.toUtc().toIso8601String(),
     'appVersion': metadata.appVersion,
     'buildNumber': metadata.buildNumber,
-    'platform': 'iPadOS',
+    'platform': metadata.platform,
     'recordCount': records.length,
     'truncated': truncated,
     'records': records.map((record) => record.toJson()).toList(growable: false),

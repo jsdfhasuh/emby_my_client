@@ -49,7 +49,7 @@ class _SafeDiagnosticExportScreenState
         _errorCode = null;
       });
     }
-    if (_capabilities.platformName != 'ios') {
+    if (!{'ios', 'android'}.contains(_capabilities.platformName)) {
       if (!mounted) return;
       setState(() {
         _report = null;
@@ -130,7 +130,7 @@ class _SafeDiagnosticExportScreenState
     }
   }
 
-  Future<void> _shareReport() async {
+  Future<void> _shareReport({bool save = false}) async {
     final report = _report;
     if (report == null || report.recordCount == 0) return;
     if (_sharing) {
@@ -161,9 +161,17 @@ class _SafeDiagnosticExportScreenState
       );
       if (confirmed != true || !mounted) return;
       setState(() => _nativeSharing = true);
-      final outcome = await _shareGateway.share(report, anchor: anchor);
+      final outcome =
+          await (save
+                  ? const MethodChannelSafeDiagnosticShareGateway(save: true)
+                  : _shareGateway)
+              .share(report, anchor: anchor);
       if (!mounted) return;
-      if (outcome == SafeDiagnosticShareOutcome.completed) {
+      if (outcome == SafeDiagnosticShareOutcome.saved) {
+        _showMessage('诊断文件已保存');
+      } else if (outcome == SafeDiagnosticShareOutcome.opened) {
+        _showMessage('已打开系统分享面板；请自行选择目标，未自动发送');
+      } else if (outcome == SafeDiagnosticShareOutcome.completed) {
         _showMessage('安全诊断报告已准备分享');
       } else {
         _showMessage('已取消导出');
@@ -242,7 +250,7 @@ class _SafeDiagnosticExportScreenState
         actions: [
           IconButton(
             tooltip: '刷新',
-            onPressed: _loading ? null : _load,
+            onPressed: _loading || _sharing ? null : _load,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -272,7 +280,7 @@ class _SafeDiagnosticExportScreenState
               ),
               const SizedBox(height: 8),
               OutlinedButton.icon(
-                onPressed: _clearReports,
+                onPressed: _sharing ? null : _clearReports,
                 icon: const Icon(Icons.delete_outline),
                 label: const Text('清空安全诊断'),
               ),
@@ -332,15 +340,25 @@ class _SafeDiagnosticExportScreenState
             runSpacing: 10,
             children: [
               OutlinedButton.icon(
-                onPressed: report.recordCount == 0 ? null : _copyReport,
+                onPressed: report.recordCount == 0 || _sharing
+                    ? null
+                    : _copyReport,
                 icon: const Icon(Icons.copy_outlined),
                 label: const Text('复制安全报告'),
               ),
               OutlinedButton.icon(
-                onPressed: _clearReports,
+                onPressed: _sharing ? null : _clearReports,
                 icon: const Icon(Icons.delete_outline),
                 label: const Text('清空安全诊断'),
               ),
+              if (_capabilities.platformName == 'android')
+                OutlinedButton.icon(
+                  onPressed: report.recordCount == 0 || _sharing
+                      ? null
+                      : () => _shareReport(save: true),
+                  icon: const Icon(Icons.save_alt),
+                  label: const Text('保存安全诊断'),
+                ),
               FilledButton.icon(
                 key: _exportButtonKey,
                 onPressed: report.recordCount == 0 || _sharing

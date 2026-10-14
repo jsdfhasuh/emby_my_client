@@ -25,6 +25,7 @@ class MainActivity : FlutterActivity() {
 
     private var channel: MethodChannel? = null
     private var updates: AppUpdateChannel? = null
+    private var diagnostics: DiagnosticExportChannel? = null
     private var isPlaying = false
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -55,6 +56,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         updates = AppUpdateChannel(this, flutterEngine.dartExecutor.binaryMessenger)
+        diagnostics = DiagnosticExportChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
@@ -98,6 +100,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        diagnostics?.close()
+        diagnostics = null
         updates?.close()
         updates = null
         try {
@@ -106,6 +110,12 @@ class MainActivity : FlutterActivity() {
         }
         channel = null
         super.onDestroy()
+    }
+
+    @Deprecated("Activity result bridge retained for FlutterActivity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (diagnostics?.onActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     private fun buildPipParams(): PictureInPictureParams {

@@ -96,7 +96,7 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
               ),
               icon: const Icon(Icons.science_outlined),
             ),
-          if (_capabilities.platformName == 'ios')
+          if ({'ios', 'android'}.contains(_capabilities.platformName))
             IconButton(
               tooltip: '安全登录诊断',
               onPressed: () => Navigator.of(context).push(
@@ -107,7 +107,7 @@ class _DiagnosticLogScreenState extends State<DiagnosticLogScreen> {
               ),
               icon: const Icon(Icons.security_outlined),
             ),
-          if (_capabilities.platformName == 'ios')
+          if ({'ios', 'android'}.contains(_capabilities.platformName))
             IconButton(
               tooltip: '导出完整调试日志',
               onPressed: () => Navigator.of(context).push(
