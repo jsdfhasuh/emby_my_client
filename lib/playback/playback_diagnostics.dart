@@ -2,6 +2,8 @@ import '../core/strm_diagnostics.dart';
 import 'source_input_failure.dart';
 import 'dart:async';
 
+import 'track_mapper.dart';
+
 import '../core/diagnostic_log.dart';
 import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
@@ -477,6 +479,7 @@ class PlaybackDiagnostics {
     required String subtitleKind,
     required int streamIndex,
     required int generation,
+    required TrackMappingResult result,
   }) {
     _emit(
       PlaybackDiagnosticEvent.subtitleMappingFailed,
@@ -485,11 +488,24 @@ class PlaybackDiagnostics {
         'subtitleKind=$subtitleKind',
         'streamIndex=$streamIndex',
         'generation=$generation',
-        'mappingResult=failed',
+        'mappingResult=${result.status.name}',
+        'mappingReason=${result.reason.name}',
+        'realTrackCount=${result.realTrackCount.clamp(0, 9999)}',
+        'candidateCount=${result.candidateCount.clamp(0, 9999)}',
+        'serverFields=${_trackFields(result.serverFields)}',
+        'engineFields=${_trackFields(result.engineFields)}',
+        'conflictFields=${_trackFields(result.conflictFields)}',
       ],
       level: PlaybackDiagnosticLevel.warning,
     );
   }
+
+  static String _trackFields(Set<TrackMetadataField> fields) => fields.isEmpty
+      ? 'none'
+      : TrackMetadataField.values
+            .where(fields.contains)
+            .map((field) => field.name)
+            .join(',');
 
   void subtitleApplyCancelled({required int generation}) {
     _emit(PlaybackDiagnosticEvent.subtitleApplyCancelled, [

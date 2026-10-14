@@ -2344,7 +2344,12 @@ class _SubtitleResolver implements PlaybackStreamResolver {
     subtitleStreamIndex: subtitleDisabled ? null : subtitleStreamIndex,
     subtitleDisabled: subtitleDisabled,
     mediaStreams: const [
-      {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+      {
+        'Index': 3,
+        'Type': 'Subtitle',
+        'DisplayTitle': 'Chinese',
+        'Title': 'Chinese',
+      },
     ],
     transcodingReasons: const [],
     availableMediaSources: const [],

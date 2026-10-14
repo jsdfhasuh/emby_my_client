@@ -3154,12 +3154,24 @@ class PlaybackController extends ChangeNotifier {
         'subtitle',
         resolvedSubtitleIndex,
       );
-      if (track?.isExternal == true && track?.deliveryUrl != null) {
+      if (track?.isExternal == true) {
+        if (track!.deliveryUrl == null || track.deliveryUrl!.trim().isEmpty) {
+          _diagnostics.subtitleMappingFailed(
+            selectionSource: selection.source.name,
+            subtitleKind: 'external',
+            streamIndex: resolvedSubtitleIndex,
+            generation: token,
+            result: _trackMapper
+                .match(track, _state.subtitleTracks)
+                .asUnavailable(TrackMappingReason.externalLocationMissing),
+          );
+          throw StateError('External subtitle location unavailable');
+        }
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
         final loader = subtitleLoader;
         if (loader != null) {
           final file = await loader.load(
-            track!.deliveryUrl!,
+            track.deliveryUrl!,
             itemId: item.id,
             sourceId: plan.mediaSourceId,
           );
@@ -3197,7 +3209,7 @@ class PlaybackController extends ChangeNotifier {
           token,
           boundEngine,
           () => boundEngine.loadExternalSubtitle(
-            resolver.resolveExternalUrl(track!.deliveryUrl!),
+            resolver.resolveExternalUrl(track.deliveryUrl!),
             title: track.title,
             language: track.language,
           ),
@@ -3264,15 +3276,15 @@ class PlaybackController extends ChangeNotifier {
         return;
       }
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-      final engineId = track == null
-          ? null
-          : _trackMapper.engineTrackId(track, tracks);
+      final mapping = _trackMapper.match(track, tracks);
+      final engineId = mapping.engineId;
       if (engineId == null) {
         _diagnostics.subtitleMappingFailed(
           selectionSource: selection.source.name,
           subtitleKind: 'embedded',
           streamIndex: resolvedSubtitleIndex,
           generation: token,
+          result: mapping,
         );
         throw StateError('Unable to map Emby subtitle track');
       }
@@ -3522,6 +3534,26 @@ class PlaybackController extends ChangeNotifier {
   void _markLateSubtitleFailed(_LateSubtitleTask task, Object error) {
     if (!_isCurrentLateSubtitleTask(task)) return;
     final identity = task.identity;
+    final plan = _state.plan;
+    if (error is TimeoutException && plan != null) {
+      final track = _trackMapper.findByIndex(
+        plan,
+        'subtitle',
+        identity.resolvedStreamIndex,
+      );
+      if (track?.isExternal != true) {
+        final mapping = _trackMapper.match(track, _state.subtitleTracks);
+        _diagnostics.subtitleMappingFailed(
+          selectionSource: identity.selection.source.name,
+          subtitleKind: 'embedded',
+          streamIndex: identity.resolvedStreamIndex,
+          generation: identity.controllerGeneration,
+          result: mapping.status == TrackMappingStatus.matched
+              ? mapping.asUnavailable(TrackMappingReason.trackWaitTimedOut)
+              : mapping,
+        );
+      }
+    }
     _markSubtitleFailed(
       selection: identity.selection,
       token: identity.controllerGeneration,
@@ -3556,9 +3588,12 @@ class PlaybackController extends ChangeNotifier {
     Duration? timeout,
     Completer<void>? cancellationSignal,
   }) async {
-    final existing = audio ? _state.audioTracks : _state.subtitleTracks;
-    if (existing.isNotEmpty) return existing;
     _throwIfCurrentEngine(token, boundEngine);
+    if (cancellationSignal?.isCompleted ?? false) {
+      throw const _PlaybackCancelled();
+    }
+    final existing = audio ? _state.audioTracks : _state.subtitleTracks;
+    if (existing.any(TrackMapper.isRealTrack)) return existing;
 
     final completer = Completer<List<EngineTrack>>();
     final cancellation = cancellationSignal ?? Completer<void>();
@@ -3575,7 +3610,7 @@ class PlaybackController extends ChangeNotifier {
           }
           return;
         }
-        if (tracks.isNotEmpty && !completer.isCompleted) {
+        if (tracks.any(TrackMapper.isRealTrack) && !completer.isCompleted) {
           completer.complete(List<EngineTrack>.unmodifiable(tracks));
         }
       },

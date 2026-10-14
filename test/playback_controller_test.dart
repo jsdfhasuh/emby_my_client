@@ -3,8 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:emby_my_client/core/server_scope.dart';
+import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/models/emby_models.dart';
+import 'package:emby_my_client/offline/offline_playback_reporter.dart';
+import 'package:emby_my_client/offline/offline_playback_resolver.dart';
 import 'package:emby_my_client/playback/emby_stream_resolver.dart';
 import 'package:emby_my_client/playback/external_subtitle_loader.dart';
 import 'package:emby_my_client/playback/media_kit_inline_playback_session.dart';
@@ -22,6 +26,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support/progressive_fixture.dart';
 
 void main() {
+  _subtitleRegressionTests();
   test(
     'source startup keeps reading past ordinary readiness deadline',
     () async {
@@ -145,7 +150,12 @@ void main() {
         _testPlan(
           mediaStreams: const [
             {'Index': 2, 'Type': 'Audio', 'Language': 'chi'},
-            {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+            {
+              'Index': 3,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Chinese',
+              'Title': 'Chinese',
+            },
           ],
         ),
         sourcePlans: {
@@ -154,7 +164,12 @@ void main() {
             mediaStreams: const [
               {'Index': 2, 'Type': 'Audio', 'Language': 'eng'},
               {'Index': 5, 'Type': 'Audio', 'Language': 'chi'},
-              {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'English'},
+              {
+                'Index': 3,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'English',
+                'Title': 'English',
+              },
             ],
           ).copyWith(audioStreamIndex: 2),
         },
@@ -1038,7 +1053,12 @@ void main() {
             method: method,
             subtitleStreamIndex: 3,
             mediaStreams: const [
-              {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+              {
+                'Index': 3,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'Chinese',
+                'Title': 'Chinese',
+              },
             ],
           ),
         );
@@ -1077,6 +1097,7 @@ void main() {
               'Index': 4,
               'Type': 'Subtitle',
               'DisplayTitle': 'Chinese',
+              'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
               'DeliveryUrl': '/subtitles/4.srt',
@@ -1122,6 +1143,7 @@ void main() {
               'Index': 4,
               'Type': 'Subtitle',
               'DisplayTitle': 'Chinese',
+              'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
               'DeliveryUrl': '/subtitles/4.srt',
@@ -1226,7 +1248,12 @@ void main() {
         _testPlan(
           subtitleStreamIndex: 3,
           mediaStreams: const [
-            {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
+            {
+              'Index': 3,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Chinese',
+              'Title': 'Chinese',
+            },
           ],
         ),
       );
@@ -1267,8 +1294,18 @@ void main() {
         _testPlan(
           subtitleStreamIndex: 3,
           mediaStreams: const [
-            {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
-            {'Index': 4, 'Type': 'Subtitle', 'DisplayTitle': 'Japanese'},
+            {
+              'Index': 3,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Chinese',
+              'Title': 'Chinese',
+            },
+            {
+              'Index': 4,
+              'Type': 'Subtitle',
+              'DisplayTitle': 'Japanese',
+              'Title': 'Japanese',
+            },
           ],
         ),
       );
@@ -1312,8 +1349,18 @@ void main() {
           _testPlan(
             subtitleStreamIndex: 3,
             mediaStreams: const [
-              {'Index': 3, 'Type': 'Subtitle', 'DisplayTitle': 'Chinese'},
-              {'Index': 4, 'Type': 'Subtitle', 'DisplayTitle': 'Japanese'},
+              {
+                'Index': 3,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'Chinese',
+                'Title': 'Chinese',
+              },
+              {
+                'Index': 4,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'Japanese',
+                'Title': 'Japanese',
+              },
             ],
           ),
         ),
@@ -1339,7 +1386,12 @@ void main() {
           _testPlan(
             subtitleStreamIndex: 5,
             mediaStreams: const [
-              {'Index': 5, 'Type': 'Subtitle', 'DisplayTitle': 'English'},
+              {
+                'Index': 5,
+                'Type': 'Subtitle',
+                'DisplayTitle': 'English',
+                'Title': 'English',
+              },
             ],
           ),
         ),
@@ -1986,6 +2038,389 @@ void main() {
   );
 }
 
+void _subtitleRegressionTests() {
+  const pseudo = [EngineTrack(id: 'auto'), EngineTrack(id: 'no')];
+  const real = [EngineTrack(id: '42', language: 'zho', codec: 'subrip')];
+  group('subtitle regression', () {
+    test(
+      'offline default and manual selection use metadata, never Emby index',
+      () async {
+        final fixture = await _offlineSubtitleCase(tracks: real);
+        await fixture.controller.start();
+        expect(fixture.engine.selectedSubtitleTrackIds, ['42']);
+        await fixture.controller.selectSubtitleStream(null);
+        await fixture.controller.selectSubtitleStream(2);
+        expect(fixture.engine.selectedSubtitleTrackIds, ['42', null, '42']);
+        expect(fixture.controller.state.appliedSubtitleStreamIndex, 2);
+        expect(fixture.controller.state.phase, PlaybackPhase.ready);
+        expect(fixture.requests, isEmpty);
+      },
+    );
+
+    test('auto no do not finish the initial track wait', () async {
+      final fixture = await _offlineSubtitleCase(
+        tracks: pseudo,
+        trackWaitTimeout: const Duration(milliseconds: 200),
+      );
+      var finished = false;
+      final start = fixture.controller.start().then((_) => finished = true);
+      await _waitUntil(() => fixture.engine.openUris.isNotEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(finished, isFalse);
+      fixture.engine.subtitleTracksController.add(real);
+      await start;
+      expect(fixture.engine.selectedSubtitleTrackIds, ['42']);
+    });
+
+    test(
+      'real tracks after initial timeout apply once despite repeated events',
+      () async {
+        final fixture = await _offlineSubtitleCase(tracks: pseudo);
+        await fixture.controller.start();
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.waitingForTracks,
+        );
+        fixture.engine.subtitleTracksController.add(pseudo);
+        fixture.engine.subtitleTracksController.add(real);
+        fixture.engine.subtitleTracksController.add(real);
+        await _waitUntil(
+          () =>
+              fixture.controller.state.subtitleSelectionStatus ==
+              SubtitleSelectionStatus.appliedEmbedded,
+        );
+        fixture.engine.subtitleTracksController.add(real);
+        await Future<void>.delayed(Duration.zero);
+        expect(fixture.engine.selectedSubtitleTrackIds, ['42']);
+      },
+    );
+
+    test(
+      'disabled late selection never writes after a real track arrives',
+      () async {
+        final fixture = await _offlineSubtitleCase(tracks: pseudo);
+        await fixture.controller.start();
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.waitingForTracks,
+        );
+        await fixture.controller.selectSubtitleStream(null);
+        fixture.engine.subtitleTracksController.add(real);
+        await Future<void>.delayed(Duration.zero);
+        expect(fixture.engine.selectedSubtitleTrackIds, [null]);
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.disabled,
+        );
+      },
+    );
+
+    test(
+      'shutdown and next media cannot revive the old late selection',
+      () async {
+        final first = await _offlineSubtitleCase(tracks: pseudo);
+        await first.controller.start();
+        expect(
+          first.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.waitingForTracks,
+        );
+        await first.controller.shutdown();
+        final next = await _offlineSubtitleCase(tracks: real);
+        await next.controller.start();
+        first.engine.subtitleTracksController.add(real);
+        await Future<void>.delayed(Duration.zero);
+        expect(first.engine.selectedSubtitleTrackIds, isEmpty);
+        expect(next.engine.selectedSubtitleTrackIds, ['42']);
+      },
+    );
+
+    test(
+      'manual selection supersedes pending default without duplicate application',
+      () async {
+        final fixture = await _offlineSubtitleCase(
+          tracks: pseudo,
+          streams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'Language': 'chi',
+              'Codec': 'srt',
+            },
+            {'Index': 3, 'Type': 'Subtitle', 'Language': 'eng', 'Codec': 'srt'},
+          ],
+        );
+        await fixture.controller.start();
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.waitingForTracks,
+        );
+        final selection = fixture.controller.selectSubtitleStream(3);
+        fixture.engine.subtitleTracksController.add(const [
+          ...real,
+          EngineTrack(id: '9', language: 'en', codec: 'subrip'),
+        ]);
+        await selection;
+        await Future<void>.delayed(Duration.zero);
+        expect(fixture.engine.selectedSubtitleTrackIds, ['9']);
+        expect(fixture.controller.state.appliedSubtitleStreamIndex, 3);
+      },
+    );
+
+    test('ambiguity fails with bounded safe mapping evidence', () async {
+      final fixture = await _offlineSubtitleCase(
+        tracks: const [
+          EngineTrack(id: '2', language: 'chi', codec: 'subrip'),
+          EngineTrack(id: '42', language: 'zho', codec: 'srt'),
+        ],
+      );
+      await fixture.controller.start();
+      expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+      expect(
+        fixture.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.failed,
+      );
+      final line = fixture.logs.singleWhere(
+        (line) => line.contains('event=playback_subtitle_mapping_failed'),
+      );
+      expect(line, contains('mappingResult=ambiguous'));
+      expect(line, contains('realTrackCount=2'));
+      expect(line, contains('candidateCount=2'));
+      expect(line, contains('mappingReason=multipleCandidates'));
+    });
+
+    test(
+      'conflicts report field names without raw title language codec or URI',
+      () async {
+        const privateValue =
+            'https://fixture.invalid/private-title?token=fixture-secret';
+        final fixture = await _offlineSubtitleCase(
+          streams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'Title': privateValue,
+              'DisplayTitle': 'private-display-label',
+              'Language': 'private-language',
+              'Codec': 'private-codec',
+            },
+          ],
+          tracks: const [
+            EngineTrack(
+              id: '42',
+              title: 'different',
+              language: 'private-language',
+              codec: 'private-codec',
+            ),
+          ],
+        );
+        await fixture.controller.start();
+        expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+        final line = fixture.logs.singleWhere(
+          (line) => line.contains('event=playback_subtitle_mapping_failed'),
+        );
+        expect(line, contains('mappingResult=unavailable'));
+        expect(line, contains('mappingReason=metadataConflict'));
+        expect(line, contains('conflictFields=title'));
+        expect(
+          line,
+          contains('serverFields=language,codec,title,displayTitle'),
+        );
+        expect(line, contains('engineFields=language,codec,title'));
+        for (final raw in [
+          privateValue,
+          'private-display-label',
+          'private-language',
+          'private-codec',
+          'fixture-secret',
+        ]) {
+          expect(fixture.logs.join('\n'), isNot(contains(raw)));
+        }
+      },
+    );
+
+    test('no real track eventually fails with noTracks evidence', () async {
+      final fixture = await _offlineSubtitleCase(
+        tracks: pseudo,
+        lateTimeout: const Duration(milliseconds: 20),
+      );
+      await fixture.controller.start();
+      expect(
+        fixture.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.waitingForTracks,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        fixture.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.failed,
+      );
+      expect(
+        fixture.logs,
+        contains(
+          allOf(
+            contains('mappingReason=noTracks'),
+            contains('realTrackCount=0'),
+            contains('candidateCount=0'),
+          ),
+        ),
+      );
+    });
+
+    test(
+      'external metadata without location never selects embedded track',
+      () async {
+        final fixture = await _offlineSubtitleCase(
+          tracks: const [EngineTrack(id: '42', language: 'chi', codec: 'srt')],
+          streams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'IsExternal': true,
+              'OfflineSubtitleState': 'available',
+              'Language': 'chi',
+              'Codec': 'srt',
+            },
+          ],
+        );
+        await fixture.controller.start();
+        expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+        expect(fixture.engine.externalSubtitleUris, isEmpty);
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.failed,
+        );
+        expect(
+          fixture.logs,
+          contains(
+            allOf(
+              contains('subtitleKind=external'),
+              contains('mappingReason=externalLocationMissing'),
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'downloaded external subtitle remains a local file with no online request',
+      () async {
+        final fixture = await _offlineSubtitleCase(
+          tracks: pseudo,
+          externalFile: true,
+        );
+        await fixture.controller.start();
+        expect(fixture.engine.externalSubtitleUris, [fixture.subtitleFile.uri]);
+        expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.appliedExternal,
+        );
+        expect(fixture.requests, isEmpty);
+      },
+    );
+  });
+}
+
+Future<
+  ({
+    PlaybackController controller,
+    _FakeEngine engine,
+    List<String> logs,
+    List<RequestOptions> requests,
+    File subtitleFile,
+  })
+>
+_offlineSubtitleCase({
+  required List<EngineTrack> tracks,
+  List<Map<String, dynamic>>? streams,
+  bool externalFile = false,
+  Duration trackWaitTimeout = const Duration(milliseconds: 10),
+  Duration lateTimeout = const Duration(seconds: 1),
+}) async {
+  final directory = await Directory.systemTemp.createTemp(
+    'emby-subtitle-regression-',
+  );
+  addTearDown(() async {
+    expect(
+      directory.absolute.path,
+      startsWith(
+        '${Directory.systemTemp.absolute.path}${Platform.pathSeparator}',
+      ),
+    );
+    await directory.delete(recursive: true);
+  });
+  final video = File('${directory.path}${Platform.pathSeparator}fixture.mkv');
+  await video.writeAsBytes([1, 2, 3, 4]);
+  final subtitle = File(
+    '${directory.path}${Platform.pathSeparator}local subtitle.srt',
+  );
+  await subtitle.writeAsString('1\n00:00:00,000 --> 00:00:01,000\nfixture\n');
+  final offline = OfflineMediaItem(
+    scope: const ServerScope(
+      serverId: 'fixture-server',
+      userId: 'fixture-user',
+    ),
+    itemId: 'fixture-item',
+    mediaSourceId: 'fixture-source',
+    metadata: OfflineMediaMetadata(
+      name: 'fixture',
+      itemType: 'Movie',
+      container: 'mkv',
+      mediaStreams:
+          streams ??
+          [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'IsDefault': true,
+              'DisplayTitle': 'Chinese - Simplified - Default (SRT)',
+              'Language': 'chi',
+              'Codec': 'srt',
+              if (externalFile) ...{
+                'IsExternal': true,
+                'DeliveryUrl': subtitle.path,
+                'OfflineSubtitleState': 'available',
+              },
+            },
+          ],
+    ),
+    localMediaPath: video.path,
+    completedAt: DateTime.utc(2026, 10, 14),
+  );
+  final engine = _FakeEngine();
+  engine.onOpen = (_) {
+    engine.subtitleTracksController.add(tracks);
+    engine.durationController.add(const Duration(hours: 1));
+  };
+  final requests = <RequestOptions>[];
+  final api = _api(requests);
+  addTearDown(api.dispose);
+  final logs = <String>[];
+  final controller = _controller(
+    api: api,
+    engine: engine,
+    item: offline.toEmbyItem(),
+    resolver: OfflinePlaybackResolver(offline),
+    reporter: OfflinePlaybackReporter(
+      item: offline,
+      writeProgress: (_, _) async {},
+    ),
+    diagnostics: _diagnostics(logs),
+    trackWaitTimeout: trackWaitTimeout,
+    lateSubtitleTrackWaitTimeout: lateTimeout,
+  );
+  addTearDown(controller.shutdown);
+  return (
+    controller: controller,
+    engine: engine,
+    logs: logs,
+    requests: requests,
+    subtitleFile: subtitle,
+  );
+}
+
 class _LifecycleSpyPlaybackController extends PlaybackController {
   _LifecycleSpyPlaybackController()
     : super(
@@ -2201,6 +2636,7 @@ EmbyApi _api(
                           'Index': defaultAudioStreamIndex,
                           'Type': 'Audio',
                           'DisplayTitle': 'Original',
+                          'Title': 'Original',
                           'Language': 'eng',
                           'Codec': 'aac',
                         },
@@ -2209,6 +2645,7 @@ EmbyApi _api(
                           'Index': defaultSubtitleStreamIndex,
                           'Type': 'Subtitle',
                           'DisplayTitle': 'Chinese',
+                          'Title': 'Chinese',
                           'Language': 'chi',
                           'Codec': 'ass',
                         },

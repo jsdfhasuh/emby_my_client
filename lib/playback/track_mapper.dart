@@ -5,7 +5,8 @@ class PlaybackTrack {
   const PlaybackTrack({
     required this.index,
     required this.type,
-    this.title,
+    String? title,
+    this.displayTitle,
     this.language,
     this.codec,
     this.channels,
@@ -13,11 +14,16 @@ class PlaybackTrack {
     this.isForced = false,
     this.isExternal = false,
     this.deliveryUrl,
-  });
+  }) : originalTitle = title;
 
   final int index;
   final String type;
-  final String? title;
+
+  /// The container's original Title is identity evidence. DisplayTitle is a
+  /// server-generated UI label and must never constrain track matching.
+  final String? originalTitle;
+  final String? displayTitle;
+  String? get title => displayTitle ?? originalTitle;
   final String? language;
   final String? codec;
   final int? channels;
@@ -29,10 +35,49 @@ class PlaybackTrack {
 
 enum TrackMappingStatus { matched, unavailable, ambiguous }
 
+enum TrackMappingReason {
+  matched,
+  noTracks,
+  missingServerTrack,
+  insufficientMetadata,
+  metadataConflict,
+  multipleCandidates,
+  externalLocationMissing,
+  trackWaitTimedOut,
+}
+
+enum TrackMetadataField { language, codec, title, channels, displayTitle }
+
 class TrackMappingResult {
-  const TrackMappingResult(this.status, [this.engineId]);
+  const TrackMappingResult(
+    this.status, {
+    this.engineId,
+    required this.reason,
+    required this.realTrackCount,
+    required this.candidateCount,
+    this.serverFields = const {},
+    this.engineFields = const {},
+    this.conflictFields = const {},
+  });
   final TrackMappingStatus status;
   final String? engineId;
+  final TrackMappingReason reason;
+  final int realTrackCount;
+  final int candidateCount;
+  final Set<TrackMetadataField> serverFields;
+  final Set<TrackMetadataField> engineFields;
+  final Set<TrackMetadataField> conflictFields;
+
+  TrackMappingResult asUnavailable(TrackMappingReason reason) =>
+      TrackMappingResult(
+        TrackMappingStatus.unavailable,
+        reason: reason,
+        realTrackCount: realTrackCount,
+        candidateCount: 0,
+        serverFields: serverFields,
+        engineFields: engineFields,
+        conflictFields: conflictFields,
+      );
 }
 
 class TrackMapper {
@@ -63,32 +108,79 @@ class TrackMapper {
   ) => match(serverTrack, engineTracks).engineId;
 
   TrackMappingResult match(
-    PlaybackTrack serverTrack,
+    PlaybackTrack? serverTrack,
     List<EngineTrack> engineTracks,
   ) {
-    final matching = engineTracks
-        .where((engineTrack) {
-          if (engineTrack.id == 'auto' || engineTrack.id == 'no') return false;
-          var evidence = false;
-          for (final pair in [
-            (_language(serverTrack.language), _language(engineTrack.language)),
-            (_text(serverTrack.codec), _text(engineTrack.codec)),
-            (_text(serverTrack.title), _text(engineTrack.title)),
-            (serverTrack.channels, engineTrack.channels),
-          ]) {
-            if (pair.$1 == null || pair.$2 == null) continue;
-            if (pair.$1 != pair.$2) return false;
-            evidence = true;
-          }
-          return evidence;
-        })
-        .toList(growable: false);
-    return switch (matching.length) {
-      0 => const TrackMappingResult(TrackMappingStatus.unavailable),
-      1 => TrackMappingResult(TrackMappingStatus.matched, matching.single.id),
-      _ => const TrackMappingResult(TrackMappingStatus.ambiguous),
+    final tracks = engineTracks.where(isRealTrack).toList(growable: false);
+    final server = <TrackMetadataField, Object?>{
+      TrackMetadataField.language: _language(serverTrack?.language),
+      TrackMetadataField.codec: _codec(serverTrack?.codec),
+      TrackMetadataField.title: _text(serverTrack?.originalTitle),
+      TrackMetadataField.channels: serverTrack?.channels,
     };
+    final serverFields = {
+      for (final entry in server.entries)
+        if (entry.value != null) entry.key,
+      if (_text(serverTrack?.displayTitle) != null)
+        TrackMetadataField.displayTitle,
+    };
+    final engineFields = <TrackMetadataField>{};
+    final conflicts = <TrackMetadataField>{};
+    final matching = <EngineTrack>[];
+    for (final track in tracks) {
+      final fields = <TrackMetadataField, Object?>{
+        TrackMetadataField.language: _language(track.language),
+        TrackMetadataField.codec: _codec(track.codec),
+        TrackMetadataField.title: _text(track.title),
+        TrackMetadataField.channels: track.channels,
+      };
+      var evidence = false;
+      var conflict = false;
+      for (final field in fields.keys) {
+        final actual = fields[field];
+        if (actual != null) engineFields.add(field);
+        final expected = server[field];
+        if (expected == null || actual == null) continue;
+        evidence = true;
+        if (expected != actual) {
+          conflicts.add(field);
+          conflict = true;
+        }
+      }
+      if (evidence && !conflict) matching.add(track);
+    }
+    final status = switch (matching.length) {
+      0 => TrackMappingStatus.unavailable,
+      1 => TrackMappingStatus.matched,
+      _ => TrackMappingStatus.ambiguous,
+    };
+    final reason = serverTrack == null
+        ? TrackMappingReason.missingServerTrack
+        : tracks.isEmpty
+        ? TrackMappingReason.noTracks
+        : switch (status) {
+            TrackMappingStatus.matched => TrackMappingReason.matched,
+            TrackMappingStatus.ambiguous =>
+              TrackMappingReason.multipleCandidates,
+            TrackMappingStatus.unavailable =>
+              conflicts.isEmpty
+                  ? TrackMappingReason.insufficientMetadata
+                  : TrackMappingReason.metadataConflict,
+          };
+    return TrackMappingResult(
+      status,
+      engineId: matching.length == 1 ? matching.single.id : null,
+      reason: reason,
+      realTrackCount: tracks.length,
+      candidateCount: matching.length,
+      serverFields: Set.unmodifiable(serverFields),
+      engineFields: Set.unmodifiable(engineFields),
+      conflictFields: Set.unmodifiable(conflicts),
+    );
   }
+
+  static bool isRealTrack(EngineTrack track) =>
+      !{'', 'auto', 'no'}.contains(track.id.trim().toLowerCase());
 
   static String? _text(String? value) {
     final text = value?.trim().toLowerCase();
@@ -106,6 +198,13 @@ class TrackMapper {
     final value => value,
   };
 
+  // Restrict aliases to the same subtitle format. Do not collapse distinct
+  // formats (for example ASS/SSA) or language regions/scripts to guess a track.
+  static String? _codec(String? value) => switch (_text(value)) {
+    'srt' || 'subrip' => 'subrip',
+    final value => value,
+  };
+
   PlaybackTrack? findByIndex(PlaybackPlan plan, String type, int index) =>
       fromPlan(plan, type).where((track) => track.index == index).firstOrNull;
 
@@ -115,7 +214,8 @@ class TrackMapper {
     return PlaybackTrack(
       index: index,
       type: json['Type']?.toString() ?? 'Unknown',
-      title: json['DisplayTitle']?.toString() ?? json['Title']?.toString(),
+      title: json['Title']?.toString(),
+      displayTitle: json['DisplayTitle']?.toString(),
       language: json['Language']?.toString(),
       codec: json['Codec']?.toString(),
       channels: _asInt(json['Channels']),
