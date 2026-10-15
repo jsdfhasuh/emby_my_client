@@ -3,8 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from prepare_release import ANDROID_APPLICATION_ID, APK_NAMES, SIGNING_RECEIPT, certificate_pin, prepare_release
+from prepare_release import ANDROID_APPLICATION_ID, APK_NAMES, SIGNING_RECEIPT, certificate_pin, prepare_release, versioned_apk_names
 
 
 class PrepareReleaseTest(unittest.TestCase):
@@ -16,7 +17,7 @@ class PrepareReleaseTest(unittest.TestCase):
         self.output = self.root / "release"
         self.notes = self.root / "notes.md"
         self.commit = "a" * 40
-        self.ipa_name = f"emby-ios-core-{self.commit[:12]}-175.ipa"
+        self.ipa_name = f"emby-ios-core-{self.commit[:12]}-192.ipa"
         self.files = {}
         # Universal APK artifacts retain nested paths; split APKs do not.
         for name in (*APK_NAMES, self.ipa_name):
@@ -27,11 +28,11 @@ class PrepareReleaseTest(unittest.TestCase):
             self.files[name] = path
         self.checksum = self.files[self.ipa_name].with_suffix(".ipa.sha256")
         digest = hashlib.sha256(self.files[self.ipa_name].read_bytes()).hexdigest()
-        self.checksum.write_text(f"{digest}  {self.ipa_name}\n", encoding="utf-8")
+        self.checksum.write_text(f"{digest}  {self.ipa_name}\n", encoding="utf-8", newline="\n")
         self.signing_receipt = self.inputs / SIGNING_RECEIPT
         self.signing_receipt.write_text(json.dumps({
             "format": 2, "certificateSha256": certificate_pin(),
-            "applicationId": ANDROID_APPLICATION_ID, "runNumber": 175,
+            "applicationId": ANDROID_APPLICATION_ID, "runNumber": 192,
             "apks": {name: hashlib.sha256(self.files[name].read_bytes()).hexdigest() for name in APK_NAMES},
         }), encoding="utf-8")
 
@@ -40,7 +41,7 @@ class PrepareReleaseTest(unittest.TestCase):
             "artifacts_dir": self.inputs,
             "output_dir": self.output,
             "notes_path": self.notes,
-            "run_number": 175,
+            "run_number": 192,
             "commit": self.commit,
             "run_url": "https://github.com/example/repo/actions/runs/123",
         }
@@ -52,10 +53,13 @@ class PrepareReleaseTest(unittest.TestCase):
         assets = self.prepare()
         self.assertEqual(
             {path.name for path in assets},
-            {*APK_NAMES, self.ipa_name, self.checksum.name, "SHA256SUMS.txt"},
+            {*APK_NAMES, self.ipa_name, self.checksum.name, "SHA256SUMS.txt",
+             "EmoEmby-1.0.192-universal.apk", "EmoEmby-1.0.192-arm64-v8a.apk",
+             "EmoEmby-1.0.192-armeabi-v7a.apk", "EmoEmby-1.0.192-x86_64.apk"},
         )
         records = (self.output / "SHA256SUMS.txt").read_text().splitlines()
-        self.assertEqual(len(records), 5)
+        self.assertEqual(len(records), 9)
+        self.assertNotIn(b"\r", (self.output / "SHA256SUMS.txt").read_bytes())
         for record in records:
             digest, name = record.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.output / name).read_bytes()).hexdigest())
@@ -64,6 +68,54 @@ class PrepareReleaseTest(unittest.TestCase):
         self.assertIn("fixed app key", notes)
         self.assertIn(certificate_pin(), notes)
         self.assertIn("TrollStore", notes)
+
+    def test_versioned_apks_are_identical_to_the_verified_updater_aliases(self):
+        self.prepare()
+        for alias, versioned in versioned_apk_names(192).items():
+            self.assertEqual((self.output / versioned).read_bytes(), self.files[alias].read_bytes())
+            self.assertEqual((self.output / alias).read_bytes(), self.files[alias].read_bytes())
+        notes = self.notes.read_text(encoding="utf-8")
+        self.assertIn("Compatibility aliases for installed apps", notes)
+        self.assertIn("byte-identical", notes)
+        for name in versioned_apk_names(192).values():
+            self.assertIn(name, notes)
+
+    def test_names_follow_the_shared_build_version_and_all_architectures(self):
+        for number in (1, 193, 2048, 209999):
+            self.assertEqual(versioned_apk_names(number), {
+                "app-debug.apk": f"EmoEmby-1.0.{number}-universal.apk",
+                "app-arm64-v8a-debug.apk": f"EmoEmby-1.0.{number}-arm64-v8a.apk",
+                "app-armeabi-v7a-debug.apk": f"EmoEmby-1.0.{number}-armeabi-v7a.apk",
+                "app-x86_64-debug.apk": f"EmoEmby-1.0.{number}-x86_64.apk",
+            })
+        with patch("prepare_release.build_version", return_value={"APP_VERSION_NAME": "2.4.193"}):
+            self.assertEqual(versioned_apk_names(193)["app-arm64-v8a-debug.apk"],
+                             "EmoEmby-2.4.193-arm64-v8a.apk")
+
+    def test_unsupported_build_number_never_creates_output(self):
+        with self.assertRaisesRegex(ValueError, "version range"):
+            self.prepare(run_number=210000)
+        self.assertFalse(self.output.exists())
+
+    def test_existing_versioned_inputs_cannot_replace_verified_signed_bytes(self):
+        stale = self.inputs / "EmoEmby-1.0.192-arm64-v8a.apk"
+        stale.write_bytes(b"unverified stale file")
+        self.prepare()
+        self.assertEqual((self.output / stale.name).read_bytes(),
+                         self.files["app-arm64-v8a-debug.apk"].read_bytes())
+
+    def test_release_output_matches_the_cross_version_updater_contract(self):
+        fixture = Path(__file__).parents[2] / "test/fixtures/releases/versioned-build-192.json"
+        expected = json.loads(fixture.read_text(encoding="utf-8"))
+        self.prepare()
+        self.assertEqual((self.output / "SHA256SUMS.txt").read_text(encoding="utf-8"),
+                         expected["checksums"])
+        self.assertEqual(
+            [{"name": path.name, "size": path.stat().st_size,
+              "browser_download_url": "https://github.com/jsdfhasuh/emby_my_client/releases/download/build-192/" + path.name}
+             for path in sorted(self.output.iterdir(), key=lambda path: path.name)], expected["release"]["assets"])
+        for name, data in expected["apkContents"].items():
+            self.assertEqual((self.output / name).read_bytes(), data.encode())
 
     def test_missing_apk_fails_before_creating_release_output(self):
         self.files[APK_NAMES[0]].unlink()

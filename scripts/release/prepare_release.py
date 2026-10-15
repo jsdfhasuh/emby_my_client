@@ -8,13 +8,28 @@ from pathlib import Path
 import re
 import shutil
 
+from build_version import build_version
 
-APK_NAMES = (
-    "app-debug.apk",
-    "app-arm64-v8a-debug.apk",
-    "app-armeabi-v7a-debug.apk",
-    "app-x86_64-debug.apk",
-)
+
+# These exact names remain updater compatibility aliases. Builds 186, 187,
+# and 191 ignore other APK names, so each alias must remain a separate asset.
+APK_ARCHITECTURES = {
+    "app-debug.apk": "universal",
+    "app-arm64-v8a-debug.apk": "arm64-v8a",
+    "app-armeabi-v7a-debug.apk": "armeabi-v7a",
+    "app-x86_64-debug.apk": "x86_64",
+}
+APK_NAMES = tuple(APK_ARCHITECTURES)
+
+
+def versioned_apk_names(run_number: int) -> dict[str, str]:
+    # The signing step verifies each APK's embedded version and ABI against
+    # this same build identity before producing the receipt checked below.
+    version = build_version(run_number)["APP_VERSION_NAME"]
+    return {name: f"EmoEmby-{version}-{abi}.apk"
+            for name, abi in APK_ARCHITECTURES.items()}
+
+
 SIGNING_RECEIPT = "ANDROID-SIGNING.json"
 ANDROID_APPLICATION_ID = "com.jsdfhasuh.emoemby"
 ANDROID_LABEL = "Emo Emby 稳定版"
@@ -45,6 +60,8 @@ def prepare_release(
 ) -> list[Path]:
     if run_number <= 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("A positive build number and full commit SHA are required")
+    apk_names = versioned_apk_names(run_number)
+    version = build_version(run_number)["APP_VERSION_NAME"]
     if not artifacts_dir.is_dir():
         raise FileNotFoundError(f"Artifact directory is missing: {artifacts_dir}")
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -76,13 +93,20 @@ def prepare_release(
     output_dir.mkdir(parents=True, exist_ok=True)
     assets = []
     for source in (*binaries, ipa_checksum):
-        target = output_dir / source.name
-        shutil.copyfile(source, target)
-        assets.append(target)
+        # Copy the already verified signed bytes; do not rebuild or re-sign.
+        # Versioned downloads and legacy updater aliases share one checksum.
+        names = ((apk_names[source.name], source.name)
+                 if source.name in apk_names else (source.name,))
+        for name in names:
+            target = output_dir / name
+            shutil.copyfile(source, target)
+            assets.append(target)
+            if source.name in apk_names:
+                digests[name] = digests[source.name]
     manifest = output_dir / "SHA256SUMS.txt"
     manifest.write_text(
         "".join(f"{digests[name]}  {name}\n" for name in sorted(digests)),
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     assets.append(manifest)
     notes_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,10 +115,19 @@ def prepare_release(
         f"Commit: `{commit}`\n\n"
         f"[Build and test results]({run_url})\n\n"
         "## Downloads\n"
-        "- `app-debug.apk`: universal Android debug build, signed with the fixed app key.\n"
-        "- `app-*-debug.apk`: smaller Android APKs for each CPU architecture.\n"
+        f"- `EmoEmby-{version}-arm64-v8a.apk`: Android ARM64 download.\n"
+        f"- `EmoEmby-{version}-armeabi-v7a.apk`: Android ARMv7 download.\n"
+        f"- `EmoEmby-{version}-x86_64.apk`: Android x86-64 download.\n"
+        f"- `EmoEmby-{version}-universal.apk`: universal Android download.\n"
+        "These are debug builds signed with the fixed app key.\n\n"
+        "### Compatibility aliases for installed apps\n"
+        "The `app-debug.apk` and `app-*-debug.apk` assets are byte-identical copies "
+        "for existing in-app updaters, including builds 186, 187 and 191. "
+        "Choose the versioned filenames above for manual downloads; "
+        "these aliases are not additional versions or different signing keys.\n\n"
         "- `emby-ios-core-*.ipa`: iPadOS IPA for TrollStore; not an App Store package.\n"
-        "- `SHA256SUMS.txt`: SHA-256 checksums for all installable packages.\n\n"
+        "- `SHA256SUMS.txt`: SHA-256 checksums for every installable filename, "
+        "including compatibility aliases.\n\n"
         f"Android certificate SHA-256: `{certificate_pin()}`.\n\n"
         f"Android app: **{ANDROID_LABEL}** (`{ANDROID_APPLICATION_ID}`).\n\n"
         "This stable app installs separately from the old com.example.embyclient app. "
@@ -102,7 +135,7 @@ def prepare_release(
         "Keep the old app and its data.\n\n"
         "Both platform builds and the existing automated checks passed. "
         "This is an automated test build, not a claim of real-device acceptance.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     return assets
 
