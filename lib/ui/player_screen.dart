@@ -1031,7 +1031,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final controller = _playbackController;
     if (controller == null) return;
     await controller.selectSubtitleStream(streamIndex);
-    _sessionSubtitleSelection = streamIndex ?? disabledSubtitleStreamIndex;
+    if (mounted && identical(controller, _playbackController)) {
+      _sessionSubtitleSelection = streamIndex ?? disabledSubtitleStreamIndex;
+    }
   }
 
   Future<void> _changeSubtitleStyle(PlaybackSettings settings) async {
@@ -1447,6 +1449,20 @@ class _PlayerScreenState extends State<PlayerScreen>
                           listenable: controller,
                           builder: (context, _) => PlaybackSubtitleOptions(
                             tracks: subtitleTracks,
+                            nativeTracks: controller.nativeSubtitleChoices,
+                            localAssets: controller.localSubtitleChoices,
+                            onSelectNative: (target) {
+                              if (!closeForSelection(sheetContext)) return;
+                              _sessionSubtitleSelection = null;
+                              unawaited(
+                                controller.selectNativeSubtitle(target),
+                              );
+                            },
+                            onSelectLocal: (target) {
+                              if (!closeForSelection(sheetContext)) return;
+                              _sessionSubtitleSelection = null;
+                              unawaited(controller.selectLocalSubtitle(target));
+                            },
                             playbackState: controller.state,
                             onSelect: (index) {
                               if (!closeForSelection(sheetContext)) return;

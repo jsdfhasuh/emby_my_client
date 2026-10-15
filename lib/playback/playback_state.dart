@@ -1,3 +1,4 @@
+import 'subtitle_target.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
@@ -28,34 +29,62 @@ enum PlaybackPhase {
   stopping,
 }
 
-enum SubtitleSelectionSource { serverDefault, explicit, disabled }
+enum SubtitleSelectionSource {
+  serverDefault,
+  explicit,
+  native,
+  localExternal,
+  disabled,
+}
 
 class SubtitleSelection {
   const SubtitleSelection.followServerDefault()
-    : source = SubtitleSelectionSource.serverDefault,
-      streamIndex = null;
-
+    : this._(SubtitleSelectionSource.serverDefault, null, null);
   const SubtitleSelection.disabled()
-    : source = SubtitleSelectionSource.disabled,
-      streamIndex = null;
-
+    : this._(SubtitleSelectionSource.disabled, null, null);
   const SubtitleSelection.explicitStream(int index)
-    : source = SubtitleSelectionSource.explicit,
-      streamIndex = index;
-
+    : this._(SubtitleSelectionSource.explicit, index, null);
+  const SubtitleSelection.nativeTrack(NativeSubtitleTrack target)
+    : this._(SubtitleSelectionSource.native, null, target);
+  SubtitleSelection.localExternal(LocalExternalAsset target)
+    : this._(SubtitleSelectionSource.localExternal, target.index, target);
+  const SubtitleSelection._(
+    this.source,
+    this.streamIndex,
+    this._target, [
+    this.requestRevision = 0,
+    this.inputEpoch,
+  ]);
   final SubtitleSelectionSource source;
   final int? streamIndex;
-
+  final SubtitleTarget? _target;
+  SubtitleTarget? get target =>
+      _target ??
+      (source == SubtitleSelectionSource.explicit
+          ? ServerStream(streamIndex!)
+          : null);
+  final int requestRevision;
+  final int? inputEpoch;
+  SubtitleSelection withRevision(int revision, int epoch) =>
+      SubtitleSelection._(source, streamIndex, target, revision, epoch);
   bool get isDisabled => source == SubtitleSelectionSource.disabled;
-
   @override
   bool operator ==(Object other) =>
       other is SubtitleSelection &&
       other.source == source &&
-      other.streamIndex == streamIndex;
-
+      other.streamIndex == streamIndex &&
+      (source != SubtitleSelectionSource.native &&
+              source != SubtitleSelectionSource.localExternal ||
+          identical(other.target, target));
   @override
-  int get hashCode => Object.hash(source, streamIndex);
+  int get hashCode => Object.hash(
+    source,
+    streamIndex,
+    source == SubtitleSelectionSource.native ||
+            source == SubtitleSelectionSource.localExternal
+        ? target
+        : null,
+  );
 }
 
 enum SubtitleSelectionStatus {
@@ -95,6 +124,7 @@ class PlaybackState {
     this.subtitleSelectionStatus = SubtitleSelectionStatus.notApplied,
     this.appliedSubtitleKind = AppliedSubtitleKind.none,
     this.appliedSubtitleStreamIndex,
+    this.appliedNativeSubtitleId,
     this.subtitleApplicationGeneration = 0,
     this.subtitleSelectionError,
     this.errorMessage,
@@ -126,6 +156,7 @@ class PlaybackState {
   final SubtitleSelectionStatus subtitleSelectionStatus;
   final AppliedSubtitleKind appliedSubtitleKind;
   final int? appliedSubtitleStreamIndex;
+  final String? appliedNativeSubtitleId;
   final int subtitleApplicationGeneration;
   final String? subtitleSelectionError;
   final String? errorMessage;
@@ -168,6 +199,8 @@ class PlaybackState {
     SubtitleSelectionStatus? subtitleSelectionStatus,
     AppliedSubtitleKind? appliedSubtitleKind,
     int? appliedSubtitleStreamIndex,
+    String? appliedNativeSubtitleId,
+    bool clearAppliedNativeSubtitleId = false,
     bool clearAppliedSubtitleStreamIndex = false,
     int? subtitleApplicationGeneration,
     String? subtitleSelectionError,
@@ -213,6 +246,9 @@ class PlaybackState {
     appliedSubtitleStreamIndex: clearAppliedSubtitleStreamIndex
         ? null
         : appliedSubtitleStreamIndex ?? this.appliedSubtitleStreamIndex,
+    appliedNativeSubtitleId: clearAppliedNativeSubtitleId
+        ? null
+        : appliedNativeSubtitleId ?? this.appliedNativeSubtitleId,
     subtitleApplicationGeneration:
         subtitleApplicationGeneration ?? this.subtitleApplicationGeneration,
     subtitleSelectionError: clearSubtitleSelectionError

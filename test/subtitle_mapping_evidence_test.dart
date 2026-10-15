@@ -83,12 +83,15 @@ void main() {
       final result = _mapper.match(server, [native], context: context);
       final line = _log(result);
       expect(line, contains('serverCodec=ssa'));
-      expect(line, contains(';codec=ass,assSsa,assSsa,mpvMatroskaEmbedded'));
+      expect(
+        line,
+        contains('track0Codec=ass,assSsa,assSsa,mpvMatroskaEmbedded'),
+      );
       expect(line, contains('codec.same,title.conflict'));
       expect(line, contains('planSourceEvidence=metadataSelfConsistencyOnly'));
       expect(line, contains('nativeSourceIdentity=unverified'));
       final strict = _log(_mapper.match(server, [native]));
-      expect(strict, contains(';codec=ass,ssa,ass,strict'));
+      expect(strict, contains('track0Codec=ass,ssa,ass,strict'));
       expect(strict, contains('codec.conflict'));
     },
   );
@@ -118,7 +121,7 @@ void main() {
             'serverCodec=${[null, '', 'und'].contains(raw) ? 'missing' : 'other'}',
           ),
         );
-        expect(line, contains(';codec=other,'));
+        expect(line, contains('track0Codec=other,'));
         expect(line, isNot(contains('secret')));
         expect(line, isNot(contains('https://')));
         expect(line, isNot(contains('private/path')));

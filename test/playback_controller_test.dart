@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:emby_my_client/playback/track_mapper.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -26,6 +27,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support/progressive_fixture.dart';
 
 void main() {
+  _deliveryRegressionTests();
+  _nativeIdentityRegressionTests();
   _subtitleRegressionTests();
   test(
     'source startup keeps reading past ordinary readiness deadline',
@@ -1058,6 +1061,7 @@ void main() {
                 'Type': 'Subtitle',
                 'DisplayTitle': 'Chinese',
                 'Title': 'Chinese',
+                'DeliveryMethod': 'Encode',
               },
             ],
           ),
@@ -1092,6 +1096,7 @@ void main() {
       final resolver = _PlanResolver(
         _testPlan(
           subtitleStreamIndex: 4,
+          transportKind: PlaybackTransportKind.offlineLocal,
           mediaStreams: const [
             {
               'Index': 4,
@@ -1100,7 +1105,7 @@ void main() {
               'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
-              'DeliveryUrl': '/subtitles/4.srt',
+              'DeliveryUrl': 'file:///subtitle-fixture.srt',
             },
           ],
         ),
@@ -1115,7 +1120,9 @@ void main() {
 
       await controller.start();
 
-      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+      expect(engine.externalSubtitleUris, [
+        Uri.parse('file:///subtitle-fixture.srt'),
+      ]);
       expect(
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.appliedExternal,
@@ -1138,6 +1145,7 @@ void main() {
       final resolver = _PlanResolver(
         _testPlan(
           subtitleStreamIndex: 4,
+          transportKind: PlaybackTransportKind.offlineLocal,
           mediaStreams: const [
             {
               'Index': 4,
@@ -1146,7 +1154,7 @@ void main() {
               'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
-              'DeliveryUrl': '/subtitles/4.srt',
+              'DeliveryUrl': 'file:///subtitle-fixture.srt',
             },
           ],
         ),
@@ -1167,7 +1175,9 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.waitingForTracks,
       );
-      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+      expect(engine.externalSubtitleUris, [
+        Uri.parse('file:///subtitle-fixture.srt'),
+      ]);
 
       externalLoad.complete();
       await _waitUntil(
@@ -1176,7 +1186,9 @@ void main() {
             SubtitleSelectionStatus.appliedExternal,
       );
 
-      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+      expect(engine.externalSubtitleUris, [
+        Uri.parse('file:///subtitle-fixture.srt'),
+      ]);
       expect(controller.state.appliedSubtitleStreamIndex, 4);
       await controller.shutdown();
     },
@@ -1193,12 +1205,13 @@ void main() {
       final resolver = _PlanResolver(
         _testPlan(
           subtitleStreamIndex: 4,
+          transportKind: PlaybackTransportKind.offlineLocal,
           mediaStreams: const [
             {
               'Index': 4,
               'Type': 'Subtitle',
               'IsExternal': true,
-              'DeliveryUrl': '/subtitles/4.srt',
+              'DeliveryUrl': 'file:///subtitle-fixture.srt',
             },
           ],
         ),
@@ -1217,14 +1230,16 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.failed,
       );
-      expect(engine.externalSubtitleUris, [Uri.parse('/subtitles/4.srt')]);
+      expect(engine.externalSubtitleUris, [
+        Uri.parse('file:///subtitle-fixture.srt'),
+      ]);
 
       engine.externalSubtitleError = null;
       await controller.selectSubtitleStream(4);
 
       expect(engine.externalSubtitleUris, [
-        Uri.parse('/subtitles/4.srt'),
-        Uri.parse('/subtitles/4.srt'),
+        Uri.parse('file:///subtitle-fixture.srt'),
+        Uri.parse('file:///subtitle-fixture.srt'),
       ]);
       expect(
         controller.state.subtitleSelectionStatus,
@@ -2064,7 +2079,7 @@ void _subtitleRegressionTests() {
           (line) => line.contains('event=playback_subtitle_mapping_failed'),
         );
         expect(line, contains('serverCodec=ssa'));
-        expect(line, contains(';codec=ass,ssa,ass,strict'));
+        expect(line, contains('track0Codec=ass,ssa,ass,strict'));
         expect(line, contains('planSourceFields=language.same,codec.same'));
         expect(
           line,
@@ -2669,10 +2684,12 @@ class _PlanResolver implements PlaybackStreamResolver {
 
 PlaybackPlan _testPlan({
   PlayMethod method = PlayMethod.directPlay,
+  PlaybackTransportKind transportKind = PlaybackTransportKind.unknown,
   int? subtitleStreamIndex,
   List<Map<String, dynamic>> mediaStreams = const [],
 }) => PlaybackPlan(
   uri: Uri.parse('https://media.example.test/video'),
+  transportKind: transportKind,
   mediaSourceId: 'source-1',
   playSessionId: 'play-session',
   method: method,
@@ -2980,9 +2997,11 @@ class _FakeEngine
     selectedAudioTrackIds.add(trackId);
   }
 
+  Future<void> Function(String?)? onSubtitleWrite;
   @override
   Future<void> selectSubtitleTrack(String? trackId) async {
     selectedSubtitleTrackIds.add(trackId);
+    await onSubtitleWrite?.call(trackId);
     selectedSubtitleOpenCounts.add(openPlayValues.length);
     actualSubtitle = trackId;
     nativeSubtitleEffects.add(trackId ?? 'off');
@@ -3134,3 +3153,453 @@ const _resumeItem = EmbyItem(
   genres: [],
   userData: EmbyUserData(playbackPositionTicks: 9000000000),
 );
+
+void _deliveryRegressionTests() {
+  for (final (format, codec) in [('vtt', 'webvtt'), ('srt', 'subrip')]) {
+    test('declared Embed format $format identifies output codec $codec', () {
+      final plan = _testPlan(method: PlayMethod.transcode);
+      final track = PlaybackTrack(
+        index: 42,
+        type: 'Subtitle',
+        codec: 'hdmv_pgs_subtitle',
+        deliveryMethod: 'Embed',
+        format: format,
+      );
+      final match = const TrackMapper().match(track.mappingTrack(plan), [
+        EngineTrack(id: '83', codec: codec),
+      ]);
+      expect(match.engineId, '83');
+      expect(
+        const TrackMapper().match(track, [
+          EngineTrack(id: '83', codec: codec),
+        ]).engineId,
+        isNull,
+      );
+    });
+  }
+  test(
+    'delivery regression Embed matches declared output Format without guessing index',
+    () async {
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(minutes: 1));
+        engine.subtitleTracksController.add(const [
+          EngineTrack(id: '83', language: 'eng', codec: 'ass'),
+        ]);
+      };
+      final api = _api([]);
+      addTearDown(api.dispose);
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        resolver: _PlanResolver(
+          _testPlan(
+            method: PlayMethod.transcode,
+            subtitleStreamIndex: 42,
+            mediaStreams: const [
+              {
+                'Index': 42,
+                'Type': 'Subtitle',
+                'Language': 'eng',
+                'Codec': 'hdmv_pgs_subtitle',
+                'DeliveryMethod': 'Embed',
+                'Format': 'ass',
+              },
+            ],
+          ),
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(engine.selectedSubtitleTrackIds, ['83']);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedEmbedded,
+      );
+    },
+  );
+  for (final mode in ['unauthorized', 'html', 'missing-url', 'offline-http']) {
+    test(
+      'delivery regression External $mode remains failed with no native load',
+      () async {
+        final origin = await ProgressiveOrigin.start();
+        addTearDown(origin.close);
+        origin.intercept = (_) async => (
+          status: mode == 'unauthorized' ? 401 : 200,
+          headers: <String, String>{},
+          body: utf8.encode('<html>not a subtitle</html>'),
+        );
+        final api = _api([]);
+        addTearDown(api.dispose);
+        final engine = _FakeEngine();
+        engine.onOpen = (_) =>
+            engine.durationController.add(const Duration(minutes: 1));
+        final controller = _controller(
+          api: api,
+          engine: engine,
+          item: _plainItem,
+          subtitleLoader: ExternalSubtitleLoader(api),
+          resolver: _PlanResolver(
+            _testPlan(
+              method: mode == 'offline-http'
+                  ? PlayMethod.directPlay
+                  : PlayMethod.transcode,
+              transportKind: mode == 'offline-http'
+                  ? PlaybackTransportKind.offlineLocal
+                  : PlaybackTransportKind.unknown,
+              subtitleStreamIndex: 42,
+              mediaStreams: [
+                {
+                  'Index': 42,
+                  'Type': 'Subtitle',
+                  'IsExternal': true,
+                  'DeliveryMethod': 'External',
+                  if (mode != 'missing-url')
+                    'DeliveryUrl': '${origin.origin}/fixture.srt',
+                },
+              ],
+            ),
+          ),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        await _waitUntil(
+          () =>
+              controller.state.subtitleSelectionStatus !=
+              SubtitleSelectionStatus.applying,
+        );
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(
+          controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.failed,
+        );
+        expect(engine.externalSubtitleUris, isEmpty);
+        if (mode == 'offline-http' || mode == 'missing-url') {
+          expect(origin.requests, isEmpty);
+        }
+      },
+    );
+  }
+
+  for (final delivery in ['Embed', 'Hls', 'unexpected', '']) {
+    test(
+      'delivery regression transcode $delivery does not imply burned subtitles',
+      () async {
+        final api = _api([]);
+        addTearDown(api.dispose);
+        final engine = _FakeEngine();
+        engine.onOpen = (_) {
+          engine.durationController.add(const Duration(minutes: 1));
+          engine.subtitleTracksController.add(const [
+            EngineTrack(
+              id: '83',
+              title: 'fixture-cue',
+              language: 'eng',
+              codec: 'srt',
+            ),
+          ]);
+        };
+        final controller = _controller(
+          api: api,
+          engine: engine,
+          item: _plainItem,
+          resolver: _PlanResolver(
+            _testPlan(
+              method: PlayMethod.transcode,
+              subtitleStreamIndex: 2,
+              mediaStreams: [
+                {
+                  'Index': 2,
+                  'Type': 'Subtitle',
+                  'Title': 'fixture-cue',
+                  'Language': 'eng',
+                  'Codec': 'srt',
+                  'DeliveryMethod': delivery,
+                },
+              ],
+            ),
+          ),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start();
+        expect(
+          controller.state.subtitleSelectionStatus,
+          delivery == 'Embed'
+              ? SubtitleSelectionStatus.appliedEmbedded
+              : SubtitleSelectionStatus.failed,
+        );
+        expect(
+          engine.selectedSubtitleTrackIds,
+          delivery == 'Embed' ? ['83'] : isEmpty,
+        );
+      },
+    );
+  }
+  test(
+    'delivery regression transcode External downloads before native load even when embedded source',
+    () async {
+      final api = _api([]);
+      addTearDown(api.dispose);
+      final directory = await Directory.systemTemp.createTemp(
+        'subtitle-delivery-test-',
+      );
+      final file = File('${directory.path}/fixture.srt');
+      await file.writeAsString(
+        '1\n00:00:00,000 --> 00:00:02,000\nexternal cue\n',
+      );
+      addTearDown(() async {
+        if (await file.exists()) await file.delete();
+        if (await directory.exists()) await directory.delete();
+      });
+      final loader = _DeliveryLoader(api, file);
+      final engine = _FakeEngine();
+      engine.onOpen = (_) =>
+          engine.durationController.add(const Duration(minutes: 1));
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+        subtitleLoader: loader,
+        resolver: _PlanResolver(
+          _testPlan(
+            method: PlayMethod.transcode,
+            subtitleStreamIndex: 2,
+            mediaStreams: const [
+              {
+                'Index': 2,
+                'Type': 'Subtitle',
+                'IsExternal': false,
+                'DeliveryMethod': 'External',
+                'DeliveryUrl': '/Videos/item/source/Subtitles/2/Stream.srt',
+                'Format': 'srt',
+              },
+            ],
+          ),
+        ),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      await _waitUntil(
+        () =>
+            controller.state.subtitleSelectionStatus !=
+            SubtitleSelectionStatus.applying,
+      );
+      expect(loader.calls, 1);
+      expect(engine.externalSubtitleUris, [file.uri]);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedExternal,
+      );
+    },
+  );
+}
+
+class _DeliveryLoader extends ExternalSubtitleLoader {
+  _DeliveryLoader(super.api, this.file);
+  final File file;
+  int calls = 0;
+  @override
+  Future<SubtitleFileLease> load(
+    String raw, {
+    required String itemId,
+    required String sourceId,
+  }) async {
+    calls++;
+    return SubtitleFileLease(file, () {});
+  }
+}
+
+void _nativeIdentityRegressionTests() {
+  Future<({PlaybackController controller, _EpochEngine engine})>
+  fixture() async {
+    final api = _api([]);
+    addTearDown(api.dispose);
+    final engine = _EpochEngine();
+    engine.onOpen = (_) {
+      engine.durationController.add(const Duration(minutes: 1));
+      engine.subtitleTracksController.add(const [
+        EngineTrack(id: 'auto'),
+        EngineTrack(id: 'no'),
+        EngineTrack(id: '81', title: 'same', language: 'eng', codec: 'ass'),
+        EngineTrack(id: '82', title: 'same', language: 'eng', codec: 'ass'),
+      ]);
+    };
+    final controller = _controller(
+      api: api,
+      engine: engine,
+      item: _plainItem,
+      resolver: _PlanResolver(
+        _testPlan(
+          subtitleStreamIndex: 2,
+          mediaStreams: const [
+            {
+              'Index': 2,
+              'Type': 'Subtitle',
+              'Codec': 'hdmv_pgs_subtitle',
+              'Title': 'same',
+              'Language': 'eng',
+            },
+          ],
+        ),
+      ),
+    );
+    addTearDown(controller.shutdown);
+    await controller.start();
+    expect(
+      controller.state.subtitleSelectionStatus,
+      SubtitleSelectionStatus.failed,
+    );
+    return (controller: controller, engine: engine);
+  }
+
+  test(
+    'duplicate native IDs are unavailable even through an older row',
+    () async {
+      final f = await fixture();
+      final old = f.controller.nativeSubtitleChoices.first;
+      f.engine.subtitleTracksController.add([old.track, old.track]);
+      expect(f.controller.nativeSubtitleChoices, isEmpty);
+      await f.controller.selectNativeSubtitle(old);
+      expect(f.engine.selectedSubtitleTrackIds, isEmpty);
+      expect(
+        f.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.failed,
+      );
+    },
+  );
+
+  test(
+    'native input epoch invalidates an in-flight result and prior rows',
+    () async {
+      final f = await fixture();
+      final old = f.controller.nativeSubtitleChoices.first;
+      final completion = Completer<void>();
+      f.engine.onSubtitleWrite = (_) => completion.future;
+      final selecting = f.controller.selectNativeSubtitle(old);
+      await _waitUntil(() => f.engine.selectedSubtitleTrackIds.isNotEmpty);
+      f.engine.subtitleInputEpoch++;
+      completion.complete();
+      await selecting;
+      expect(f.controller.state.appliedNativeSubtitleId, isNull);
+      await f.controller.selectNativeSubtitle(old);
+      expect(f.engine.selectedSubtitleTrackIds, ['81']);
+      f.engine.onSubtitleWrite = null;
+      await f.controller.selectNativeSubtitle(
+        f.controller.nativeSubtitleChoices.last,
+      );
+      expect(f.engine.selectedSubtitleTrackIds, ['81', '82']);
+      expect(f.controller.state.appliedNativeSubtitleId, '82');
+    },
+  );
+
+  test(
+    'native identity selects real ID despite codec conflict and identical labels after reorder',
+    () async {
+      final f = await fixture();
+      final choices = f.controller.nativeSubtitleChoices;
+      expect(choices.map((t) => t.track.id), ['81', '82']);
+      f.engine.subtitleTracksController.add(
+        choices.reversed.map((t) => t.track).toList(),
+      );
+      await f.controller.selectNativeSubtitle(choices.last);
+      expect(f.engine.selectedSubtitleTrackIds, ['82']);
+      expect(f.controller.state.appliedNativeSubtitleId, '82');
+      expect(f.controller.state.appliedSubtitleStreamIndex, isNull);
+      expect(f.controller.state.plan!.subtitleStreamIndex, isNull);
+      f.engine.subtitleTracksController.add([choices.first.track]);
+      await f.controller.selectNativeSubtitle(choices.last);
+      expect(f.engine.selectedSubtitleTrackIds, ['82']);
+      expect(
+        f.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.failed,
+      );
+    },
+  );
+
+  test(
+    'native identity from old input or closed session cannot be selected',
+    () async {
+      final f = await fixture();
+      final old = f.controller.nativeSubtitleChoices.first;
+      await f.controller.reconfigure(clearSubtitle: true);
+      f.engine.selectedSubtitleTrackIds.clear();
+      await f.controller.selectNativeSubtitle(old);
+      expect(f.engine.selectedSubtitleTrackIds, isEmpty);
+      final current = f.controller.nativeSubtitleChoices.last;
+      await f.controller.selectNativeSubtitle(current);
+      expect(f.engine.selectedSubtitleTrackIds, ['82']);
+      await f.controller.shutdown();
+      await f.controller.selectNativeSubtitle(current);
+      expect(f.engine.selectedSubtitleTrackIds, ['82']);
+    },
+  );
+
+  test(
+    'native A B A revisions ignore old A failure and serialize real completion',
+    () async {
+      final f = await fixture();
+      final choices = f.controller.nativeSubtitleChoices;
+      final first = Completer<void>();
+      final last = Completer<void>();
+      var calls = 0;
+      f.engine.onSubtitleWrite = (_) =>
+          ++calls == 1 ? first.future : last.future;
+      final a1 = f.controller.selectNativeSubtitle(choices.first);
+      await _waitUntil(() => calls == 1);
+      final b = f.controller.selectNativeSubtitle(choices.last);
+      final a2 = f.controller.selectNativeSubtitle(choices.first);
+      first.completeError(StateError('old A failure'));
+      await _waitUntil(() => calls == 2);
+      expect(
+        f.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.applying,
+      );
+      expect(f.engine.selectedSubtitleTrackIds, ['81', '81']);
+      last.complete();
+      await Future.wait([a1, b, a2]);
+      expect(
+        f.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedEmbedded,
+      );
+      expect(f.controller.state.appliedNativeSubtitleId, '81');
+      expect(f.controller.state.subtitleSelectionError, isNull);
+    },
+  );
+
+  test(
+    'server A B A late metadata failure cannot overwrite newest A',
+    () async {
+      final f = await fixture();
+      f.engine.subtitleTracksController.add(const [
+        EngineTrack(
+          id: '81',
+          title: 'same',
+          language: 'eng',
+          codec: 'hdmv_pgs_subtitle',
+        ),
+      ]);
+      final old = Completer<SubtitleMappingContext>();
+      f.engine.subtitleContextOperation = old.future;
+      final reads = f.engine.subtitleContextReads;
+      final a1 = f.controller.selectSubtitleStream(2);
+      await _waitUntil(() => f.engine.subtitleContextReads > reads);
+      await f.controller.selectSubtitleStream(null);
+      f.engine.subtitleContextOperation = null;
+      await f.controller.selectSubtitleStream(2);
+      old.completeError(StateError('old A metadata failed'));
+      await a1;
+      expect(
+        f.controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.appliedEmbedded,
+      );
+      expect(f.controller.state.appliedSubtitleStreamIndex, 2);
+      expect(f.controller.state.subtitleSelectionError, isNull);
+    },
+  );
+}
+
+class _EpochEngine extends _FakeEngine implements SubtitleInputEpochProvider {
+  @override
+  int subtitleInputEpoch = 0;
+}

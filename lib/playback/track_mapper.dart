@@ -1,6 +1,10 @@
 import '../models/emby_models.dart';
 import 'playback_engine.dart';
 
+enum SubtitleDelivery { unspecified, external, embed, encode, hls, unsupported }
+
+enum SubtitleFormat { missing, other, srt, ass, ssa, vtt, webvtt }
+
 class PlaybackTrack {
   const PlaybackTrack({
     required this.index,
@@ -14,6 +18,8 @@ class PlaybackTrack {
     this.isForced = false,
     this.isExternal = false,
     this.deliveryUrl,
+    this.deliveryMethod,
+    this.format,
   }) : originalTitle = title;
 
   final int index;
@@ -31,6 +37,55 @@ class PlaybackTrack {
   final bool isForced;
   final bool isExternal;
   final String? deliveryUrl;
+  final String? deliveryMethod;
+  final String? format;
+  bool usesDeliveredFormat(PlaybackPlan plan) =>
+      plan.method != PlayMethod.directPlay &&
+      delivery == SubtitleDelivery.embed &&
+      format?.trim().isNotEmpty == true;
+
+  /// An explicit Embed response may convert the source subtitle codec. Match
+  /// its declared output format against the current output, never its index.
+  PlaybackTrack mappingTrack(PlaybackPlan plan) => usesDeliveredFormat(plan)
+      ? PlaybackTrack(
+          index: index,
+          type: type,
+          title: originalTitle,
+          displayTitle: displayTitle,
+          language: language,
+          codec: format?.trim().toLowerCase() == 'vtt' ? 'webvtt' : format,
+          channels: channels,
+          isDefault: isDefault,
+          isForced: isForced,
+          deliveryMethod: deliveryMethod,
+          format: format,
+          deliveryUrl: deliveryUrl,
+        )
+      : this;
+  SubtitleDelivery get delivery => switch (deliveryMethod?.toLowerCase()) {
+    null || '' => SubtitleDelivery.unspecified,
+    'external' => SubtitleDelivery.external,
+    'embed' => SubtitleDelivery.embed,
+    'encode' => SubtitleDelivery.encode,
+    'hls' => SubtitleDelivery.hls,
+    _ => SubtitleDelivery.unsupported,
+  };
+  SubtitleFormat get safeFormat =>
+      SubtitleFormat.values
+          .where((value) => value.name == format?.toLowerCase())
+          .firstOrNull ??
+      (format == null ? SubtitleFormat.missing : SubtitleFormat.other);
+  SubtitleDelivery deliveryFor(PlaybackPlan plan) {
+    // Downloaded metadata describes the server source, not the local file.
+    if (plan.transportKind == PlaybackTransportKind.offlineLocal) {
+      return isExternal ? SubtitleDelivery.external : SubtitleDelivery.embed;
+    }
+    if (delivery != SubtitleDelivery.unspecified) return delivery;
+    if (plan.method == PlayMethod.directPlay) {
+      return isExternal ? SubtitleDelivery.external : SubtitleDelivery.embed;
+    }
+    return SubtitleDelivery.unspecified;
+  }
 }
 
 enum TrackMappingStatus { matched, unavailable, ambiguous }
@@ -391,6 +446,8 @@ class TrackMapper {
       isForced: json['IsForced'] as bool? ?? false,
       isExternal: json['IsExternal'] as bool? ?? false,
       deliveryUrl: json['DeliveryUrl']?.toString(),
+      deliveryMethod: json['DeliveryMethod']?.toString(),
+      format: json['Format']?.toString(),
     );
   }
 

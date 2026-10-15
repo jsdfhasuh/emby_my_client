@@ -148,6 +148,10 @@ class SubtitleMappingContext {
   );
 }
 
+abstract interface class SubtitleInputEpochProvider {
+  int get subtitleInputEpoch;
+}
+
 abstract interface class SubtitleMappingContextProvider {
   Future<SubtitleMappingContext> readSubtitleMappingContext();
 }
@@ -217,6 +221,7 @@ class MediaKitPlaybackEngine
         SourceFailureEmitter,
         PlaybackNativeResourceOwner,
         SubtitleMappingContextProvider,
+        SubtitleInputEpochProvider,
         PlaybackCacheEngine,
         PlaybackCacheIdentitySnapshotReader {
   MediaKitPlaybackEngine(
@@ -268,6 +273,8 @@ class MediaKitPlaybackEngine
   _PreparedSource? _preparedSource;
   bool _preparingSource = false;
   int _inputRevision = 0;
+  @override
+  int get subtitleInputEpoch => _inputRevision;
   Future<void> _subtitleNativeTail = Future<void>.value();
   final _sourceErrors = StreamController<SourceInputFailure>.broadcast(
     sync: true,

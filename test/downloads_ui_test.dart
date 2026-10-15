@@ -411,6 +411,7 @@ void _subtitleRouteTests() {
   for (final action in [
     'success',
     'codecFamily',
+    'nativeConflict',
     'engineFailure',
     'metadataConflict',
     'disable',
@@ -431,7 +432,9 @@ void _subtitleRouteTests() {
               : action == 'audio'
               ? 'Route audio'
               : 'Route subtitle';
-          final tile = find.widgetWithText(ListTile, label);
+          final tile = action == 'nativeConflict'
+              ? find.byKey(const ValueKey('native-subtitle-42'))
+              : find.widgetWithText(ListTile, label);
           final callback = tester.widget<ListTile>(tile).onTap!;
           fixture.logs.clear();
           fixture.engine.subtitleSelections.clear();
@@ -498,7 +501,12 @@ void _subtitleRouteTests() {
             await tester.pumpAndSettle();
             await tester.tap(find.text('字幕'));
             await tester.pumpAndSettle();
-            expect(find.textContaining('字幕加载失败'), findsOneWidget);
+            expect(
+              find.textContaining(
+                action == 'metadataConflict' ? '无法确认服务器字幕' : '字幕加载失败',
+              ),
+              findsOneWidget,
+            );
             expect(
               tester
                   .widget<ListTile>(
@@ -508,6 +516,17 @@ void _subtitleRouteTests() {
               isNotNull,
             );
           }
+          // Leaving the player must return to the same download list after
+          // successful selection, failure, disable, and repeated gestures.
+          if (find.byType(BottomSheet).evaluate().isNotEmpty) {
+            Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+            await _flushRoute(tester);
+          }
+          Navigator.of(tester.element(find.byType(PlayerScreen))).pop();
+          await _flushRoute(tester);
+          expect(find.byType(PlayerScreen), findsNothing);
+          expect(find.byType(DownloadsScreen), findsOneWidget);
+          expect(fixture.engine.disposals, 1);
           expect(tester.takeException(), isNull);
         },
       );
@@ -618,7 +637,8 @@ _mountOfflinePlayer(WidgetTester tester, {String action = 'success'}) async {
   final engine = RoutePlaybackEngine()
     ..matroskaFamily = action == 'codecFamily'
     ..failSubtitle = action == 'engineFailure'
-    ..conflictingMetadata = action == 'metadataConflict';
+    ..conflictingMetadata =
+        action == 'metadataConflict' || action == 'nativeConflict';
   final observer = _FullPlayerRouteObserver();
   final logs = <String>[];
   DiagnosticLog.instance.setTestSink(logs.add);

@@ -1,3 +1,4 @@
+import 'subtitle_target.dart';
 import '../core/strm_diagnostics.dart';
 import 'source_input_failure.dart';
 import 'dart:async';
@@ -54,6 +55,7 @@ enum PlaybackDiagnosticEvent {
   engineErrorSuppressed('playback_engine_error_suppressed'),
   subtitleApplyRequested('playback_subtitle_apply_requested'),
   subtitleApplied('playback_subtitle_applied'),
+  subtitleDelivery('playback_subtitle_delivery'),
   subtitleDisabled('playback_subtitle_disabled'),
   subtitleApplyFailed('playback_subtitle_apply_failed'),
   subtitleMappingFailed('playback_subtitle_mapping_failed'),
@@ -441,6 +443,17 @@ class PlaybackDiagnostics {
     ]);
   }
 
+  void subtitleDeliveryResolved(
+    PlaybackTrack track,
+    SubtitleDelivery delivery,
+  ) {
+    _emit(PlaybackDiagnosticEvent.subtitleDelivery, [
+      'delivery=${delivery.name}',
+      'format=${track.safeFormat.name}',
+      'urlPresent=${track.deliveryUrl?.isNotEmpty == true}',
+    ]);
+  }
+
   void subtitleDisabled({required int generation}) {
     _emit(PlaybackDiagnosticEvent.subtitleDisabled, ['generation=$generation']);
   }
@@ -469,6 +482,7 @@ class PlaybackDiagnostics {
         'streamIndex=${streamIndex ?? 'none'}',
         'generation=$generation',
         'errorType=${error.runtimeType}',
+        if (error is SubtitleSelectionFailure) 'reason=${error.reason.name}',
       ],
       level: PlaybackDiagnosticLevel.warning,
     );
@@ -481,6 +495,7 @@ class PlaybackDiagnostics {
     required int generation,
     required TrackMappingResult result,
     required TrackSourceEvidence source,
+    bool usesDeliveredFormat = false,
   }) {
     _emit(
       PlaybackDiagnosticEvent.subtitleMappingFailed,
@@ -502,6 +517,7 @@ class PlaybackDiagnostics {
         'trackIdentity=realTrackOrdinal',
         'displayTitleRole=labelOnly',
         'serverCodec=${result.serverCodec.name}',
+        'codecBasis=${usesDeliveredFormat ? 'deliveryFormat' : 'sourceCodec'}',
         'codecEvidenceOrder=nativeName,serverFamily,nativeFamily,context',
         'trackEvidenceCount=${result.trackEvidence.length.clamp(0, 16)}',
         'trackEvidenceOmitted=${(result.trackEvidence.length - 16).clamp(0, 9999)}',
@@ -511,7 +527,7 @@ class PlaybackDiagnostics {
           index++
         )
           'track$index=${result.trackEvidence[index].eligible ? 'eligible' : 'rejected'}:${_trackComparisons(result.trackEvidence[index].fields)}'
-              ';codec=${_trackCodecEvidence(result.trackEvidence[index])}',
+              ' track${index}Codec=${_trackCodecEvidence(result.trackEvidence[index])}',
         'planTransport=${source.transport.name}',
         'planInput=${source.input.name}',
         'selectedSourceLookup=${source.sourceLookup.name}',
