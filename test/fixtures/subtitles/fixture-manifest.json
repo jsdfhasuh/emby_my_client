@@ -1,0 +1,13 @@
+{
+  "file": "synthetic-pgs.mkv",
+  "sha256": "c313e182458760e6363fe5ff8b9ef9fa4a584caa444a889df878bfe0c4f93bbc",
+  "bytes": 253676,
+  "tracks": [
+    "MJPEG black 320x180",
+    "PCM silence 8000Hz",
+    "PGS ALPHA image",
+    "PGS BETA image",
+    "ASS TEXT_CUE"
+  ],
+  "source": "Generated from code only. No user media or downloads."
+}

@@ -1,0 +1,74 @@
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+
+group 'com.alexmercerind.media_kit_libs_android_video'
+version '1.3.8-pgs.1'
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'com.alexmercerind.media_kit_libs_android_video'
+    compileSdkVersion 36
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    defaultConfig { minSdkVersion 16 }
+}
+
+def lockFile = file('artifacts.json')
+def artifactLock = new JsonSlurper().parse(lockFile)
+def outputDirectory = layout.buildDirectory.dir('verified-native')
+def nativeFiles = artifactLock.artifacts.collect { name, spec ->
+    outputDirectory.map { it.file(name).asFile }
+}
+def verifyNativeArtifacts = tasks.register('verifyNativeArtifacts') {
+    inputs.file(lockFile)
+    outputs.files(nativeFiles)
+    // A cached or overwritten JAR must be checked on every build.
+    outputs.upToDateWhen { false }
+    doLast {
+        def sha256 = { File input ->
+            def digest = MessageDigest.getInstance('SHA-256')
+            input.withInputStream { stream ->
+                byte[] buffer = new byte[65536]
+                int count
+                while ((count = stream.read(buffer)) != -1) {
+                    digest.update(buffer, 0, count)
+                }
+            }
+            digest.digest().encodeHex().toString()
+        }
+        artifactLock.artifacts.each { name, spec ->
+            def destination = outputDirectory.get().file(name).asFile
+            destination.parentFile.mkdirs()
+            if (!destination.exists()) {
+                def temporary = new File(destination.parentFile, name + '.download')
+                try {
+                    def url = new URL("https://github.com/${artifactLock.repository}/releases/download/${artifactLock.release}/${name}")
+                    def connection = url.openConnection()
+                    connection.connectTimeout = 30000
+                    connection.readTimeout = 120000
+                    connection.inputStream.withCloseable { input ->
+                        temporary.withOutputStream { output -> output << input }
+                    }
+                    if (sha256(temporary) != spec.sha256) {
+                        throw new GradleException("Native artifact SHA256 mismatch: ${name}")
+                    }
+                    java.nio.file.Files.move(temporary.toPath(), destination.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } finally {
+                    temporary.delete()
+                }
+            }
+            if (sha256(destination) != spec.sha256) {
+                throw new GradleException("Cached native artifact SHA256 mismatch: ${name}")
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation files(nativeFiles).builtBy(verifyNativeArtifacts)
+}
+tasks.named('preBuild').configure { dependsOn(verifyNativeArtifacts) }

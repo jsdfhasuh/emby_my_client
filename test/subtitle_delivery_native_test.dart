@@ -69,6 +69,7 @@ void main() {
         );
         final native = player.platform as NativePlayer;
         await native.setProperty('ao', 'null');
+        await native.setProperty('cache-on-disk', 'no');
         final engine = _ObservedEngine(player);
         final offline = mode == 'file-native' || mode == 'offline-external';
         final isExternal = mode.endsWith('external');
@@ -128,6 +129,11 @@ void main() {
           () async =>
               controller.state.subtitleSelectionStatus !=
               SubtitleSelectionStatus.applying,
+          describe: () async =>
+              'phase=${controller.state.phase} '
+              'selection=${controller.state.subtitleSelectionStatus} '
+              'tracks=${controller.state.subtitleTracks.length} '
+              'sid=${await native.getProperty('sid')}',
         );
         if (!isExternal && !embed) {
           expect(

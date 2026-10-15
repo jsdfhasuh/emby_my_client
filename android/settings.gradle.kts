@@ -24,3 +24,8 @@ plugins {
 }
 
 include(":app")
+
+// Preserve Flutter's plugin registration and Dart/iOS locks. Only this Android
+// native module uses the audited full (non-GPL) libmpv build; see its README.
+project(":media_kit_libs_android_video").projectDir =
+    file("media_kit_libs_android_video")

@@ -1,0 +1,35 @@
+{
+  "repository": "media-kit/libmpv-android-video-build",
+  "release": "v1.1.8",
+  "flavor": "full",
+  "artifacts": {
+    "full-arm64-v8a.jar": {
+      "sha256": "031aa9e76de6e0dea733d382252636f6237ded0aef797a561e6fc8b85c4f3ff1",
+      "libraries": {
+        "lib/arm64-v8a/libmediakitandroidhelper.so": "ab55b1d34665dba8fa7a451e82c466ee71b9698e7da6c9a3cb68a7c0ee7610d4",
+        "lib/arm64-v8a/libmpv.so": "c0d797517822ac8e3006318cc5b80a5331a086282690043881448a9fbc843678"
+      }
+    },
+    "full-armeabi-v7a.jar": {
+      "sha256": "e4875bb02d58f643950a5e0ac2d4862336fd7c0b47d65455cbc7a5ba41cfe522",
+      "libraries": {
+        "lib/armeabi-v7a/libmediakitandroidhelper.so": "506d0bc7775fe9888be6b6e889d8556ca0574dba65813866e2158cbf52a8c8b1",
+        "lib/armeabi-v7a/libmpv.so": "183dde0d172041163dde9d5297b91713572c672d668df155c03baf008b100f1d"
+      }
+    },
+    "full-x86.jar": {
+      "sha256": "0d9a5b68c8bad247e24111673ca10ac645606e6eee308082241d7e90bc4015ea",
+      "libraries": {
+        "lib/x86/libmediakitandroidhelper.so": "c5c846516df0ddf41434e4bdd6bb324b0b77b9668a45caff5cb78a4b54355bba",
+        "lib/x86/libmpv.so": "b9fe0ed3eb887709afbf67487e3bfe416394b2bcc01d061ba62c9683b0068ac1"
+      }
+    },
+    "full-x86_64.jar": {
+      "sha256": "ebb01a3b48c81ce78e5b7f44f89f68e30aaed169e54f7baa100e03830d4ed96f",
+      "libraries": {
+        "lib/x86_64/libmediakitandroidhelper.so": "6ca2d827a892b8ddd60df64fab81456ad6fd05180dd6c4a0974549858025abc9",
+        "lib/x86_64/libmpv.so": "1ebc57e51d7de0258a2526ccb33380627d23c4fe130172f010924919ee7f0b40"
+      }
+    }
+  }
+}

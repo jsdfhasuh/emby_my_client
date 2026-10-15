@@ -460,6 +460,7 @@ class MediaKitPlaybackEngine
           }
           checkCurrent();
           _sourceMode = true;
+          await _resetSubtitleRendering();
           for (final entry in {
             ..._sourceOptions,
             'demuxer-lavf-format': input.format,
@@ -633,6 +634,7 @@ class MediaKitPlaybackEngine
           return;
         }
         await _restoreSourceOptions();
+        await _resetSubtitleRendering();
         await player.open(
           Media(uri.toString(), httpHeaders: headers),
           play: play,
@@ -905,6 +907,7 @@ class MediaKitPlaybackEngine
     return _returnNativeOperation(
       kind: PlaybackNativeOperationKind.propertyWrite,
       operation: () async {
+        await _resetSubtitleRendering();
         if (trackId == null) {
           await player.setSubtitleTrack(SubtitleTrack.no());
           await _confirmSubtitle('no');
@@ -918,6 +921,7 @@ class MediaKitPlaybackEngine
         }
         await player.setSubtitleTrack(track);
         await _confirmSubtitle(trackId);
+        await _configureSubtitleRendering(track.codec);
       },
     );
   }
@@ -936,6 +940,7 @@ class MediaKitPlaybackEngine
         if (native is! NativePlayer) {
           throw const SourceInputException('subtitle_unconfirmed');
         }
+        await _resetSubtitleRendering();
         String? videoFormat;
         if (_sourceMode) {
           if (uri.scheme != 'file') {
@@ -971,6 +976,10 @@ class MediaKitPlaybackEngine
           if (!matched) {
             throw const SourceInputException('subtitle_unconfirmed');
           }
+          final selected = tracks.whereType<Map>().firstWhere(
+            (entry) => entry['type'] == 'sub' && entry['id'].toString() == sid,
+          );
+          await _configureSubtitleRendering(selected['codec'] as String?);
         } finally {
           if (videoFormat != null) {
             await native.setProperty('demuxer-lavf-format', videoFormat);
@@ -978,6 +987,29 @@ class MediaKitPlaybackEngine
         }
       },
     );
+  }
+
+  // Only native track metadata selects the bitmap path. Server labels,
+  // ordinals and file extensions cannot enable native subtitle rendering.
+  static bool isBitmapSubtitleCodec(String? codec) => const {
+    'hdmv_pgs_subtitle',
+    'dvd_subtitle',
+    'dvb_subtitle',
+    'xsub',
+  }.contains(codec?.trim().toLowerCase());
+
+  Future<void> _resetSubtitleRendering() => _configureSubtitleRendering(null);
+
+  Future<void> _configureSubtitleRendering(String? nativeCodec) async {
+    final native = player.platform;
+    if (native is! NativePlayer) return;
+    final visible =
+        native.configuration.libass || isBitmapSubtitleCodec(nativeCodec);
+    final value = visible ? 'yes' : 'no';
+    await native.setProperty('sub-visibility', value);
+    if (await native.getProperty('sub-visibility') != value) {
+      throw const SourceInputException('subtitle_render_unconfirmed');
+    }
   }
 
   Future<void> _confirmSubtitle(String expected) async {

@@ -14,6 +14,7 @@ on:
       - 'test/**'
       - 'ios/**'
       - 'native/**'
+      - 'android/**'
       - 'scripts/android/**'
       - 'scripts/ios/**'
       - 'scripts/release/**'
@@ -173,6 +174,9 @@ jobs:
       - name: Test release artifact preparation
         run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
 
+      - name: Test Android native artifact verification
+        run: python3 -m unittest discover -s scripts/android -p 'test_*.py'
+
       - name: Verify playback cache event safety
         run: >-
           flutter test
@@ -200,6 +204,7 @@ jobs:
           mapfile -t apk_paths < <(find build/app/outputs/flutter-apk -maxdepth 1 -type f -name 'app*-debug.apk' -print | sort)
           test "${#apk_paths[@]}" -ge 4
           bash scripts/android/verify_mpv_capabilities.sh "${apk_paths[@]}"
+          python3 scripts/android/verify_native_artifacts.py "${apk_paths[@]}"
 
       - name: Run startable Android libmpv smoke test
         shell: bash
@@ -264,6 +269,9 @@ jobs:
             bash scripts/android/run_mpv_startability_probe.sh \
               build/app/outputs/flutter-apk/app-x86_64-debug.apk \
               build/android/artifacts/android-mpv-capability-manifest.json
+          ANDROID_NDK_HOME="$android_sdk_root/ndk/$ANDROID_NDK_VERSION" \
+            bash scripts/android/run_subtitle_render_probe.sh \
+              build/app/outputs/flutter-apk/app-x86_64-debug.apk
 
       - name: Verify Android mpv semantic evidence safety
         shell: bash
@@ -295,6 +303,14 @@ jobs:
           print('ANDROID_ACTIVE_CONTEXT_GATE=NOT_RUN')
           print('ANDROID_DISK_TELEMETRY_EVIDENCE_GATE=NOT_RUN')
           PY
+
+      - name: Upload synthetic subtitle rendering evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-subtitle-render-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: build/android/artifacts/subtitle-render/
 
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
