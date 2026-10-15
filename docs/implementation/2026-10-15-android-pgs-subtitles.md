@@ -87,3 +87,23 @@ without a VideoController. The first audio-only fixture adjustment therefore had
 no playback clock and timed out locally; that failed attempt is retained too.
 The native error assertion remains intact; no error filtering or retry was added.
 Production playback audio is unchanged. Build 188 was not rerun or published.
+
+Build 189 (commit 1f11fa9, workflow 38726146747) also failed with 1701 passed
+and 2 failed. Disabling audio and enabling headless video passed on the newer
+Windows host library but timed out in both PGS tests on Ubuntu 24.04. This
+failure was not rerun or published. Stage-specific native diagnostics and a
+local Ubuntu reproduction were added before attempting another CI run.
+Both failed workflows blocked iOS and release publication as intended.
+
+The Ubuntu native probe reproduced the exact failure mechanism: with audio off,
+the default MKV demuxer reports the MJPEG video as image=true and time-pos stays
+at 2.0 while pause=no. This matches mpv 0.37's demux_mkv_open_video source, which
+sets still_image for image codecs. The same bytes with the FFmpeg demuxer report
+image=false, advance normally, and expose TEXT_CUE. The host fixture now selects
+demuxer=lavf and asserts image=false after each open. This setting is test-only;
+production input selection and the Android pixel/texture gates are unchanged.
+Timeouts now name the cycle/stage and report native state from generated content.
+The missing-library first probe invocation during container setup is also kept;
+the actual failing clock trace and corrected comparison use the same libmpv.
+
+Upstream cause: https://github.com/mpv-player/mpv/blob/v0.37.0/demux/demux_mkv.c#L1428-L1436
