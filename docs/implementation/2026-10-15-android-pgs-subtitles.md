@@ -107,3 +107,43 @@ The missing-library first probe invocation during container setup is also kept;
 the actual failing clock trace and corrected comparison use the same libmpv.
 
 Upstream cause: https://github.com/mpv-player/mpv/blob/v0.37.0/demux/demux_mkv.c#L1428-L1436
+
+
+## First Android CI pixel gate failure
+
+Build 190 (commit 6ec9a87, workflow 38729840557) passed all host tests, APK
+builds, updater policy tests, packaged-library hashes/capabilities, and native
+libmpv startup. The pixel probe failed on its first A-to-B transition (sid=2,
+expected BETA, verifiedFrames=1); release and iOS were blocked. Its first ALPHA
+frame and failure log are retained. The original terse error did not distinguish
+pixel mismatch from seek-position mismatch, so that exact CI condition cannot
+be reconstructed from the first log alone.
+
+Local scheduling variations reproduced failures without native decoder errors.
+Trace logs showed a subtitle refresh seek overlapping an exact seek: the
+indexless generated MKV skipped the boundary video packet and restarted at
+5.5 seconds for a 5.0-second request, despite correct BETA pixels. Callback-only
+and no-frame-drop changes did not resolve it; an FFmpeg-demuxer comparison also
+failed the predeclared 25/250/750 ms timing matrix. Those attempts remain failed
+evidence, not accepted validations.
+
+The final native probe waits for FILE_LOADED and PLAYBACK_RESTART, decodes from
+one second before each exact seek target, and captures only a redraw after the
+restart event. Its original all-pixel thresholds, +/-0.15-second seek tolerance,
+40-frame count, decoder checks, and native-error rejection remain unchanged.
+It now follows the advanced render API callback contract and reports frame
+presentation. Slow render consumers also need to redraw the retained current
+frame: the pinned mpv moves next_frame to cur_frame after a 200 ms presentation
+timeout, clearing UPDATE_FRAME. Ignoring that retained frame caused the remaining
+750 ms case to keep an old screenshot. The probe redraws real libmpv pixels on
+each render wake-up, including the explicitly requested post-restart redraw.
+Failure output now saves the unmatched frame plus native position, selected
+tracks, render counters, and error state. All settings are probe-only.
+
+Sources for the render contract and retained-frame timeout:
+- https://github.com/mpv-player/mpv/blob/78d43740f52db817d98bcf24fb30a76ab6fa13ff/libmpv/render.h
+- https://github.com/mpv-player/mpv/blob/78d43740f52db817d98bcf24fb30a76ab6fa13ff/video/out/vo_libmpv.c#L461-L505
+
+With the completed probe, normal scheduling and the same 25/250/750 ms matrix
+each pass all 40 frames on API 35. A one-pixel corruption of the temporary
+expected ALPHA mask is rejected at stage 0. No failed workflow was rerun.
