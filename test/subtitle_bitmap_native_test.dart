@@ -22,6 +22,11 @@ void main() {
       addTearDown(engine.dispose);
       final native = player.platform as NativePlayer;
       await native.setProperty('ao', 'null');
+      // This video/subtitle fixture must not exercise the null audio device
+      // state machine during rapid paused seeks on older libmpv builds.
+      await native.setProperty('aid', 'no');
+      // No VideoController is attached in this host test; enable its video clock.
+      await native.setProperty('vid', 'auto');
       await native.setProperty('cache-on-disk', 'no');
       final failures = <String>[];
       final logs = player.stream.log.listen((entry) {
@@ -38,6 +43,7 @@ void main() {
         await engine.open(uri, headers: const {}, play: false);
         expect(engine.subtitleInputEpoch, greaterThan(oldEpoch));
         expect(await native.getProperty('sub-visibility'), 'no');
+        expect(await native.getProperty('aid'), 'no');
         await _until(
           () =>
               player.state.tracks.subtitle
@@ -71,6 +77,7 @@ void main() {
         await engine.seek(const Duration(seconds: 4));
         expect(await native.getProperty('sid'), 'no');
         expect(await native.getProperty('sub-visibility'), 'no');
+        expect(await native.getProperty('aid'), 'no');
 
         await engine.selectSubtitleTrack(text.id);
         await engine.seek(const Duration(seconds: 3));
@@ -78,6 +85,7 @@ void main() {
         await _until(() => player.state.subtitle.first.trim() == 'TEXT_CUE');
         await engine.pause();
         expect(await native.getProperty('sub-visibility'), 'no');
+        expect(await native.getProperty('aid'), 'no');
 
         await engine.selectSubtitleTrack(b.id);
         expect(await native.getProperty('sub-visibility'), 'yes');
@@ -91,6 +99,7 @@ void main() {
         );
         await engine.pause();
         expect(await native.getProperty('sub-visibility'), 'no');
+        expect(await native.getProperty('aid'), 'no');
 
         await engine.selectSubtitleTrack(a.id);
         expect(await native.getProperty('sub-visibility'), 'yes');

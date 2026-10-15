@@ -75,3 +75,15 @@ Emby account have not been tested. A successful CI run is not user acceptance.
 Only generated public test content was used; no credentials or private media
 were accessed or committed. Final release bytes and updater compatibility must
 be checked against the exact workflow commit after publication.
+
+## First CI attempt
+
+Build 188 (commit c745af8, workflow 38724824258) failed with 1701 passed and
+2 failed. Both new PGS tests completed their subtitle assertions, then rejected
+errors from the Linux libmpv null audio device during paused seeks. The fixture
+now explicitly disables its silent audio track and checks that it stays disabled.
+It also enables video explicitly: a headless media_kit player defaults to vid=no
+without a VideoController. The first audio-only fixture adjustment therefore had
+no playback clock and timed out locally; that failed attempt is retained too.
+The native error assertion remains intact; no error filtering or retry was added.
+Production playback audio is unchanged. Build 188 was not rerun or published.
