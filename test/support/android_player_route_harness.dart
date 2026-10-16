@@ -23,6 +23,9 @@ import 'synthetic_playback_origin.dart';
 import 'synthetic_download_fixture.dart';
 import 'harness_touch.dart';
 import 'harness_playback.dart';
+import 'harness_lifecycle_trace.dart';
+import 'package:emby_my_client/playback/playback_controller.dart';
+import 'package:emby_my_client/playback/playback_state.dart';
 
 const _controlOrigin = 'http://127.0.0.1:38766';
 final _client = HttpClient();
@@ -33,6 +36,7 @@ final _interactions = <Map<String, Object?>>[];
 final _routeEvents = <Map<String, Object?>>[];
 final _gestureTrace = <Map<String, Object?>>[];
 final _menuTrace = <Map<String, Object?>>[];
+final _lifecycleTrace = <Map<String, Object?>>[];
 final _callbackErrors = <Map<String, Object?>>[];
 final _routeObserver = _RouteObserver();
 const _traceGestures = bool.fromEnvironment('SUBTITLE_ROUTE_TRACE');
@@ -53,6 +57,32 @@ Future<void> main() async {
     return originalPlatformError?.call(error, stack) ?? false;
   };
   DiagnosticLog.instance.setTestSink((line) {
+    final event = safeHarnessLifecycleEvent(line);
+    if (event != null) {
+      // No private State access: an epoch is available only while an existing
+      // menu exposes its controller through the production ListenableBuilder.
+      final controllers =
+          _elements(
+                (w) =>
+                    w is ListenableBuilder &&
+                    w.listenable is PlaybackController,
+              )
+              .map(
+                (e) =>
+                    (e.widget as ListenableBuilder).listenable
+                        as PlaybackController,
+              )
+              .toSet();
+      final controller = controllers.length == 1 ? controllers.single : null;
+      _lifecycleTrace.add({
+        'atUs': _eventClock.elapsedMicroseconds,
+        ...event,
+        'observedMenuEpoch': controller?.subtitleInputEpoch,
+        'observedMenuPhase': controller?.state.phase.name,
+        ..._dartPlaybackSnapshot(),
+      });
+      if (_lifecycleTrace.length > 512) _lifecycleTrace.removeAt(0);
+    }
     // This full match admits only the fixed production menu-state record.
     final match = RegExp(
       r'event=playback_options phase=[a-z_]+ reason=[a-z_]+ '
@@ -314,6 +344,7 @@ Future<void> main() async {
       'verifiedStages': _reported,
       'cleanup': cleanup,
       'menuTrace': _menuTrace,
+      'lifecycleTrace': _lifecycleTrace,
       'callbackErrors': _callbackErrors,
       if (failure != null) 'error': '$failure',
       if (failureStack != null) 'stack': '$failureStack',
@@ -670,21 +701,12 @@ Future<Map<String, Object?>> _playbackSnapshot() async {
   return result;
 }
 
-bool _playingAcknowledged(Map<String, Object?> value, bool playing) =>
-    value['playerFound'] == true &&
-    value['uiPlaying'] == playing &&
-    value['dartPlaying'] == playing &&
-    value['dartCompleted'] == false &&
-    value['pause'] == (playing ? 'no' : 'yes') &&
-    value['eof-reached'] == 'no' &&
-    !value.containsKey('nativeReadError');
-
 Future<void> _waitForPlaying(bool playing) async {
   final deadline = DateTime.now().add(const Duration(seconds: 15));
   Map<String, Object?> snapshot;
   do {
     snapshot = await _playbackSnapshot();
-    if (_playingAcknowledged(snapshot, playing)) {
+    if (harnessPlayingAcknowledged(snapshot, playing)) {
       _interactions.add({
         'action': 'playback-ack',
         'atUs': _eventClock.elapsedMicroseconds,
@@ -702,10 +724,77 @@ Future<void> _waitForPlaying(bool playing) async {
 
 Future<void> _pause() async {
   await _showControls();
-  // Callers first acknowledge play; a stale pre-play tooltip is not completion.
-  await _waitForPlaying(true);
-  await _tapKey('player-play-pause');
-  await _waitForPlaying(false);
+  // Use the real menu's public listenable to observe the current controller;
+  // duration alone may arrive before native open/subtitle setup has completed.
+  await _tapKey('player-options');
+  await _until(
+    () => _elements((w) => w is BottomSheet).isNotEmpty,
+    'startup readiness sheet',
+  );
+  final controllers =
+      _elements(
+            (w) => w is ListenableBuilder && w.listenable is PlaybackController,
+          )
+          .map(
+            (e) =>
+                (e.widget as ListenableBuilder).listenable
+                    as PlaybackController,
+          )
+          .toSet();
+  if (controllers.length != 1) {
+    throw StateError('Startup controller unavailable');
+  }
+  final controller = controllers.single;
+  final player = _routePlayer();
+  if (player == null) throw StateError('Startup player unavailable');
+  Future<bool> waitReady({bool? playing}) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 15));
+    Map<String, Object?> snapshot;
+    do {
+      final epoch = controller.subtitleInputEpoch;
+      final readyBefore =
+          controller.state.phase == PlaybackPhase.ready &&
+          controller.state.plan != null;
+      final sameBefore = identical(player, _routePlayer());
+      snapshot = await _playbackSnapshot();
+      snapshot.addAll({
+        'controllerReadyBefore': readyBefore,
+        'controllerReadyAfter':
+            controller.state.phase == PlaybackPhase.ready &&
+            controller.state.plan != null,
+        'epochBefore': epoch,
+        'epochAfter': controller.subtitleInputEpoch,
+        'samePlayer': sameBefore && identical(player, _routePlayer()),
+      });
+      if (harnessStartupAcknowledged(snapshot) &&
+          (playing == null || snapshot['dartPlaying'] == playing)) {
+        _interactions.add({
+          'action': 'playback-ack',
+          'atUs': _eventClock.elapsedMicroseconds,
+          'playing': snapshot['dartPlaying'],
+          'startup': true,
+          'playback': snapshot,
+        });
+        return snapshot['dartPlaying']! as bool;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+    } while (DateTime.now().isBefore(deadline));
+    throw StateError('Startup acknowledgement timeout: $snapshot');
+  }
+
+  await waitReady();
+  Navigator.of(_elements((w) => w is BottomSheet).single).pop();
+  await _until(
+    () => _elements((w) => w is BottomSheet).isEmpty,
+    'startup readiness sheet close',
+  );
+  await pauseHarnessStartup(
+    waitForReadyPlaying: () => waitReady(),
+    tapPlayPause: () => _tapKey('player-play-pause'),
+    waitForPlaying: (playing) async {
+      await waitReady(playing: playing);
+    },
+  );
 }
 
 Future<void> _playUntilCue(String cue) async {
@@ -744,7 +833,7 @@ Future<void> _stage(
     );
   }
   final playback = routeShown ? await _playbackSnapshot() : null;
-  if (routeShown && !_playingAcknowledged(playback!, false)) {
+  if (routeShown && !harnessPlayingAcknowledged(playback!, false)) {
     throw StateError('UI stage must be paused: $stage, $playback');
   }
   await _report({
@@ -857,6 +946,7 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
       'routeEvents': _routeEvents,
       'gestureTrace': _gestureTrace,
       'menuTrace': _menuTrace,
+      'lifecycleTrace': _lifecycleTrace,
       'callbackErrors': _callbackErrors,
       'interactions': _interactions,
       'nodes': nodes,

@@ -528,6 +528,96 @@ behavior fix. A passing run would not establish the original 195-197 cause;
 any actual Release still requires exact-commit CI, payload integrity, signing,
 version and historical-updater verification before being accepted.
 
+### Build 198 controlled diagnostic result
+
+The reviewed diagnostic commit 9595a1dac021f7cdf95c340b103d315884870426
+triggered the single automatic push run 38902253378, attempt 1. It was a new
+observation run in the same workflow, not an unchanged retry. All **1916 Linux
+tests**, **32 release preparation tests**, **40 Android verifier tests**, and
+**29 cache safety tests** passed. Native pixels, position pixels and all
+**32 texture frames** passed. Navigation failed at **12 of 34 stages**; iPadOS
+and publication were skipped. All seven application cleanup fields are true.
+Raw logs and original screenshots are retained in release/build-198-first-failure.
+
+The new record establishes this occurrence's direct failure mechanism. At
+45.613638 seconds the native ASS row was enabled, not scrolling, and bound to
+ready input epoch 1. Its callback popped the sheet at 45.625409 seconds. The
+next enabled options button received a real hit, a 6.375-millisecond pointer
+pair, and its child callback at 46.438013 seconds. The production method entered
+at 46.518086 seconds with controller present but plan absent, phase=resolving,
+and input epoch 3. It returned `blocked reason=no_plan` at 46.518709 seconds.
+No modal push followed. UI, Dart and native playback remained paused at zero
+of 12 seconds without EOF, and callbackErrors was empty. The screenshot shows
+TEXT_CUE and the enabled settings control without an open sheet.
+
+Thus the click was discarded during an input transition. The normal native
+subtitle selection path does not itself reconfigure or increment the input
+revision. A stop followed by prepareSource can account for epoch 1 to 3 before
+a replacement plan resolves, but these fields do not establish which recovery
+or cache/lifecycle event triggered it. In this same run, the first cycle's first
+menu already reported ready epoch 3 at 6.189842 seconds, before the first native
+subtitle row tap at 7.699474 seconds. Input replacement therefore also occurred
+without a manual subtitle selection. Its upstream trigger remains under
+investigation. The result does not retroactively prove the causes of builds
+195-197.
+
+The targeted correction opens the requested settings modal during resolution,
+shows its loading state, and refreshes the contents from the current controller.
+Current contents capture the current input/source binding while previously
+queued callbacks retain their stale-input rejection. Three controlled resolver
+tests first failed against the original production code: a single real tap while
+resolving produced no sheet, an already-open sheet did not show resolution, and
+failed resolution did not show the unavailable state. These original failures
+are retained in regression/build198/02-resolving-negative-first.log.
+
+After the fix, all three behavioral regressions passed. The first complete
+focused file had **8 passes and 1 failure** in diagnostic ordering: a departing
+sheet emitted a mapping record after close. That result is retained in
+04-menu-focused-first.log. Mapping is now recorded only while the menu is open
+and its input/source binding changes; the source value is never exported. The
+final focused run passed **11 tests**, including both fixed-field diagnostic
+parser tests, and static analysis passed. Old callbacks remain rejected during
+and after input replacement, while a freshly rendered row selects the current
+native ID and closes the same modal.
+
+One declared serial run of this menu fix passed **32 texture frames**, then
+failed at **17 of 34 route stages**, with **14 of 28 paused-frame confirmations**
+and all seven cleanup fields true. The original diagnostic is retained in
+regression/build198/serial-menu-fixed-first. At 44.528365 seconds the offline
+player logged inactive, at 44.684934 resumed, and at 44.771940 playback_ready
+with UI and Dart playing=false and duration 12 seconds. The timeout snapshot
+also had native pause=yes, time-pos=0 and eof-reached=no. No callback errors
+were recorded. This establishes a ready, paused input while the initial harness
+unconditionally awaited playing=true. The lifecycle sequence is consistent with
+startup quiescence but does not independently prove the unique upstream cause
+or reclassify the earlier failures.
+
+The controlled harness correction observes the current ready input and
+acknowledges matching UI, Dart and native state before acting. An initially
+paused input is explicitly played through the real control, acknowledged as
+playing, then paused through the real control and acknowledged again. An
+already-playing input is explicitly paused. Production lifecycle behavior is
+unchanged. The cue flow still requires its explicit play and pause confirmations;
+no retry, longer deadline or lower pixel/stage/paused-frame gate is introduced.
+
+The startup helper's first focused run passed **5 tests**, retaining the two
+existing stale-cue controls. Its first analysis reported one missing-braces lint;
+that report remains in 15-startup-analyze-first.log. After adding the braces,
+analysis passed and the final APK was built from the recorded source hashes.
+The one declared run of that changed driver passed **32 texture screenshots**,
+**34 route stages**, **28 paused-frame confirmations**, all three texture cleanup
+fields and all seven route cleanup fields. Callback errors were empty. The owned
+API 33 emulator was stopped without wiping it. Evidence and source/APK hashes
+are retained in regression/build198/handoff.json and serial-startup-fixed-first.
+
+The visual scopes remain distinct: the 32 texture screenshots exercise files
+and local HTTP, two cycles each, with A-B-A-off-A-ASS-SRT-A selection. They include
+20 actual PGS glyph frames, four subtitle-off frames and eight text frames.
+The production-route PGS stages validate choice binding and navigation at the
+initial paused position; they do not prove a visible PGS cue there. Route ASS/SRT
+stages do check visible text. Independent review of the original PNGs confirmed
+this distinction. A selected native ID alone is not treated as display evidence.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,

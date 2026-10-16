@@ -1429,42 +1429,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     final controller = _playbackController;
-    final plan = controller?.state.plan;
-    if (controller == null || plan == null) {
-      _recordPlaybackOptions(
-        'blocked',
-        reason: controller == null ? 'no_controller' : 'no_plan',
-      );
+    if (controller == null) {
+      _recordPlaybackOptions('blocked', reason: 'no_controller');
       return;
     }
-    final optionsInputEpoch = controller.subtitleInputEpoch;
-    final optionsMediaSourceId = plan.mediaSourceId;
     _playbackOptionsOpen = true;
     _controlsTimer?.cancel();
     var selectionAccepted = false;
-    bool closeForSelection(BuildContext sheetContext) {
-      // The parent owns this modal. A callback already queued by a gesture can
-      // outlive the sheet or run again while its exit animation is in flight.
-      if (selectionAccepted ||
-          !mounted ||
-          !sheetContext.mounted ||
-          _playbackResourcesReleased ||
-          !identical(controller, _playbackController) ||
-          controller.subtitleInputEpoch != optionsInputEpoch ||
-          controller.state.plan?.mediaSourceId != optionsMediaSourceId ||
-          ModalRoute.of(sheetContext)?.isCurrent != true) {
-        _recordPlaybackOptions('selection_blocked');
-        return false;
-      }
-      _recordPlaybackOptions('selection_pop');
-      selectionAccepted = true;
-      Navigator.of(sheetContext).pop();
-      return true;
-    }
-
-    _recordPlaybackOptions('mapping');
-    final audioTracks = _trackMapper.fromPlan(plan, 'audio');
-    final subtitleTracks = _trackMapper.fromPlan(plan, 'subtitle');
+    int? mappedEpoch;
+    String? mappedSource;
     try {
       _recordPlaybackOptions('push_requested');
       await showModalBottomSheet<void>(
@@ -1477,71 +1450,130 @@ class _PlayerScreenState extends State<PlayerScreen>
           child: SafeArea(
             child: SizedBox(
               height: MediaQuery.sizeOf(sheetContext).height * 0.82,
-              child: Column(
-                children: [
-                  const TabBar(
-                    tabs: [
-                      Tab(text: '画质'),
-                      Tab(text: '音轨'),
-                      Tab(text: '字幕'),
-                      Tab(text: '章节'),
-                      Tab(text: '播放'),
-                    ],
-                  ),
-                  Expanded(
-                    child: TabBarView(
-                      children: [
-                        _buildQualityOptions(sheetContext, plan),
-                        ListenableBuilder(
-                          listenable: controller,
-                          builder: (context, _) => _buildAudioOptions(
-                            audioTracks,
-                            controller.state,
-                            closeForSelection: () =>
-                                closeForSelection(sheetContext),
-                          ),
-                        ),
-                        ListenableBuilder(
-                          listenable: controller,
-                          builder: (context, _) => PlaybackSubtitleOptions(
-                            tracks: subtitleTracks,
-                            nativeTracks: controller.nativeSubtitleChoices,
-                            localAssets: controller.localSubtitleChoices,
-                            onSelectNative: (target) {
-                              if (!closeForSelection(sheetContext)) return;
-                              _sessionSubtitleSelection = null;
-                              unawaited(
-                                controller.selectNativeSubtitle(target),
-                              );
-                            },
-                            onSelectLocal: (target) {
-                              if (!closeForSelection(sheetContext)) return;
-                              _sessionSubtitleSelection = null;
-                              unawaited(controller.selectLocalSubtitle(target));
-                            },
-                            onExportDiagnostics: () {
-                              if (!closeForSelection(sheetContext)) return;
-                              Navigator.of(context).push(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => DiagnosticLogScreen(
-                                    playbackTraceId: controller.trace?.id,
+              child: ListenableBuilder(
+                listenable: controller,
+                builder: (context, _) {
+                  final state = controller.state;
+                  final plan = state.plan;
+                  if (plan == null) {
+                    final failed = state.phase == PlaybackPhase.failed;
+                    return Center(
+                      key: ValueKey(
+                        failed
+                            ? 'playback-options-unavailable'
+                            : 'playback-options-loading',
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (!failed) const CircularProgressIndicator(),
+                          if (!failed) const SizedBox(height: 16),
+                          Text(failed ? '播放设置暂时不可用' : '正在加载播放设置…'),
+                        ],
+                      ),
+                    );
+                  }
+                  // Each rebuilt menu belongs to the current input. Queued
+                  // callbacks keep their original epoch and cannot select
+                  // against a later input or close its refreshed menu.
+                  final optionsInputEpoch = controller.subtitleInputEpoch;
+                  final optionsMediaSourceId = plan.mediaSourceId;
+                  bool closeForSelection(BuildContext sheetContext) {
+                    // The parent owns this modal. A callback already queued by a gesture can
+                    // outlive the sheet or run again while its exit animation is in flight.
+                    if (selectionAccepted ||
+                        !mounted ||
+                        !sheetContext.mounted ||
+                        _playbackResourcesReleased ||
+                        !identical(controller, _playbackController) ||
+                        controller.subtitleInputEpoch != optionsInputEpoch ||
+                        controller.state.plan?.mediaSourceId !=
+                            optionsMediaSourceId ||
+                        ModalRoute.of(sheetContext)?.isCurrent != true) {
+                      _recordPlaybackOptions('selection_blocked');
+                      return false;
+                    }
+                    _recordPlaybackOptions('selection_pop');
+                    selectionAccepted = true;
+                    Navigator.of(sheetContext).pop();
+                    return true;
+                  }
+
+                  if (_playbackOptionsOpen &&
+                      (mappedEpoch != optionsInputEpoch ||
+                          mappedSource != optionsMediaSourceId)) {
+                    mappedEpoch = optionsInputEpoch;
+                    mappedSource = optionsMediaSourceId;
+                    _recordPlaybackOptions('mapping');
+                  }
+                  final audioTracks = _trackMapper.fromPlan(plan, 'audio');
+                  final subtitleTracks = _trackMapper.fromPlan(
+                    plan,
+                    'subtitle',
+                  );
+                  return Column(
+                    children: [
+                      const TabBar(
+                        tabs: [
+                          Tab(text: '画质'),
+                          Tab(text: '音轨'),
+                          Tab(text: '字幕'),
+                          Tab(text: '章节'),
+                          Tab(text: '播放'),
+                        ],
+                      ),
+                      Expanded(
+                        child: TabBarView(
+                          children: [
+                            _buildQualityOptions(sheetContext, plan),
+                            _buildAudioOptions(
+                              audioTracks,
+                              controller.state,
+                              closeForSelection: () =>
+                                  closeForSelection(sheetContext),
+                            ),
+                            PlaybackSubtitleOptions(
+                              tracks: subtitleTracks,
+                              nativeTracks: controller.nativeSubtitleChoices,
+                              localAssets: controller.localSubtitleChoices,
+                              onSelectNative: (target) {
+                                if (!closeForSelection(sheetContext)) return;
+                                _sessionSubtitleSelection = null;
+                                unawaited(
+                                  controller.selectNativeSubtitle(target),
+                                );
+                              },
+                              onSelectLocal: (target) {
+                                if (!closeForSelection(sheetContext)) return;
+                                _sessionSubtitleSelection = null;
+                                unawaited(
+                                  controller.selectLocalSubtitle(target),
+                                );
+                              },
+                              onExportDiagnostics: () {
+                                if (!closeForSelection(sheetContext)) return;
+                                Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => DiagnosticLogScreen(
+                                      playbackTraceId: controller.trace?.id,
+                                    ),
                                   ),
-                                ),
-                              );
-                            },
-                            playbackState: controller.state,
-                            onSelect: (index) {
-                              if (!closeForSelection(sheetContext)) return;
-                              unawaited(_selectSubtitleStream(index));
-                            },
-                          ),
+                                );
+                              },
+                              playbackState: controller.state,
+                              onSelect: (index) {
+                                if (!closeForSelection(sheetContext)) return;
+                                unawaited(_selectSubtitleStream(index));
+                              },
+                            ),
+                            _buildChapterOptions(sheetContext),
+                            _buildPlayerOptions(sheetContext),
+                          ],
                         ),
-                        _buildChapterOptions(sheetContext),
-                        _buildPlayerOptions(sheetContext),
-                      ],
-                    ),
-                  ),
-                ],
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           ),

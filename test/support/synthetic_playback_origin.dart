@@ -22,6 +22,9 @@ class SyntheticPlaybackOrigin {
   final _held = <Completer<void>>[];
   int subtitleStatus = 200;
   bool holdSubtitle = false;
+  bool holdPlaybackInfo = false;
+  int playbackInfoStatus = 200;
+  final _heldPlaybackInfo = <Completer<void>>[];
   int activeRequests = 0;
   bool closed = false;
   String get origin => 'http://${_server.address.address}:${_server.port}';
@@ -134,6 +137,14 @@ class SyntheticPlaybackOrigin {
     _held.clear();
   }
 
+  void releasePlaybackInfo() {
+    holdPlaybackInfo = false;
+    for (final gate in _heldPlaybackInfo) {
+      if (!gate.isCompleted) gate.complete();
+    }
+    _heldPlaybackInfo.clear();
+  }
+
   Future<void> _reply(HttpRequest request) async {
     activeRequests++;
     requests.add(request.uri.path);
@@ -163,6 +174,13 @@ class SyntheticPlaybackOrigin {
               : 'Synthetic subtitle failure',
         );
       } else if (path.endsWith('/PlaybackInfo')) {
+        if (holdPlaybackInfo) {
+          final gate = Completer<void>();
+          _heldPlaybackInfo.add(gate);
+          await gate.future;
+        }
+        if (closed) return;
+        request.response.statusCode = playbackInfoStatus;
         request.response.headers.contentType = ContentType.json;
         request.response.write(
           jsonEncode({
@@ -229,6 +247,7 @@ class SyntheticPlaybackOrigin {
     if (closed) return;
     closed = true;
     releaseSubtitle();
+    releasePlaybackInfo();
     await _server.close(force: true);
     await _subscription.cancel();
   }

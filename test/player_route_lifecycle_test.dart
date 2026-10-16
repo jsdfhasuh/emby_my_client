@@ -5,6 +5,7 @@ import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
+import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:emby_my_client/playback/subtitle_problem.dart';
 import 'package:emby_my_client/ui/widgets/playback_subtitle_options.dart';
@@ -46,7 +47,7 @@ void main() {
               .take(3)
               .toList()
               .reversed,
-          ['entry', 'mapping', 'push_requested'],
+          ['entry', 'push_requested', 'mapping'],
         );
         expect(
           _diagnostics.lastWhere((line) => line.contains('phase=entry')),
@@ -91,6 +92,121 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('playback options single tap survives resolving plan', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester);
+    final engine = await fixture.open(tester);
+    await _subtitles(tester);
+    final controller = _optionsController(tester);
+    Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+    await _flush(tester);
+    fixture.origin.holdPlaybackInfo = true;
+    final reopening = controller.reconfigure(maxStreamingBitrate: 90000000);
+    await _until(
+      tester,
+      () => controller.state.phase == PlaybackPhase.resolving,
+    );
+    expect(controller.state.plan, isNull);
+    await tester.tap(find.byKey(const ValueKey('player-options')));
+    await _flush(tester);
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('playback-options-loading')),
+      findsOneWidget,
+    );
+    expect(find.byType(PlaybackSubtitleOptions), findsNothing);
+    fixture.origin.releasePlaybackInfo();
+    await _until(tester, () => controller.state.phase == PlaybackPhase.ready);
+    await reopening;
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('playback-options-loading')),
+      findsNothing,
+    );
+    await tester.tap(find.text('字幕'));
+    await _flush(tester);
+    await tester.tap(find.byKey(const ValueKey('native-subtitle-2')));
+    await _flush(tester);
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(engine.subtitleSelections.last, '2');
+    await _close(tester);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'playback options refresh epoch without accepting stale callback',
+    (tester) async {
+      final fixture = await _mount(tester);
+      final engine = await fixture.open(tester);
+      await _subtitles(tester);
+      final controller = _optionsController(tester);
+      final oldEpoch = controller.subtitleInputEpoch;
+      final stale = tester
+          .widget<ListTile>(find.byKey(const ValueKey('native-subtitle-1')))
+          .onTap!;
+      fixture.origin.holdPlaybackInfo = true;
+      final reopening = controller.reconfigure(maxStreamingBitrate: 90000000);
+      await _until(
+        tester,
+        () => controller.state.phase == PlaybackPhase.resolving,
+      );
+      expect(
+        find.byKey(const ValueKey('playback-options-loading')),
+        findsOneWidget,
+      );
+      stale();
+      await _flush(tester);
+      expect(find.byType(BottomSheet), findsOneWidget);
+      fixture.origin.releasePlaybackInfo();
+      await _until(tester, () => controller.state.phase == PlaybackPhase.ready);
+      await reopening;
+      expect(controller.subtitleInputEpoch, greaterThan(oldEpoch));
+      final selections = engine.subtitleSelections.toList();
+      stale();
+      await _flush(tester);
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(engine.subtitleSelections, selections);
+      await tester.tap(find.byKey(const ValueKey('native-subtitle-2')));
+      await _flush(tester);
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(engine.subtitleSelections.last, '2');
+      await _close(tester);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('playback options shows unavailable after resolution fails', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester);
+    await fixture.open(tester);
+    await _subtitles(tester);
+    final controller = _optionsController(tester);
+    fixture.origin.holdPlaybackInfo = true;
+    fixture.origin.playbackInfoStatus = 503;
+    final reopening = controller.reconfigure(maxStreamingBitrate: 90000000);
+    await _until(
+      tester,
+      () => controller.state.phase == PlaybackPhase.resolving,
+    );
+    fixture.origin.releasePlaybackInfo();
+    await _until(tester, () => controller.state.phase == PlaybackPhase.failed);
+    await reopening;
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('playback-options-loading')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('playback-options-unavailable')),
+      findsOneWidget,
+    );
+    expect(find.byType(PlaybackSubtitleOptions), findsNothing);
+    await _close(tester);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('stale subtitle sheet cannot select against a new input epoch', (
     tester,
@@ -264,6 +380,12 @@ void main() {
     },
   );
 }
+
+PlaybackController _optionsController(WidgetTester tester) => tester
+    .widgetList<ListenableBuilder>(find.byType(ListenableBuilder))
+    .map((widget) => widget.listenable)
+    .whereType<PlaybackController>()
+    .first;
 
 Future<void> _subtitles(WidgetTester tester) async {
   await tester.tap(find.byKey(const ValueKey('player-options')));
@@ -447,6 +569,12 @@ class _Engine extends RoutePlaybackEngine
     _nativeReleases.clear();
   }
 
+  @override
+  Future<void> stop() async {
+    inputEpoch++;
+    await super.stop();
+  }
+
   final externalUris = <Uri>[];
   final seeks = <Duration>[];
   int lifecyclePauses = 0;
@@ -457,6 +585,7 @@ class _Engine extends RoutePlaybackEngine
     required Map<String, String> headers,
     required bool play,
   }) async {
+    inputEpoch++;
     openedUri = uri;
     durations.add(const Duration(seconds: 12));
     subtitles.add(const [
