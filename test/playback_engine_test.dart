@@ -10,6 +10,26 @@ import 'package:media_kit/media_kit.dart';
 
 void main() {
   test(
+    'retained probe release waits for true disposal and runs once',
+    () async {
+      final platform = _FakePlatformPlayer();
+      final gate = Completer<void>();
+      platform.disposeGate = gate;
+      final engine = _createEngine(platform, _FakePlaybackOutputQuiescer());
+      var releases = 0;
+      engine.retainUntilNativeDisposal(() async {
+        releases++;
+      });
+      final disposal = engine.dispose();
+      await Future<void>.delayed(Duration.zero);
+      expect(releases, 0);
+      gate.complete();
+      await disposal;
+      await engine.dispose();
+      expect(releases, 1);
+    },
+  );
+  test(
     'non-native backend cannot claim native Matroska subtitle context',
     () async {
       final engine = _createEngine(

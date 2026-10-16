@@ -354,6 +354,9 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
     : supportedOptions = playbackCacheOptionNames.toSet(),
       supportedProperties = playbackCachePropertyNames.toSet(),
       strings = {
+        'pause': 'yes',
+        'idle-active': 'yes',
+        'playlist-count': '0',
         'mpv-version': 'mpv 0.40.0 Copyright build path must not escape',
         'platform': 'darwin',
         for (final option in playbackCacheOptionNames)
@@ -429,8 +432,14 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
     if (command.first == 'loadfile') {
       profileCacheModes.add('${strings['cache']}/${strings['cache-on-disk']}');
       strings['idle-active'] = 'no';
+      strings['path'] = command[1];
+      strings['duration'] = '0.000125';
+      strings['playlist-count'] = '1';
     } else if (command.first == 'stop') {
       strings['idle-active'] = 'yes';
+      strings.remove('path');
+      strings.remove('duration');
+      strings['playlist-count'] = '0';
     }
   }
 }

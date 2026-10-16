@@ -103,6 +103,7 @@ class NativePlaybackCacheEngine
     required this.access,
     required bool Function() hasOpenedMedia,
     PlaybackCacheTelemetryReader? telemetryReader,
+    this.retainUntilNativeDisposal,
   }) : _hasOpenedMedia = hasOpenedMedia,
        _telemetry = PlaybackCacheTelemetryReadCoordinator(
          reader:
@@ -111,6 +112,7 @@ class NativePlaybackCacheEngine
        );
 
   final NativePlaybackPropertyAccess access;
+  final void Function(Future<void> Function())? retainUntilNativeDisposal;
   final bool Function() _hasOpenedMedia;
   final PlaybackCacheTelemetryReadCoordinator _telemetry;
   Future<PlaybackCacheEngineCapabilities>? _capabilities;
@@ -123,8 +125,9 @@ class NativePlaybackCacheEngine
     }
     return _capabilities ??= PlaybackCacheCapabilityProbe(
       access: access,
-      profileSwitchExperiment:
-          const RuntimePlaybackCacheProfileSwitchExperiment(),
+      profileSwitchExperiment: RuntimePlaybackCacheProfileSwitchExperiment(
+        retainUntilNativeDisposal: retainUntilNativeDisposal,
+      ),
     ).probe();
   }
 
@@ -621,9 +624,24 @@ class PlaybackCacheProfileValues {
   }
 }
 
+/// The probe may still own a native input. Do not configure/open another media
+/// on this context; retained files are released only after native disposal.
+class PlaybackCacheProbeUnsettled implements Exception {
+  const PlaybackCacheProbeUnsettled();
+
+  @override
+  String toString() => 'Playback cache probe did not settle';
+}
+
 class RuntimePlaybackCacheProfileSwitchExperiment
     implements PlaybackCacheProfileSwitchExperiment {
-  const RuntimePlaybackCacheProfileSwitchExperiment();
+  const RuntimePlaybackCacheProfileSwitchExperiment({
+    this.retainUntilNativeDisposal,
+    this.settlementTimeout = const Duration(seconds: 2),
+  });
+
+  final void Function(Future<void> Function())? retainUntilNativeDisposal;
+  final Duration settlementTimeout;
 
   @override
   Future<PlaybackCacheProfileSwitchStrategy> run({
@@ -631,8 +649,40 @@ class RuntimePlaybackCacheProfileSwitchExperiment
     required ResolvedPlaybackCacheOptionBindings bindings,
   }) async {
     Directory? root;
+    var inputMayBePending = false;
+    var cleanupFailed = false;
+    Future<void> release() async {
+      if (root != null && await root.exists()) {
+        await root.delete(recursive: true);
+      }
+    }
+
+    Future<void> stopAndSettle() async {
+      try {
+        await access.command(const ['stop']);
+        if (!await _waitFor(
+          () async =>
+              _parseBoolean(await access.getString('idle-active')) == true &&
+              int.tryParse(await access.getString('playlist-count') ?? '') == 0,
+        )) {
+          throw const PlaybackCacheProbeUnsettled();
+        }
+        inputMayBePending = false;
+      } catch (_) {
+        cleanupFailed = true;
+        rethrow;
+      }
+    }
+
     try {
       if (!playbackCacheRequiredDiskLogicalOptions.every(bindings.supports)) {
+        return PlaybackCacheProfileSwitchStrategy.unsupported;
+      }
+      // A new MediaKit context starts paused and keeps the short WAV loaded.
+      // Do not change pause: restoring it could race lifecycle suspension.
+      if (_parseBoolean(await access.getString('pause')) != true ||
+          _parseBoolean(await access.getString('idle-active')) != true ||
+          int.tryParse(await access.getString('playlist-count') ?? '') != 0) {
         return PlaybackCacheProfileSwitchStrategy.unsupported;
       }
       root = await Directory.systemTemp.createTemp('emby-mpv-capability-');
@@ -660,25 +710,44 @@ class RuntimePlaybackCacheProfileSwitchExperiment
             return PlaybackCacheProfileSwitchStrategy.unsupported;
           }
         }
+        // loadfile acknowledges playlist mutation, not completion of the open.
+        inputMayBePending = true;
         await access.command(['loadfile', media.path, 'replace']);
-        if (!await _waitForIdle(access, expected: false)) {
+        if (!await _waitFor(
+          () async =>
+              _parseBoolean(await access.getString('idle-active')) == false &&
+              await access.getString('path') == media.path &&
+              (double.tryParse(await access.getString('duration') ?? '') ?? 0) >
+                  0,
+        )) {
           return PlaybackCacheProfileSwitchStrategy.unsupported;
         }
-        await access.command(const ['stop']);
-        if (!await _waitForIdle(access, expected: true)) {
-          return PlaybackCacheProfileSwitchStrategy.unsupported;
-        }
+        await stopAndSettle();
       }
       return PlaybackCacheProfileSwitchStrategy.inPlaceAfterMediaStop;
     } catch (_) {
       return PlaybackCacheProfileSwitchStrategy.unsupported;
     } finally {
-      if (root != null) {
-        try {
-          await root.delete(recursive: true);
-        } catch (_) {
-          // A probe residue must not affect playback capability fallback.
+      if (inputMayBePending) {
+        if (!cleanupFailed) {
+          try {
+            await stopAndSettle();
+          } catch (_) {
+            // The failure is handled below; never retry an unconfirmed stop.
+          }
         }
+        if (cleanupFailed) {
+          // A failed/expired stop is not permission to delete an input or to
+          // continue startup. The native owner releases it after true disposal.
+          retainUntilNativeDisposal?.call(release);
+          throw const PlaybackCacheProbeUnsettled();
+        }
+      }
+      try {
+        await release();
+      } catch (_) {
+        // Safe residue after confirmed stop can be removed at native disposal.
+        retainUntilNativeDisposal?.call(release);
       }
     }
   }
@@ -693,14 +762,10 @@ class RuntimePlaybackCacheProfileSwitchExperiment
     throw StateError('Unresolved playback cache option');
   }
 
-  static Future<bool> _waitForIdle(
-    NativePlaybackPropertyAccess access, {
-    required bool expected,
-  }) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 2));
+  Future<bool> _waitFor(Future<bool> Function() check) async {
+    final deadline = DateTime.now().add(settlementTimeout);
     while (DateTime.now().isBefore(deadline)) {
-      final idle = _parseBoolean(await access.getString('idle-active'));
-      if (idle == expected) return true;
+      if (await check()) return true;
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
     return false;

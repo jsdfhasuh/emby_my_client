@@ -965,6 +965,234 @@ without wiping it. Physical phones, private movies and audible quality remain
 untested. Exact-commit CI, the pending macOS header check and actual new Release
 payload verification are still required.
 
+### Build 205 first failure: first offline input fails to open
+
+Commit 6c03d292ba5af3367d650af0b43619e242615f89 triggered automatic run
+38937962766, attempt 1. Format, analysis and 1969 full tests passed, as did native
+subtitle/position pixels and all 32 Flutter texture frames. Both online route
+loops completed. The route check then stopped after stage 17 (download-list),
+timing out on offline native ready. Root viewed the original screenshot: the
+first offline route shows the playback-failed page and a Return button. The
+terminal cleanup has routesClosed=false and the other six fields true;
+callbackErrors is empty. iPadOS and Release were skipped. The full 1,267,766-byte
+quality log and original artifacts remain in release/build-205-first-failure.
+
+The offline route was pushed at 62.515629 seconds. Lifecycle inactive/resumed
+events followed at 63.107373 and 63.202045 seconds, then native_open failed with
+fingerprint=other at 63.460279 seconds. This native_open label reflects the
+controller startup phase; it does not identify a particular native command as
+the failing operation. MediaKit forwards selected native error-log prefixes, but
+the saved artifact has neither the original prefix nor text, so the underlying
+file/decoder/other failure cannot be distinguished. The later diagnostic has position and
+duration zero and a Player-disposed native-read assertion. That later read is
+not established as the primary opening failure. This is distinct from build
+204's playing acknowledgement timeout; the primary cause remains under review.
+An independent cleanup gap was found: the normal player-back widget remains in
+the tree but can be hidden and ignore pointer input. The visible error Return
+button had no stable key, while the harness cleanup only selected player-back.
+This can leave the failed route open without identifying why startup failed.
+No unchanged CI run has been rerun, and no new Release has been published.
+
+### Build 205 investigation: preserve first failure and restore error Return
+
+Controlled widget tests exposed a separate production defect: after initial
+startup failure, the normal fullscreen control layer can remain visible because
+playback never starts its hide timer, covering the error page's Return button.
+The failed state now hides that layer and stops it receiving pointer events.
+The existing error Return action has a stable key, and the harness selects this
+visible action when cleaning up a failed route. The regression uses the real
+DownloadsScreen and PlayerScreen, verifies hit testing, returns to Downloads,
+and checks one engine disposal, zero network attempts and temporary-file removal.
+The original missing-key failure, the first still-blocked Return failure, and
+the subsequent insufficient navigation-wait/obsolete normal-back test failures
+remain recorded. This controlled overlay defect is not established as the cause
+of build 205's original failure screenshot or native startup error.
+
+A passive diagnostic retains independent bounded evidence for preparation,
+media startup, runtime and cleanup within each controller generation: each group
+keeps its first error and at most eight error/fatal native-log events. It emits
+only fixed channel, prefix, failure-kind, playback-phase and startup-step enums,
+bounded generation/input counters and lifecycle state. Native text, URLs, paths,
+tokens and media names are never emitted by this event. The startup step is the
+Dart receipt point, not proof of which native operation originated the message.
+The safe route-artifact extractor accepts the same closed schema; controlled
+tests capture a primary permission error before disposal and reject private or
+unrecognized fields. The diagnostic itself does not alter recovery. The subsequent probe-settlement
+repair described below prevents reuse after an unconfirmed probe stop; cache
+profile values and user playback intent are unchanged.
+
+The fixed desktop experiment opened generated local media in three lifecycle
+windows (before, overlapping and after open). Its first three cases all failed
+the native-error gate with mkv: Failed to create file cache, despite completing
+the playback/track assertions. The experiment inherited MediaKit's disk-cache
+default and bypassed production's disabled offline cache profile. The mkv log
+prefix is not forwarded to MediaKit's errorStream, so this observation does not
+explain build 205's playback_engine_error. A separate, explicitly changed
+condition applies and reads back the production-equivalent disabled profile:
+all three cases passed. Both results are retained; no original failure is
+relabelled as a pass. This host experiment checks input/lifecycle behavior and
+tracks, with audio disabled; it does not establish Android causality, rendered
+subtitle pixels or audible quality. The Android primary cause remains UNKNOWN.
+
+### Build 205 follow-up: settle temporary probe input before deletion
+
+The first instrumented local sequence (serial-diagnostic-first) passed 32 texture
+frames and 34 route stages against 258 frozen hashes, with all cleanup checks
+true. Texture nativeErrors was zero and route callbackErrors was empty. The
+new route diagnostics nevertheless captured file/file_missing during the second
+online cacheSetup (22.682843 seconds, error-stream counterpart at 22.685049),
+and lavf/file_cache_failed during both offline cacheSetup phases (44.074155 and
+65.330224). These messages were nonterminal; every route later reached ready.
+The original artifacts, frozen manifest and successful measurement remain
+unchanged. They establish the observation, not the cause of the old build 205
+failure.
+
+Read-only review found that all plans run the temporary WAV profile-switch probe
+before resolving even the disabled offline profile. In the original probe,
+accepted loadfile followed by a property-read or command failure could return
+unsupported without stopping the accepted input; finally still attempted to
+delete its directory. Two controlled original-code cases failed because input
+remained pending. Their later file-deletion assertions were not reached and are
+not claimed as observed results. A third negative case proved that a preparation
+error consumed the single error slot and hid a subsequent media-startup error.
+All three failures remain in 25-probe-evidence-original.log (five other tests
+passed). The asynchronous loadfile contract is documented by
+[mpv 0.36 input commands](https://raw.githubusercontent.com/mpv-player/mpv/v0.36.0/DOCS/man/input.rst):
+command completion does not establish that the new file has finished loading.
+
+The probe now checks that the context is paused, idle and has an empty playlist
+before loading. It never writes or restores pause. A successful load must expose
+the probe path and positive duration. Every accepted or potentially accepted
+load is stopped, with idle and empty-playlist confirmation before deleting its
+input. A failed or unconfirmed stop retains the temporary input until real
+native disposal and propagates a typed unsafe-probe error through the controller,
+preventing real-media open, cache configuration or startup fallback on that
+context. Preparation errors also have a separate diagnostic quota from media
+startup, runtime and cleanup errors. These are controlled, independently proven
+defects; the missing original native message still prevents assigning build
+205's primary cause.
+
+### Instrumented Android first failure: stale debug reference pointer
+
+The new serial-probe-fixed-first measurement against 262 frozen hashes failed
+before its first texture frame. The app died about three seconds after launch;
+the existing 180-second harness deadline then expired, the outer runner exited
+1, and the route gate did not run. No cleanup completion was reported. Original
+logs, APK hashes, screenshot, exit information and native crash buffer remain
+in the build205 evidence directory; this is not a passing measurement.
+
+Root independently matched the crash address 0x78ba000a0390 with the decimal
+pointer 132740259906448 restored by MediaKit's debug NativeReferenceHolder. The
+crashing app PID was 3960. Its matching reference file was last modified at
+17:03:10 UTC, before this 18:11:36 UTC process, and still held exactly that old
+pointer. The locked package restores the buffer by PID and immediately reads
+it via FFI; the crash frame is anonymous Dart code. This establishes this
+measurement's stale debug-reference failure before engine construction or cache
+probing. The release-mode code skips this debug holder. It does not establish
+the cause of build 205's older startup error or the separate Windows incomplete
+test run. A scoped cold-start cleanup for the dedicated emulator harness is
+required; production code and the package cache remain unchanged for this issue.
+
+### Scoped runner repair and debug-APK publication boundary
+
+The dedicated emulator runners now back up and remove only exact MediaKit
+debug-holder filenames before a cold launch, after force-stop and two checks
+that the app has no live process. The helper checks the emulator identity,
+restricts enumeration on-device to the fixed holder prefix, refuses symlinks,
+unexpected names, oversized files and non-pointer contents, and saves all
+matching inputs before deleting any. It rechecks metadata before removal and
+records partial failure. No app-data clear, private media access or package-cache
+modification is involved. Ten focused helper cases passed. The first Linux
+suite used an interpreter without Pillow and failed to import one test module;
+the next invocation had already started on the same interpreter and also failed.
+Both results remain in 52/53. With the existing Pillow environment, all 56 Python
+cases passed in 54-android-python-linux-venv.log.
+
+The new serial-holder-fixed-first measurement used the unchanged 41 APK hashes
+and 264 source/dependency hashes frozen in 55. Both gates exited zero: 32 texture
+frames and 34 route stages passed, with 28 paused-player acknowledgements, six
+non-player records, all seven route and all three texture cleanup fields true.
+There were no recorded native failure/error, memory-pressure or callback events
+in this measurement. Root independently replayed the pixel/protocol artifacts,
+verified all frozen hashes, and viewed PGS ALPHA and offline EXTERNAL_CUE pixels.
+The owned emulator was stopped without wiping. This does not replace the earlier
+zero-frame crash or establish the primary cause of build 205.
+
+The expanded desktop suite in 32-probe-related-final.log completed 251 tests but
+reported all three host-native lifecycle cases as did not complete, exiting 1
+without a captured primary native/assertion cause. One authorized verbose
+diagnostic invocation of those three unchanged cases passed with normal native
+allocation/disposal and overall exit zero. That separate diagnostic did not
+explain the earlier exit; the expanded run remains incomplete with unknown cause.
+The earlier 134-test probe suite passed and final analysis found no issues; its
+first six lint findings remain in 28-probe-analyze-first.log.
+
+Review of the existing workflow confirmed that published APKs use --debug.
+Although release-mode code skips the holder, that observation does not exempt
+these published debug APKs: production main directly initializes MediaKit and
+uses the same Android files directory, without a cold-process guard. The runner
+repair alone is not sufficient to address this publication risk. A minimal
+application cold-process guard is being added without changing build mode,
+dependencies, package identity, signing or publication policy. The successful
+runner-only measurement remains separate evidence, not acceptance of that
+pending application change.
+
+### Application cold-process guard and final local acceptance
+
+The debug source set now registers DebugMediaKitApplication. Its onCreate runs
+before Flutter initialization and invokes a synchronized process-once guard.
+Only the current PID's exact MediaKit holder and safe_local_storage .src file
+are candidates; both are validated as direct regular private files before any
+removal. Pointer contents are never read, other PIDs and user data are untouched,
+and failure prevents unsafe initialization with a fixed non-sensitive message.
+The JVM-static guard preserves newly allocated live references across repeated
+entry and Dart hot restart. Release build mode, package, signing and publishing
+configuration are unchanged. The earlier runner cleanup was archived with its
+hashes in 62 and removed: both final runners are byte-identical to the base commit.
+
+The first six-case Windows JVM run passed five and failed while creating a
+symlink fixture because this account lacks that OS privilege; no cleanup
+assertion ran in that case. The failure and XML remain in 63. The Windows suite
+then passed 43 with that one platform-limited fixture explicitly skipped. Linux
+ran the same six cleanup cases with zero failures, skips or assumptions (66),
+including actual symlink, stale-pointer, interrupted-write and same-process
+preservation checks. Three merged manifests and both actual newly built APK
+manifests identify the startup Application. The first read-only APK inspector
+assumed a hex boolean, whereas aapt2 printed true; that parsing failure remains
+in 77 and was corrected without rebuilding or rerunning a gate. Root separately
+verified both actual APK manifests and hashes using aapt, and confirmed the
+verifier rejects the older unguarded APK.
+
+The first Linux native/probe set passed 137 and failed all three host lifecycle
+cases (68). A single diagnostic run with unchanged configuration, five-second
+deadline and assertions showed all three failures were position progress only:
+duration was 12, pause=no, idle=no and eof=no, but native time-pos and Dart
+position stayed zero. Diagnostic snapshots occur after a frozen failed-deadline
+result and cannot extend acceptance. One two-condition experiment (71) observed
+the default mkv demuxer marking the selected MJPEG track image=true, with no
+progress. Explicit lavf alone produced image=false and time-pos=0.5 within the
+same deadline. The original file-format was mkv, not an image demuxer. Only the
+Linux generated-fixture host test now requests/readbacks lavf and checks the
+video is not marked as an image. Production and Android demuxer settings are
+unchanged. The resulting 140-case Linux target set passed (72), and final analysis
+found no issues (73). These observations do not explain the Windows incomplete
+run or the old build 205 primary startup failure.
+
+The final ordinary-runner sequence serial-app-protected-first used two newly
+built APKs and 265 frozen source/dependency hashes (74). It passed all 32 texture
+frames and 34 production-route stages, with 28 paused-player acknowledgements,
+six non-player records, all seven route and all three texture cleanup fields
+true, no recorded native failure/error or memory-pressure events and no callback
+errors. No external pointer pre-cleanup ran. Root independently replayed saved
+pixel/protocol evidence, verified every frozen hash, and viewed PGS ALPHA and
+offline EXTERNAL_CUE pixels. The owned emulator was stopped without wiping it.
+Actual Android PID collision was not deliberately forced; current-PID reuse and
+same-process preservation were controlled JVM filesystem cases, while these
+Android runs validate normal cold startup and real subtitle/navigation behavior.
+Physical phones, user movies, iOS subtitle pixels and audible quality remain
+NOT_RUN. Exact-commit full CI and actual Release/update compatibility verification
+are still required. All first failures remain preserved, and no CI was rerun.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part
@@ -981,7 +1209,7 @@ actual build 186/187/191/192 updater sources. They also recheck that build 192's
 existing Release and assets have not changed. Preparation and static analysis
 are not proof that a new Release exists or that compatibility has passed.
 
-Local suite, texture and production-route results above are complete. CI, actual
+Local validation outcomes and incomplete runs are recorded above. CI, actual
 Release payloads and historical-updater compatibility must be verified against
 the exact pushed commit and recorded in the external publication receipt. No
 new build number or publication success is inferred from these local results.

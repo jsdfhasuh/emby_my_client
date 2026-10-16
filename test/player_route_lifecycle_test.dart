@@ -438,7 +438,12 @@ Future<void> _close(WidgetTester tester) async {
     Navigator.of(tester.element(find.byType(BottomSheet))).pop();
     await _flush(tester);
   }
-  await tester.tap(find.byKey(const ValueKey('player-back')));
+  final errorReturn = find.byKey(const ValueKey('player-error-back'));
+  final back = errorReturn.evaluate().isNotEmpty
+      ? errorReturn
+      : find.byKey(const ValueKey('player-back'));
+  expect(back.hitTestable(), findsOneWidget);
+  await tester.tap(back);
   await _until(tester, () => find.byType(PlayerScreen).evaluate().isEmpty);
 }
 

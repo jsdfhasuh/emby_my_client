@@ -248,6 +248,7 @@ class MediaKitPlaybackEngine
           timeoutReporter: _diagnostics.nativeOperationTimeout,
         ),
         hasOpenedMedia: () => _hasOpenedMedia,
+        retainUntilNativeDisposal: retainUntilNativeDisposal,
       );
     }
   }

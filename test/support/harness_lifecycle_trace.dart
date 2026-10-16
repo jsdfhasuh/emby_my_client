@@ -20,6 +20,79 @@ Map<String, Object>? safeHarnessLifecycleEvent(String line) {
     'playback_seek_recovery_started': {},
     'playback_seek_recovery_succeeded': {},
     'playback_seek_recovery_failed': {},
+    'playback_native_failure': {
+      'channel': {'log', 'error'},
+      'prefix': {
+        'file',
+        'ffmpeg',
+        'vd',
+        'ad',
+        'cplayer',
+        'stream',
+        'demux',
+        'mkv',
+        'lavf',
+        'ao',
+        'ao/opensles',
+        'ao/audiotrack',
+        'ao/null',
+        'vo',
+        'vo/gpu',
+        'vo/gpu/opengl',
+        'options',
+        'sub',
+        'osd/libass',
+        'other',
+      },
+      'level': {'error', 'fatal'},
+      'kind': {
+        'cache_probe_unsettled',
+        'file_cache_failed',
+        'file_missing',
+        'permission_denied',
+        'property_missing',
+        'invalid_option',
+        'disposed',
+        'decoder_missing',
+        'decoder_failed',
+        'audio_output_failed',
+        'video_output_failed',
+        'open_failed',
+        'invalid_media',
+        'command_failed',
+        'io_error',
+        'out_of_memory',
+        'other',
+      },
+      'phase': {
+        'idle',
+        'resolving',
+        'opening',
+        'waitingForReady',
+        'retryingWithTranscode',
+        'seekingResume',
+        'ready',
+        'stopping',
+        'failed',
+        'recoveryPending',
+        'recovering',
+      },
+      'step': {
+        'idle',
+        'binding',
+        'resolving',
+        'cacheSetup',
+        'engineOpen',
+        'waitingReady',
+        'tracks',
+        'presentation',
+        'resumeSeek',
+        'playbackIntent',
+        'ready',
+        'cleanup',
+      },
+      'lifecycleSuspended': {'true', 'false'},
+    },
     'playback_engine_error': {
       'stage': {'native_open', 'native_read'},
       'outcome': {'failed'},
@@ -39,6 +112,15 @@ Map<String, Object>? safeHarnessLifecycleEvent(String line) {
     final value = tokens[entry.key];
     if (value == null || !entry.value.contains(value)) return null;
     result[entry.key] = value;
+  }
+  if (event == 'playback_native_failure') {
+    for (final name in ['generation', 'inputEpoch']) {
+      final value = tokens[name];
+      if (value == null || !RegExp(r'^[0-9]{1,6}$').hasMatch(value)) {
+        return null;
+      }
+      result[name] = int.parse(value);
+    }
   }
   if (event == 'playback_cache_memory_pressure' ||
       event == 'playback_cache_low_space' ||

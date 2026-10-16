@@ -27,6 +27,25 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'unsettled cache probe forbids media open and transcode fallback',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events)
+        ..probeError = const PlaybackCacheProbeUnsettled();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(events.where((e) => e == 'probe'), hasLength(1));
+      expect(engine.openCalls, 0);
+      expect(engine.configuredProfiles, isEmpty);
+      expect(events.where((e) => e == 'dispose'), hasLength(1));
+    },
+  );
+  test(
     'shared ready play timeout cannot masquerade as a newer explicit intent',
     () async {
       final events = <String>[];
@@ -2615,6 +2634,7 @@ class _CacheEngine
   final List<String> events;
   PlaybackCacheEngineSnapshot? snapshot;
   Object? snapshotError;
+  Object? probeError;
   Future<void>? snapshotOperation;
   final bool requireRecreationAfterOpen;
   final bool keepSubtitleStreamOpenAfterDispose;
@@ -2777,6 +2797,7 @@ class _CacheEngine
   @override
   Future<PlaybackCacheEngineCapabilities> probeCacheCapabilities() async {
     events.add('probe');
+    if (probeError case final error?) throw error;
     return _capabilities();
   }
 

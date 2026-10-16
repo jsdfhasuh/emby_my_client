@@ -2179,9 +2179,9 @@ class _PlayerScreenState extends State<PlayerScreen>
               if (_buffering && _error == null) _buildBuffering(),
               if (_error != null) _buildError(),
               IgnorePointer(
-                ignoring: !_controlsVisible,
+                ignoring: !_controlsVisible || _error != null,
                 child: AnimatedOpacity(
-                  opacity: _controlsVisible ? 1 : 0,
+                  opacity: _controlsVisible && _error == null ? 1 : 0,
                   duration: const Duration(milliseconds: 180),
                   child: _buildControls(),
                 ),
@@ -2398,6 +2398,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
               const SizedBox(height: 18),
               FilledButton.icon(
+                key: const ValueKey('player-error-back'),
                 onPressed: () =>
                     unawaited(_closePlayer(PlayerExitReason.playbackError)),
                 icon: const Icon(Icons.arrow_back),

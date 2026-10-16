@@ -24,6 +24,7 @@ import 'external_subtitle_loader.dart';
 import 'playback_diagnostics.dart';
 import 'playback_diagnostics_test_overrides.dart';
 import 'playback_engine.dart';
+import 'native_failure_evidence.dart';
 import 'playback_resource_request.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_recovery_policy.dart';
@@ -415,6 +416,24 @@ class PlaybackController extends ChangeNotifier {
     return _startPlayback(resumePosition: resumePosition);
   }
 
+  final _nativeFailureEvidence = NativeFailureEvidence();
+  NativeStartupStep _nativeStartupStep = NativeStartupStep.idle;
+
+  void _recordNativeFailure(String message, {required bool fromLog}) {
+    final event = _nativeFailureEvidence.record(
+      message: message,
+      fromLog: fromLog,
+      generation: _generation,
+      inputEpoch: _subtitleInputEpoch,
+      phase: _state.phase,
+      step: _nativeStartupStep,
+      lifecycleSuspended: _lifecycleSuspended,
+    );
+    if (event != null) {
+      DiagnosticLog.instance.warning('player', event);
+    }
+  }
+
   Future<void> _startPlayback({
     Duration? resumePosition,
     bool forceTranscodeInitially = false,
@@ -431,6 +450,7 @@ class PlaybackController extends ChangeNotifier {
       'recoveryExecuted': continueReporting,
     });
     final token = _advanceGeneration();
+    _nativeStartupStep = NativeStartupStep.binding;
     await _bindEngine(token);
     _throwIfStale(token);
     var currentOpeningStatusMessage = openingStatusMessage;
@@ -457,6 +477,7 @@ class PlaybackController extends ChangeNotifier {
       PlaybackPlan? plan;
       var engineOpenTimedOut = false;
       try {
+        _nativeStartupStep = NativeStartupStep.resolving;
         plan =
             preparedPlan ??
             await resolver.resolve(
@@ -480,6 +501,7 @@ class PlaybackController extends ChangeNotifier {
         final resume = _resumePositionForPlan(plan, resumePosition);
         _selectedMediaSourceId = plan.mediaSourceId;
         if (!continueReporting) reporter.activate(plan);
+        _nativeStartupStep = NativeStartupStep.cacheSetup;
         plan = await _prepareCacheForPlan(plan, token, readAheadAnchor: resume);
         reporter.updatePlan(plan);
         _throwIfStale(token);
@@ -500,6 +522,7 @@ class PlaybackController extends ChangeNotifier {
             statusMessage: currentOpeningStatusMessage,
           ),
         );
+        _nativeStartupStep = NativeStartupStep.engineOpen;
         _prepareReadyWait();
         final openingIntentRevision = _playbackIntentRevision;
         final openingPlaying =
@@ -556,16 +579,20 @@ class PlaybackController extends ChangeNotifier {
             statusMessage: currentOpeningStatusMessage,
           ),
         );
+        _nativeStartupStep = NativeStartupStep.waitingReady;
         await _waitUntilReady(token, plan);
         _throwIfStale(token);
+        _nativeStartupStep = NativeStartupStep.tracks;
         if (plan.method == PlayMethod.directPlay) {
           await _applySelectedDirectPlayTracks(plan, token);
         } else {
           await _applyInitialSubtitles(plan, token, engine);
         }
+        _nativeStartupStep = NativeStartupStep.presentation;
         await _restoreEnginePresentation(token);
 
         if (resume > Duration.zero) {
+          _nativeStartupStep = NativeStartupStep.resumeSeek;
           final target = plan.duration == null
               ? _clampToDuration(resume)
               : resume;
@@ -595,6 +622,7 @@ class PlaybackController extends ChangeNotifier {
 
         // Explicit requests made while stop/open/seek was in flight belong to
         // this item, not to the obsolete input. Apply them only after preparation.
+        _nativeStartupStep = NativeStartupStep.playbackIntent;
         _inputAcceptsPlaybackCommands = true;
         if (resume == Duration.zero &&
             openingIntentRevision == _playbackIntentRevision) {
@@ -639,6 +667,7 @@ class PlaybackController extends ChangeNotifier {
           'continuingCycle': continueReporting,
           'recoveryExecuted': continueReporting,
         });
+        _nativeStartupStep = NativeStartupStep.ready;
         DiagnosticLog.instance.info(
           'player',
           'event=playback_ready method=${plan.method.serverValue}',
@@ -649,13 +678,17 @@ class PlaybackController extends ChangeNotifier {
         return;
       } catch (error) {
         if (_isCurrent(token)) {
+          _recordNativeFailure(error.toString(), fromLog: false);
+          _nativeStartupStep = NativeStartupStep.cleanup;
           _inputAcceptsPlaybackCommands = false;
           _appliedPlaybackIntentRevision = -1;
         }
         // A logical timeout does not mean the native operation has settled.
         // Neither optimization fallback nor transcode may race that operation.
         engineOpenTimedOut =
-            engineOpenTimedOut || error is PlaybackNativeOperationTimedOut;
+            engineOpenTimedOut ||
+            error is PlaybackNativeOperationTimedOut ||
+            error is PlaybackCacheProbeUnsettled;
         if (error is SourceInputException) {
           (error.failure ??
                   SourceInputFailure(
@@ -931,6 +964,8 @@ class PlaybackController extends ChangeNotifier {
       capabilities = cacheEngine == null
           ? PlaybackCacheEngineCapabilities.unsupported()
           : await cacheEngine.probeCacheCapabilities();
+    } on PlaybackCacheProbeUnsettled {
+      rethrow;
     } catch (_) {
       capabilities = PlaybackCacheEngineCapabilities.unsupported();
     }
@@ -2159,6 +2194,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _handleEngineError(String error, {required int engineGeneration}) {
+    _recordNativeFailure(error, fromLog: false);
     if (_handleSubtitleDecoderError(error)) return;
     if (_lastSourceFailure != null) return;
     final fingerprint = _approvedRecoveryFingerprint(error);
@@ -2212,6 +2248,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _handleEngineLog(String log) {
+    _recordNativeFailure(log, fromLog: true);
     if (_handleSubtitleDecoderError(log)) return;
     if (_lastSourceFailure != null) return;
     final lower = log.toLowerCase();

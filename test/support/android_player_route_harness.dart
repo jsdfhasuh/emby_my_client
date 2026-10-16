@@ -279,7 +279,10 @@ Future<void> main() async {
           Navigator.of(element).pop();
           await Future<void>.delayed(const Duration(milliseconds: 400));
         }
-        await _tapKey('player-back');
+        final errorReturn = _elements(
+          (w) => w.key == const ValueKey('player-error-back'),
+        ).isNotEmpty;
+        await _tapKey(errorReturn ? 'player-error-back' : 'player-back');
         await _until(
           () => _elements((w) => w is PlayerScreen).isEmpty,
           'failure cleanup',
