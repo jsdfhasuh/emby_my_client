@@ -37,6 +37,21 @@ void main() {
           expect(engine.subtitleSelections, [null]);
         }
         await _subtitles(tester);
+        expect(
+          _diagnostics
+              .where((line) => line.contains('event=playback_options'))
+              .map((line) => RegExp(r'phase=([a-z_]+)').firstMatch(line)![1])
+              .toList()
+              .reversed
+              .take(3)
+              .toList()
+              .reversed,
+          ['entry', 'mapping', 'push_requested'],
+        );
+        expect(
+          _diagnostics.lastWhere((line) => line.contains('phase=entry')),
+          contains('open=false released=false controller=true plan=true'),
+        );
         final initialState = tester
             .widget<PlaybackSubtitleOptions>(
               find.byType(PlaybackSubtitleOptions),
@@ -53,6 +68,12 @@ void main() {
         await tester.tap(row);
         await _flush(tester);
         expect(engine.subtitleSelections, [null, '1']);
+        expect(
+          _diagnostics.lastWhere(
+            (line) => line.contains('event=playback_options'),
+          ),
+          contains('phase=closed reason=none mounted=true open=false'),
+        );
         expect(find.byType(PlayerScreen), findsOneWidget);
         expect(engine.disposals, 0);
         await _close(tester);

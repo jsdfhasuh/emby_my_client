@@ -3,6 +3,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage.dart';
 import 'package:emby_my_client/playback/cache/playback_cache_storage_scope.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
@@ -31,11 +32,41 @@ final _eventClock = Stopwatch()..start();
 final _interactions = <Map<String, Object?>>[];
 final _routeEvents = <Map<String, Object?>>[];
 final _gestureTrace = <Map<String, Object?>>[];
+final _menuTrace = <Map<String, Object?>>[];
+final _callbackErrors = <Map<String, Object?>>[];
 final _routeObserver = _RouteObserver();
 const _traceGestures = bool.fromEnvironment('SUBTITLE_ROUTE_TRACE');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Preserve framework/platform error handling. The artifact stores only type
+  // and allowlisted source frames, never an exception message or external URL.
+  final originalFlutterError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    _recordCallbackError('flutter', details.exception, details.stack);
+    originalFlutterError?.call(details);
+  };
+  final dispatcher = WidgetsBinding.instance.platformDispatcher;
+  final originalPlatformError = dispatcher.onError;
+  dispatcher.onError = (error, stack) {
+    _recordCallbackError('platform', error, stack);
+    return originalPlatformError?.call(error, stack) ?? false;
+  };
+  DiagnosticLog.instance.setTestSink((line) {
+    // This full match admits only the fixed production menu-state record.
+    final match = RegExp(
+      r'event=playback_options phase=[a-z_]+ reason=[a-z_]+ '
+      r'mounted=(?:true|false) open=(?:true|false) released=(?:true|false) '
+      r'controller=(?:true|false) plan=(?:true|false) current=(?:true|false) '
+      r'playback=[A-Za-z]+ epoch=-?\d+(?:\r?\n)?$',
+    ).firstMatch(line);
+    if (match == null) return;
+    _menuTrace.add({
+      'atUs': _eventClock.elapsedMicroseconds,
+      'state': match.group(0)!.trim(),
+    });
+    if (_menuTrace.length > 512) _menuTrace.removeAt(0);
+  });
   // This generated-media debug target keeps callback evidence even when the
   // console trace is off. Never filter unrelated application/native messages.
   final originalDebugPrint = debugPrint;
@@ -282,11 +313,16 @@ Future<void> main() async {
       'nativePixelGate': 'SEPARATE_REQUIRED',
       'verifiedStages': _reported,
       'cleanup': cleanup,
+      'menuTrace': _menuTrace,
+      'callbackErrors': _callbackErrors,
       if (failure != null) 'error': '$failure',
       if (failureStack != null) 'stack': '$failureStack',
     });
   } finally {
     _client.close(force: true);
+    DiagnosticLog.instance.setTestSink(null);
+    FlutterError.onError = originalFlutterError;
+    dispatcher.onError = originalPlatformError;
   }
 }
 
@@ -735,6 +771,22 @@ Future<void> _stage(
   _reported++;
 }
 
+void _recordCallbackError(String source, Object error, StackTrace? stack) {
+  final safeFrames = RegExp(
+    r'^#\d+\s+[^\r\n(]+\('
+    r'(?:package:(?:emby_my_client|flutter)/[A-Za-z0-9_/]+\.dart|dart:[a-z_]+)'
+    r':\d+:\d+\)',
+    multiLine: true,
+  ).allMatches('$stack').take(12).map((match) => match.group(0)).toList();
+  _callbackErrors.add({
+    'atUs': _eventClock.elapsedMicroseconds,
+    'source': source,
+    'errorType': error.runtimeType.toString(),
+    'frames': safeFrames,
+  });
+  if (_callbackErrors.length > 64) _callbackErrors.removeAt(0);
+}
+
 Future<void> _diagnostic(Object error, StackTrace stack) async {
   final view = WidgetsBinding.instance.platformDispatcher.views.first;
   final screen = Offset.zero & (view.physicalSize / view.devicePixelRatio);
@@ -804,6 +856,8 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
       'devicePixelRatio': view.devicePixelRatio,
       'routeEvents': _routeEvents,
       'gestureTrace': _gestureTrace,
+      'menuTrace': _menuTrace,
+      'callbackErrors': _callbackErrors,
       'interactions': _interactions,
       'nodes': nodes,
     }),

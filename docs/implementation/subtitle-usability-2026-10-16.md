@@ -448,6 +448,86 @@ Failure diagnostics additionally retain a bounded 512-message gesture/callback
 history, without discarding unrelated application or native messages. This local
 acceptance does not replace the pending exact-commit CI and Release checks.
 
+### Cross-build first-failure timeline
+
+The three original failures use the same 15-second deadline and 40-millisecond
+polling interval. Opening waits for a mounted `BottomSheet`; closing waits for
+that element to disappear. A native sid change never satisfies either predicate.
+The complete extracted events and source/evidence hashes are retained externally
+in regression/build197/cross-build-first-failure-timeline.json. Times below are
+relative to each harness process, not shared wall-clock timestamps.
+
+| Original run | Actual target and gesture | Route evidence | Playback / scrolling evidence | Missing causal evidence |
+| --- | --- | --- | --- | --- |
+| 195, 9/34 | Options target hit after native 1 selection; no measured pointer duration or callback trace | No route observer existed; failure screenshot has no sheet | Native pause/EOF and scroll activity were not recorded | Whether the child callback ran and which production guard applied |
+| 196, 10/34 | BETA row hit at 44.550279 s; pointer down/up 44.550427–44.555986 s | Modal pushed at 42.969780 s; no following pop before timeout | Tap-time row enablement, native pause/EOF and scroll activity were not recorded | Whether the selection callback ran and whether its captured input/source remained current |
+| 197, 1/34 | Options hit at 6.668764 s; pointer down/up 6.685972–6.703147 s; child recognizer onTap at 7.047133 s | Only initial and player routes pushed; no modal push or player pop | UI/Dart/native paused, position 0/12 s, no EOF; no scroll ancestors | Whether InkWell forwarded to the production method, and the method's guard values |
+
+The controlled long-press vulnerability and the separate local stale-pause/EOF
+failure were independently demonstrated and corrected. Neither proves the
+original 195 or 196 cause. Build 197's recorded pause and route state exclude
+that local EOF explanation for its occurrence. The recognizer's onTap trace is
+not itself a production-method entry record. No further publication is accepted
+on the strength of those earlier local controls alone.
+
+### Build 197 first options-open failure
+
+Commit c7297ad213e420d715bb5cdf4b07cb848fdf4cf1 triggered run 38897403987,
+attempt 1. The full Linux suite passed **1916 tests**, release preparation passed
+**32 tests**, Android verifier discovery passed **40 tests**, and cache safety
+passed **29 tests**. Native and position pixels and all **32 Flutter texture
+frames** passed. Production navigation failed after **1 of 34 stages**, when the
+first online player options sheet did not open.
+
+The new evidence excludes the earlier local EOF failure for this occurrence:
+native pause=yes, UI and Dart playing=false, no completion/end-of-file state,
+and position zero of a 12-second fixture. The enabled options button received
+a successful hit and a 17.175-millisecond pointer pair. Gesture arbitration
+selected its child tap recognizer and recorded its onTap callback. No modal
+route push or player route pop followed. The screenshot shows the paused player
+with its controls visible and no bottom sheet. The cause remains under
+investigation; successful callback dispatch alone does not prove that the
+production method passed its state guards or completed navigation.
+
+All seven application cleanup fields are true, and the emulator wrapper returned
+failure normally. iPadOS and publication were skipped; no build-197 Release was
+created. Raw logs, exact run metadata, gesture/route diagnostics and screenshots
+remain under release/build-197-first-failure. The earlier open, close and local
+EOF failures remain separate; no failed workflow was rerun to obtain a pass.
+
+One predeclared follow-up added only observation: fixed menu entry/guard/mapping/
+push/close fields, plus callback error types and allowlisted source frames while
+preserving the original Flutter/platform handlers. It records no media URLs,
+IDs or exception messages. The focused lifecycle check passed once and analysis
+passed. No playback, subtitle, gesture or wait behavior was changed.
+
+That single serial diagnostic passed **32 texture frames**, then failed at
+**17 of 34 route stages**. Both online cycles opened and closed their sheets
+normally. On the first offline player, the pause helper timed out waiting for
+playing=true even though UI, Dart and native state already agreed on paused at
+zero of 12 seconds, with no EOF or completion. The final real touch was the
+download play row; no player-video or play/pause touch followed, so an accidental
+control tap is not established. The cause of the initial offline pause is also
+unproven because startup/lifecycle events were not recorded. No callback errors
+were recorded; all seven cleanup fields are true. This distinct failure remains preserved in
+regression/build197/serial-diagnostic-first. It is not an acceptance run or a
+reproduction of build 197's first options-open failure, and no repeat was run.
+
+The original build 197 cause remains unestablished. Its existing artifact did
+not capture the application method entry or callback exceptions, and that past
+run cannot provide the missing observations retroactively. At the end of that
+local investigation, the diagnosis-only changes remained uncommitted, remote
+main was c7297ad, and the latest published Release was build 192.
+
+The next controlled run carries these reviewed, redacted diagnostics into the
+same existing CI workflow to obtain the missing evidence. It is a new diagnostic
+commit, not an unchanged retry or a claimed repair of the historical failure.
+Navigation, subtitle behavior, fixtures, deadlines, stage counts and pixel gates
+are unchanged. The initial offline-pause failure is retained without a speculative
+behavior fix. A passing run would not establish the original 195-197 cause;
+any actual Release still requires exact-commit CI, payload integrity, signing,
+version and historical-updater verification before being accepted.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,

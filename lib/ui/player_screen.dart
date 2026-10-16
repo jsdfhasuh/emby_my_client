@@ -1400,11 +1400,43 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  // Fixed state fields only: this trace must never contain a media URL or ID.
+  void _recordPlaybackOptions(String phase, {String reason = 'none'}) {
+    try {
+      final controller = _playbackController;
+      DiagnosticLog.instance.info(
+        'player',
+        'event=playback_options phase=$phase reason=$reason '
+            'mounted=$mounted open=$_playbackOptionsOpen '
+            'released=$_playbackResourcesReleased '
+            'controller=${controller != null} plan=${controller?.state.plan != null} '
+            'current=${mounted && ModalRoute.of(context)?.isCurrent == true} '
+            'playback=${controller?.state.phase.name ?? 'none'} '
+            'epoch=${controller?.subtitleInputEpoch ?? -1}',
+      );
+    } catch (_) {
+      // Observability must not change the callback or route lifecycle.
+    }
+  }
+
   Future<void> _showPlaybackOptions({int initialTab = 0}) async {
-    if (_playbackOptionsOpen || _playbackResourcesReleased) return;
+    _recordPlaybackOptions('entry');
+    if (_playbackOptionsOpen || _playbackResourcesReleased) {
+      _recordPlaybackOptions(
+        'blocked',
+        reason: _playbackOptionsOpen ? 'already_open' : 'resources_released',
+      );
+      return;
+    }
     final controller = _playbackController;
     final plan = controller?.state.plan;
-    if (controller == null || plan == null) return;
+    if (controller == null || plan == null) {
+      _recordPlaybackOptions(
+        'blocked',
+        reason: controller == null ? 'no_controller' : 'no_plan',
+      );
+      return;
+    }
     final optionsInputEpoch = controller.subtitleInputEpoch;
     final optionsMediaSourceId = plan.mediaSourceId;
     _playbackOptionsOpen = true;
@@ -1421,16 +1453,20 @@ class _PlayerScreenState extends State<PlayerScreen>
           controller.subtitleInputEpoch != optionsInputEpoch ||
           controller.state.plan?.mediaSourceId != optionsMediaSourceId ||
           ModalRoute.of(sheetContext)?.isCurrent != true) {
+        _recordPlaybackOptions('selection_blocked');
         return false;
       }
+      _recordPlaybackOptions('selection_pop');
       selectionAccepted = true;
       Navigator.of(sheetContext).pop();
       return true;
     }
 
+    _recordPlaybackOptions('mapping');
     final audioTracks = _trackMapper.fromPlan(plan, 'audio');
     final subtitleTracks = _trackMapper.fromPlan(plan, 'subtitle');
     try {
+      _recordPlaybackOptions('push_requested');
       await showModalBottomSheet<void>(
         context: context,
         backgroundColor: const Color(0xFF171A1C),
@@ -1513,6 +1549,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
     } finally {
       _playbackOptionsOpen = false;
+      _recordPlaybackOptions('closed');
       if (mounted && !_playbackResourcesReleased) _restartControlsTimer();
     }
   }
