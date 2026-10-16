@@ -721,6 +721,65 @@ The emulator was stopped without wiping data. Source/APK hashes, first logs,
 JSON and screenshots are retained in regression/build200. Physical phones,
 private films and iOS subtitle rendering remain untested.
 
+### Build 201 first failure: startup diagnostics masked the primary error
+
+Commit 9bf6b732897bdb7a7f64b284548df69a159af61e triggered automatic run
+38915362751, attempt 1. Format and analysis passed. The full suite reported
+**1927 passed and 1 failed**: subtitle_delivery_native_test.dart's http-native
+case. Android build/render checks, iPadOS and publication were not reached.
+The complete 990,051-byte job log and exact run metadata are retained in
+release/build-201-first-failure. No APK or UI artifact exists for this run.
+
+The exception was `[Player] has been disposed` at the test's line 136, inside
+the timeout description passed to _until. That description ran only after the
+200 checks at 25 ms intervals failed to observe a non-applying subtitle state.
+The preceding file-native test passed at 14:29:13.180925 UTC and this failure
+was reported at 14:29:18.721115 UTC. This identifies a secondary diagnostic
+failure, not the original reason startup failed. The controller's terminal
+startup-error path sets phase failed and disposes the engine; this test has no
+engine recreator or concurrent shutdown. The original primary error, startup
+state and native error details were not retained, so the upstream cause remains
+unknown. Neither network failure, audio failure nor the earlier Android memory
+pressure is established by this evidence.
+
+The follow-up will require ready state immediately after start and retain safe
+startup/controller/engine observations before any disposed-handle read. It will
+preserve the existing sid and decoded-cue requirements and failure result.
+
+The first instrumented Linux run passed 11 tests (six diagnostic controls and
+five actual delivery modes), but its retained native events revealed a separate
+production defect: the cache capability probe wrote stream-buffer-size=1. Each
+mode recorded both a native log and an error event rejecting that value before
+opening media. The actual fixed Linux binary reports a ByteSize range of
+4096..536870912 and a 128 KiB default. The
+[mpv manual](https://mpv.io/manual/stable/#options-stream-buffer-size) specifies
+byte units; the [reference source](https://github.com/mpv-player/mpv/blob/v0.39.0/stream/stream.c#L91-L113)
+also bounds the option. A controlled range regression failed on the original
+implementation with invalidValues=[1]; an ignored-write negative case passed.
+
+The production change is limited to using **4096 bytes** for this probe. Its
+existing write/readback and default-restoration checks remain intact. Test-only
+diagnostics now require ready/live startup, retain the first 128 safe events,
+preserve original exceptions and stacks, and use cached state when describing
+failure. Native subtitle-text and overlay matching, sid checks, cue positions,
+audio configuration and wait counts are unchanged.
+
+One revised Linux run passed **28 tests**: 16 capability tests, six diagnostic
+controls, and six actual native tests. The new strict native capability test
+confirmed support, default restoration and no native errors after event-stream
+closure. All five delivery modes recorded **zero invalid-probe events**, with
+no dropped events. File/HTTP cue exercises still each recorded 11 ao/null
+illegal-state log entries; these were retained, and this result does not claim
+all native logs were error-free or that audible playback was validated. Both
+instrumented variants completed startup, so neither reproduces build 201's
+original primary startup failure. That historical cause remains unknown.
+
+Analysis passed for all five changed Dart files. The original CI failure,
+instrumented baseline, controlled negative and fixed run are retained under
+regression/build201 with source hashes and per-mode snapshots. No unchanged
+CI run was retried. Android rendering will be checked by the next exact-commit
+workflow; no new local Android run is claimed for this probe change.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

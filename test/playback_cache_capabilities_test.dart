@@ -8,6 +8,31 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'stream buffer probe respects native range and restores default',
+    () async {
+      final access = _RangeCheckedAccess();
+      final result = await PlaybackCacheCapabilityProbe(access: access).probe();
+      expect(access.invalidValues, isEmpty);
+      expect(result.supportsStreamBufferSize, isTrue);
+      expect(access.streamWrites.first, inInclusiveRange(4096, 536870912));
+      expect(access.streamWrites.first, isNot(131072));
+      expect(access.streamWrites.last, 131072);
+      expect(access.strings['stream-buffer-size'], '131072');
+      expect(result.resetValues['stream-buffer-size'], '131072');
+    },
+  );
+
+  test(
+    'stream buffer probe still rejects ignored write after restoring default',
+    () async {
+      final access = _RangeCheckedAccess()..ignoreProbe = true;
+      final result = await PlaybackCacheCapabilityProbe(access: access).probe();
+      expect(result.supportsStreamBufferSize, isFalse);
+      expect(access.strings['stream-buffer-size'], '131072');
+    },
+  );
+
+  test(
     'probe records required options, choices, resets, and strategy',
     () async {
       final access = _FakeNativeAccess.complete();
@@ -407,5 +432,29 @@ class _FakeNativeAccess implements NativePlaybackPropertyAccess {
     } else if (command.first == 'stop') {
       strings['idle-active'] = 'yes';
     }
+  }
+}
+
+// Match the real fixed Linux mpv ByteSize range, including its default.
+class _RangeCheckedAccess extends _FakeNativeAccess {
+  _RangeCheckedAccess() : super.complete() {
+    strings['option-info/stream-buffer-size/default-value'] = '131072';
+    strings['stream-buffer-size'] = '131072';
+  }
+  final streamWrites = <int>[];
+  final invalidValues = <int>[];
+  bool ignoreProbe = false;
+  @override
+  Future<void> setString(String name, String value) async {
+    if (name == 'stream-buffer-size') {
+      final bytes = int.parse(value);
+      streamWrites.add(bytes);
+      if (bytes < 4096 || bytes > 536870912) {
+        invalidValues.add(bytes);
+        throw RangeError('Native stream buffer range');
+      }
+      if (ignoreProbe && bytes != 131072) return;
+    }
+    await super.setString(name, value);
   }
 }

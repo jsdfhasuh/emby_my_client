@@ -257,7 +257,8 @@ class PlaybackCacheCapabilityProbe {
       PlaybackCacheLogicalOption.seekableCache => 'auto',
       PlaybackCacheLogicalOption.cachePause => 'yes',
       PlaybackCacheLogicalOption.cachePauseWait => '1',
-      PlaybackCacheLogicalOption.streamBufferSize => '1',
+      // mpv's stream buffer ByteSize minimum is 4096 bytes.
+      PlaybackCacheLogicalOption.streamBufferSize => '4096',
     };
   }
 }
