@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'playback/cache/playback_cache_storage_scope.dart';
 import 'playback/playback_diagnostics_test_overrides_scope.dart';
 import 'playback/playback_settings_scope.dart';
+import 'playback/subtitle_preferences_scope.dart';
 import 'state/app_controller.dart';
 import 'ui/accounts/server_accounts_screen.dart';
 import 'ui/home_shell.dart';
@@ -34,7 +35,10 @@ class EmbyClientApp extends StatelessWidget {
             controller: controller.playbackDiagnosticsTestOverrides,
             child: PlaybackSettingsRepositoryScope(
               repository: controller.playbackSettingsRepository,
-              child: child ?? const SizedBox.shrink(),
+              child: SubtitlePreferencesRepositoryScope(
+                repository: controller.subtitlePreferencesRepository,
+                child: child ?? const SizedBox.shrink(),
+              ),
             ),
           ),
         ),

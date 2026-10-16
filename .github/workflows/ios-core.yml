@@ -116,6 +116,14 @@ jobs:
             exit 1
           }
 
+      - name: Install fixed screenshot verifier dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/subtitle-python"
+          "$RUNNER_TEMP/subtitle-python/bin/python" -m pip install 'Pillow==11.3.0'
+          echo "$RUNNER_TEMP/subtitle-python/bin" >> "$GITHUB_PATH"
+
       - name: Build controlled libmpv input bridge for native host tests
         shell: bash
         run: |
@@ -182,6 +190,17 @@ jobs:
           flutter test
           test/playback_cache_evidence_test.dart
           test/playback_diagnostics_test.dart
+
+      - name: Build synthetic subtitle UI harnesses separately
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/android/harness
+          flutter build apk --debug --target-platform android-x64 --target test/support/android_bitmap_harness.dart
+          cp build/app/outputs/flutter-apk/app-debug.apk build/android/harness/subtitle-texture.apk
+          flutter build apk --debug --target-platform android-x64 --target test/support/android_player_route_harness.dart
+          cp build/app/outputs/flutter-apk/app-debug.apk build/android/harness/player-route.apk
+          # Production builds below replace Flutter outputs before publication.
 
       - name: Derive application version
         run: python3 scripts/release/build_version.py --run-number "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
@@ -272,6 +291,25 @@ jobs:
           ANDROID_NDK_HOME="$android_sdk_root/ndk/$ANDROID_NDK_VERSION" \
             bash scripts/android/run_subtitle_render_probe.sh \
               build/app/outputs/flutter-apk/app-x86_64-debug.apk
+
+      - name: Verify Android API 33 Flutter texture and production player routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/android/run_flutter_subtitle_gates.sh \
+            build/android/harness/subtitle-texture.apk \
+            build/android/harness/player-route.apk
+
+      - name: Upload Flutter subtitle and player route evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-subtitle-ui-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: |
+            build/android/artifacts/subtitle-texture/
+            build/android/artifacts/player-route/
+            ${{ runner.temp }}/subtitle-ui-emulator.log
 
       - name: Verify Android mpv semantic evidence safety
         shell: bash

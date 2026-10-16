@@ -152,7 +152,7 @@ class ExternalSubtitleLoader {
         _reserved -= bytes.length;
         _leases.remove(lease);
         event('released');
-      });
+      }, detectedFormat: extension);
       _leases.add(lease);
       directory = null;
       event('succeeded');
@@ -191,8 +191,15 @@ class ExternalSubtitleLoader {
 }
 
 class SubtitleFileLease {
-  SubtitleFileLease(this.file, this._onRelease);
+  SubtitleFileLease(
+    this.file,
+    this._onRelease, {
+    this.detectedFormat = 'unknown',
+  });
   final File file;
+
+  /// Content-sniffed format, independent of URL extension or server metadata.
+  final String detectedFormat;
   final void Function() _onRelease;
   bool attached = false;
   bool _released = false;

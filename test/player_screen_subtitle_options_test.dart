@@ -56,9 +56,10 @@ void main() {
     expect(selections, [3]);
   });
 
-  testWidgets('shows applied state and exposes a retry after failure', (
+  testWidgets('shows applied state, accepts confirmation and exposes retry', (
     tester,
   ) async {
+    final confirmations = <int?>[];
     final appliedState = const PlaybackState(
       appliedSubtitleStreamIndex: 3,
       subtitleSelectionStatus: SubtitleSelectionStatus.appliedEmbedded,
@@ -69,7 +70,7 @@ void main() {
           body: PlaybackSubtitleOptions(
             tracks: const [track],
             playbackState: appliedState,
-            onSelect: (_) {},
+            onSelect: confirmations.add,
           ),
         ),
       ),
@@ -78,8 +79,10 @@ void main() {
     expect(find.byIcon(Icons.check), findsOneWidget);
     expect(
       tester.widget<ListTile>(find.widgetWithText(ListTile, 'Chinese')).onTap,
-      isNull,
+      isNotNull,
     );
+    await tester.tap(find.widgetWithText(ListTile, 'Chinese'));
+    expect(confirmations, [3]);
 
     final selections = <int?>[];
     final failedState = const PlaybackState(

@@ -177,39 +177,81 @@ class BrowseCacheState extends ChangeNotifier {
   bool offline = false;
   bool authenticationRequired = false;
   bool storageUnavailable = false;
-  bool missingPage = false;
   bool _closed = false;
+  int _nextRequest = 0;
+  int _lastConnectivityRequest = 0;
+  int _recoveryRevision = 0;
   final Map<String, DateTime> _stale = {};
+  final Set<String> _missing = {};
+
+  int beginRequest() => ++_nextRequest;
+  int get recoveryRevision => _recoveryRevision;
+  bool get missingPage => _missing.isNotEmpty;
+  bool get needsRecovery => offline || hasStalePages || missingPage;
   DateTime? get cachedAt => _stale.values.isEmpty
       ? null
       : _stale.values.reduce((a, b) => a.isBefore(b) ? a : b);
   bool get hasStalePages => _stale.isNotEmpty;
 
+  bool _acceptConnectivity(int? request) {
+    final order = request ?? beginRequest();
+    if (order < _lastConnectivityRequest || authenticationRequired) {
+      return false;
+    }
+    _lastConnectivityRequest = order;
+    return true;
+  }
+
   void cached(
     String key,
     BrowseSnapshot? snapshot, {
     required bool disconnected,
+    int? request,
   }) {
-    if (_closed) return;
-    offline = disconnected;
-    missingPage = snapshot == null;
-    if (snapshot != null) _stale[key] = snapshot.updatedAt;
+    if (_closed || authenticationRequired) return;
+    final current = _acceptConnectivity(request);
+    if (current) {
+      offline = disconnected;
+    } else if (disconnected && !offline) {
+      // A request that began before recovery can fail late. Keep the newer
+      // online evidence and retry the page whose response was still stale.
+      _recoveryRevision++;
+    }
+    if (snapshot == null) {
+      _missing.add(key);
+      _stale.remove(key);
+    } else {
+      _missing.remove(key);
+      _stale[key] = snapshot.updatedAt;
+    }
     notifyListeners();
   }
 
-  void online(String key) {
-    if (_closed) return;
-    offline = false;
-    missingPage = false;
+  void online(String key, {int? request}) {
+    if (_closed || authenticationRequired) return;
+    final current = _acceptConnectivity(request);
+    final recovered = current && offline;
+    if (current) offline = false;
+    _missing.remove(key);
     _stale.remove(key);
+    if (recovered) _recoveryRevision++;
+    notifyListeners();
+  }
+
+  /// A reconnect is a reason to retry, not proof that a cached page is fresh.
+  void requestRecovery() {
+    if (_closed || authenticationRequired || !needsRecovery) return;
+    _recoveryRevision++;
     notifyListeners();
   }
 
   void authFailed() {
     if (_closed) return;
     authenticationRequired = true;
+    _lastConnectivityRequest = beginRequest();
     offline = false;
     _stale.clear();
+    _missing.clear();
     notifyListeners();
   }
 

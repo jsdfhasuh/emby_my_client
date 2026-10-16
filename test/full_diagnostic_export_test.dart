@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:emby_my_client/core/diagnostic_log.dart';
 import 'package:emby_my_client/core/full_diagnostic_export.dart';
+import 'package:emby_my_client/core/playback_diagnostic_snapshot.dart';
 import 'package:emby_my_client/core/safe_diagnostic_export.dart';
 import 'package:emby_my_client/ui/diagnostic_log_screen.dart';
 import 'package:emby_my_client/ui/full_diagnostic_export_screen.dart';
@@ -53,12 +54,13 @@ deviceId=fixture-device http://192.0.2.10:8096 Session JSON {"accessToken":"fixt
 path=/Users/fixture/Library/Containers/app/data
 ''').buildReport(generatedAtUtc: DateTime.utc(2026, 8, 7));
 
-    expect(report.content, contains('fixture-password'));
+    expect(report.content, isNot(contains('fixture-password')));
     expect(report.content, contains('fixture-user'));
     expect(report.content, isNot(contains('fixture-token')));
     expect(report.content, contains('192.0.2.10'));
     expect(report.content, contains('/Users/fixture'));
-    expect(report.content, contains('Authorization: Basic'));
+    expect(report.content, contains('Authorization: <redacted>'));
+    expect(report.content, contains('credentialRedaction=credentials-v1'));
   });
 
   test(
@@ -248,6 +250,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpWidget(
       MaterialApp(
         home: FullDiagnosticExportScreen(
+          initialScope: DiagnosticLogScope.all,
           service: _service('event=player_route_enter'),
           shareGateway: gateway,
           capabilities: PlatformCapabilities.ipad,
@@ -278,6 +281,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpWidget(
       MaterialApp(
         home: FullDiagnosticExportScreen(
+          initialScope: DiagnosticLogScope.all,
           service: _service(log),
           shareGateway: gateway,
           capabilities: PlatformCapabilities.ipad,
@@ -321,6 +325,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpWidget(
       MaterialApp(
         home: FullDiagnosticExportScreen(
+          initialScope: DiagnosticLogScope.all,
           service: _service(log),
           shareGateway: _CapturingGateway(),
           capabilities: PlatformCapabilities.ipad,
@@ -351,6 +356,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpWidget(
       MaterialApp(
         home: FullDiagnosticExportScreen(
+          initialScope: DiagnosticLogScope.all,
           service: _service('event=player_route_enter'),
           shareGateway: gateway,
           capabilities: PlatformCapabilities.ipad,
@@ -370,6 +376,7 @@ request headers: {"Authorization":"Bearer fixture"}
     await tester.pumpWidget(
       MaterialApp(
         home: FullDiagnosticExportScreen(
+          initialScope: DiagnosticLogScope.all,
           service: _service('event=player_route_enter'),
           shareGateway: gateway,
           capabilities: PlatformCapabilities.ipad,
@@ -399,7 +406,7 @@ request headers: {"Authorization":"Bearer fixture"}
       ),
     );
     await tester.pump();
-    expect(find.byTooltip('导出完整调试日志'), findsOneWidget);
+    expect(find.byTooltip('导出本次播放诊断'), findsOneWidget);
   });
 }
 

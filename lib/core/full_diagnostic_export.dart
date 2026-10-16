@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'diagnostic_log.dart';
+import 'playback_diagnostic_snapshot.dart';
 import 'export_credential_redactor.dart';
 import 'token_redactor.dart';
 import 'safe_diagnostic_export.dart';
@@ -88,6 +89,9 @@ class FullDiagnosticReport {
     required this.buildNumber,
     required this.truncated,
     required this.lineCount,
+    this.scope = DiagnosticLogScope.all,
+    this.playbackTraceId,
+    this.summary = const PlaybackDiagnosticSummary(),
   });
 
   final String filename;
@@ -97,6 +101,13 @@ class FullDiagnosticReport {
   final String buildNumber;
   final bool truncated;
   final int lineCount;
+  final DiagnosticLogScope scope;
+  final String? playbackTraceId;
+  final PlaybackDiagnosticSummary summary;
+
+  String get associationLabel => scope == DiagnosticLogScope.all
+      ? '范围：全部日志'
+      : '播放标识：${playbackTraceId ?? '暂无播放会话'}';
 }
 
 class FullDiagnosticExportService {
@@ -125,17 +136,31 @@ class FullDiagnosticExportService {
   @visibleForTesting
   static int get maxBytesForTesting => _maxFullDiagnosticBytes;
 
-  Future<FullDiagnosticReport> buildReport({DateTime? generatedAtUtc}) async {
+  Future<FullDiagnosticReport> buildReport({
+    DateTime? generatedAtUtc,
+    DiagnosticLogScope scope = DiagnosticLogScope.all,
+    String? playbackTraceId,
+    bool resolveLatest = true,
+    PlaybackDiagnosticSnapshot? snapshot,
+  }) async {
     final metadata = await _readMetadata();
     _validateMetadata(metadata);
 
-    final rawLog = await _readRawLog();
-    final sourceTruncated = rawLog.contains(DiagnosticLog.truncationMarker);
+    late final PlaybackDiagnosticSnapshot selection;
+    final rawLog = snapshot == null ? await _readRawLog() : null;
     late final String redactedLog;
     try {
-      redactedLog = metadata.platform == 'Android'
-          ? ExportCredentialRedactor.redact(rawLog)
-          : FullDiagnosticRedactor.redact(DiagnosticLog.redact(rawLog));
+      selection =
+          snapshot ??
+          PlaybackDiagnosticSnapshot.capture(
+            rawLog!,
+            scope: scope,
+            playbackTraceId: playbackTraceId,
+            resolveLatest: resolveLatest,
+          );
+      // Keep the v1 native envelope; its iPadOS token-only marker is a legacy
+      // minimum. The hashed body states the stronger credentials-v1 policy.
+      redactedLog = ExportCredentialRedactor.redact(selection.content);
     } on FullDiagnosticExportException {
       rethrow;
     } catch (_) {
@@ -147,7 +172,8 @@ class FullDiagnosticExportService {
     final lines = _completeLines(redactedLog);
     final timestamp = (generatedAtUtc ?? DateTime.now()).toUtc();
     var firstLine = 0;
-    var bodyBytes = _bodyByteLength(lines);
+    final marker = '${selection.exportMarker}\n';
+    var bodyBytes = _bodyByteLength(lines) + utf8.encode(marker).length;
     final headerBytes = _headerByteLength(
       metadata: metadata,
       generatedAtUtc: timestamp,
@@ -164,8 +190,8 @@ class FullDiagnosticExportService {
     }
 
     final selected = lines.sublist(firstLine);
-    final truncated = sourceTruncated || firstLine > 0;
-    final body = _encodeBody(selected);
+    final truncated = selection.sourceTruncated || firstLine > 0;
+    final body = '$marker${_encodeBody(selected)}';
     final content = _encodeReport(
       metadata: metadata,
       generatedAtUtc: timestamp,
@@ -182,6 +208,9 @@ class FullDiagnosticExportService {
       buildNumber: metadata.buildNumber,
       truncated: truncated,
       lineCount: selected.length,
+      scope: selection.scope,
+      playbackTraceId: selection.playbackTraceId,
+      summary: selection.summary,
     );
   }
 
@@ -332,9 +361,7 @@ class FullDiagnosticExportService {
         !{'true', 'false'}.contains(header['truncated']) ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(header['sha256']!) ||
         sha256.convert(utf8.encode(body)).toString() != header['sha256'] ||
-        (header['platform'] == 'Android'
-            ? ExportCredentialRedactor.redact(body) != body
-            : FullDiagnosticRedactor.containsSensitiveContent(body))) {
+        ExportCredentialRedactor.redact(body) != body) {
       throw const FullDiagnosticExportException(
         FullDiagnosticExportException.unsafe,
       );

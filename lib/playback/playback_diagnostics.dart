@@ -52,10 +52,12 @@ enum PlaybackDiagnosticEvent {
   seekRecoveryStarted('playback_seek_recovery_started'),
   seekRecoverySucceeded('playback_seek_recovery_succeeded'),
   seekRecoveryFailed('playback_seek_recovery_failed'),
+  engineError('playback_engine_error'),
   engineErrorSuppressed('playback_engine_error_suppressed'),
   subtitleApplyRequested('playback_subtitle_apply_requested'),
   subtitleApplied('playback_subtitle_applied'),
   subtitleDelivery('playback_subtitle_delivery'),
+  subtitleContentDetected('playback_subtitle_content_detected'),
   subtitleDisabled('playback_subtitle_disabled'),
   subtitleApplyFailed('playback_subtitle_apply_failed'),
   subtitleMappingFailed('playback_subtitle_mapping_failed'),
@@ -411,6 +413,32 @@ class PlaybackDiagnostics {
     );
   }
 
+  /// A fixed error classification belongs to the playback trace; native text,
+  /// URLs, paths and codec names are never copied into this event.
+  void engineError({
+    required String fingerprint,
+    required int generation,
+    required bool duringOpen,
+  }) {
+    const allowed = {
+      'seek_failed',
+      'partial_file',
+      'input_output_error',
+      'packet_read_error',
+      'http-inflate',
+      'log-overflow',
+      'dns-resolution',
+      'http-open',
+      'other',
+    };
+    _emit(PlaybackDiagnosticEvent.engineError, [
+      'fingerprint=${allowed.contains(fingerprint) ? fingerprint : 'other'}',
+      'generation=${generation.clamp(0, 999999)}',
+      'stage=${duringOpen ? 'native_open' : 'native_read'}',
+      'outcome=failed',
+    ], level: PlaybackDiagnosticLevel.warning);
+  }
+
   void subtitleApplyRequested({
     required String selectionSource,
     required String subtitleKind,
@@ -434,14 +462,35 @@ class PlaybackDiagnostics {
     required String subtitleKind,
     required int? streamIndex,
     required int generation,
+    String? nativeCodec,
+    String? nativeId,
   }) {
     _emit(PlaybackDiagnosticEvent.subtitleApplied, [
       'selectionSource=$selectionSource',
       'subtitleKind=$subtitleKind',
       'streamIndex=${streamIndex ?? 'none'}',
       'generation=$generation',
+      if (nativeCodec != null) 'nativeFormat=${_nativeCodec(nativeCodec).name}',
+      if (nativeId != null)
+        'nativeId=${RegExp(r'^(?:0|[1-9][0-9]{0,3}|auto|no)$').hasMatch(nativeId) ? nativeId : 'unavailable'}',
     ]);
   }
+
+  // Keep the same closed codec vocabulary used by track mapping evidence.
+  static TrackCodecLabel _nativeCodec(String value) =>
+      switch (value.trim().toLowerCase()) {
+        'ass' => TrackCodecLabel.ass,
+        'ssa' => TrackCodecLabel.ssa,
+        'srt' => TrackCodecLabel.srt,
+        'subrip' => TrackCodecLabel.subrip,
+        'pgs' => TrackCodecLabel.pgs,
+        'hdmv_pgs_subtitle' => TrackCodecLabel.hdmvPgsSubtitle,
+        'dvd_subtitle' => TrackCodecLabel.dvdSubtitle,
+        'vtt' || 'webvtt' => TrackCodecLabel.webvtt,
+        'mov_text' => TrackCodecLabel.movText,
+        'text' => TrackCodecLabel.text,
+        _ => TrackCodecLabel.other,
+      };
 
   void subtitleDeliveryResolved(
     PlaybackTrack track,
@@ -449,8 +498,24 @@ class PlaybackDiagnostics {
   ) {
     _emit(PlaybackDiagnosticEvent.subtitleDelivery, [
       'delivery=${delivery.name}',
+      'streamIndex=${track.index}',
       'format=${track.safeFormat.name}',
       'urlPresent=${track.deliveryUrl?.isNotEmpty == true}',
+    ]);
+  }
+
+  void subtitleContentDetected({
+    required String format,
+    required int streamIndex,
+    required int generation,
+  }) {
+    final safeFormat = const {'ass', 'srt', 'vtt'}.contains(format)
+        ? format
+        : 'unknown';
+    _emit(PlaybackDiagnosticEvent.subtitleContentDetected, [
+      'format=$safeFormat',
+      'streamIndex=$streamIndex',
+      'generation=$generation',
     ]);
   }
 
@@ -625,7 +690,15 @@ class PlaybackDiagnostics {
     List<String> fields, {
     PlaybackDiagnosticLevel level = PlaybackDiagnosticLevel.info,
   }) {
-    if (event.code.startsWith('playback_subtitle_')) {
+    if (const {
+      PlaybackDiagnosticEvent.subtitleApplyRequested,
+      PlaybackDiagnosticEvent.subtitleApplied,
+      PlaybackDiagnosticEvent.subtitleDisabled,
+      PlaybackDiagnosticEvent.subtitleApplyFailed,
+      PlaybackDiagnosticEvent.subtitleMappingFailed,
+      PlaybackDiagnosticEvent.subtitleApplyCancelled,
+      PlaybackDiagnosticEvent.subtitleApplySkippedStale,
+    }.contains(event)) {
       final generationField = fields
           .where((f) => f.startsWith('generation='))
           .firstOrNull;
@@ -645,7 +718,8 @@ class PlaybackDiagnostics {
       });
     }
     final suffix = fields.isEmpty ? '' : ' ${fields.join(' ')}';
-    _writer(level, 'playback', 'event=${event.code}$suffix');
+    final association = trace == null ? '' : ' trace=${trace!.id}';
+    _writer(level, 'playback', 'event=${event.code}$association$suffix');
   }
 
   static void _writeToDiagnosticLog(

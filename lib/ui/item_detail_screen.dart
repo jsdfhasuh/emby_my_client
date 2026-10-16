@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
+import '../data/browse_refresh_binding.dart';
 import '../downloads/download_models.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
@@ -66,6 +67,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   ModalRoute<dynamic>? _subscribedRoute;
   int _genreNavigationGeneration = 0;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  late final BrowseRefreshBinding _browseRefresh;
   String? _seasonId;
   bool _loadFailed = false;
   bool _loading = true;
@@ -79,6 +81,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   @override
   void initState() {
     super.initState();
+    _browseRefresh = BrowseRefreshBinding(
+      state: widget.api.browseState,
+      refresh: _refreshCurrentData,
+    );
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refreshCurrentData,
@@ -109,16 +115,17 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
   void dispose() {
     _invalidateGenreNavigation(updateState: false);
     if (_subscribedRoute != null) homeShellRouteObserver.unsubscribe(this);
+    _browseRefresh.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool showLoading = true}) async {
     final generation = ++_episodesGeneration;
     setState(() {
-      _loading = true;
+      _loading = showLoading && _item == null;
+      _loadingEpisodes = _item?.isSeries == true;
       _loadFailed = false;
-      _episodesUnavailable = false;
     });
     try {
       final item = await widget.api.getItem(widget.initialItem.id);
@@ -143,6 +150,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
         _seasons = seasons;
         _episodes = episodes;
         _seasonId = seasonId;
+        _episodesUnavailable = false;
       });
     } catch (error, stackTrace) {
       _logFailure('Item detail initial load failed', error, stackTrace);
@@ -154,7 +162,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
       }
     } finally {
       if (mounted && generation == _episodesGeneration) {
-        setState(() => _loading = false);
+        setState(() {
+          _loading = false;
+          _loadingEpisodes = false;
+        });
       }
     }
   }
@@ -294,29 +305,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> with RouteAware {
     );
   }
 
-  Future<void> _refreshCurrentData() async {
-    final current = _item;
-    if (current == null) return;
-    final seasonId = _seasonId;
-    try {
-      final refreshedItem = await widget.api.getItem(current.id);
-      final refreshedEpisodes = current.isSeries
-          ? await widget.api.getEpisodes(current.id, seasonId: seasonId)
-          : _episodes;
-      if (!mounted || seasonId != _seasonId) return;
-      setState(() {
-        _item = refreshedItem;
-        _episodes = refreshedEpisodes;
-      });
-    } catch (error, stackTrace) {
-      _showOperationFailure(
-        event: 'Item detail refresh failed',
-        message: '详情刷新失败，请重试',
-        error: error,
-        stackTrace: stackTrace,
-      );
-    }
-  }
+  Future<void> _refreshCurrentData() => _load(showLoading: false);
 
   Future<void> _toggleFavorite(EmbyItem item) async {
     await _updateUserData(

@@ -7,7 +7,7 @@ fi
 apk_path="$1"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 output="$root_dir/build/android/artifacts/subtitle-render"
-mkdir -p "$output"
+python3 "$root_dir/scripts/android/verify_subtitle_position.py" prepare-output "$output"
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/emby-subtitle-render.XXXXXX")"
 remote_dir="/data/local/tmp/emby-subtitle-render-$$"
 case "$remote_dir" in /data/local/tmp/emby-subtitle-render-[0-9]*) ;; *) exit 65 ;; esac
@@ -15,6 +15,7 @@ server_pid=''
 port=''
 cleanup() {
   adb pull "$remote_dir/frames" "$output/" >/dev/null 2>&1 || true
+  adb pull "$remote_dir/position-frames" "$output/" >/dev/null 2>&1 || true
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; fi
   if [[ -n "$port" ]]; then adb reverse --remove "tcp:$port" >/dev/null 2>&1 || true; fi
   adb shell rm -rf "$remote_dir" >/dev/null 2>&1 || true
@@ -35,6 +36,11 @@ compiler="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64
   "$root_dir/scripts/android/subtitle_render_probe.c" \
   -L"$native_dir" -lmpv -ldl -Wl,--allow-shlib-undefined '-Wl,-rpath,$ORIGIN' \
   -o "$native_dir/subtitle_render_probe"
+# shellcheck disable=SC2016
+"$compiler" -std=c11 -O2 -Wall -Wextra -Werror \
+  "$root_dir/scripts/android/subtitle_position_probe.c" \
+  -L"$native_dir" -lmpv -ldl -Wl,--allow-shlib-undefined '-Wl,-rpath,$ORIGIN' \
+  -o "$native_dir/subtitle_position_probe"
 cp "$root_dir"/test/fixtures/subtitles/{synthetic-pgs.mkv,external.srt,expected-PGS-ALPHA.mask,expected-PGS-BETA.mask} "$native_dir/"
 python3 "$root_dir/scripts/android/subtitle_fixture_server.py" \
   "$native_dir/synthetic-pgs.mkv" "$temp_dir/port" >"$output/server.log" 2>&1 &
@@ -51,6 +57,7 @@ adb shell mkdir -p "$remote_dir/frames"
 adb push "$native_dir/." "$remote_dir/" >/dev/null
 adb shell chmod 0700 "$remote_dir/subtitle_render_probe"
 adb shell "cd '$remote_dir' && LD_LIBRARY_PATH=. ./subtitle_render_probe synthetic-pgs.mkv 'http://127.0.0.1:$port/synthetic-pgs.mkv' expected-PGS-ALPHA.mask expected-PGS-BETA.mask external.srt frames" \
+  2> >(tee "$output/native-probe.stderr.log" >&2) \
   | tr -d '\r' > "$output/manifest.json"
 adb pull "$remote_dir/frames" "$output/" >/dev/null
 python3 - "$output/manifest.json" <<'PY'
@@ -72,3 +79,13 @@ assert manifest == {
 }
 print("ANDROID_PACKAGED_SUBTITLE_SOFTWARE_PIXELS=PASSED")
 PY
+
+adb shell mkdir -p "$remote_dir/position-frames"
+adb shell chmod 0700 "$remote_dir/subtitle_position_probe"
+adb shell "cd '$remote_dir' && LD_LIBRARY_PATH=. ./subtitle_position_probe synthetic-pgs.mkv 'http://127.0.0.1:$port/synthetic-pgs.mkv' expected-PGS-ALPHA.mask expected-PGS-BETA.mask external.srt position-frames" \
+  2> >(tee "$output/position-probe.stderr.log" >&2) \
+  | tr -d '\r' > "$output/position-manifest.json"
+adb pull "$remote_dir/position-frames" "$output/" >/dev/null
+python3 "$root_dir/scripts/android/verify_subtitle_position.py" verify \
+  "$output/position-manifest.json" "$output/position-frames" \
+  "$root_dir/test/fixtures/subtitles/expected-PGS-ALPHA.mask"

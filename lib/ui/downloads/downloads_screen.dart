@@ -112,20 +112,27 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       final completedBefore = widget.downloads.tasks
           .where((task) => task.isComplete)
           .length;
-      final available = await widget.downloads.offlineItems();
+      final available = await widget.downloads.offlineItems(
+        verifyFresh: showResult,
+      );
       final cleanup = showResult
           ? await widget.downloads.cleanupOrphans()
           : null;
       if (!showResult || !mounted) return;
       final difference = completedBefore - available.length;
       final invalidated = difference > 0 ? difference : 0;
+      final digestChecked = available
+          .where((item) => item.integrity != null)
+          .length;
+      final basicChecked = available.length - digestChecked;
       final removedFiles = cleanup?.deletedFiles ?? 0;
       final reclaimedBytes = cleanup?.reclaimedBytes ?? 0;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             '缓存检查完成：${available.length} 个可用，'
-            '$invalidated 个需重新下载，清理 $removedFiles 个残留文件'
+            '$invalidated 个需重新下载，$digestChecked 个通过摘要校验，'
+            '$basicChecked 个无摘要（仅检查文件头和大小）；清理 $removedFiles 个残留文件'
             '${reclaimedBytes > 0 ? '（${_formatBytes(reclaimedBytes)}）' : ''}',
           ),
         ),
@@ -307,7 +314,26 @@ class _DownloadRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    _statusText(task),
+                    '视频：${_statusText(task)}',
+                    key: ValueKey('download-video-${task.id}'),
+                    style: const TextStyle(
+                      color: Color(0xFFAAB2B4),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '字幕：${_subtitleStatusText(task)}',
+                    key: ValueKey('download-subtitles-${task.id}'),
+                    style: const TextStyle(
+                      color: Color(0xFFAAB2B4),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    task.metadata.coverStatusText,
+                    key: ValueKey('download-cover-${task.id}'),
                     style: const TextStyle(
                       color: Color(0xFFAAB2B4),
                       fontSize: 12,
@@ -325,15 +351,20 @@ class _DownloadRow extends StatelessWidget {
             if (task.isComplete)
               IconButton(
                 tooltip: downloads.isRepairingSubtitles(task.id)
-                    ? '正在补下载字幕'
+                    ? '取消字幕修复（保留下载）'
                     : '检查并补下载字幕',
                 onPressed: downloads.isRepairingSubtitles(task.id)
-                    ? null
+                    ? () => downloads.cancelSubtitleRepair(task.id)
                     : () => downloads.repairSubtitles(task.id),
-                icon: const Icon(Icons.subtitles_outlined),
+                icon: Icon(
+                  downloads.isRepairingSubtitles(task.id)
+                      ? Icons.close
+                      : Icons.subtitles_outlined,
+                ),
               ),
             if (task.isComplete)
               IconButton(
+                key: ValueKey('download-play-${task.id}'),
                 tooltip: '离线播放',
                 onPressed: onPlay,
                 icon: const Icon(Icons.play_arrow_rounded),
@@ -419,11 +450,22 @@ String _statusText(DownloadTaskRecord task) {
       '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.waitingForStorage => '等待存储空间 · $size',
     DownloadStatus.paused => '已暂停 · $size',
-    DownloadStatus.completed =>
-      '视频可离线播放 · $size\n'
-          '${task.lastErrorCode == 'subtitleRepairing' ? '正在补下载字幕' : task.metadata.subtitleStatusText}',
+    DownloadStatus.completed => '视频可离线播放 · $size',
     DownloadStatus.failed => '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.cancelling => '正在删除',
+  };
+}
+
+String _subtitleStatusText(DownloadTaskRecord task) {
+  final state = task.metadata.subtitleStatusText;
+  return switch (task.lastErrorCode) {
+    'subtitleRepairing' => '正在修复，可取消；已保存字幕仍可用',
+    'subtitleRepairCancelled' => '修复已取消；$state',
+    'subtitleRepairInterrupted' => '修复已中断，可重试；$state',
+    'subtitleRepair:networkUnavailable' => '当前无网络，联网后可重试；$state',
+    'subtitleRepair:wifiRequired' => '等待 Wi-Fi 后可重试；$state',
+    'subtitleRepairFailed' => '修复失败，可重试；$state',
+    _ => state,
   };
 }
 
@@ -440,9 +482,8 @@ String _friendlyError(String? code) => switch (code) {
   'localMediaCorrupt' => '本地文件损坏',
   'invalidLocalPath' => '本地文件路径无效',
   'nonMediaContentType' || 'nonMediaPayload' => '服务器返回的不是媒体',
-  'contentLengthMismatch' ||
-  'rangeResumeRejected' ||
-  'checksumMismatch' => '文件校验失败',
+  'contentLengthMismatch' || 'rangeResumeRejected' => '文件校验失败',
+  'checksumMismatch' => '视频校验失败，请重新下载视频',
   'processInterrupted' => '应用退出后已暂停',
   _ => '下载失败',
 };

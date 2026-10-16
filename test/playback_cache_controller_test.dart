@@ -222,7 +222,10 @@ void main() {
         final trace = StrmTrace(log: logs.log);
         final events = <String>[];
         final engine = _CacheEngine(events: events);
-        final source = fixtureRequest('https://source.invalid/private');
+        final source = fixtureRequest(
+          'https://source.invalid/private',
+          trace: trace,
+        );
         final controller = _controller(
           engine: engine,
           storage: _CacheStorage(events),
@@ -243,7 +246,7 @@ void main() {
             httpStatus: reason == 'source_denied' ? 403 : null,
           ),
           trace: trace,
-          openAttempt: 1,
+          openAttempt: trace.currentAttempt,
           request: 2,
           stale: false,
         );
@@ -278,6 +281,54 @@ void main() {
       },
     );
   }
+
+  test(
+    'typed source failures require the current trace and open attempt',
+    () async {
+      final events = <String>[];
+      final engine = _CacheEngine(events: events);
+      final source = fixtureRequest('https://source.invalid/video');
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        resolver: _Resolver(sourceRequest: source),
+      );
+      addTearDown(controller.shutdown);
+      addTearDown(engine.sourceFailures.close);
+      await controller.start();
+      final firstAttempt = source.trace.currentAttempt;
+      expect(firstAttempt, 1);
+      expect(controller.trace, same(source.trace));
+      await controller.handleMemoryPressure();
+      expect(source.trace.currentAttempt, 2);
+      expect(engine.openCalls, 2);
+
+      for (final staleFailure in [
+        SourceInputFailure(
+          error: const SourceInputException('unknown'),
+          trace: StrmTrace(),
+          openAttempt: source.trace.currentAttempt,
+          request: 2,
+          stale: false,
+        ),
+        SourceInputFailure(
+          error: const SourceInputException('unknown'),
+          trace: source.trace,
+          openAttempt: firstAttempt,
+          request: 2,
+          stale: false,
+        ),
+      ]) {
+        engine.sourceFailures.add(staleFailure);
+        expect(controller.state.phase, PlaybackPhase.ready);
+        expect(controller.state.errorMessage, isNull);
+      }
+
+      engine.sourceFailures.add(_cacheSourceFailure(controller));
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(controller.state.errorMessage, '源站读取失败，请返回后重试');
+    },
+  );
 
   test(
     'cache is resolved and applied before open then cleaned after dispose',
@@ -1133,7 +1184,7 @@ void main() {
 
     final pressure = controller.handleMemoryPressure();
     await _waitUntil(() => engine.snapshotReads > snapshotReadsBefore);
-    final failure = _cacheSourceFailure();
+    final failure = _cacheSourceFailure(controller);
     engine.sourceFailures.add(failure);
     engine.sourceFailures.add(failure);
     engine.errorController.add('source_input_failed');
@@ -1184,7 +1235,7 @@ void main() {
       expect(controller.state.phase, PlaybackPhase.ready);
       expect(pressureCompleted, isFalse);
 
-      engine.sourceFailures.add(_cacheSourceFailure());
+      engine.sourceFailures.add(_cacheSourceFailure(controller));
       engine.errorController.add('source_input_failed');
 
       expect(controller.state.phase, PlaybackPhase.failed);
@@ -1211,7 +1262,7 @@ void main() {
     await controller.start();
     engine.onOpen = () {
       if (engine.openCalls == 2) {
-        engine.sourceFailures.add(_cacheSourceFailure());
+        engine.sourceFailures.add(_cacheSourceFailure(controller));
       }
     };
 
@@ -1262,7 +1313,7 @@ void main() {
       // A typed failure must supersede a less specific native error, without
       // being lost to the event-deduplication guard when it is replayed.
       engine.errorController.add('network connection failed');
-      final failure = _cacheSourceFailure();
+      final failure = _cacheSourceFailure(controller);
       engine.sourceFailures.add(failure);
       engine.sourceFailures.add(failure);
       expect(controller.state.phase, PlaybackPhase.ready);
@@ -1791,7 +1842,7 @@ void main() {
   });
 
   test(
-    'engine error and log fingerprints share the two-second limit',
+    'engine errors and native logs each keep a two-second fingerprint limit',
     () async {
       final lines = <String>[];
       DiagnosticLog.instance.setTestSink(lines.add);
@@ -1806,23 +1857,51 @@ void main() {
       );
       await controller.start();
 
-      engine.errorController.add('partial file');
-      engine.logController.add('partial file');
-      engine.errorController.add('partial file');
-      engine.errorController.add('failed to resolve hostname');
-      engine.logController.add('failed to resolve hostname');
-      now = now.add(const Duration(seconds: 2));
-      engine.errorController.add('partial file');
-      await Future<void>.delayed(Duration.zero);
+      void emitBurst() {
+        // Neither signal ordering may hide a terminal error or flood logs.
+        engine.logController.add('partial file');
+        engine.errorController.add('partial file');
+        engine.errorController.add('partial file');
+        engine.logController.add('partial file');
+        engine.errorController.add('failed to resolve hostname');
+        engine.logController.add('failed to resolve hostname');
+        engine.logController.add('failed to resolve hostname');
+        engine.errorController.add('failed to resolve hostname');
+      }
 
-      expect(
-        lines.where((line) => line.contains('fingerprint=partial_file')),
-        hasLength(2),
-      );
-      expect(
-        lines.where((line) => line.contains('fingerprint=dns-resolution')),
-        hasLength(1),
-      );
+      void expectCounts(int count) {
+        for (final fingerprint in ['partial_file', 'dns-resolution']) {
+          for (final event in ['playback_engine_error', 'libmpv_log']) {
+            final matches = lines.where(
+              (line) =>
+                  line.contains('event=$event ') &&
+                  line.contains('fingerprint=$fingerprint '),
+            );
+            expect(matches, hasLength(count), reason: '$event/$fingerprint');
+            if (event == 'playback_engine_error') {
+              for (final line in matches) {
+                expect(line, contains('trace=${controller.trace!.id} '));
+                expect(
+                  line,
+                  contains('generation=1 stage=native_read outcome=failed'),
+                );
+              }
+            }
+          }
+        }
+      }
+
+      emitBurst();
+      await Future<void>.delayed(Duration.zero);
+      expectCounts(1);
+      now = now.add(const Duration(milliseconds: 1999));
+      emitBurst();
+      await Future<void>.delayed(Duration.zero);
+      expectCounts(1);
+      now = now.add(const Duration(milliseconds: 1));
+      emitBurst();
+      await Future<void>.delayed(Duration.zero);
+      expectCounts(2);
       await controller.shutdown();
     },
   );
@@ -1954,6 +2033,8 @@ PlaybackController _controller({
   item: item,
   engine: engine,
   resolver: resolver,
+  // Production bootstrap shares the resource trace with its controller.
+  trace: resolver is _Resolver ? resolver.sourceRequest?.trace : null,
   reporter: reporter ?? _Reporter(),
   playbackHeaders: const {},
   session: session,
@@ -2032,7 +2113,16 @@ class _CacheEngine
   Future<void> openSource(
     PlaybackResourceRequest request, {
     required bool play,
-  }) => open(Uri.parse('embyinput://fixture'), headers: const {}, play: play);
+  }) {
+    // Mirror the native custom-input adapter advancing each open attempt.
+    request.trace.nextOpen();
+    return open(
+      Uri.parse('embyinput://fixture'),
+      headers: const {},
+      play: play,
+    );
+  }
+
   _CacheEngine({
     required this.events,
     this.snapshot,
@@ -2362,13 +2452,14 @@ class _SubtitleResolver implements PlaybackStreamResolver {
   Uri resolveExternalUrl(String rawUrl) => Uri.parse(rawUrl);
 }
 
-SourceInputFailure _cacheSourceFailure() => SourceInputFailure(
-  error: const SourceInputException('unknown'),
-  trace: StrmTrace(),
-  openAttempt: 1,
-  request: 2,
-  stale: false,
-);
+SourceInputFailure _cacheSourceFailure(PlaybackController controller) =>
+    SourceInputFailure(
+      error: const SourceInputException('unknown'),
+      trace: controller.trace!,
+      openAttempt: controller.trace!.currentAttempt,
+      request: 2,
+      stale: false,
+    );
 
 class _GatedStartReporter extends _Reporter {
   int startCalls = 0;

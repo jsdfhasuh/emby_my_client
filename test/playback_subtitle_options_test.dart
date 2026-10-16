@@ -16,10 +16,11 @@ void main() {
   Widget buildMenu(
     PlaybackState state, {
     void Function(int? streamIndex)? onSelect,
+    List<PlaybackTrack> tracks = const [track],
   }) => MaterialApp(
     home: Scaffold(
       body: PlaybackSubtitleOptions(
-        tracks: const [track],
+        tracks: tracks,
         playbackState: state,
         onSelect: onSelect ?? (_) {},
       ),
@@ -45,21 +46,74 @@ void main() {
     expect(find.byIcon(Icons.check), findsNothing);
   });
 
-  testWidgets('only an actually applied subtitle is checked and disabled', (
+  for (final status in [
+    SubtitleSelectionStatus.appliedEmbedded,
+    SubtitleSelectionStatus.appliedExternal,
+    SubtitleSelectionStatus.appliedServer,
+  ]) {
+    testWidgets('checked $status row can confirm a manual memory', (
+      tester,
+    ) async {
+      final choices = <int?>[];
+      await tester.pumpWidget(
+        buildMenu(
+          PlaybackState(
+            subtitleSelectionStatus: status,
+            appliedSubtitleStreamIndex: 3,
+          ),
+          onSelect: choices.add,
+        ),
+      );
+      expect(find.byIcon(Icons.check), findsOneWidget);
+      expect(tester.widget<ListTile>(trackTile().first).onTap, isNotNull);
+      await tester.tap(trackTile().first);
+      expect(choices, [3]);
+      expect(find.byIcon(Icons.check), findsOneWidget);
+    });
+  }
+
+  for (final status in [
+    SubtitleSelectionStatus.disabled,
+    SubtitleSelectionStatus.appliedNone,
+  ]) {
+    testWidgets(
+      'checked $status off row can confirm a manual disabled memory',
+      (tester) async {
+        final choices = <int?>[];
+        await tester.pumpWidget(
+          buildMenu(
+            PlaybackState(subtitleSelectionStatus: status),
+            onSelect: choices.add,
+          ),
+        );
+        final off = find.widgetWithText(ListTile, '关闭字幕');
+        expect(find.byIcon(Icons.check), findsOneWidget);
+        expect(tester.widget<ListTile>(off).onTap, isNotNull);
+        await tester.tap(off);
+        expect(choices, [null]);
+        expect(find.byIcon(Icons.check), findsOneWidget);
+      },
+    );
+  }
+
+  testWidgets('ambiguous duplicate index stays disabled even when checked', (
     tester,
   ) async {
+    final choices = <int?>[];
     await tester.pumpWidget(
       buildMenu(
         const PlaybackState(
           subtitleSelectionStatus: SubtitleSelectionStatus.appliedEmbedded,
           appliedSubtitleStreamIndex: 3,
         ),
+        tracks: const [track, track],
+        onSelect: choices.add,
       ),
     );
-
-    final tile = tester.widget<ListTile>(trackTile().first);
-    expect(tile.onTap, isNull);
-    expect(find.byIcon(Icons.check), findsOneWidget);
+    for (final tile in tester.widgetList<ListTile>(trackTile())) {
+      expect(tile.onTap, isNull);
+    }
+    expect(choices, isEmpty);
   });
 
   testWidgets('application in progress disables subtitle changes', (

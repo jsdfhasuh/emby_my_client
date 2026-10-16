@@ -1,7 +1,11 @@
 import 'subtitle_target.dart';
+import 'subtitle_problem.dart';
+import 'subtitle_preference_binding.dart';
 import '../core/strm_diagnostics.dart';
 import 'source_input_failure.dart';
 import 'dart:async';
+import 'dart:io';
+import 'subtitle_presentation.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -42,7 +46,7 @@ class PlaybackController extends ChangeNotifier {
     required this.reporter,
     required this.playbackHeaders,
     this.subtitleLoader,
-    this.trace,
+    StrmTrace? trace,
     this.engineRecreator,
     PlaybackItemSession? session,
     this.cacheSettings = const PlaybackCacheSettings(),
@@ -78,9 +82,16 @@ class PlaybackController extends ChangeNotifier {
        _engine = engine,
        session = session ?? PlaybackItemSession.create(),
        cacheStorage = cacheStorage ?? PlatformPlaybackCacheStorage(),
-       _diagnostics = diagnostics ?? PlaybackDiagnostics(),
+       trace = trace ?? diagnostics?.trace ?? StrmTrace(),
        _clock = clock ?? DateTime.now,
        _maxStreamingBitrate = maxStreamingBitrate {
+    _diagnostics = diagnostics ?? PlaybackDiagnostics(trace: this.trace);
+    if (trace == null && diagnostics?.trace == null) {
+      this.trace?.emit('strm_entry', {
+        'entry': 'unavailable',
+        'outcome': 'started',
+      });
+    }
     _testSeekFailurePending =
         testOverrides?.injectApprovedSeekFailureAfterNextExecutedSeek ?? false;
     _testCacheFailureObservationPending =
@@ -102,7 +113,7 @@ class PlaybackController extends ChangeNotifier {
   final PlaybackCacheSettings cacheSettings;
   final PlaybackDiagnosticsTestOverrides? testOverrides;
   final PlaybackCacheStorage cacheStorage;
-  final PlaybackDiagnostics _diagnostics;
+  late final PlaybackDiagnostics _diagnostics;
   final Duration readyTimeout;
   final Duration sourceReadyIdleTimeout;
   final Duration sourceReadyTimeout;
@@ -151,6 +162,7 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
+  int get subtitleInputEpoch => _subtitleInputEpoch;
   int get _subtitleInputEpoch => engine is SubtitleInputEpochProvider
       ? (engine as SubtitleInputEpochProvider).subtitleInputEpoch
       : _generation;
@@ -190,7 +202,10 @@ class PlaybackController extends ChangeNotifier {
     }
     final assets = <LocalExternalAsset>[];
     for (final track in _trackMapper.fromPlan(plan, 'subtitle')) {
-      if (!track.isExternal || track.deliveryUrl == null) continue;
+      if (track.deliveryFor(plan) != SubtitleDelivery.external ||
+          track.deliveryUrl == null) {
+        continue;
+      }
       try {
         final uri = resolver.resolveExternalUrl(track.deliveryUrl!);
         if (uri.scheme == 'file') {
@@ -203,27 +218,40 @@ class PlaybackController extends ChangeNotifier {
     return assets;
   }
 
-  Future<void> selectNativeSubtitle(NativeSubtitleTrack target) =>
-      _selectBoundSubtitle(
-        SubtitleSelection.nativeTrack(target),
-        target.binding,
-      );
-  Future<void> selectLocalSubtitle(LocalExternalAsset target) =>
-      _selectBoundSubtitle(
-        SubtitleSelection.localExternal(target),
-        target.binding,
-      );
+  Future<void> selectNativeSubtitle(
+    NativeSubtitleTrack target, {
+    bool automatic = false,
+  }) {
+    return _selectBoundSubtitle(
+      SubtitleSelection.nativeTrack(target),
+      target.binding,
+      automatic: automatic,
+    );
+  }
+
+  Future<void> selectLocalSubtitle(
+    LocalExternalAsset target, {
+    bool automatic = false,
+  }) {
+    return _selectBoundSubtitle(
+      SubtitleSelection.localExternal(target),
+      target.binding,
+      automatic: automatic,
+    );
+  }
 
   Future<void> _selectBoundSubtitle(
     SubtitleSelection requested,
-    SubtitleInputBinding binding,
-  ) async {
+    SubtitleInputBinding binding, {
+    bool automatic = false,
+  }) async {
     final plan = _state.plan;
     if (plan == null ||
         plan.method != PlayMethod.directPlay ||
         !_isSubtitleBindingCurrent(binding)) {
       return;
     }
+    if (!automatic) subtitlePreferences?.manualSelectionRequested();
     _cancelLateSubtitleTask();
     subtitleLoader?.cancel();
     _desiredSubtitleSelection = requested;
@@ -318,6 +346,9 @@ class PlaybackController extends ChangeNotifier {
         onObservationApplied: _onCacheObservationApplied,
       );
 
+  SubtitlePreferenceBinding? subtitlePreferences;
+  bool get acceptsSubtitlePreferences =>
+      !_retiring && !_shuttingDown && !_disposed && !_engineDisposed;
   PlaybackState get state => _state;
   PlaybackEngine get engine => _engine;
   int get maxStreamingBitrate => _maxStreamingBitrate;
@@ -1462,7 +1493,11 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> selectSubtitleStream(int? streamIndex) async {
+  Future<void> selectSubtitleStream(
+    int? streamIndex, {
+    bool automatic = false,
+  }) async {
+    if (!automatic) subtitlePreferences?.manualSelectionRequested();
     final plan = _state.plan;
     if (plan == null) return;
     final requested = streamIndex == null
@@ -1470,7 +1505,13 @@ class PlaybackController extends ChangeNotifier {
         : SubtitleSelection.explicitStream(streamIndex);
     final boundEngine = engine;
     final token = _generation;
-    if (_isSubtitleApplied(requested, token, boundEngine)) return;
+    if (_isSubtitleApplied(requested, token, boundEngine)) {
+      _desiredSubtitleSelection = requested;
+      _setState(
+        _state.copyWith(desiredSubtitleSelection: _desiredSubtitleSelection),
+      );
+      return;
+    }
     _cancelLateSubtitleTask();
     subtitleLoader?.cancel();
     _desiredSubtitleSelection = requested;
@@ -1607,7 +1648,9 @@ class PlaybackController extends ChangeNotifier {
               item,
               mediaSourceId: mediaSourceId,
               subtitleDisabled:
-                  clearSubtitle || _desiredSubtitleSelection.isDisabled,
+                  clearSubtitle ||
+                  (subtitlePreferences == null &&
+                      _desiredSubtitleSelection.isDisabled),
               maxStreamingBitrate: maxStreamingBitrate ?? _maxStreamingBitrate,
               forceTranscode: forceTranscode,
             );
@@ -1655,7 +1698,8 @@ class PlaybackController extends ChangeNotifier {
                 (_selectedMediaSourceId ?? _state.plan?.mediaSourceId)) {
           // Numeric indices are identities within one source, not preferences.
           _selectedAudioStreamIndex = null;
-          if (!_desiredSubtitleSelection.isDisabled) {
+          if (!_desiredSubtitleSelection.isDisabled ||
+              subtitlePreferences != null) {
             _desiredSubtitleSelection =
                 const SubtitleSelection.followServerDefault();
           }
@@ -1693,6 +1737,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> shutdown() {
+    subtitlePreferences?.dispose();
     final existing = _shutdownOperation;
     if (existing != null) return existing;
     final quiescence = quiesce();
@@ -1922,15 +1967,75 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  int? _nativeSubtitleFailureRevision;
+  int? _nativeSubtitleFailureInputEpoch;
+  String? _nativeSubtitleFailureCodec;
+  bool _handleSubtitleDecoderError(String error) {
+    // Native logging can publish one failure through both log and error streams.
+    // Once attributed, repeats for this exact failed request remain subtitle
+    // failures even though its applied codec has been cleared from the UI state.
+    if (_state.subtitleSelectionStatus == SubtitleSelectionStatus.failed &&
+        _nativeSubtitleFailureRevision ==
+            _desiredSubtitleSelection.requestRevision &&
+        _nativeSubtitleFailureInputEpoch == _subtitleInputEpoch &&
+        _desiredSubtitleSelection.inputEpoch == _subtitleInputEpoch &&
+        SubtitleProblem.fromNative(error, _nativeSubtitleFailureCodec) !=
+            null) {
+      return true;
+    }
+    if (_state.subtitleSelectionStatus == SubtitleSelectionStatus.applying ||
+        _state.subtitleSelectionStatus ==
+            SubtitleSelectionStatus.waitingForTracks) {
+      // Native log messages have no selection revision. Do not attribute an
+      // old decoder callback to a newer choice, or make it a video failure.
+      // Current selection completion and attributed failures own its state.
+      return const [
+        'ass',
+        'ssa',
+        'subrip',
+        'webvtt',
+        'hdmv_pgs_subtitle',
+        'dvd_subtitle',
+        'dvb_subtitle',
+        'xsub',
+      ].any((codec) => SubtitleProblem.fromNative(error, codec) != null);
+    }
+    if (_state.subtitleSelectionStatus !=
+            SubtitleSelectionStatus.appliedEmbedded &&
+        _state.subtitleSelectionStatus !=
+            SubtitleSelectionStatus.appliedExternal) {
+      return false;
+    }
+    final codec = SubtitlePresentation.activeCodec(_state);
+    final problem = SubtitleProblem.fromNative(error, codec);
+    if (problem == null ||
+        _state.appliedSubtitleKind == AppliedSubtitleKind.none) {
+      return false;
+    }
+    _nativeSubtitleFailureRevision = _desiredSubtitleSelection.requestRevision;
+    _nativeSubtitleFailureInputEpoch = _subtitleInputEpoch;
+    _nativeSubtitleFailureCodec = codec;
+    _markSubtitleFailed(
+      selection: _desiredSubtitleSelection,
+      token: _generation,
+      boundEngine: engine,
+      error: const SourceInputException('subtitle_decoder_unsupported'),
+    );
+    return true;
+  }
+
   void _handleEngineError(String error, {required int engineGeneration}) {
+    if (_handleSubtitleDecoderError(error)) return;
     if (_lastSourceFailure != null) return;
     final fingerprint = _approvedRecoveryFingerprint(error);
     final diagnosticFingerprint = _engineDiagnosticFingerprint(error);
-    if (_shouldWriteEngineFingerprint(diagnosticFingerprint)) {
-      DiagnosticLog.instance.error(
-        'player',
-        'event=playback_engine_error fingerprint=$diagnosticFingerprint',
-        error: error,
+    // Warning text and error signals have independent bounded rate limits.
+    // Otherwise a preceding native log can hide the terminal error event.
+    if (_shouldWriteEngineFingerprint('error-$diagnosticFingerprint')) {
+      _diagnostics.engineError(
+        fingerprint: diagnosticFingerprint,
+        generation: engineGeneration,
+        duringOpen: _isStartupPhase(_state.phase),
       );
     }
     final completer = _readyCompleter;
@@ -1973,6 +2078,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _handleEngineLog(String log) {
+    if (_handleSubtitleDecoderError(log)) return;
     if (_lastSourceFailure != null) return;
     final lower = log.toLowerCase();
     if (lower.contains('failed to create file cache') &&
@@ -2886,8 +2992,8 @@ class PlaybackController extends ChangeNotifier {
                   SubtitleSelectionStatus.appliedServer) &&
           _state.appliedSubtitleStreamIndex == selection.streamIndex;
     }
-    return _state.subtitleSelectionStatus ==
-            SubtitleSelectionStatus.appliedNone ||
+    return _state.subtitleSelectionStatus == SubtitleSelectionStatus.disabled ||
+        _state.subtitleSelectionStatus == SubtitleSelectionStatus.appliedNone ||
         _state.subtitleSelectionStatus ==
             SubtitleSelectionStatus.appliedEmbedded ||
         _state.subtitleSelectionStatus ==
@@ -2929,21 +3035,32 @@ class PlaybackController extends ChangeNotifier {
     );
   }
 
-  void _markSubtitleApplied({
+  bool _markSubtitleApplied({
     required SubtitleSelection selection,
     required SubtitleSelectionStatus status,
     required AppliedSubtitleKind kind,
     required int? streamIndex,
     required int token,
     required PlaybackEngine boundEngine,
+    String? nativeCodec,
   }) {
-    if (!_isCurrentSubtitleSelection(selection, token, boundEngine)) return;
+    if (!_isCurrentSubtitleSelection(selection, token, boundEngine)) {
+      return false;
+    }
+    if (_nativeSubtitleFailureRevision == selection.requestRevision) {
+      return false;
+    }
+    nativeCodec ??= boundEngine is SubtitleCodecProvider
+        ? (boundEngine as SubtitleCodecProvider).activeSubtitleCodec
+        : null;
     _appliedSubtitleEngine = boundEngine;
     _setState(
       _state.copyWith(
         desiredSubtitleSelection: selection,
         subtitleSelectionStatus: status,
         appliedSubtitleKind: kind,
+        actualSubtitleCodec: nativeCodec,
+        clearActualSubtitleCodec: nativeCodec == null,
         appliedNativeSubtitleId: selection.target is NativeSubtitleTrack
             ? (selection.target as NativeSubtitleTrack).track.id
             : null,
@@ -2954,6 +3071,12 @@ class PlaybackController extends ChangeNotifier {
         clearSubtitleSelectionError: true,
       ),
     );
+    // Listeners may synchronously fail this decoder or request a new selection.
+    // Only the still-confirmed operation may publish success or update reporting.
+    return _isCurrentSubtitleSelection(selection, token, boundEngine) &&
+        _nativeSubtitleFailureRevision != selection.requestRevision &&
+        _state.subtitleSelectionStatus == status &&
+        _isSubtitleApplied(selection, token, boundEngine);
   }
 
   void _markSubtitleFailed({
@@ -2975,9 +3098,8 @@ class PlaybackController extends ChangeNotifier {
         clearAppliedSubtitleStreamIndex: true,
         clearAppliedNativeSubtitleId: true,
         subtitleApplicationGeneration: token,
-        subtitleSelectionError: error is SubtitleSelectionFailure
-            ? error.message
-            : '字幕加载失败，请重试',
+        subtitleProblem: SubtitleProblem.classify(error),
+        subtitleSelectionError: SubtitleProblem.classify(error).message,
       ),
     );
     _diagnostics.subtitleApplyFailed(
@@ -3014,6 +3136,14 @@ class PlaybackController extends ChangeNotifier {
     SubtitleSelection selection,
     int? streamIndex,
   ) {
+    final token = _generation;
+    final boundEngine = engine;
+    if (!_isCurrentSubtitleSelection(selection, token, boundEngine) ||
+        _nativeSubtitleFailureRevision == selection.requestRevision ||
+        !_isSubtitleApplied(selection, token, boundEngine)) {
+      return;
+    }
+    final confirmedStatus = _state.subtitleSelectionStatus;
     final current = _state.plan;
     if (current == null ||
         current.mediaSourceId != plan.mediaSourceId ||
@@ -3026,7 +3156,11 @@ class PlaybackController extends ChangeNotifier {
             clearAudioStreamIndex: _state.appliedAudioStreamIndex == null,
           )
         : current;
-    final updated = selection.isDisabled
+    final subtitleDisabled =
+        selection.isDisabled ||
+        (selection.source == SubtitleSelectionSource.serverDefault &&
+            _state.subtitleSelectionStatus == SubtitleSelectionStatus.disabled);
+    final updated = subtitleDisabled
         ? appliedAudio.copyWith(
             clearSubtitleStreamIndex: true,
             subtitleDisabled: true,
@@ -3037,6 +3171,14 @@ class PlaybackController extends ChangeNotifier {
             subtitleDisabled: false,
           );
     _setState(_state.copyWith(plan: updated));
+    // The plan notification can also invalidate this confirmed selection.
+    if (!_isCurrentSubtitleSelection(selection, token, boundEngine) ||
+        _nativeSubtitleFailureRevision == selection.requestRevision ||
+        _state.subtitleSelectionStatus != confirmedStatus ||
+        !_isSubtitleApplied(selection, token, boundEngine) ||
+        !identical(_state.plan, updated)) {
+      return;
+    }
     reporter.updatePlan(updated);
   }
 
@@ -3047,20 +3189,22 @@ class PlaybackController extends ChangeNotifier {
     required int token,
     required PlaybackEngine boundEngine,
   }) {
-    _markSubtitleApplied(
+    if (!_markSubtitleApplied(
       selection: selection,
       status: SubtitleSelectionStatus.appliedExternal,
       kind: AppliedSubtitleKind.external,
       streamIndex: streamIndex,
       token: token,
       boundEngine: boundEngine,
-    );
-    if (!_isSubtitleApplied(selection, token, boundEngine)) return;
+    )) {
+      return;
+    }
     _diagnostics.subtitleApplied(
       selectionSource: selection.source.name,
       subtitleKind: 'external',
       streamIndex: streamIndex,
       generation: token,
+      nativeCodec: _state.actualSubtitleCodec,
     );
     _updateReporterSubtitlePlan(plan, selection, streamIndex);
   }
@@ -3193,7 +3337,12 @@ class PlaybackController extends ChangeNotifier {
     int? resolvedSubtitleIndex;
     try {
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-      resolvedSubtitleIndex = selection.isDisabled
+      // Emby uses -1 to explicitly disable its default subtitle. Keep the
+      // server-default preference while turning off any native auto selection.
+      final serverDefaultDisabled =
+          selection.source == SubtitleSelectionSource.serverDefault &&
+          plan.subtitleStreamIndex == disabledSubtitleStreamIndex;
+      resolvedSubtitleIndex = selection.isDisabled || serverDefaultDisabled
           ? null
           : selection.source != SubtitleSelectionSource.serverDefault
           ? selection.streamIndex
@@ -3205,7 +3354,7 @@ class PlaybackController extends ChangeNotifier {
         generation: token,
       );
 
-      if (selection.isDisabled) {
+      if (selection.isDisabled || serverDefaultDisabled) {
         await _runPropertyWrite(
           boundEngine,
           () => _submitSubtitleWrite(
@@ -3216,14 +3365,16 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-        _markSubtitleApplied(
+        if (!_markSubtitleApplied(
           selection: selection,
           status: SubtitleSelectionStatus.disabled,
           kind: AppliedSubtitleKind.none,
           streamIndex: null,
           token: token,
           boundEngine: boundEngine,
-        );
+        )) {
+          return;
+        }
         _diagnostics.subtitleDisabled(generation: token);
         _updateReporterSubtitlePlan(plan, selection, null);
         return;
@@ -3256,33 +3407,40 @@ class PlaybackController extends ChangeNotifier {
           }),
         );
         validate();
-        _markSubtitleApplied(
+        if (!_markSubtitleApplied(
           selection: selection,
           status: SubtitleSelectionStatus.appliedEmbedded,
           kind: AppliedSubtitleKind.embedded,
           streamIndex: null,
           token: token,
           boundEngine: boundEngine,
-        );
+          nativeCodec: target.track.codec,
+        )) {
+          return;
+        }
         _diagnostics.subtitleApplied(
           selectionSource: selection.source.name,
           subtitleKind: 'native',
           streamIndex: null,
           generation: token,
+          nativeCodec: target.track.codec,
+          nativeId: target.track.id,
         );
         _updateReporterSubtitlePlan(plan, selection, null);
         return;
       }
 
       if (resolvedSubtitleIndex == null) {
-        _markSubtitleApplied(
+        if (!_markSubtitleApplied(
           selection: selection,
           status: SubtitleSelectionStatus.appliedNone,
           kind: AppliedSubtitleKind.none,
           streamIndex: null,
           token: token,
           boundEngine: boundEngine,
-        );
+        )) {
+          return;
+        }
         _diagnostics.subtitleApplied(
           selectionSource: selection.source.name,
           subtitleKind: 'none',
@@ -3299,6 +3457,9 @@ class PlaybackController extends ChangeNotifier {
         resolvedSubtitleIndex,
       );
       if (track == null) {
+        if (plan.transportKind == PlaybackTransportKind.offlineLocal) {
+          throw const SourceInputException('subtitle_missing');
+        }
         throw const SubtitleSelectionFailure(
           SubtitleFailureReason.mappingUnconfirmed,
         );
@@ -3320,14 +3481,16 @@ class PlaybackController extends ChangeNotifier {
             SubtitleFailureReason.mappingUnconfirmed,
           );
         }
-        _markSubtitleApplied(
+        if (!_markSubtitleApplied(
           selection: selection,
           status: SubtitleSelectionStatus.appliedServer,
           kind: AppliedSubtitleKind.server,
           streamIndex: resolvedSubtitleIndex,
           token: token,
           boundEngine: boundEngine,
-        );
+        )) {
+          return;
+        }
         _diagnostics.subtitleApplied(
           selectionSource: selection.source.name,
           subtitleKind: 'encoded',
@@ -3386,6 +3549,11 @@ class PlaybackController extends ChangeNotifier {
           );
           try {
             _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+            _diagnostics.subtitleContentDetected(
+              format: file.detectedFormat,
+              streamIndex: resolvedSubtitleIndex,
+              generation: token,
+            );
             await _submitSubtitleWrite(selection, token, boundEngine, () async {
               _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
               if (boundEngine is! PlaybackNativeResourceOwner) {
@@ -3417,11 +3585,24 @@ class PlaybackController extends ChangeNotifier {
           selection,
           token,
           boundEngine,
-          () => boundEngine.loadExternalSubtitle(
-            resolver.resolveExternalUrl(track.deliveryUrl!),
-            title: track.title,
-            language: track.language,
-          ),
+          () async {
+            final uri = resolver.resolveExternalUrl(track.deliveryUrl!);
+            if (uri.scheme == 'file') {
+              final file = File.fromUri(uri);
+              if (!await file.exists()) {
+                throw const SourceInputException('subtitle_missing');
+              }
+              if (await file.length() == 0) {
+                throw const SourceInputException('subtitle_unreadable');
+              }
+            }
+            _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
+            await boundEngine.loadExternalSubtitle(
+              uri,
+              title: track.title,
+              language: track.language,
+            );
+          },
         );
         try {
           await externalLoad.timeout(
@@ -3520,19 +3701,24 @@ class PlaybackController extends ChangeNotifier {
         ),
       );
       _throwIfCurrentSubtitleSelection(selection, token, boundEngine);
-      _markSubtitleApplied(
+      if (!_markSubtitleApplied(
         selection: selection,
         status: SubtitleSelectionStatus.appliedEmbedded,
         kind: AppliedSubtitleKind.embedded,
         streamIndex: resolvedSubtitleIndex,
         token: token,
         boundEngine: boundEngine,
-      );
+        nativeCodec: tracks.where((track) => track.id == engineId).single.codec,
+      )) {
+        return;
+      }
       _diagnostics.subtitleApplied(
         selectionSource: selection.source.name,
         subtitleKind: 'embedded',
         streamIndex: resolvedSubtitleIndex,
         generation: token,
+        nativeCodec: tracks.where((track) => track.id == engineId).single.codec,
+        nativeId: engineId,
       );
       _updateReporterSubtitlePlan(plan, selection, resolvedSubtitleIndex);
     } on SubtitleApplicationSuperseded {

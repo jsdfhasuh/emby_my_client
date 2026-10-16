@@ -9,6 +9,8 @@ import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
+import 'package:emby_my_client/playback/subtitle_preferences.dart';
+import 'package:emby_my_client/playback/subtitle_preferences_repository.dart';
 import 'package:emby_my_client/search/search_history_store.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/settings/library_sort_preferences.dart';
@@ -58,6 +60,18 @@ void main() {
       final sortPreferences = MemoryLibrarySortPreferenceStore();
       final searchHistory = MemorySearchHistoryStore();
       final playbackSettings = PlaybackSettingsRepository();
+      final subtitlePreferences = SubtitlePreferencesRepository(
+        storage: _SubtitleStorage(),
+      );
+      for (final session in [_firstSession, _secondSession]) {
+        await subtitlePreferences.load(session);
+        await subtitlePreferences.remember(
+          session,
+          itemId: 'movie',
+          mediaSourceId: 'source',
+          choice: const SubtitleRememberedChoice.disabled(),
+        );
+      }
       await downloadSettings.save(
         _firstScope,
         const DownloadSettings(wifiOnly: false),
@@ -112,10 +126,19 @@ void main() {
         librarySortPreferenceStore: sortPreferences,
         searchHistoryStore: searchHistory,
         playbackSettingsRepository: playbackSettings,
+        subtitlePreferencesRepository: subtitlePreferences,
       );
 
       await cleanup.delete(scope: _firstScope, session: _firstSession);
       expect(clearedImageScopes, [_firstScope]);
+      expect(
+        (await subtitlePreferences.load(_firstSession)).rememberedCount,
+        0,
+      );
+      expect(
+        (await subtitlePreferences.load(_secondSession)).rememberedCount,
+        1,
+      );
 
       expect(await firstDirectory.exists(), isFalse);
       expect(await secondFile.readAsBytes(), [2]);
@@ -237,6 +260,21 @@ void main() {
       expect(await _scopeCount(database, 'offline_progress', _firstScope), 1);
     },
   );
+}
+
+class _SubtitleStorage implements PlaybackSettingsStorage {
+  final values = <String, String>{};
+  @override
+  Future<String?> read(String key) async => values[key];
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
 }
 
 Future<void> _seedDatabase(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../data/emby_api.dart';
 import '../downloads/download_service.dart';
+import '../downloads/download_models.dart';
 import '../models/emby_models.dart';
 import 'player_screen.dart';
 
@@ -10,6 +11,7 @@ Future<bool> openCachedPlayback(
   required EmbyApi api,
   required DownloadService? downloads,
   required EmbyItem item,
+  bool requireLocal = false,
 }) async {
   if (!api.isSessionActive) return true;
   if (api.browseState.authenticationRequired) {
@@ -20,12 +22,33 @@ Future<bool> openCachedPlayback(
   }
   // A verified local copy can play immediately even before the first failed
   // request has detected a newly disconnected server.
-  final local = downloads != null && downloads.scope == api.scope
-      ? await downloads.offlineItem(item.id)
-      : null;
+  OfflineMediaItem? local;
+  try {
+    local = downloads != null && downloads.scope == api.scope
+        ? await downloads.offlineItem(item.id)
+        : null;
+  } catch (_) {
+    if (!context.mounted || !api.isSessionActive) return true;
+    if (!requireLocal &&
+        !api.browseState.offline &&
+        !api.browseState.authenticationRequired) {
+      return false;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('本地下载暂不可用，请到下载管理检查文件')));
+    return true;
+  }
   if (!context.mounted || !api.isSessionActive) return true;
-  if (local == null || local.scope != api.scope) {
-    if (!api.browseState.offline) {
+  if (api.browseState.authenticationRequired) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('登录已失效，请重新登录')));
+    return true;
+  }
+  final playable = local;
+  if (playable == null || playable.scope != api.scope) {
+    if (!requireLocal && !api.browseState.offline) {
       return false;
     }
     ScaffoldMessenger.of(
@@ -37,8 +60,8 @@ Future<bool> openCachedPlayback(
     MaterialPageRoute(
       builder: (_) => PlayerScreen(
         api: api,
-        item: local.toEmbyItem(),
-        offlineItem: local,
+        item: playable.toEmbyItem(),
+        offlineItem: playable,
         downloads: downloads,
       ),
     ),

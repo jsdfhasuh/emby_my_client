@@ -31,12 +31,18 @@ import '../playback/playback_settings.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/playback_settings_scope.dart';
 import '../playback/playback_state.dart';
+import '../playback/subtitle_presentation.dart';
+import '../playback/subtitle_preference_binding.dart';
+import '../playback/subtitle_preferences.dart';
+import '../playback/subtitle_preferences_scope.dart';
 import '../playback/seek_preview_mode.dart';
 import '../playback/trickplay/trickplay_detail_hydrator.dart';
 import '../playback/ui_seek_dispatcher.dart';
 import '../playback/player_session_coordinator.dart';
 import 'widgets/playback_cache_status_section.dart';
 import 'widgets/playback_subtitle_options.dart';
+import 'widgets/configured_playback_video.dart';
+import 'diagnostic_log_screen.dart';
 import 'widgets/horizontal_seek_preview_overlay.dart';
 import 'widgets/playback_timeline.dart';
 import '../playback/track_mapper.dart';
@@ -228,6 +234,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   final TrackMapper _trackMapper = const TrackMapper();
   PlaybackController? _playbackController;
   PlaybackSettings _settings = const PlaybackSettings();
+  final ValueNotifier<int> _settingsChanges = ValueNotifier(0);
   PlaybackPlan? _plan;
   Timer? _controlsTimer;
   Timer? _nextCountdownTimer;
@@ -360,10 +367,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final videoController = VideoController(player);
     _playbackBackend = PlayerPlaybackBackend(
       engine: MediaKitPlaybackEngine(player),
-      buildVideo: (fit) => Video(
+      buildVideo: (fit) => ConfiguredPlaybackVideo(
         controller: videoController,
         fit: fit,
-        controls: NoVideoControls,
+        settings: _settings,
       ),
     );
   }
@@ -424,9 +431,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         testOverrides: _diagnosticsTestOverrides?.consumeForPlayback(),
         maxStreamingBitrate: _settings.maxStreamingBitrate,
       );
+      SubtitlePreferenceBinding(
+        controller: controller,
+        session: widget.api.session,
+        repository: SubtitlePreferencesRepositoryScope.of(context),
+      );
     } else {
       controller = PlaybackSessionBootstrap.createOnlineController(
         entry: 'fullscreen',
+        subtitlePreferencesRepository: SubtitlePreferencesRepositoryScope.of(
+          context,
+        ),
         api: widget.api,
         item: _currentItem,
         engine: _playbackBackend.engine,
@@ -934,6 +949,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _settingsChanges.dispose();
     _trickplayPreviewEnabled = false;
     _uiSeekRequestGate.invalidate();
     _uiSeekPending = false;
@@ -989,6 +1005,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _settings = snapshot.settings;
         _videoFit = _boxFit(snapshot.settings.videoFit);
       });
+      _settingsChanges.value++;
     }
   }
 
@@ -1351,9 +1368,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         openNext: (session) async {
           if (!mounted) return;
           _itemSession = session;
-          _sessionSubtitleSelection = subtitleSelectionForNextQueueItem(
-            _sessionSubtitleSelection,
-          );
+          _sessionSubtitleSelection = null;
           _createPlayer();
           setState(() {
             _currentItem = item;
@@ -1385,11 +1400,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  Future<void> _showPlaybackOptions() async {
+  Future<void> _showPlaybackOptions({int initialTab = 0}) async {
     if (_playbackOptionsOpen || _playbackResourcesReleased) return;
     final controller = _playbackController;
     final plan = controller?.state.plan;
     if (controller == null || plan == null) return;
+    final optionsInputEpoch = controller.subtitleInputEpoch;
+    final optionsMediaSourceId = plan.mediaSourceId;
     _playbackOptionsOpen = true;
     _controlsTimer?.cancel();
     var selectionAccepted = false;
@@ -1401,6 +1418,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           !sheetContext.mounted ||
           _playbackResourcesReleased ||
           !identical(controller, _playbackController) ||
+          controller.subtitleInputEpoch != optionsInputEpoch ||
+          controller.state.plan?.mediaSourceId != optionsMediaSourceId ||
           ModalRoute.of(sheetContext)?.isCurrent != true) {
         return false;
       }
@@ -1418,6 +1437,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         isScrollControlled: true,
         builder: (sheetContext) => DefaultTabController(
           length: 5,
+          initialIndex: initialTab,
           child: SafeArea(
             child: SizedBox(
               height: MediaQuery.sizeOf(sheetContext).height * 0.82,
@@ -1462,6 +1482,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                               if (!closeForSelection(sheetContext)) return;
                               _sessionSubtitleSelection = null;
                               unawaited(controller.selectLocalSubtitle(target));
+                            },
+                            onExportDiagnostics: () {
+                              if (!closeForSelection(sheetContext)) return;
+                              Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => DiagnosticLogScreen(
+                                    playbackTraceId: controller.trace?.id,
+                                  ),
+                                ),
+                              );
                             },
                             playbackState: controller.state,
                             onSelect: (index) {
@@ -1629,10 +1659,103 @@ class _PlayerScreenState extends State<PlayerScreen>
     final controller = _playbackController;
     if (controller == null) return const SizedBox.shrink();
     return ListenableBuilder(
-      listenable: controller,
+      listenable: Listenable.merge([
+        controller,
+        _settingsChanges,
+        controller.subtitlePreferences,
+      ]),
       builder: (context, _) => ListView(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
         children: [
+          if (controller.subtitlePreferences case final preferences?) ...[
+            ListTile(
+              title: const Text('字幕语言偏好'),
+              subtitle: const Text('本片手动选择优先；仅明确匹配时自动选择，下次打开生效'),
+              trailing: DropdownButton<SubtitleLanguagePreference>(
+                key: const ValueKey('subtitle-language-preference'),
+                value: preferences.preferences.language,
+                items: const [
+                  DropdownMenuItem(
+                    value: SubtitleLanguagePreference.chinese,
+                    child: Text('中文优先'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleLanguagePreference.simplifiedChinese,
+                    child: Text('简体中文'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleLanguagePreference.traditionalChinese,
+                    child: Text('繁体中文'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleLanguagePreference.bilingualChinese,
+                    child: Text('中外双语'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleLanguagePreference.serverDefault,
+                    child: Text('服务器默认'),
+                  ),
+                ],
+                onChanged: preferences.snapshot == null
+                    ? null
+                    : (value) {
+                        if (value != null) {
+                          unawaited(
+                            preferences.setPreferences(
+                              preferences.preferences.copyWith(language: value),
+                            ),
+                          );
+                        }
+                      },
+              ),
+            ),
+            ListTile(
+              title: const Text('强制字幕偏好'),
+              subtitle: const Text('强制字幕通常仅翻译特定对白或画面文字'),
+              trailing: DropdownButton<SubtitleForcedPreference>(
+                key: const ValueKey('subtitle-forced-preference'),
+                value: preferences.preferences.forced,
+                items: const [
+                  DropdownMenuItem(
+                    value: SubtitleForcedPreference.avoid,
+                    child: Text('优先完整字幕'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleForcedPreference.allow,
+                    child: Text('不限制'),
+                  ),
+                  DropdownMenuItem(
+                    value: SubtitleForcedPreference.prefer,
+                    child: Text('优先强制字幕'),
+                  ),
+                ],
+                onChanged: preferences.snapshot == null
+                    ? null
+                    : (value) {
+                        if (value != null) {
+                          unawaited(
+                            preferences.setPreferences(
+                              preferences.preferences.copyWith(forced: value),
+                            ),
+                          );
+                        }
+                      },
+              ),
+            ),
+            ListTile(
+              title: const Text('清除此影片当前版本的字幕记忆'),
+              subtitle: Text(
+                preferences.saveError ?? '不会改变当前正在播放的字幕，下次打开使用语言偏好',
+              ),
+              trailing: TextButton(
+                onPressed: preferences.snapshot == null
+                    ? null
+                    : () => unawaited(preferences.forgetCurrentChoice()),
+                child: const Text('清除记忆'),
+              ),
+            ),
+            const Divider(),
+          ],
           const Text('播放速度'),
           const SizedBox(height: 8),
           SegmentedButton<double>(
@@ -1793,7 +1916,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.subtitles),
+            key: const ValueKey('subtitle-delay-setting'),
             title: const Text('字幕延迟'),
+            subtitle: Text(
+              SubtitlePresentation.fromState(controller.state).explanation,
+            ),
             trailing: DropdownButton<int>(
               value: _settings.subtitleDelayMilliseconds,
               items: const [
@@ -1803,14 +1930,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                 DropdownMenuItem(value: 500, child: Text('+0.5 秒')),
                 DropdownMenuItem(value: 1000, child: Text('+1.0 秒')),
               ],
-              onChanged: (value) {
-                if (value != null) unawaited(_changeSubtitleDelay(value));
-              },
+              onChanged: !SubtitlePresentation.fromState(controller.state).delay
+                  ? null
+                  : (value) {
+                      if (value != null) unawaited(_changeSubtitleDelay(value));
+                    },
             ),
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.format_size),
+            key: const ValueKey('subtitle-size-setting'),
             title: const Text('字幕字号'),
             trailing: DropdownButton<double>(
               value: _settings.subtitleFontSize,
@@ -1820,19 +1950,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                 DropdownMenuItem(value: 52, child: Text('大')),
                 DropdownMenuItem(value: 64, child: Text('特大')),
               ],
-              onChanged: (value) {
-                if (value == null) return;
-                unawaited(
-                  _changeSubtitleStyle(
-                    _settings.copyWith(subtitleFontSize: value),
-                  ),
-                );
-              },
+              onChanged:
+                  !SubtitlePresentation.fromState(controller.state).textStyle
+                  ? null
+                  : (value) {
+                      if (value == null) return;
+                      unawaited(
+                        _changeSubtitleStyle(
+                          _settings.copyWith(subtitleFontSize: value),
+                        ),
+                      );
+                    },
             ),
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.vertical_align_bottom),
+            key: const ValueKey('subtitle-position-setting'),
             title: const Text('字幕位置'),
             trailing: DropdownButton<int>(
               value: _settings.subtitlePosition,
@@ -1841,14 +1975,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                 DropdownMenuItem(value: 88, child: Text('居中')),
                 DropdownMenuItem(value: 100, child: Text('底部')),
               ],
-              onChanged: (value) {
-                if (value == null) return;
-                unawaited(
-                  _changeSubtitleStyle(
-                    _settings.copyWith(subtitlePosition: value),
-                  ),
-                );
-              },
+              onChanged:
+                  !SubtitlePresentation.fromState(controller.state).position
+                  ? null
+                  : (value) {
+                      if (value == null) return;
+                      unawaited(
+                        _changeSubtitleStyle(
+                          _settings.copyWith(subtitlePosition: value),
+                        ),
+                      );
+                    },
             ),
           ),
           ListTile(
@@ -1865,11 +2002,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                       0xFF80CBC4 => '青色',
                       _ => '白色',
                     },
-                    onPressed: () => unawaited(
-                      _changeSubtitleStyle(
-                        _settings.copyWith(subtitleColor: color),
-                      ),
-                    ),
+                    onPressed:
+                        !SubtitlePresentation.fromState(
+                          controller.state,
+                        ).textStyle
+                        ? null
+                        : () => unawaited(
+                            _changeSubtitleStyle(
+                              _settings.copyWith(subtitleColor: color),
+                            ),
+                          ),
                     icon: Icon(
                       color == _settings.subtitleColor
                           ? Icons.check_circle
@@ -1894,11 +2036,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                       0xFFFFFFFF => '白色',
                       _ => '黑色',
                     },
-                    onPressed: () => unawaited(
-                      _changeSubtitleStyle(
-                        _settings.copyWith(subtitleOutlineColor: color),
-                      ),
-                    ),
+                    onPressed:
+                        !SubtitlePresentation.fromState(
+                          controller.state,
+                        ).textStyle
+                        ? null
+                        : () => unawaited(
+                            _changeSubtitleStyle(
+                              _settings.copyWith(subtitleOutlineColor: color),
+                            ),
+                          ),
                     icon: Icon(
                       color == _settings.subtitleOutlineColor
                           ? Icons.check_circle
@@ -1956,7 +2103,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Center(child: _playbackBackend.buildVideo(_videoFit)),
+              Center(
+                key: const ValueKey('player-video'),
+                child: _playbackBackend.buildVideo(_videoFit),
+              ),
               if (_buffering && _error == null) _buildBuffering(),
               if (_error != null) _buildError(),
               IgnorePointer(
@@ -1987,6 +2137,57 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ),
               if (_nextCountdown != null && !_controlsLocked)
                 _buildNextEpisodeCountdown(),
+              if (_playbackController?.state.subtitleSelectionStatus ==
+                      SubtitleSelectionStatus.failed &&
+                  !_controlsLocked)
+                Positioned(
+                  top: 56,
+                  left: 16,
+                  right: 16,
+                  child: _buildSubtitleRecovery(),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSubtitleRecovery() {
+    final controller = _playbackController!;
+    return SafeArea(
+      child: Material(
+        color: const Color(0xDD242424),
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            children: [
+              Text(
+                controller.state.subtitleSelectionError ?? '字幕加载失败',
+                key: const ValueKey('subtitle-recovery-message'),
+              ),
+              TextButton(
+                onPressed: () => _showPlaybackOptions(initialTab: 2),
+                child: const Text('切换字幕'),
+              ),
+              TextButton(
+                onPressed: () => unawaited(_selectSubtitleStream(null)),
+                child: const Text('关闭字幕'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => DiagnosticLogScreen(
+                      playbackTraceId: controller.trace?.id,
+                    ),
+                  ),
+                ),
+                child: const Text('本次日志'),
+              ),
             ],
           ),
         ),
@@ -2203,6 +2404,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: Row(
                 children: [
                   IconButton(
+                    key: const ValueKey('player-back'),
                     tooltip: '返回',
                     onPressed: () =>
                         unawaited(_closePlayer(PlayerExitReason.userBack)),
@@ -2242,6 +2444,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       icon: const Icon(Icons.picture_in_picture_alt),
                     ),
                   IconButton(
+                    key: const ValueKey('player-options'),
                     tooltip: '播放设置',
                     onPressed: _showPlaybackOptions,
                     icon: const Icon(Icons.tune),
@@ -2283,6 +2486,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                   const SizedBox(width: 22),
                   IconButton.filled(
+                    key: const ValueKey('player-play-pause'),
                     tooltip: _playing ? '暂停' : '播放',
                     iconSize: 40,
                     onPressed: _togglePlay,
@@ -2318,6 +2522,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: Column(
                 children: [
                   PlaybackTimeline(
+                    key: const ValueKey('player-timeline'),
                     duration: _duration,
                     max: maxMs,
                     value: positionMs,

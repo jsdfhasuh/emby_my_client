@@ -23,6 +23,36 @@ EmbyApi subtitleApi(String origin) => EmbyApi(
 );
 
 void main() {
+  for (final sample in {
+    'ass': '[Script Info]\nTitle: Fixture\n',
+    'vtt': 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nFixture\n',
+  }.entries) {
+    test(
+      'detects ${sample.key} content despite a misleading URL extension',
+      () async {
+        final server = await ProgressiveOrigin.start();
+        addTearDown(server.close);
+        final api = subtitleApi('https://emby.invalid');
+        addTearDown(api.dispose);
+        final loader = ExternalSubtitleLoader(api);
+        addTearDown(loader.dispose);
+        server.intercept = (_) async => (
+          status: 200,
+          headers: <String, String>{},
+          body: utf8.encode(sample.value),
+        );
+        final lease = await loader.load(
+          '${server.origin}/subtitle.srt',
+          itemId: 'item',
+          sourceId: 'source',
+        );
+        expect(lease.detectedFormat, sample.key);
+        expect(lease.file.path, endsWith('subtitle.${sample.key}'));
+        await lease.release();
+      },
+    );
+  }
+
   test(
     'Emby subtitle uses headers, strips own token query, and drops auth on same-origin non-subtitle redirect',
     () async {
@@ -53,6 +83,7 @@ void main() {
       expect(server.requests.last.headers.containsKey('authorization'), false);
       expect(server.requests.last.target, '/public/sub.srt?api_key=upstream');
       expect(await lease.file.readAsString(), _srt);
+      expect(lease.detectedFormat, 'srt');
       lease.attached = true;
       await loader.dispose();
       expect(await lease.file.exists(), true);

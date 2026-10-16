@@ -124,6 +124,7 @@ class EmbyApi {
   ServerScope get scope => ServerScope.fromSession(session);
   final BrowseCacheRepository? browseCache;
   final BrowseCacheState browseState = BrowseCacheState();
+  final Map<String, int> _browseRequestVersions = {};
   final String _deviceName;
   final Dio _dio;
   final FutureOr<void> Function()? _onSessionExpired;
@@ -348,6 +349,8 @@ class EmbyApi {
   }
 
   Future<void> _handleRealtimeConnected() async {
+    if (_disposed) return;
+    browseState.requestRecovery();
     final operations = <Future<void>>[
       _runConnectedAction(
         _reportRemoteCapabilities,
@@ -1989,6 +1992,9 @@ class EmbyApi {
     }
     final key = BrowseCacheRepository.requestKey(path, queryParameters);
     final generation = cache.generation(scope);
+    final request = browseState.beginRequest();
+    _browseRequestVersions[key] = request;
+    bool isCurrent() => !_disposed && _browseRequestVersions[key] == request;
     BrowseSnapshot? snapshot;
     try {
       snapshot = await cache.load(scope, key);
@@ -1996,11 +2002,11 @@ class EmbyApi {
         snapshot = null;
       }
     } catch (_) {
-      browseState.storageFailed();
+      if (isCurrent()) browseState.storageFailed();
     }
     if (_disposed) throw StateError('Server session is closed');
     try {
-      final request = _dio.get<dynamic>(
+      final pendingResponse = _dio.get<dynamic>(
         path,
         queryParameters: queryParameters,
         cancelToken: cancelToken,
@@ -2012,8 +2018,8 @@ class EmbyApi {
               ),
       );
       final response = snapshot == null
-          ? await request
-          : await request.timeout(
+          ? await pendingResponse
+          : await pendingResponse.timeout(
               const Duration(seconds: 4),
               onTimeout: () => throw DioException(
                 requestOptions: RequestOptions(path: path),
@@ -2025,7 +2031,14 @@ class EmbyApi {
         if (snapshot != null &&
             !browseState.authenticationRequired &&
             cache.generation(scope) == generation) {
-          browseState.cached(key, snapshot, disconnected: false);
+          if (isCurrent()) {
+            browseState.cached(
+              key,
+              snapshot,
+              disconnected: false,
+              request: request,
+            );
+          }
           return Response(
             data: snapshot.data,
             requestOptions: response.requestOptions,
@@ -2035,18 +2048,19 @@ class EmbyApi {
         }
         throw const EmbyApiException('服务器返回了无效的浏览数据');
       }
-      browseState.online(key);
+      if (!isCurrent()) return response;
+      browseState.online(key, request: request);
       try {
         await cache.save(
           scope,
           key,
           response.data,
           expectedGeneration: generation,
-          isActive: () => !_disposed,
+          isActive: isCurrent,
         );
-        browseState.storageRecovered();
+        if (isCurrent()) browseState.storageRecovered();
       } catch (_) {
-        browseState.storageFailed();
+        if (isCurrent()) browseState.storageFailed();
       }
       return response;
     } on DioException catch (error) {
@@ -2069,7 +2083,14 @@ class EmbyApi {
       }
       // Clear/account removal invalidates already-read fallback data too.
       if (cache.generation(scope) != generation) snapshot = null;
-      browseState.cached(key, snapshot, disconnected: network);
+      if (isCurrent()) {
+        browseState.cached(
+          key,
+          snapshot,
+          disconnected: network,
+          request: request,
+        );
+      }
       if (snapshot == null) {
         throw const EmbyApiException('此页面或分页尚未缓存，联网后可用');
       }
@@ -2079,6 +2100,10 @@ class EmbyApi {
         statusCode: 200,
         extra: {'offlineSnapshot': true},
       );
+    } finally {
+      if (_browseRequestVersions[key] == request) {
+        _browseRequestVersions.remove(key);
+      }
     }
   }
 

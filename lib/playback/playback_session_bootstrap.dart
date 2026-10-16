@@ -11,6 +11,8 @@ import 'playback_engine.dart';
 import 'playback_operation_coordinator.dart';
 import 'playback_session_reporter.dart';
 import 'playback_settings.dart';
+import 'subtitle_preference_binding.dart';
+import 'subtitle_preferences_repository.dart';
 
 abstract final class PlaybackSessionBootstrap {
   static PlaybackController createOnlineController({
@@ -27,10 +29,11 @@ abstract final class PlaybackSessionBootstrap {
     PlaybackDiagnosticsTestOverrides? testOverrides,
     String entry = 'unavailable',
     StrmTrace? trace,
+    SubtitlePreferencesRepository? subtitlePreferencesRepository,
   }) {
     trace ??= StrmTrace();
     trace.emit('strm_entry', {'entry': entry, 'outcome': 'started'});
-    return PlaybackController(
+    final controller = PlaybackController(
       trace: trace,
       diagnostics: PlaybackDiagnostics(trace: trace),
       item: item,
@@ -56,6 +59,14 @@ abstract final class PlaybackSessionBootstrap {
       stopTimeout: nativeOperationTimeouts.stop,
       disposeTimeout: nativeOperationTimeouts.dispose,
     );
+    SubtitlePreferenceBinding(
+      controller: controller,
+      session: api.session,
+      repository:
+          subtitlePreferencesRepository ??
+          SubtitlePreferencesRepository.instance,
+    );
+    return controller;
   }
 
   static Future<void> configureAndStart({

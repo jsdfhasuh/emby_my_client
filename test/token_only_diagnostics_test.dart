@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:emby_my_client/core/diagnostic_log.dart';
+import 'package:emby_my_client/core/export_credential_redactor.dart';
 import 'package:emby_my_client/core/full_diagnostic_export.dart';
 import 'package:emby_my_client/core/strm_diagnostics.dart';
 import 'package:emby_my_client/core/token_redactor.dart';
@@ -150,11 +151,18 @@ void main() {
       ).readAsString();
       final local = await fixture.log.read();
       expect(local, disk);
-      expect(report.content.split('\n').skip(8).join('\n'), local);
+      expect(
+        report.content.split('\n').skip(9).join('\n'),
+        ExportCredentialRedactor.redact(local),
+      );
       for (final text in [disk, local, report.content]) {
         expect(
           text,
-          contains(url.replaceAll('failed-wire-token', TokenRedactor.marker)),
+          contains(
+            text == report.content
+                ? ExportCredentialRedactor.redact(url)
+                : url.replaceAll('failed-wire-token', TokenRedactor.marker),
+          ),
         );
         expect(text, contains('"sourceUrl"'));
         expect(text, contains('"requestUrl"'));
@@ -216,13 +224,16 @@ void main() {
       expect(
         report.content,
         contains(
-          '"location":"${origin.origin}/last?access_token=<redacted-token>&sign=a%2Fb&x=1&x=2"',
+          ExportCredentialRedactor.redact(
+            '"location":"${origin.origin}/last?access_token=<redacted-token>&sign=a%2Fb&x=1&x=2"',
+          ),
         ),
       );
       expect(report.content, contains('"fromUrl"'));
       expect(report.content, contains('"toUrl"'));
       expect(report.content, contains('"http":302'));
-      expect(report.content, contains('theme=keep'));
+      expect(await fixture.log.read(), contains('theme=keep'));
+      expect(report.content, isNot(contains('theme=keep')));
       for (final token in [
         'wire-original-secret',
         'wire-next-secret',

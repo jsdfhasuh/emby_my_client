@@ -71,6 +71,7 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
   bool _handedOff = false;
   double? _progress;
   String? _message;
+  String _latestStatus = '尚未检查';
 
   @override
   void initState() {
@@ -125,11 +126,12 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
       await work();
     } catch (error) {
       if (mounted) {
-        setState(
-          () => _message =
+        setState(() {
+          _message =
               (error is UpdateFailure ? error : const UpdateFailure('network'))
-                  .message,
-        );
+                  .message;
+          if (_latestStatus == '正在检查…') _latestStatus = '检查未完成，请重试';
+        });
       }
     } finally {
       if (mounted) {
@@ -147,15 +149,21 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
     if (!mounted) return;
     setState(() {
       _release = null;
+      _latestStatus = '正在检查…';
       _download = null;
       _permissionRequired = false;
       _handedOff = false;
     });
     final cancel = _cancel = CancelToken();
     final release = await _source.latest(cancel);
-    if (!mounted || cancel.isCancelled) return;
+    if (!mounted) return;
+    if (cancel.isCancelled) {
+      setState(() => _latestStatus = '检查已取消');
+      return;
+    }
     setState(() {
       _release = release;
+      _latestStatus = '检查完成';
       if (!release.isNewerThan(_installed!)) _message = '当前已是最新版本。';
     });
   });
@@ -255,7 +263,14 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
           Text(
             app == null
                 ? (_loading ? '正在读取版本…' : '版本信息不可用')
-                : '当前版本 ${app.version}\n构建号 ${app.buildNumber}',
+                : '已安装版本 ${app.version}\n构建号 ${app.buildNumber}',
+          ),
+          const SizedBox(height: 12),
+          Text(
+            release == null
+                ? '最新版本：$_latestStatus'
+                : '最新公开版本：1.0.${release.number}（${release.tag}）',
+            key: const ValueKey('latest-version'),
           ),
           const SizedBox(height: 16),
           const Text('仅在你点击时检查 GitHub 公开版本。下载和安装均由你确认。'),
@@ -292,14 +307,20 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
             ),
           if (release != null) ...[
             const Divider(),
-            Text(
-              '公开版本 ${release.tag}',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
+            Text('更新摘要', style: Theme.of(context).textTheme.titleLarge),
             if (app?.releaseNumber == null)
               const Text('此旧版本未记录可比较的发布号；安装前会核验实际版本与签名。'),
             const SizedBox(height: 12),
-            Text(release.notes.isEmpty ? '此版本未提供更新说明。' : release.notes),
+            Text(
+              releaseChangelogSummary(release.notes),
+              key: const ValueKey('release-summary'),
+            ),
+            if (release.notes.trim().isNotEmpty)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('完整更新说明'),
+                children: [SelectableText(release.notes)],
+              ),
             const SizedBox(height: 12),
             SelectableText(release.page),
             TextButton(
@@ -346,4 +367,27 @@ class _AppUpdateScreenState extends State<AppUpdateScreen> {
       ),
     );
   }
+}
+
+/// A short excerpt of actual release notes, with the original available below.
+String releaseChangelogSummary(String notes) {
+  final lines = notes
+      .split('\n')
+      .map((line) => line.trim())
+      .where(
+        (line) =>
+            line.isNotEmpty && !line.startsWith('```') && !line.startsWith('#'),
+      )
+      .take(3)
+      .toList();
+  if (lines.isEmpty) return '此版本未提供更新摘要，请查看完整更新说明。';
+  return lines
+      .map((line) {
+        final plain = line.replaceFirst(RegExp(r'^[-*+]\s+'), '');
+        final runes = plain.runes.toList();
+        return runes.length > 160
+            ? '${String.fromCharCodes(runes.take(160))}…'
+            : plain;
+      })
+      .join('\n');
 }

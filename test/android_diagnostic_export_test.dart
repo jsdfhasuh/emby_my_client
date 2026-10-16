@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:emby_my_client/core/export_credential_redactor.dart';
 import 'package:emby_my_client/core/full_diagnostic_export.dart';
+import 'package:emby_my_client/core/playback_diagnostic_snapshot.dart';
 import 'package:emby_my_client/core/safe_diagnostic_export.dart';
 import 'package:emby_my_client/core/sign_in_diagnostics.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
@@ -182,7 +183,7 @@ void main() {
                 : (save ? 'save' : 'share'),
           );
           expect(
-            find.text('诊断文件已保存'),
+            find.textContaining('诊断文件已保存'),
             outcome == 'saved' ? findsOneWidget : findsNothing,
           );
           expect(
@@ -243,13 +244,14 @@ void main() {
       await tester.pumpAndSettle();
       result.complete('saved');
       await tester.pumpAndSettle();
-      expect(find.text('诊断文件已保存'), findsNothing);
+      expect(find.textContaining('诊断文件已保存'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
 }
 
 FullDiagnosticExportScreen _fullScreen() => FullDiagnosticExportScreen(
+  initialScope: DiagnosticLogScope.all,
   capabilities: PlatformCapabilities.android,
   service: FullDiagnosticExportService(
     readLog: () async => 'event=fixture password=fixture-secret\n',

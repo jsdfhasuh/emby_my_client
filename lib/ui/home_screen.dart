@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../data/emby_api.dart';
+import '../data/browse_refresh_binding.dart';
 import '../downloads/download_service.dart';
 import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
@@ -48,6 +49,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late Future<HomeData> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  late final BrowseRefreshBinding _browseRefresh;
   final Map<String, HomeLatestSection> _latestSections = {};
   int _loadGeneration = 0;
   bool _openingLibrary = false;
@@ -56,6 +58,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _future = _loadHome(_loadGeneration);
+    _browseRefresh = BrowseRefreshBinding(
+      state: widget.api.browseState,
+      refresh: _refresh,
+    );
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refresh,
@@ -66,6 +72,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _browseRefresh.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
@@ -163,6 +170,7 @@ class _HomeScreenState extends State<HomeScreen> {
           MaterialPageRoute(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
+              downloads: widget.downloads,
               source: FilteredLibraryPhotoSource(
                 queryFingerprint: 'home-latest:${section.library.id.hashCode}',
                 initialItems: section.items,

@@ -1,4 +1,8 @@
 import 'dart:io';
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:emby_my_client/downloads/download_integrity.dart';
 
 import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
@@ -92,6 +96,102 @@ void main() {
     expect(resolver.canForceTranscode, isFalse);
   });
 
+  test(
+    'missing external subtitle is excluded while local video remains playable',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'offline-sidecar-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}video.mkv');
+      await file.writeAsBytes([1, 2, 3, 4]);
+      final offline = _offline(
+        file.path,
+        mediaStreams: [
+          {
+            'Index': 7,
+            'Type': 'Subtitle',
+            'Codec': 'srt',
+            'IsExternal': true,
+            'IsDefault': true,
+            'OfflineSubtitleState': 'available',
+            'DeliveryUrl':
+                '${directory.path}${Platform.pathSeparator}missing.srt',
+          },
+        ],
+      );
+      final resolver = OfflinePlaybackResolver(offline);
+      final plan = await resolver.resolve(offline.toEmbyItem());
+      final requested = await resolver.resolve(
+        offline.toEmbyItem(),
+        subtitleStreamIndex: 7,
+      );
+      expect(requested.subtitleStreamIndex, 7);
+      expect(requested.mediaStreams, isEmpty);
+      expect(plan.uri, file.uri);
+      expect(plan.mediaStreams, isEmpty);
+      expect(plan.subtitleStreamIndex, isNull);
+      expect(plan.usesServerAuthentication, isFalse);
+    },
+  );
+
+  test(
+    'resolver independently rejects changed same-size video with known digest',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'offline-digest-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}video.mkv');
+      final original = [1, 2, 3, 4];
+      await file.writeAsBytes(original);
+      final offline = _offline(
+        file.path,
+        expectedBytes: original.length,
+        integrity: DownloadIntegrity.fromStored(
+          'sha-256',
+          base64Encode(sha256.convert(original).bytes),
+        ),
+      );
+      final resolver = OfflinePlaybackResolver(offline);
+      expect((await resolver.resolve(offline.toEmbyItem())).uri, file.uri);
+      await file.writeAsBytes([4, 3, 2, 1]);
+      await expectLater(
+        resolver.resolve(offline.toEmbyItem()),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await file.readAsBytes(), [4, 3, 2, 1]);
+      expect(resolver.canForceTranscode, isFalse);
+    },
+  );
+
+  test(
+    'legacy video without digest still rejects header errors and wrong size',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'offline-legacy-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}video.mkv');
+      await file.writeAsBytes([1, 2, 3, 4]);
+      final offline = _offline(file.path, expectedBytes: 4);
+      final resolver = OfflinePlaybackResolver(offline);
+      expect((await resolver.resolve(offline.toEmbyItem())).uri, file.uri);
+      await file.writeAsBytes([1, 2, 3]);
+      await expectLater(
+        resolver.resolve(offline.toEmbyItem()),
+        throwsA(isA<FileSystemException>()),
+      );
+      await file.writeAsString('<html>not media</html>');
+      final noSize = _offline(file.path);
+      await expectLater(
+        OfflinePlaybackResolver(noSize).resolve(noSize.toEmbyItem()),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await file.exists(), isTrue);
+    },
+  );
+
   test('writes offline progress without an online session report', () async {
     final writes = <(Duration, bool)>[];
     final reporter = OfflinePlaybackReporter(
@@ -115,6 +215,8 @@ void main() {
 OfflineMediaItem _offline(
   String path, {
   int? runtimeTicks,
+  int? expectedBytes,
+  DownloadIntegrity? integrity,
   List<Map<String, dynamic>> mediaStreams = const [],
 }) => OfflineMediaItem(
   scope: const ServerScope(serverId: 'server-1', userId: 'user-1'),
@@ -129,4 +231,6 @@ OfflineMediaItem _offline(
   ),
   localMediaPath: path,
   completedAt: DateTime.utc(2026, 7, 30),
+  expectedBytes: expectedBytes,
+  integrity: integrity,
 );

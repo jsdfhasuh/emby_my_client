@@ -44,8 +44,12 @@ class SourceInputException implements Exception {
           'invalid_range' => 'range_response',
           'native_registration' => 'native_register',
           'native_policy_option' => 'native_open',
-          'subtitle_format' || 'subtitle_budget' => 'subtitle_download',
-          'subtitle_unconfirmed' => 'subtitle_apply',
+          'subtitle_format' ||
+          'subtitle_budget' ||
+          'subtitle_missing' ||
+          'subtitle_unreadable' => 'subtitle_download',
+          'subtitle_unconfirmed' ||
+          'subtitle_decoder_unsupported' => 'subtitle_apply',
           _ => 'body_read',
         };
   int? get safeHttp =>

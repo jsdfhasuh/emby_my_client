@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import '../core/diagnostic_log.dart';
 import '../core/server_scope.dart';
 import '../data/emby_api.dart';
+import '../data/browse_refresh_binding.dart';
 import '../downloads/download_service.dart';
 import '../images/emby_image_request.dart';
 import '../library/library_alphabet_filter.dart';
@@ -84,12 +85,17 @@ abstract interface class LibraryBrowseDebugState {
 class _LibraryScreenState extends State<LibraryScreen> {
   late Future<List<EmbyItem>> _future;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  late final BrowseRefreshBinding _browseRefresh;
   bool _openingView = false;
 
   @override
   void initState() {
     super.initState();
     _future = _loadViews();
+    _browseRefresh = BrowseRefreshBinding(
+      state: widget.api.browseState,
+      refresh: _refresh,
+    );
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refresh,
@@ -114,6 +120,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    _browseRefresh.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
@@ -1156,6 +1163,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
   final Set<String> _seenItemIds = {};
   late final LibraryScrollPositionController _positionController;
   late final RealtimeRefreshBinding _realtimeRefresh;
+  late final BrowseRefreshBinding _browseRefresh;
   late LibraryBrowseState _state;
   late LibrarySortPreference _rootPreference;
 
@@ -1423,6 +1431,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     _positionController = LibraryScrollPositionController();
     _controller.addListener(_onScroll);
     widget.libraryScanService?.addListener(_onLibraryScanChanged);
+    _browseRefresh = BrowseRefreshBinding(
+      state: widget.api.browseState,
+      refresh: _refreshPreservingPosition,
+    );
     _realtimeRefresh = RealtimeRefreshBinding(
       client: widget.api.realtime,
       refresh: _refreshRealtime,
@@ -1489,6 +1501,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       ..dispose();
     widget.libraryScanService?.removeListener(_onLibraryScanChanged);
     _positionController.dispose();
+    _browseRefresh.dispose();
     unawaited(_realtimeRefresh.dispose());
     super.dispose();
   }
@@ -2828,7 +2841,11 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
         final source = _photoSequenceSource(item);
         final result = await Navigator.of(context).push<MediaViewerResult>(
           MaterialPageRoute<MediaViewerResult>(
-            builder: (_) => PhotoViewerScreen(api: widget.api, source: source),
+            builder: (_) => PhotoViewerScreen(
+              api: widget.api,
+              source: source,
+              downloads: widget.downloads,
+            ),
           ),
         );
         if (!mounted || result == null) return;

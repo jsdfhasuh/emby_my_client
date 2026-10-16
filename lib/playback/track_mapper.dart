@@ -78,7 +78,9 @@ class PlaybackTrack {
   SubtitleDelivery deliveryFor(PlaybackPlan plan) {
     // Downloaded metadata describes the server source, not the local file.
     if (plan.transportKind == PlaybackTransportKind.offlineLocal) {
-      return isExternal ? SubtitleDelivery.external : SubtitleDelivery.embed;
+      return isExternal || delivery == SubtitleDelivery.external
+          ? SubtitleDelivery.external
+          : SubtitleDelivery.embed;
     }
     if (delivery != SubtitleDelivery.unspecified) return delivery;
     if (plan.method == PlayMethod.directPlay) {

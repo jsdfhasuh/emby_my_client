@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as path;
 
 import '../core/diagnostic_log.dart';
 import '../data/emby_api.dart';
+import 'download_asset_verifier.dart';
 import 'download_models.dart';
 
 abstract interface class DownloadAssetService {
@@ -17,7 +18,16 @@ abstract interface class DownloadAssetService {
   });
 }
 
-class EmbyDownloadAssetService implements DownloadAssetService {
+abstract interface class SubtitleRepairAssetService {
+  Future<OfflineMediaMetadata> repairSubtitles(
+    DownloadTaskRecord task,
+    Directory downloadDirectory, {
+    CancelToken? cancelToken,
+  });
+}
+
+class EmbyDownloadAssetService
+    implements DownloadAssetService, SubtitleRepairAssetService {
   EmbyDownloadAssetService(
     this.api, {
     this.maximumAssetBytes = 20 * 1024 * 1024,
@@ -31,6 +41,30 @@ class EmbyDownloadAssetService implements DownloadAssetService {
     DownloadTaskRecord task,
     Directory downloadDirectory, {
     CancelToken? cancelToken,
+  }) => _downloadAssets(
+    task,
+    downloadDirectory,
+    cancelToken: cancelToken,
+    includeCover: true,
+  );
+
+  @override
+  Future<OfflineMediaMetadata> repairSubtitles(
+    DownloadTaskRecord task,
+    Directory downloadDirectory, {
+    CancelToken? cancelToken,
+  }) => _downloadAssets(
+    task,
+    downloadDirectory,
+    cancelToken: cancelToken,
+    includeCover: false,
+  );
+
+  Future<OfflineMediaMetadata> _downloadAssets(
+    DownloadTaskRecord task,
+    Directory downloadDirectory, {
+    CancelToken? cancelToken,
+    required bool includeCover,
   }) async {
     if (task.id.isEmpty) throw ArgumentError.value(task.id, 'task.id');
     final assetKey = task.id.length <= 16 ? task.id : task.id.substring(0, 16);
@@ -43,7 +77,12 @@ class EmbyDownloadAssetService implements DownloadAssetService {
     await assetDirectory.create(recursive: true);
     final cancellation = cancelToken ?? CancelToken();
     _checkCancelled(cancellation);
-    var streams = task.metadata.mediaStreams;
+    final previous = await verifyOfflineAssets(
+      task.metadata,
+      directory: downloadDirectory,
+    );
+    _checkCancelled(cancellation);
+    var streams = previous.mediaStreams;
     var discovered = false;
     try {
       final source = await api.getDownloadMediaSource(
@@ -60,11 +99,12 @@ class EmbyDownloadAssetService implements DownloadAssetService {
       discovered = true;
     } catch (_) {
       _checkCancelled(cancellation);
-      // Keep the manifest so an incomplete discovery remains repairable.
+      // Existing verified assets remain playable even if discovery is offline.
     }
-    var primaryImagePath = task.metadata.primaryImagePath;
-    final imageTag = task.metadata.primaryImageTag;
-    if (imageTag != null && imageTag.isNotEmpty) {
+    var primaryImagePath = previous.primaryImagePath;
+    var primaryImageState = previous.primaryImageState;
+    final imageTag = previous.primaryImageTag;
+    if (includeCover && imageTag != null && imageTag.isNotEmpty) {
       try {
         final imageUri =
             Uri.parse(
@@ -77,62 +117,74 @@ class EmbyDownloadAssetService implements DownloadAssetService {
                 'quality': '90',
               },
             );
-        final imageFile = File(path.join(assetDirectory.path, 'primary.jpg'));
-        await _download(
+        final imageFile = await _download(
           imageUri,
-          imageFile,
+          File(path.join(assetDirectory.path, 'primary.jpg')),
           temporaryDirectory: temporaryDirectory,
           requireImage: true,
           cancellation: cancellation,
         );
         primaryImagePath = imageFile.path;
-      } catch (error, stackTrace) {
+        primaryImageState = OfflineAssetState.available;
+      } catch (error) {
+        _checkCancelled(cancellation);
+        if (primaryImagePath == null) {
+          primaryImageState = OfflineAssetState.failed;
+        }
         DiagnosticLog.instance.warning(
           'download',
-          'Offline primary image failed item=${task.itemId}: '
-              '${error.runtimeType}',
+          'Offline primary image failed item=${task.itemId}: ${error.runtimeType}',
         );
-        DiagnosticLog.instance.debug('download', stackTrace.toString());
       }
     }
 
+    final saved = <int, Map<String, dynamic>>{
+      for (final stream in previous.mediaStreams)
+        if (OfflineMediaMetadata.isExternalSubtitle(stream) &&
+            stream['OfflineSubtitleState'] == 'available' &&
+            _integer(stream['Index']) != null)
+          _integer(stream['Index'])!: stream,
+    };
     final mediaStreams = <Map<String, dynamic>>[];
+    final seen = <int>{};
     for (final original in streams) {
       _checkCancelled(cancellation);
-      final stream = Map<String, dynamic>.from(original);
-      final externalSubtitle =
-          stream['Type']?.toString().toLowerCase() == 'subtitle' &&
-          stream['IsExternal'] == true;
-      if (!externalSubtitle) {
-        mediaStreams.add(stream);
+      var stream = Map<String, dynamic>.from(original);
+      if (!OfflineMediaMetadata.isExternalSubtitle(stream)) {
+        final index = _integer(stream['Index']);
+        final retained = stream['Type']?.toString().toLowerCase() == 'subtitle'
+            ? saved[index]
+            : null;
+        if (retained != null) {
+          // A negotiation change to Embed does not remove a verified sidecar
+          // or create two playback identities for the same source index.
+          seen.add(index!);
+          mediaStreams.add(Map<String, dynamic>.from(retained));
+        } else {
+          mediaStreams.add(stream);
+        }
         continue;
       }
       final rawUrl = stream.remove('DeliveryUrl')?.toString();
       stream.remove('Path');
+      stream.remove('OfflineSubtitleError');
+      final index = _integer(stream['Index']);
+      if (index != null) seen.add(index);
+      final existing = saved[index];
       stream['OfflineSubtitleState'] = 'missing';
       try {
-        final index = _integer(stream['Index']);
         if (index == null || index < 0) {
           throw const FormatException('subtitleIndex');
         }
-        final extension = _supportedSubtitleExtension(stream);
+        final extension = offlineSubtitleExtension(stream);
         if (extension == null) {
           stream['OfflineSubtitleState'] = 'unsupported';
-          mediaStreams.add(stream);
-          continue;
+          throw const FormatException('unsupportedSubtitle');
         }
-        final subtitleFile = File(
-          path.join(assetDirectory.path, 'subtitle-$index.$extension'),
-        );
-        // A saved local file is usable during an interrupted discovery too.
-        if (!discovered &&
-            rawUrl == subtitleFile.path &&
-            await subtitleFile.exists()) {
-          _validateSubtitle(await subtitleFile.readAsBytes(), extension);
+        if (!discovered) {
+          if (existing == null) throw const FormatException('sourceUnverified');
+          stream = Map<String, dynamic>.from(existing);
         } else {
-          if (!discovered) throw const FormatException('sourceUnverified');
-          // The documented endpoint binds both the source and track when item
-          // metadata omits DeliveryUrl. Never guess a different media source.
           final uri =
               rawUrl != null &&
                   rawUrl.isNotEmpty &&
@@ -144,42 +196,51 @@ class EmbyDownloadAssetService implements DownloadAssetService {
                   '${Uri.encodeComponent(task.mediaSourceId)}/Subtitles/'
                   '$index/Stream.$extension',
                 );
-          _requireSameServer(uri);
-          await _download(
+          final subtitleFile = await _download(
             uri,
-            subtitleFile,
+            File(path.join(assetDirectory.path, 'subtitle-$index.$extension')),
             temporaryDirectory: temporaryDirectory,
             cancellation: cancellation,
             subtitleFormat: extension,
           );
+          stream['DeliveryUrl'] = subtitleFile.path;
+          stream['Format'] = extension;
+          stream['OfflineSubtitleState'] = 'available';
         }
-        stream['DeliveryUrl'] = subtitleFile.path;
-        stream['OfflineSubtitleState'] = 'available';
-      } catch (error, stackTrace) {
+      } catch (error) {
         _checkCancelled(cancellation);
-        stream['OfflineSubtitleState'] = 'failed';
+        if (existing != null) {
+          stream = Map<String, dynamic>.from(existing);
+          stream['OfflineSubtitleError'] = 'refreshFailed';
+        } else if (stream['OfflineSubtitleState'] != 'unsupported') {
+          stream['OfflineSubtitleState'] = 'failed';
+        }
         DiagnosticLog.instance.warning(
           'download',
-          'Offline subtitle failed item=${task.itemId} '
-              'index=${stream['Index'] ?? 'unknown'}: ${error.runtimeType}',
+          'Offline subtitle failed item=${task.itemId} index=$index: ${error.runtimeType}',
         );
-        DiagnosticLog.instance.debug('download', stackTrace.toString());
       }
       mediaStreams.add(stream);
     }
-
+    // A server removing a track does not delete a user's already saved subtitle.
+    for (final entry in saved.entries) {
+      if (!seen.contains(entry.key)) mediaStreams.add(entry.value);
+    }
+    _checkCancelled(cancellation);
     if (await temporaryDirectory.exists() &&
         await temporaryDirectory.list(followLinks: false).isEmpty) {
       await temporaryDirectory.delete();
     }
-    return task.metadata.copyWith(
+    return previous.copyWith(
       primaryImagePath: primaryImagePath,
+      clearPrimaryImagePath: primaryImagePath == null,
+      primaryImageState: primaryImageState,
       mediaStreams: mediaStreams,
       subtitleDiscoveryComplete: discovered,
     );
   }
 
-  Future<void> _download(
+  Future<File> _download(
     Uri uri,
     File destination, {
     required Directory temporaryDirectory,
@@ -250,6 +311,7 @@ class EmbyDownloadAssetService implements DownloadAssetService {
       if (body == null) throw const FormatException('emptyAsset');
       try {
         await for (final chunk in body.stream) {
+          _checkCancelled(cancellation);
           received += chunk.length;
           if (received > maximumAssetBytes) {
             throw const FormatException('assetTooLarge');
@@ -264,11 +326,22 @@ class EmbyDownloadAssetService implements DownloadAssetService {
         throw const FormatException('assetLengthMismatch');
       }
       if (subtitleFormat != null) {
-        _validateSubtitle(await temporary.readAsBytes(), subtitleFormat);
+        validateOfflineSubtitle(await temporary.readAsBytes(), subtitleFormat);
       }
+      final bytes = await temporary.readAsBytes();
+      if (requireImage) await validateOfflineImage(bytes);
       _checkCancelled(cancellation);
-      if (await destination.exists()) await destination.delete();
-      await temporary.rename(destination.path);
+      // Content-addressed sidecars preserve old manifests during cancellation,
+      // failed refresh, or process death before the new manifest is committed.
+      final digest = sha256.convert(bytes).toString().substring(0, 24);
+      final published = File(
+        path.join(
+          destination.parent.path,
+          '${path.basenameWithoutExtension(destination.path)}-$digest'
+          '${path.extension(destination.path)}',
+        ),
+      );
+      return await temporary.rename(published.path);
     } catch (_) {
       if (!cancelToken.isCancelled) cancelToken.cancel('assetDownloadFailed');
       final partial = temporary;
@@ -303,31 +376,6 @@ class NoopDownloadAssetService implements DownloadAssetService {
     Directory downloadDirectory, {
     CancelToken? cancelToken,
   }) async => task.metadata.copyWith(subtitleDiscoveryComplete: true);
-}
-
-String? _supportedSubtitleExtension(Map<String, dynamic> stream) {
-  return switch (stream['Codec']?.toString().toLowerCase()) {
-    'subrip' => 'srt',
-    'ass' || 'ssa' => 'ass',
-    'webvtt' || 'vtt' => 'vtt',
-    'mov_text' => 'srt',
-    'srt' => 'srt',
-    _ => null,
-  };
-}
-
-void _validateSubtitle(List<int> bytes, String format) {
-  var text = utf8.decode(bytes, allowMalformed: false).trimLeft();
-  if (text.startsWith('\uFEFF')) text = text.substring(1).trimLeft();
-  if (text.startsWith('<') ||
-      text.toLowerCase().contains('<html') ||
-      !(switch (format) {
-        'vtt' => text.startsWith('WEBVTT'),
-        'ass' => text.contains('[Script Info]') && text.contains('[Events]'),
-        _ => RegExp(r'\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->').hasMatch(text),
-      })) {
-    throw const FormatException('subtitleFormat');
-  }
 }
 
 int? _integer(Object? value) {

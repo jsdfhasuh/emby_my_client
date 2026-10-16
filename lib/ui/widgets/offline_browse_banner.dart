@@ -18,6 +18,8 @@ class OfflineBrowseBanner extends StatelessWidget {
           !state.missingPage) {
         return const SizedBox.shrink();
       }
+      final retry =
+          onRetry ?? (state.needsRecovery ? state.requestRecovery : null);
       final timestamp = state.cachedAt?.toLocal().toString().split('.').first;
       final title = state.authenticationRequired
           ? '登录已失效，请重新登录'
@@ -50,8 +52,8 @@ class OfflineBrowseBanner extends StatelessWidget {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
-                if (onRetry != null && !state.authenticationRequired)
-                  TextButton(onPressed: onRetry, child: const Text('刷新')),
+                if (retry != null && !state.authenticationRequired)
+                  TextButton(onPressed: retry, child: const Text('刷新')),
               ],
             ),
           ),

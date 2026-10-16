@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/full_diagnostic_export.dart';
+import '../core/playback_diagnostic_snapshot.dart';
+import 'diagnostic_scope_controls.dart';
 import '../core/safe_diagnostic_export.dart';
 import '../platform/platform_capabilities.dart';
 
@@ -19,7 +21,11 @@ String buildFullDiagnosticPreview(
   if (utf8.encode(content).length <= maxBytes) return content;
 
   final lines = content.split('\n');
-  final headerCount = lines.length < 8 ? lines.length : 8;
+  final fixedLines =
+      lines.length > 8 && lines[8].startsWith('event=diagnostic_export ')
+      ? 9
+      : 8;
+  final headerCount = lines.length < fixedLines ? lines.length : fixedLines;
   final header = lines.take(headerCount).join('\n');
   final prefix = '$header\n$_fullDiagnosticPreviewOmission\n';
   final prefixBytes = utf8.encode(prefix).length;
@@ -59,11 +65,17 @@ class FullDiagnosticExportScreen extends StatefulWidget {
     this.service,
     this.shareGateway,
     this.capabilities,
+    this.playbackTraceId,
+    this.initialScope = DiagnosticLogScope.currentPlayback,
+    this.initialSnapshot,
   });
 
   final FullDiagnosticExportService? service;
   final FullDiagnosticShareGateway? shareGateway;
   final PlatformCapabilities? capabilities;
+  final String? playbackTraceId;
+  final DiagnosticLogScope initialScope;
+  final PlaybackDiagnosticSnapshot? initialSnapshot;
 
   @override
   State<FullDiagnosticExportScreen> createState() =>
@@ -85,14 +97,22 @@ class _FullDiagnosticExportScreenState
   bool _loading = true;
   bool _sharing = false;
   bool _previewTruncated = false;
+  late DiagnosticLogScope _scope =
+      widget.initialSnapshot?.scope ?? widget.initialScope;
+  late String? _playbackTraceId =
+      widget.playbackTraceId ?? widget.initialSnapshot?.playbackTraceId;
+  bool _selectionResolved = false;
+
+  String get _exportLabel =>
+      _scope == DiagnosticLogScope.all ? '导出完整调试日志' : '导出本次播放诊断';
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _load(snapshot: widget.initialSnapshot);
   }
 
-  Future<void> _load() async {
+  Future<void> _load({PlaybackDiagnosticSnapshot? snapshot}) async {
     if (mounted) {
       setState(() {
         _loading = true;
@@ -112,11 +132,20 @@ class _FullDiagnosticExportScreenState
       return;
     }
     try {
-      final report = await _service.buildReport();
+      final report = await _service.buildReport(
+        scope: _scope,
+        playbackTraceId: _playbackTraceId,
+        resolveLatest: !_selectionResolved,
+        snapshot: snapshot,
+      );
       final preview = buildFullDiagnosticPreview(report.content);
       if (!mounted) return;
       setState(() {
         _report = report;
+        _playbackTraceId ??= report.playbackTraceId;
+        if (report.scope == DiagnosticLogScope.currentPlayback) {
+          _selectionResolved = true;
+        }
         _previewContent = preview;
         _previewTruncated = preview != report.content;
         _loading = false;
@@ -154,8 +183,8 @@ class _FullDiagnosticExportScreenState
         context: context,
         barrierDismissible: false,
         builder: (context) => AlertDialog(
-          title: const Text('导出完整调试日志？'),
-          content: Text(_privacyDescription),
+          title: Text('$_exportLabel？'),
+          content: Text('${report.associationLabel}\n\n$_privacyDescription'),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -176,11 +205,11 @@ class _FullDiagnosticExportScreenState
               .share(report, anchor: anchor);
       if (!mounted) return;
       if (outcome == FullDiagnosticShareOutcome.saved) {
-        _showMessage('诊断文件已保存');
+        _showMessage('诊断文件已保存；${report.associationLabel}');
       } else if (outcome == FullDiagnosticShareOutcome.opened) {
-        _showMessage('已打开系统分享面板；请自行选择目标，未自动发送');
+        _showMessage('已打开系统分享面板；请自行选择目标，未自动发送。${report.associationLabel}');
       } else if (outcome == FullDiagnosticShareOutcome.completed) {
-        _showMessage('完整调试日志已准备分享');
+        _showMessage('诊断日志已准备分享；${report.associationLabel}');
       } else {
         _showMessage('已取消导出');
       }
@@ -236,9 +265,8 @@ class _FullDiagnosticExportScreenState
   String _failureMessage(String code) =>
       '完整调试日志操作失败（${_normalizeErrorCode(code)}）';
 
-  String get _privacyDescription => _capabilities.platformName == 'android'
-      ? '导出副本会隐藏密码、Token、授权头、Cookie 和 URL 参数值。仍可能包含服务器地址、媒体标识、路径及错误栈，请预览后自行选择保存或分享目标。本地原始日志保持不变。'
-      : '完整调试日志仅隐藏认证 Token 值，保留完整地址、路径、媒体 ID、请求头及错误栈。';
+  String get _privacyDescription =>
+      '导出副本会隐藏密码、Token、授权头、Cookie 和 URL 参数值。仍可能包含服务器地址、媒体标识、路径及错误栈，请预览后自行选择保存或分享目标。本地原始日志保持不变。';
 
   void _showMessage(String message) {
     ScaffoldMessenger.of(context)
@@ -250,11 +278,13 @@ class _FullDiagnosticExportScreenState
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('完整调试日志'),
+        title: Text(_scope == DiagnosticLogScope.all ? '完整调试日志' : '本次播放诊断'),
         actions: [
           if (_capabilities.platformName == 'android')
             IconButton(
-              tooltip: '保存完整调试日志',
+              tooltip: _scope == DiagnosticLogScope.all
+                  ? '保存完整调试日志'
+                  : '保存本次播放诊断',
               onPressed: !_loading && !_sharing && (_report?.lineCount ?? 0) > 0
                   ? () => _shareReport(save: true)
                   : null,
@@ -280,7 +310,7 @@ class _FullDiagnosticExportScreenState
         !_sharing;
     return IconButton(
       key: _exportButtonKey,
-      tooltip: '导出完整调试日志',
+      tooltip: _exportLabel,
       onPressed: canShare ? _shareReport : null,
       icon: _sharing
           ? const SizedBox.square(
@@ -321,6 +351,23 @@ class _FullDiagnosticExportScreenState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          DiagnosticScopeControls(
+            scope: _scope,
+            onChanged: _sharing
+                ? null
+                : (value) {
+                    if (value == _scope) return;
+                    setState(() => _scope = value);
+                    _load();
+                  },
+          ),
+          const SizedBox(height: 12),
+          SelectableText(
+            report.associationLabel,
+            key: const ValueKey('export-association'),
+          ),
+          if (report.scope == DiagnosticLogScope.currentPlayback)
+            PlaybackDiagnosticSummaryCard(summary: report.summary),
           const Text(
             '发送前请检查',
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
@@ -339,9 +386,15 @@ class _FullDiagnosticExportScreenState
           ),
           const SizedBox(height: 18),
           if (report.lineCount == 0)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 22),
-              child: Center(child: Text('暂无完整调试日志记录')),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 22),
+              child: Center(
+                child: Text(
+                  _scope == DiagnosticLogScope.all
+                      ? '暂无完整调试日志记录'
+                      : '暂无可关联的本次播放记录，可切换到全部日志。',
+                ),
+              ),
             )
           else ...[
             const Text(

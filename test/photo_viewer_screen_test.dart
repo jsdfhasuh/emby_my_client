@@ -18,6 +18,48 @@ import 'package:flutter_test/flutter_test.dart';
 import 'shared_preferences_async_test_backend.dart';
 
 void main() {
+  testWidgets(
+    'offline home video blocks inline startup and resumes after recovery',
+    (tester) async {
+      final api = EmbyApi(_session, dio: Dio());
+      addTearDown(api.dispose);
+      final harness = _ViewerSessionHarness();
+      api.browseState.cached('fixture', null, disconnected: true);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PhotoViewerScreen(
+            api: api,
+            source: _viewerSource(
+              mode: MediaViewerMode.homeMedia,
+              items: const [_video1],
+              initialItemId: _video1.id,
+            ),
+            inlineSessionFactory: harness.create,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(harness.sessions, isEmpty);
+      expect(
+        find.byKey(ValueKey('offline-video-page-${_video1.id}')),
+        findsOneWidget,
+      );
+      api.browseState.online('fixture');
+      await tester.pumpAndSettle();
+      expect(harness.sessions, hasLength(1));
+      expect(harness.sessions.single.playCalls, 1);
+      api.browseState.cached('fixture', null, disconnected: true);
+      await tester.pumpAndSettle();
+      expect(harness.sessions.single.shutdownCalls, 1);
+      expect(
+        find.byKey(ValueKey('offline-video-page-${_video1.id}')),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+  );
+
   for (final sameAccount in [false, true]) {
     testWidgets(
       'workspace replacement retires viewer and late playback (same account: $sameAccount)',

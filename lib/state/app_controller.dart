@@ -30,6 +30,7 @@ import '../playback/cache/playback_cache_storage.dart';
 import '../playback/playback_diagnostics.dart';
 import '../playback/playback_diagnostics_test_overrides.dart';
 import '../playback/playback_settings_repository.dart';
+import '../playback/subtitle_preferences_repository.dart';
 import '../settings/library_category_settings.dart';
 import '../settings/library_sort_preferences.dart';
 
@@ -86,6 +87,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     PlaybackDiagnosticsTestOverridesController?
     playbackDiagnosticsTestOverrides,
     PlaybackSettingsRepository? playbackSettingsRepository,
+    SubtitlePreferencesRepository? subtitlePreferencesRepository,
     AccountDataCleanup? accountDataCleanup,
     PlatformCapabilities? capabilities,
     SignInAuthenticator? authenticator,
@@ -104,6 +106,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
            PlaybackDiagnosticsTestOverridesController(),
        _playbackSettingsRepository =
            playbackSettingsRepository ?? PlaybackSettingsRepository(),
+       _subtitlePreferencesRepository =
+           subtitlePreferencesRepository ??
+           SubtitlePreferencesRepository.instance,
        _accountDataCleanup = accountDataCleanup,
        _capabilities = capabilities ?? PlatformCapabilities.current(),
        _authenticate = authenticator ?? _defaultAuthenticate,
@@ -131,6 +136,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final PlaybackDiagnosticsTestOverridesController
   _playbackDiagnosticsTestOverrides;
   final PlaybackSettingsRepository _playbackSettingsRepository;
+  final SubtitlePreferencesRepository _subtitlePreferencesRepository;
   final ClientRegistry<EmbyApi> _clients;
   LibraryCategorySettingsStore? _libraryCategorySettingsStore;
   LibrarySortPreferenceStore? _librarySortPreferenceStore;
@@ -181,6 +187,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   get playbackDiagnosticsTestOverrides => _playbackDiagnosticsTestOverrides;
   PlaybackSettingsRepository get playbackSettingsRepository =>
       _playbackSettingsRepository;
+  SubtitlePreferencesRepository get subtitlePreferencesRepository =>
+      _subtitlePreferencesRepository;
   EmbyApi get api => _clients.requireClient(_scope!);
 
   Future<void> initialize() => _initialization ??= _initialize();
@@ -368,6 +376,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       // B's API until A's scan, downloads, realtime client, and Dio instance
       // have fully shut down. This keeps one active server workspace at most.
       preparedState = await _prepareWorkspaceState(targetAccount.session);
+      if (previousSession != null) {
+        await _subtitlePreferencesRepository.deactivate(previousSession);
+      }
       await _shutdownLibraryScanService();
       await _shutdownDownloads(stopExecutor: true);
       if (previousScope != null) {
@@ -736,6 +747,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
 
   void _resetSessionState() {
     _playbackDiagnosticsTestOverrides.clear();
+    final previous = _session;
+    if (previous != null) {
+      unawaited(_subtitlePreferencesRepository.deactivate(previous));
+    }
     _session = null;
     _scope = null;
     _serverCapabilities = null;
@@ -747,6 +762,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     await _accounts.initialize();
     final accountId = _accounts.currentAccountId;
     if (accountId == null) {
+      final session = _session;
+      if (session != null) {
+        await _clearSubtitlePreferences(session);
+      }
       await _store.clearSession();
       _resetSessionState();
       if (!_disposed) notifyListeners();
@@ -789,6 +808,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       try {
         await _accounts.remove(accountId);
         accountRemoved = true;
+        await _clearSubtitlePreferences(account.session);
         if (deleteLocalData) {
           await _deleteStoredAccountData(account);
         } else {
@@ -811,10 +831,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     var accountRemoved = false;
     try {
       _playbackDiagnosticsTestOverrides.clear();
+      await _subtitlePreferencesRepository.deactivate(account.session);
       await _shutdownLibraryScanService();
       await _shutdownDownloads(stopExecutor: true);
       await _accounts.remove(accountId);
       accountRemoved = true;
+      await _clearSubtitlePreferences(account.session);
       if (deleteLocalData) {
         await _deleteStoredAccountData(account);
       } else {
@@ -893,6 +915,19 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         'Failed to clear removed account playback settings',
         error: error,
         stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _clearSubtitlePreferences(EmbySession session) async {
+    try {
+      await _subtitlePreferencesRepository.deleteAccountPreferences(session);
+    } catch (error) {
+      // Removal remains available if optional preference storage fails. The
+      // repository invalidates pending writes before attempting the deletion.
+      DiagnosticLog.instance.warning(
+        'storage',
+        'Failed to clear subtitle preferences errorType=${error.runtimeType}',
       );
     }
   }
@@ -1202,6 +1237,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         libraryCategorySettingsStore: _categorySettingsStore,
         librarySortPreferenceStore: librarySortPreferenceStore,
         playbackSettingsRepository: _playbackSettingsRepository,
+        subtitlePreferencesRepository: _subtitlePreferencesRepository,
       );
 
   EmbyApi _createApi(EmbySession session, ServerScope scope) {
@@ -1489,6 +1525,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    final session = _session;
+    if (session != null) {
+      unawaited(_subtitlePreferencesRepository.deactivate(session));
+    }
     _localDatabaseAvailable = false;
     if (_observingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);

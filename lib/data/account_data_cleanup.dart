@@ -7,6 +7,7 @@ import '../downloads/download_path_policy.dart';
 import '../downloads/download_settings.dart';
 import '../models/emby_models.dart';
 import '../playback/playback_settings_repository.dart';
+import '../playback/subtitle_preferences_repository.dart';
 import '../search/search_history_store.dart';
 import '../settings/library_category_settings.dart';
 import '../settings/library_sort_preferences.dart';
@@ -22,6 +23,7 @@ class AccountDataCleanup {
     LibrarySortPreferenceStore? librarySortPreferenceStore,
     SearchHistoryStore? searchHistoryStore,
     PlaybackSettingsRepository? playbackSettingsRepository,
+    SubtitlePreferencesRepository? subtitlePreferencesRepository,
     Future<void> Function(ServerScope)? clearImages,
   }) : _database = database,
        _clearImages = clearImages ?? embyImageCacheManager.clearScope,
@@ -37,7 +39,10 @@ class AccountDataCleanup {
        _searchHistoryStore =
            searchHistoryStore ?? SharedPreferencesSearchHistoryStore(),
        _playbackSettingsRepository =
-           playbackSettingsRepository ?? PlaybackSettingsRepository();
+           playbackSettingsRepository ?? PlaybackSettingsRepository(),
+       _subtitlePreferencesRepository =
+           subtitlePreferencesRepository ??
+           SubtitlePreferencesRepository.instance;
 
   final LocalDatabase _database;
   final Future<void> Function(ServerScope) _clearImages;
@@ -47,6 +52,7 @@ class AccountDataCleanup {
   final LibrarySortPreferenceStore _librarySortPreferenceStore;
   final SearchHistoryStore _searchHistoryStore;
   final PlaybackSettingsRepository _playbackSettingsRepository;
+  final SubtitlePreferencesRepository _subtitlePreferencesRepository;
 
   Future<void> delete({
     required ServerScope scope,
@@ -85,6 +91,7 @@ class AccountDataCleanup {
       _librarySortPreferenceStore.clear(scope),
       _searchHistoryStore.clear(scope),
       _playbackSettingsRepository.deleteAccountSettings(session),
+      _subtitlePreferencesRepository.deleteAccountPreferences(session),
     ]);
   }
 }

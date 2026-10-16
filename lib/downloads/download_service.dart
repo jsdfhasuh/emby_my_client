@@ -13,9 +13,11 @@ import '../core/server_scope.dart';
 import '../data/emby_api.dart';
 import '../models/emby_models.dart';
 import 'download_assets.dart';
+import 'download_asset_verifier.dart';
 import 'download_cleanup.dart';
 import 'download_executor.dart';
 import 'download_integrity.dart';
+import 'download_media_verifier.dart';
 import 'download_models.dart';
 import 'download_path_policy.dart';
 import 'download_preflight.dart';
@@ -66,8 +68,13 @@ class DownloadService extends ChangeNotifier {
   final int maxConcurrentDownloads;
   final Duration storageRecheckInterval;
 
+  final DownloadMediaVerifier _mediaVerifier = DownloadMediaVerifier();
   final Map<String, DownloadTaskRecord> _tasks = {};
   final Map<String, Future<void>> _operations = {};
+  final Map<String, Future<DownloadTaskRecord>> _invalidations = {};
+  final Set<Future<Object?>> _inspections = {};
+  final Map<String, OfflineMediaMetadata> _pendingAssetMetadata = {};
+  final Set<String> _repairingSubtitleTasks = {};
   final Map<String, CancelToken> _cancelTokens = {};
   final Map<String, _RequestedAction> _requestedActions = {};
   final Map<String, String> _networkBlockCodes = {};
@@ -92,6 +99,7 @@ class DownloadService extends ChangeNotifier {
 
   DownloadSettings get settings => _settings;
   bool isRepairingSubtitles(String taskId) =>
+      _repairingSubtitleTasks.contains(taskId) ||
       _tasks[taskId]?.lastErrorCode == 'subtitleRepairing';
   bool get hasActiveWork =>
       _operations.isNotEmpty ||
@@ -180,12 +188,26 @@ class DownloadService extends ChangeNotifier {
         await _repository.saveTask(task);
       } else if (task.status == DownloadStatus.completed) {
         if (!executorRunning && task.lastErrorCode == 'subtitleRepairing') {
-          task = task.copyWith(lastErrorCode: 'subtitlesIncomplete');
+          task = task.copyWith(lastErrorCode: 'subtitleRepairInterrupted');
           await _repository.saveTask(task);
         }
         final errorCode = await _completedFileError(task, finalFile);
         if (errorCode != null) {
           task = await _invalidateCompletedFile(task, finalFile, errorCode);
+        } else if (!executorRunning) {
+          final metadata = await verifyOfflineAssets(
+            task.metadata,
+            directory: downloadDirectory,
+          );
+          if (jsonEncode(metadata.toJson()) !=
+              jsonEncode(task.metadata.toJson())) {
+            task = task.copyWith(metadata: metadata);
+            final offline = await _repository.offlineItem(scope, task.itemId);
+            await _repository.complete(
+              task,
+              _offlineWithMetadata(task, metadata, existing: offline),
+            );
+          }
         }
       } else if (task.requiresFreshDownload) {
         await _repository.removeOfflineItem(task);
@@ -564,30 +586,58 @@ class DownloadService extends ChangeNotifier {
     final executor = _executor;
     if (executor != null && await executor.isRunning) {
       if (isRepairingSubtitles(taskId)) return;
-      await _save(task.copyWith(lastErrorCode: 'subtitleRepairing'));
+      _tasks[taskId] = task.copyWith(lastErrorCode: 'subtitleRepairing');
+      _notify();
       try {
         await executor.send(
           DownloadExecutorCommand.repairSubtitles,
           taskId: taskId,
         );
       } catch (_) {
-        await _save(task.copyWith(lastErrorCode: 'subtitlesIncomplete'));
+        _tasks[taskId] = task;
+        _notify();
         rethrow;
       }
       return;
     }
+    if (_operations.containsKey(taskId) || _shuttingDown || _disposed) return;
     final token = CancelToken();
     _cancelTokens[taskId] = token;
+    _repairingSubtitleTasks.add(taskId);
     final operation = _repairSubtitles(task, token);
     _operations[taskId] = operation;
     try {
       await operation;
     } finally {
       _operations.remove(taskId);
+      _pendingAssetMetadata.remove(taskId);
+      _repairingSubtitleTasks.remove(taskId);
       _cancelTokens.remove(taskId);
       _requestedActions.remove(taskId);
       _notify();
+      _pumpQueue();
     }
+  }
+
+  /// Stops only the subtitle operation and keeps all completed local media.
+  Future<void> cancelSubtitleRepair(String taskId) async {
+    final executor = _executor;
+    if (executor != null && await executor.isRunning) {
+      await executor.send(
+        DownloadExecutorCommand.cancelSubtitleRepair,
+        taskId: taskId,
+      );
+      return;
+    }
+    final operation = _operations[taskId];
+    if (operation == null ||
+        !isRepairingSubtitles(taskId) ||
+        _requestedActions[taskId] == _RequestedAction.delete) {
+      return;
+    }
+    _requestedActions[taskId] = _RequestedAction.cancelRepair;
+    _cancelTokens[taskId]?.cancel('cancelSubtitleRepair');
+    await operation;
   }
 
   Future<void> _repairSubtitles(
@@ -603,12 +653,41 @@ class DownloadService extends ChangeNotifier {
         task,
         File(task.finalPath),
         alreadyValidated: true,
+        subtitlesOnly: true,
       );
-    } catch (_) {
+    } catch (error) {
       if (_requestedActions[task.id] == _RequestedAction.delete) {
         await _removeTaskAndFiles(_tasks[task.id] ?? task);
       } else if (_tasks.containsKey(task.id)) {
-        await _save(task.copyWith(lastErrorCode: 'subtitlesIncomplete'));
+        final fileError = await _completedFileError(task, File(task.finalPath));
+        if (_requestedActions[task.id] == _RequestedAction.delete) {
+          await _removeTaskAndFiles(_tasks[task.id] ?? task);
+          return;
+        }
+        if (fileError != null) {
+          await _invalidateCompletedFile(task, File(task.finalPath), fileError);
+          return;
+        }
+        final code = _shuttingDown
+            ? 'subtitleRepairInterrupted'
+            : token.isCancelled
+            ? 'subtitleRepairCancelled'
+            : error is DownloadPreflightException
+            ? 'subtitleRepair:${error.code}'
+            : 'subtitleRepairFailed';
+        final restored = task.copyWith(lastErrorCode: code);
+        final existing = await _repository.offlineItem(scope, task.itemId);
+        await _repository.complete(
+          restored,
+          _offlineWithMetadata(restored, restored.metadata, existing: existing),
+        );
+        // Delete can arrive while the rollback transaction is being written.
+        if (_requestedActions[task.id] == _RequestedAction.delete) {
+          await _removeTaskAndFiles(restored);
+        } else {
+          _tasks[task.id] = restored;
+          _notify();
+        }
       }
     }
   }
@@ -681,19 +760,34 @@ class DownloadService extends ChangeNotifier {
     );
   }
 
-  Future<OfflineMediaItem?> offlineItem(String itemId) async {
+  Future<OfflineMediaItem?> offlineItem(String itemId) {
+    if (_shuttingDown || _disposed) return Future.value(null);
+    return _inspect(() => _readOfflineItem(itemId));
+  }
+
+  Future<OfflineMediaItem?> _readOfflineItem(String itemId) async {
     final item = await _repository.offlineItem(scope, itemId);
     if (item == null) return null;
     final task = taskForItem(itemId);
     if (task == null || task.status != DownloadStatus.completed) return null;
     final file = File(item.localMediaPath);
-    final errorCode = await _completedFileError(task, file);
-    if (errorCode == null) return item;
-    await _invalidateCompletedFile(task, file, errorCode);
+    final errorCode = await _completedFileError(task, file, fresh: true);
+    // A user can delete the item while a large digest is streaming.
+    final current = _tasks[task.id];
+    if (current == null || !current.isComplete) return null;
+    if (errorCode == null) return _verifyOfflineItemAssets(current, item);
+    await _invalidateCompletedFile(current, file, errorCode);
     return null;
   }
 
-  Future<List<OfflineMediaItem>> offlineItems() async {
+  Future<List<OfflineMediaItem>> offlineItems({bool verifyFresh = false}) {
+    if (_shuttingDown || _disposed) return Future.value(const []);
+    return _inspect(() => _readOfflineItems(verifyFresh: verifyFresh));
+  }
+
+  Future<List<OfflineMediaItem>> _readOfflineItems({
+    required bool verifyFresh,
+  }) async {
     final stored = await _repository.listOfflineItems(scope);
     final available = <OfflineMediaItem>[];
     for (final item in stored) {
@@ -706,9 +800,13 @@ class DownloadService extends ChangeNotifier {
           .firstOrNull;
       if (task == null || task.status != DownloadStatus.completed) continue;
       final file = File(task.finalPath);
-      final errorCode = await _completedFileError(task, file);
+      final errorCode = await _completedFileError(
+        task,
+        file,
+        fresh: verifyFresh,
+      );
       if (errorCode == null) {
-        available.add(item);
+        available.add(await _verifyOfflineItemAssets(task, item));
         continue;
       }
       final current = _tasks[task.id];
@@ -718,6 +816,64 @@ class DownloadService extends ChangeNotifier {
     }
     return List.unmodifiable(available);
   }
+
+  Future<T> _inspect<T>(Future<T> Function() read) async {
+    final operation = read();
+    _inspections.add(operation);
+    try {
+      return await operation;
+    } finally {
+      _inspections.remove(operation);
+    }
+  }
+
+  Future<void> _drainInspections() => Future.wait(
+    _inspections.toList().map((operation) async {
+      try {
+        await operation;
+      } catch (_) {
+        // The original caller owns the read error; shutdown still drains IO.
+      }
+    }),
+  );
+
+  Future<OfflineMediaItem> _verifyOfflineItemAssets(
+    DownloadTaskRecord task,
+    OfflineMediaItem item,
+  ) async {
+    final metadata = await verifyOfflineAssets(
+      item.metadata,
+      directory: await _directoryResolver(scope),
+    );
+    // Runtime checks update the view without competing with a worker's database
+    // writes. Startup persists the same verification, including legacy upgrades.
+    if (identical(_tasks[task.id], task) &&
+        !_operations.containsKey(task.id) &&
+        !isRepairingSubtitles(task.id) &&
+        jsonEncode(metadata.toJson()) != jsonEncode(task.metadata.toJson())) {
+      _tasks[task.id] = task.copyWith(metadata: metadata);
+      _notify();
+    }
+    return _offlineWithMetadata(task, metadata, existing: item);
+  }
+
+  OfflineMediaItem _offlineWithMetadata(
+    DownloadTaskRecord task,
+    OfflineMediaMetadata metadata, {
+    OfflineMediaItem? existing,
+  }) => OfflineMediaItem(
+    scope: task.scope,
+    itemId: task.itemId,
+    mediaSourceId: task.mediaSourceId,
+    metadata: metadata,
+    localMediaPath: task.finalPath,
+    completedAt: existing?.completedAt ?? task.updatedAt,
+    expectedBytes:
+        task.expectedBytes ??
+        (task.downloadedBytes > 0 ? task.downloadedBytes : null),
+    integrity: task.integrity,
+    progress: existing?.progress,
+  );
 
   Future<void> recordOfflineProgress(
     OfflineMediaItem item,
@@ -742,6 +898,7 @@ class DownloadService extends ChangeNotifier {
   Future<void> shutdown() async {
     if (_shuttingDown) {
       await Future.wait(_operations.values.toList(growable: false));
+      await _drainInspections();
       return;
     }
     _shuttingDown = true;
@@ -750,10 +907,11 @@ class DownloadService extends ChangeNotifier {
     await _networkChanges?.cancel();
     _networkChanges = null;
     for (final entry in _cancelTokens.entries) {
-      _requestedActions[entry.key] = _RequestedAction.pause;
+      _requestedActions.putIfAbsent(entry.key, () => _RequestedAction.pause);
       entry.value.cancel('shutdown');
     }
     await Future.wait(_operations.values.toList(growable: false));
+    await _drainInspections();
     await _executorChanges?.cancel();
     _executorChanges = null;
     try {
@@ -1003,6 +1161,7 @@ class DownloadService extends ChangeNotifier {
       unawaited(
         operation.whenComplete(() {
           _operations.remove(task.id);
+          _pendingAssetMetadata.remove(task.id);
           _cancelTokens.remove(task.id);
           final action = _requestedActions.remove(task.id);
           _networkBlockCodes.remove(task.id);
@@ -1334,6 +1493,7 @@ class DownloadService extends ChangeNotifier {
     DownloadTaskRecord task,
     File finalFile, {
     bool alreadyValidated = false,
+    bool subtitlesOnly = false,
   }) async {
     final length = await finalFile.length();
     if (!alreadyValidated) {
@@ -1346,11 +1506,19 @@ class DownloadService extends ChangeNotifier {
     final completedAt = DateTime.now().toUtc();
     var metadata = task.metadata;
     try {
-      metadata = await _assetService.downloadAssets(
-        task,
-        await _directoryResolver(scope),
-        cancelToken: _cancelTokens[task.id],
-      );
+      final directory = await _directoryResolver(scope);
+      final service = _assetService;
+      metadata = subtitlesOnly && service is SubtitleRepairAssetService
+          ? await (service as SubtitleRepairAssetService).repairSubtitles(
+              task,
+              directory,
+              cancelToken: _cancelTokens[task.id],
+            )
+          : await service.downloadAssets(
+              task,
+              directory,
+              cancelToken: _cancelTokens[task.id],
+            );
     } catch (error, stackTrace) {
       DiagnosticLog.instance.error(
         'download',
@@ -1360,6 +1528,11 @@ class DownloadService extends ChangeNotifier {
       );
       metadata = metadata.copyWith(subtitleDiscoveryComplete: false);
     }
+    metadata = await verifyOfflineAssets(
+      metadata,
+      directory: await _directoryResolver(scope),
+    );
+    _pendingAssetMetadata[task.id] = metadata;
     final cancellation = _cancelTokens[task.id];
     if (cancellation != null) _throwIfInterrupted(task.id, cancellation);
     final completed = task.copyWith(
@@ -1373,16 +1546,26 @@ class DownloadService extends ChangeNotifier {
       clearLastErrorCode: !metadata.subtitlesNeedRepair,
       updatedAt: completedAt,
     );
+    final existing = subtitlesOnly
+        ? await _repository.offlineItem(scope, task.itemId)
+        : null;
+    if (cancellation != null) _throwIfInterrupted(task.id, cancellation);
     final item = OfflineMediaItem(
       scope: completed.scope,
       itemId: completed.itemId,
       mediaSourceId: completed.mediaSourceId,
       metadata: completed.metadata,
       localMediaPath: finalFile.path,
-      completedAt: completedAt,
+      completedAt: existing?.completedAt ?? completedAt,
+      expectedBytes: completed.expectedBytes,
+      integrity: completed.integrity,
+      progress: existing?.progress,
     );
     await _repository.complete(completed, item);
+    // A delete/cancel arriving during the transaction must win the commit.
+    if (cancellation != null) _throwIfInterrupted(task.id, cancellation);
     _tasks[completed.id] = completed;
+    _pendingAssetMetadata.remove(task.id);
     DiagnosticLog.instance.info(
       'download',
       'Download completed item=${completed.itemId} bytes=$length',
@@ -1393,31 +1576,56 @@ class DownloadService extends ChangeNotifier {
 
   Future<String?> _completedFileError(
     DownloadTaskRecord task,
+    File file, {
+    bool fresh = false,
+  }) => _mediaVerifier.check(
+    file,
+    expectedBytes:
+        task.expectedBytes ??
+        (task.downloadedBytes > 0 ? task.downloadedBytes : null),
+    integrity: task.integrity,
+    fresh: fresh,
+  );
+
+  Future<DownloadTaskRecord> _invalidateCompletedFile(
+    DownloadTaskRecord task,
     File file,
+    String errorCode,
+  ) => _invalidations.putIfAbsent(
+    task.id,
+    () => _runCompletedFileInvalidation(task, file, errorCode),
+  );
+
+  Future<DownloadTaskRecord> _runCompletedFileInvalidation(
+    DownloadTaskRecord task,
+    File file,
+    String errorCode,
   ) async {
+    // An inspection can write after its digest check. Keep that write inside the
+    // same lifecycle as transfers so delete and shutdown drain it before ending.
+    // A repair already owns its task operation and awaits this invalidation.
+    final ownsOperation = !_operations.containsKey(task.id);
+    final wasTracked = _tasks.containsKey(task.id);
+    late DownloadTaskRecord result;
+    final operation = () async {
+      result = await _writeCompletedFileInvalidation(task, file, errorCode);
+    }();
+    if (ownsOperation) _operations[task.id] = operation;
     try {
-      if (!await file.exists()) return 'missingFile';
-      final length = await file.length();
-      final expected =
-          task.expectedBytes ??
-          (task.downloadedBytes > 0 ? task.downloadedBytes : null);
-      if (length <= 0 || (expected != null && length != expected)) {
-        return 'localMediaCorrupt';
+      await operation;
+      return result;
+    } finally {
+      _invalidations.remove(task.id);
+      if (ownsOperation && identical(_operations[task.id], operation)) {
+        _operations.remove(task.id);
+        _requestedActions.remove(task.id);
+        _notify();
+        if (wasTracked) _pumpQueue();
       }
-      return null;
-    } on FileSystemException catch (error, stackTrace) {
-      DiagnosticLog.instance.error(
-        'download',
-        'Completed media health check failed item=${task.itemId} '
-            'task=${task.id}',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      return 'localMediaCorrupt';
     }
   }
 
-  Future<DownloadTaskRecord> _invalidateCompletedFile(
+  Future<DownloadTaskRecord> _writeCompletedFileInvalidation(
     DownloadTaskRecord task,
     File file,
     String errorCode,
@@ -1441,6 +1649,12 @@ class DownloadService extends ChangeNotifier {
     );
     await _repository.removeOfflineItem(failed);
     await _repository.saveTask(failed);
+    // A delete may have arrived during either database write. It must be the
+    // final persisted action, and may also be pending when shutdown starts.
+    if (_requestedActions[task.id] == _RequestedAction.delete) {
+      await _removeTaskAndFiles(_tasks[task.id] ?? failed);
+      return failed;
+    }
     _tasks[failed.id] = failed;
     _notify();
     return failed;
@@ -1483,7 +1697,10 @@ class DownloadService extends ChangeNotifier {
     final files = <(String, bool)>[
       (tempPath, true),
       (finalPath, true),
-      for (final assetPath in task.metadata.assetPaths)
+      for (final assetPath in {
+        ...task.metadata.assetPaths,
+        ...?_pendingAssetMetadata[task.id]?.assetPaths,
+      })
         (pathPolicy.resolveStoredPath(assetPath), false),
     ];
     var rejectedPaths = 0;
@@ -1599,7 +1816,7 @@ class DownloadService extends ChangeNotifier {
   }
 }
 
-enum _RequestedAction { pause, delete, waitForNetwork }
+enum _RequestedAction { pause, delete, waitForNetwork, cancelRepair }
 
 class _DownloadInterrupted implements Exception {
   const _DownloadInterrupted();

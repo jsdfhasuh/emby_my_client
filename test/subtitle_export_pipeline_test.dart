@@ -67,7 +67,10 @@ void main() {
       expect(report.content, contains('track0Codec=ass,other,ass,strict'));
       expect(
         report.content,
-        contains('delivery=unsupported format=other urlPresent=true'),
+        contains(
+          'event=playback_subtitle_delivery delivery=unsupported '
+          'streamIndex=2 format=other urlPresent=true',
+        ),
       );
       for (final secret in [
         'secret-codec-value',

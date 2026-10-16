@@ -6,6 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../data/emby_api.dart';
+import '../../downloads/download_service.dart';
+import '../offline_playback_entry.dart';
+import '../widgets/media_widgets.dart';
 import '../../images/emby_image_cache.dart';
 import '../../images/emby_image_request.dart';
 import '../../images/photo_prefetcher.dart';
@@ -26,11 +29,13 @@ class PhotoViewerScreen extends StatefulWidget {
     super.key,
     required this.api,
     required this.source,
+    this.downloads,
     this.inlineSessionFactory,
   });
 
   final EmbyApi api;
   final PhotoSequenceSource source;
+  final DownloadService? downloads;
   final InlinePlaybackSessionFactory? inlineSessionFactory;
 
   @override
@@ -52,6 +57,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   late PhotoViewerController _controller;
   late PageController _pageController;
   bool _initialized = false;
+  bool _openingLocalVideo = false;
+  late bool _serverPlaybackBlocked;
   bool _currentPageZoomed = false;
   bool _seekInteractionActive = false;
   bool _closing = false;
@@ -72,6 +79,8 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   @override
   void initState() {
     super.initState();
+    _serverPlaybackBlocked = _isServerPlaybackBlocked;
+    widget.api.browseState.addListener(_browseStateChanged);
     _lifecycleState =
         WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
@@ -154,6 +163,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
 
   @override
   void dispose() {
+    widget.api.browseState.removeListener(_browseStateChanged);
     WidgetsBinding.instance.removeObserver(this);
     final inlineCoordinator = _inlineCoordinator;
     if (inlineCoordinator != null) {
@@ -211,20 +221,31 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     final injectedFactory = widget.inlineSessionFactory;
     final InlinePlaybackSessionFactory factory;
     if (injectedFactory != null) {
-      factory = injectedFactory;
+      factory = (item) {
+        if (_isServerPlaybackBlocked || _openingLocalVideo) {
+          throw StateError('Server playback unavailable');
+        }
+        return injectedFactory(item);
+      };
     } else {
       final settingsRepository = PlaybackSettingsRepositoryScope.of(context);
       final cacheStorage = PlaybackCacheStorageScope.of(context);
       final diagnosticsController =
           PlaybackDiagnosticsTestOverridesScope.maybeOf(context);
       final settings = settingsRepository.load(widget.api.session);
-      factory = (item) async => MediaKitInlinePlaybackSession.create(
-        api: widget.api,
-        item: item,
-        settings: (await settings).settings,
-        cacheStorage: cacheStorage,
-        testOverrides: diagnosticsController?.consumeForPlayback(),
-      );
+      factory = (item) async {
+        final loadedSettings = (await settings).settings;
+        if (_isServerPlaybackBlocked || _openingLocalVideo) {
+          throw StateError('Server playback unavailable');
+        }
+        return MediaKitInlinePlaybackSession.create(
+          api: widget.api,
+          item: item,
+          settings: loadedSettings,
+          cacheStorage: cacheStorage,
+          testOverrides: diagnosticsController?.consumeForPlayback(),
+        );
+      };
     }
     final coordinator = InlinePlaybackCoordinator(
       factory: factory,
@@ -243,8 +264,91 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     }
     if (_controller.mediaItems.isEmpty) return Future<void>.value();
     final item = _controller.mediaItems[_controller.currentIndex];
-    if (item.isPlayable) return _ensureInlineCoordinator().activate(item);
+    if (item.isPlayable && !_isServerPlaybackBlocked && !_openingLocalVideo) {
+      return _ensureInlineCoordinator().activate(item);
+    }
     return _inlineCoordinator?.deactivate() ?? Future<void>.value();
+  }
+
+  bool get _isServerPlaybackBlocked =>
+      !widget.api.isSessionActive ||
+      widget.api.browseState.offline ||
+      widget.api.browseState.authenticationRequired;
+
+  void _browseStateChanged() {
+    if (!mounted || _closing) return;
+    final blocked = _isServerPlaybackBlocked;
+    if (blocked == _serverPlaybackBlocked) return;
+    setState(() => _serverPlaybackBlocked = blocked);
+    unawaited(_syncCurrentPlayback());
+  }
+
+  Widget _offlineVideoPage(EmbyItem item) => Stack(
+    key: ValueKey('offline-video-page-${item.id}'),
+    fit: StackFit.expand,
+    children: [
+      EmbyImage(request: _viewerRequest(item), fit: BoxFit.contain),
+      Center(
+        child: Container(
+          color: const Color(0xCC000000),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.cloud_off_outlined,
+                color: Colors.white,
+                size: 40,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                widget.api.browseState.authenticationRequired
+                    ? '登录已失效，请重新登录'
+                    : '服务器离线，仅可播放本地下载',
+                style: const TextStyle(color: Colors.white),
+              ),
+              if (!widget.api.browseState.authenticationRequired &&
+                  widget.downloads != null) ...[
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  key: ValueKey('offline-video-play-${item.id}'),
+                  onPressed: _openingLocalVideo
+                      ? null
+                      : () => unawaited(_playLocalVideo(item)),
+                  icon: const Icon(Icons.download_done),
+                  label: const Text('播放本地下载'),
+                ),
+              ] else if (!widget.api.browseState.authenticationRequired)
+                const Text(
+                  '视频尚无可用的本地下载，联网后可播放',
+                  style: TextStyle(color: Colors.white70),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Future<void> _playLocalVideo(EmbyItem item) async {
+    if (_openingLocalVideo || _closing) return;
+    setState(() => _openingLocalVideo = true);
+    try {
+      await _inlineCoordinator?.deactivate();
+      if (!mounted || _closing) return;
+      await openCachedPlayback(
+        context,
+        api: widget.api,
+        downloads: widget.downloads,
+        item: item,
+        requireLocal: true,
+      );
+    } finally {
+      if (mounted && !_closing) {
+        setState(() => _openingLocalVideo = false);
+        unawaited(_syncCurrentPlayback());
+      }
+    }
   }
 
   Future<void> _closeViewer() {
@@ -353,6 +457,9 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
                       itemBuilder: (context, index) {
                         final item = mediaItems[index];
                         if (item.isPlayable) {
+                          if (_isServerPlaybackBlocked) {
+                            return _offlineVideoPage(item);
+                          }
                           return InlineVideoPage(
                             key: ValueKey('video-page-${item.id}'),
                             itemId: item.id,
@@ -402,7 +509,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   void _playInline() {
-    if (_closing) return;
+    if (_closing || _isServerPlaybackBlocked || _openingLocalVideo) return;
     unawaited(_inlineCoordinator?.play() ?? Future<void>.value());
   }
 
@@ -417,7 +524,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   }
 
   void _retryInline() {
-    if (_closing) return;
+    if (_closing || _isServerPlaybackBlocked || _openingLocalVideo) return;
     unawaited(_inlineCoordinator?.retry() ?? Future<void>.value());
   }
 

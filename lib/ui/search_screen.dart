@@ -326,6 +326,7 @@ class _SearchScreenState extends State<SearchScreen> {
           MaterialPageRoute(
             builder: (_) => PhotoViewerScreen(
               api: widget.api,
+              downloads: widget.downloads,
               source: FilteredLibraryPhotoSource(
                 queryFingerprint:
                     'search:${Object.hash(query, itemType).toUnsigned(32)}',

@@ -1,4 +1,7 @@
 import 'dart:io';
+import 'package:emby_my_client/core/diagnostic_log.dart';
+import 'package:emby_my_client/core/strm_diagnostics.dart';
+import 'package:emby_my_client/playback/track_mapper.dart';
 
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/cache/native_playback_property_access.dart';
@@ -17,6 +20,109 @@ import 'package:emby_my_client/playback/playback_seek_statistics.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'engine failure events use only fixed classification and bounded fields',
+    () {
+      final lines = <String>[];
+      final trace = StrmTrace(log: DiagnosticLog.forTesting());
+      final diagnostics = PlaybackDiagnostics(
+        trace: trace,
+        writer: (_, _, message) => lines.add(message),
+      );
+      diagnostics.engineError(
+        fingerprint: 'http-open',
+        generation: 7,
+        duringOpen: true,
+      );
+      expect(
+        lines.single,
+        contains(
+          'trace=${trace.id} fingerprint=http-open generation=7 stage=native_open outcome=failed',
+        ),
+      );
+      diagnostics.engineError(
+        fingerprint: 'private-media password=synthetic-secret',
+        generation: -1,
+        duringOpen: false,
+      );
+      expect(
+        lines.last,
+        contains('fingerprint=other generation=0 stage=native_read'),
+      );
+      expect(lines.join('\n'), isNot(contains('synthetic-secret')));
+      expect(lines.join('\n'), isNot(contains('private-media')));
+    },
+  );
+
+  test(
+    'actual native codec and ID are allowlisted independently of metadata',
+    () {
+      final lines = <String>[];
+      final diagnostics = PlaybackDiagnostics(
+        writer: (_, _, message) => lines.add(message),
+      );
+      diagnostics.subtitleApplied(
+        selectionSource: 'manual',
+        subtitleKind: 'native',
+        streamIndex: null,
+        generation: 2,
+        nativeCodec: 'HDMV_PGS_SUBTITLE',
+        nativeId: '12',
+      );
+      expect(
+        lines.single,
+        contains('nativeFormat=hdmvPgsSubtitle nativeId=12'),
+      );
+      diagnostics.subtitleApplied(
+        selectionSource: 'manual',
+        subtitleKind: 'native',
+        streamIndex: null,
+        generation: 2,
+        nativeCodec: 'private-media-name',
+        nativeId: 'https://private.invalid/sub',
+      );
+      expect(lines.last, contains('nativeFormat=other nativeId=unavailable'));
+      expect(lines.last, isNot(contains('private')));
+    },
+  );
+
+  test('subtitle evidence is trace-bound and delivery is not a failure', () {
+    final lines = <String>[];
+    final log = DiagnosticLog.forTesting()..setTestSink(lines.add);
+    final trace = StrmTrace(log: log);
+    final diagnostics = PlaybackDiagnostics(
+      trace: trace,
+      writer: (_, _, message) => lines.add(message),
+    );
+    diagnostics.subtitleApplyRequested(
+      selectionSource: 'serverDefault',
+      subtitleKind: 'external',
+      streamIndex: 2,
+      generation: 4,
+    );
+    diagnostics.subtitleDeliveryResolved(
+      const PlaybackTrack(index: 2, type: 'Subtitle', format: 'srt'),
+      SubtitleDelivery.external,
+    );
+    diagnostics.subtitleContentDetected(
+      format: 'ass',
+      streamIndex: 2,
+      generation: 4,
+    );
+    expect(lines.where((line) => line.contains('outcome=failed')), isEmpty);
+    for (final line in lines) {
+      expect(line, contains('trace=${trace.id}'));
+    }
+    expect(lines.join('\n'), contains('format=ass streamIndex=2 generation=4'));
+    diagnostics.subtitleContentDetected(
+      format: 'private-url',
+      streamIndex: 2,
+      generation: 4,
+    );
+    expect(lines.last, contains('format=unknown'));
+    expect(lines.last, isNot(contains('private-url')));
+  });
+
   test('fixed playback diagnostics never expose source strings or paths', () {
     final lines = <String>[];
     final diagnostics = PlaybackDiagnostics(

@@ -202,7 +202,9 @@ const _session = EmbySession(
   deviceId: 'device-1',
 );
 
-const _imageBytes = <int>[0xFF, 0xD8, 0xFF, 0xD9];
+final _imageBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+);
 final _subtitleBytes = utf8.encode(
   '1\n00:00:00,000 --> 00:00:01,000\nFixture\n',
 );

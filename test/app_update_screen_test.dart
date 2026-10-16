@@ -76,6 +76,17 @@ class Gateway implements UpdateGateway {
 }
 
 void main() {
+  test('release summary is bounded and preserves a complete-notes source', () {
+    final notes =
+        '# Release\n\n- Fix subtitle selection\n* Improve seek\n'
+        '- ${'长' * 200}\n- Fourth change';
+    final summary = releaseChangelogSummary(notes);
+    expect(summary, startsWith('Fix subtitle selection\nImprove seek\n'));
+    expect(summary, isNot(contains('# Release')));
+    expect(summary, isNot(contains('Fourth change')));
+    expect(summary.split('\n').last.runes.length, 161);
+  });
+
   late Source source;
   late Gateway gateway;
   setUp(() {
@@ -109,9 +120,12 @@ void main() {
     expect(find.textContaining('1.0.179'), findsOneWidget);
     expect(find.textContaining('1792000'), findsOneWidget);
     expect(source.checks, 0);
+    expect(find.text('最新版本：尚未检查'), findsOneWidget);
+    expect(find.textContaining('已安装版本 1.0.179'), findsOneWidget);
     await tap(tester, 'check-update');
     expect(source.checks, 1);
-    expect(find.text('公开版本 build-180'), findsOneWidget);
+    expect(find.text('最新公开版本：1.0.180（build-180）'), findsOneWidget);
+    expect(find.text('更新摘要'), findsOneWidget);
     expect(find.text('A public release'), findsOneWidget);
     expect(find.byKey(const ValueKey('install-update')), findsNothing);
   });
@@ -208,13 +222,22 @@ void main() {
       await tester.pump();
       expect(source.downloads, 1);
       expect(find.text('下载中 25%'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('download-update')),
+        150,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(
         tester
             .widget<FilledButton>(find.byKey(const ValueKey('download-update')))
             .onPressed,
         isNull,
       );
-      await tester.ensureVisible(find.text('取消'));
+      await tester.scrollUntilVisible(
+        find.text('取消'),
+        -150,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(

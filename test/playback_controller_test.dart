@@ -27,6 +27,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support/progressive_fixture.dart';
 
 void main() {
+  late Directory externalFixtureDirectory;
+  late File subtitleFixture;
+  setUpAll(() async {
+    externalFixtureDirectory = await Directory.systemTemp.createTemp(
+      'subtitle-controller-',
+    );
+    subtitleFixture = File('${externalFixtureDirectory.path}/fixture.srt');
+    await subtitleFixture.writeAsString(
+      '1\n00:00:00,000 --> 00:00:10,000\nSYNTHETIC\n',
+    );
+  });
+  tearDownAll(() async {
+    await subtitleFixture.delete();
+    await externalFixtureDirectory.delete();
+  });
   _deliveryRegressionTests();
   _nativeIdentityRegressionTests();
   _subtitleRegressionTests();
@@ -967,6 +982,48 @@ void main() {
     await controller.shutdown();
   });
 
+  test(
+    'server disabled sentinel turns off native subtitles without a mapping error',
+    () async {
+      final api = _api(
+        [],
+        defaultSubtitleStreamIndex: disabledSubtitleStreamIndex,
+      );
+      addTearDown(api.dispose);
+      final engine = _FakeEngine();
+      engine.onOpen = (_) {
+        engine.durationController.add(const Duration(hours: 1));
+        engine.subtitleTracksController.add(const [
+          EngineTrack(id: '18', title: 'PGS', codec: 'hdmv_pgs_subtitle'),
+        ]);
+      };
+      final controller = _controller(
+        api: api,
+        engine: engine,
+        item: _plainItem,
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      expect(engine.selectedSubtitleTrackIds, [null]);
+      expect(
+        controller.state.subtitleSelectionStatus,
+        SubtitleSelectionStatus.disabled,
+      );
+      expect(controller.state.subtitleProblem, isNull);
+      expect(controller.state.plan!.subtitleDisabled, isTrue);
+      expect(
+        controller.state.desiredSubtitleSelection.source,
+        SubtitleSelectionSource.serverDefault,
+      );
+      await controller.selectNativeSubtitle(
+        controller.nativeSubtitleChoices.single,
+      );
+      expect(engine.selectedSubtitleTrackIds, [null, '18']);
+      expect(controller.state.appliedNativeSubtitleId, '18');
+      expect(controller.state.plan!.subtitleDisabled, isFalse);
+    },
+  );
+
   test('does not select a subtitle when the plan has no default', () async {
     final requests = <RequestOptions>[];
     final api = _api(requests);
@@ -1097,7 +1154,7 @@ void main() {
         _testPlan(
           subtitleStreamIndex: 4,
           transportKind: PlaybackTransportKind.offlineLocal,
-          mediaStreams: const [
+          mediaStreams: [
             {
               'Index': 4,
               'Type': 'Subtitle',
@@ -1105,7 +1162,7 @@ void main() {
               'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
-              'DeliveryUrl': 'file:///subtitle-fixture.srt',
+              'DeliveryUrl': subtitleFixture.uri.toString(),
             },
           ],
         ),
@@ -1120,9 +1177,7 @@ void main() {
 
       await controller.start();
 
-      expect(engine.externalSubtitleUris, [
-        Uri.parse('file:///subtitle-fixture.srt'),
-      ]);
+      expect(engine.externalSubtitleUris, [subtitleFixture.uri]);
       expect(
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.appliedExternal,
@@ -1146,7 +1201,7 @@ void main() {
         _testPlan(
           subtitleStreamIndex: 4,
           transportKind: PlaybackTransportKind.offlineLocal,
-          mediaStreams: const [
+          mediaStreams: [
             {
               'Index': 4,
               'Type': 'Subtitle',
@@ -1154,7 +1209,7 @@ void main() {
               'Title': 'Chinese',
               'Language': 'chi',
               'IsExternal': true,
-              'DeliveryUrl': 'file:///subtitle-fixture.srt',
+              'DeliveryUrl': subtitleFixture.uri.toString(),
             },
           ],
         ),
@@ -1175,9 +1230,7 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.waitingForTracks,
       );
-      expect(engine.externalSubtitleUris, [
-        Uri.parse('file:///subtitle-fixture.srt'),
-      ]);
+      expect(engine.externalSubtitleUris, [subtitleFixture.uri]);
 
       externalLoad.complete();
       await _waitUntil(
@@ -1186,9 +1239,7 @@ void main() {
             SubtitleSelectionStatus.appliedExternal,
       );
 
-      expect(engine.externalSubtitleUris, [
-        Uri.parse('file:///subtitle-fixture.srt'),
-      ]);
+      expect(engine.externalSubtitleUris, [subtitleFixture.uri]);
       expect(controller.state.appliedSubtitleStreamIndex, 4);
       await controller.shutdown();
     },
@@ -1206,12 +1257,12 @@ void main() {
         _testPlan(
           subtitleStreamIndex: 4,
           transportKind: PlaybackTransportKind.offlineLocal,
-          mediaStreams: const [
+          mediaStreams: [
             {
               'Index': 4,
               'Type': 'Subtitle',
               'IsExternal': true,
-              'DeliveryUrl': 'file:///subtitle-fixture.srt',
+              'DeliveryUrl': subtitleFixture.uri.toString(),
             },
           ],
         ),
@@ -1230,16 +1281,14 @@ void main() {
         controller.state.subtitleSelectionStatus,
         SubtitleSelectionStatus.failed,
       );
-      expect(engine.externalSubtitleUris, [
-        Uri.parse('file:///subtitle-fixture.srt'),
-      ]);
+      expect(engine.externalSubtitleUris, [subtitleFixture.uri]);
 
       engine.externalSubtitleError = null;
       await controller.selectSubtitleStream(4);
 
       expect(engine.externalSubtitleUris, [
-        Uri.parse('file:///subtitle-fixture.srt'),
-        Uri.parse('file:///subtitle-fixture.srt'),
+        subtitleFixture.uri,
+        subtitleFixture.uri,
       ]);
       expect(
         controller.state.subtitleSelectionStatus,
@@ -2411,17 +2460,26 @@ void _subtitleRegressionTests() {
         expect(fixture.engine.externalSubtitleUris, isEmpty);
         expect(
           fixture.controller.state.subtitleSelectionStatus,
+          SubtitleSelectionStatus.appliedNone,
+        );
+        expect(
+          const TrackMapper().fromPlan(
+            fixture.controller.state.plan!,
+            'subtitle',
+          ),
+          isEmpty,
+        );
+        await fixture.controller.selectSubtitleStream(2);
+        expect(
+          fixture.controller.state.subtitleSelectionStatus,
           SubtitleSelectionStatus.failed,
         );
         expect(
-          fixture.logs,
-          contains(
-            allOf(
-              contains('subtitleKind=external'),
-              contains('mappingReason=externalLocationMissing'),
-            ),
-          ),
+          fixture.controller.state.subtitleSelectionError,
+          contains('字幕尚未下载'),
         );
+        expect(fixture.engine.selectedSubtitleTrackIds, isEmpty);
+        expect(fixture.engine.externalSubtitleUris, isEmpty);
       },
     );
 

@@ -22,6 +22,54 @@ void main() {
   setUpAll(sqfliteFfiInit);
 
   testWidgets(
+    'late automatic detail refresh cannot overwrite a newer manual refresh',
+    (tester) async {
+      final api = _DeferredDetailApi();
+      addTearDown(api.dispose);
+      final initial = EmbyItem.fromJson({
+        'Id': 'item',
+        'Name': 'Initial title',
+        'Type': 'Movie',
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ItemDetailScreen(api: api, initialItem: initial),
+        ),
+      );
+      api.responses[0].complete(initial);
+      await tester.pumpAndSettle();
+      api.browseState.cached(
+        'item',
+        BrowseSnapshot({}, DateTime.utc(2026)),
+        disconnected: true,
+      );
+      api.browseState.requestRecovery();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(api.responses, hasLength(2));
+      await tester.tap(
+        find.descendant(
+          of: find.byType(OfflineBrowseBanner),
+          matching: find.byType(TextButton),
+        ),
+      );
+      await tester.pump();
+      expect(api.responses, hasLength(3));
+      api.responses[2].complete(
+        EmbyItem.fromJson({'Id': 'item', 'Name': 'New title', 'Type': 'Movie'}),
+      );
+      await tester.pumpAndSettle();
+      api.responses[1].complete(
+        EmbyItem.fromJson({'Id': 'item', 'Name': 'Old title', 'Type': 'Movie'}),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('New title'), findsWidgets);
+      expect(find.text('Old title'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
     'offline series detail keeps visited episodes and labels an uncached season',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(800, 1400));
@@ -39,10 +87,11 @@ void main() {
         await online.getEpisodes('series', seasonId: 'season');
         await online.dispose();
       });
+      final offlineWire = _Adapter()..mode = 'offline';
       final offline = EmbyApi(
         _session(),
         browseCache: memory,
-        dio: Dio()..httpClientAdapter = (_Adapter()..mode = 'offline'),
+        dio: Dio()..httpClientAdapter = offlineWire,
       );
       addTearDown(offline.dispose);
       await tester.pumpWidget(
@@ -62,7 +111,16 @@ void main() {
       expect(find.text('此季剧集暂不可用；未缓存的内容需联网后查看'), findsOneWidget);
       expect(find.text('Episode 1'), findsNothing);
       expect(find.text('这一季没有剧集'), findsNothing);
+      offlineWire
+        ..mode = 'online'
+        ..extraSeason = true;
+      offline.browseState.requestRecovery();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.text('Episode 1'), findsOneWidget);
+      expect(offline.browseState.offline, isFalse);
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 
@@ -575,3 +633,14 @@ EmbySession _session({String server = 'server', String user = 'user'}) =>
       accessToken: 'fixture-token',
       deviceId: 'fixture-device',
     );
+
+class _DeferredDetailApi extends EmbyApi {
+  _DeferredDetailApi() : super(_session(), dio: Dio());
+  final responses = <Completer<EmbyItem>>[];
+  @override
+  Future<EmbyItem> getItem(String id) {
+    final result = Completer<EmbyItem>();
+    responses.add(result);
+    return result.future;
+  }
+}

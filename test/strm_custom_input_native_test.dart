@@ -293,6 +293,11 @@ void main() {
       );
       expect(source.requests, isNotEmpty);
       expect(
+        source.requests.every((r) => r.target == '/d/video%2fsource?sig=%7e'),
+        isTrue,
+        reason: 'Transport must preserve the original signed URL bytes',
+      );
+      expect(
         source.requests.every(
           (r) =>
               r.headers['authorization'] == 'Bearer source-fixture' &&
@@ -348,7 +353,9 @@ void main() {
         {trace.id},
       );
       expect(exported.content, isNot(contains('source-fixture')));
-      expect(exported.content, contains('sig=%7e'));
+      expect(exported.content, contains('sig=<redacted>'));
+      expect(exported.content, isNot(contains('sig=%7e')));
+      expect(exported.content, isNot(contains('sig=~')));
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );

@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/diagnostic_log.dart';
+import 'package:emby_my_client/core/export_credential_redactor.dart';
 import 'package:emby_my_client/core/full_diagnostic_export.dart';
 import 'package:emby_my_client/core/strm_diagnostics.dart';
 import 'package:emby_my_client/data/emby_api.dart';
@@ -90,6 +91,28 @@ Future<PlaybackPlan> resolve(StrmTrace trace, String url) async {
 }
 
 void main() {
+  for (final reason in [
+    'subtitle_missing',
+    'subtitle_unreadable',
+    'subtitle_decoder_unsupported',
+  ]) {
+    test('fixed $reason survives structured logging and export', () async {
+      expect(SourceInputException(reason).reason, reason);
+      final line =
+          'event=strm_failure trace=1111111111111111 '
+          'stage=subtitle_apply reason=$reason';
+      expect(StrmDiagnosticSchema.valid(line), isTrue);
+      final report = await FullDiagnosticExportService(
+        readLog: () async => '$line\n',
+        appVersion: '1.0.195',
+        buildNumber: '195',
+      ).buildReport();
+      expect(report.content, contains('reason=$reason'));
+      FullDiagnosticExportService.validateSnapshot(report.content);
+      expect(StrmDiagnosticSchema.valid('$line-private-codec'), isFalse);
+    });
+  }
+
   test('queued reporting retains the attempt captured at invocation', () async {
     final fixture = await fileLog();
     final trace = StrmTrace(log: fixture.log);
@@ -456,7 +479,10 @@ void main() {
       expect(raw, contains('token=<redacted-token>'));
       expect(raw, isNot(contains('unique-appended-secret')));
       final result = await report(fixture.log, 'redaction');
-      expect(result.content.split('\n').skip(8).join('\n'), raw);
+      expect(
+        result.content.split('\n').skip(9).join('\n'),
+        ExportCredentialRedactor.redact(raw),
+      );
     },
   );
 

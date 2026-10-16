@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../playback/playback_state.dart';
 import '../../playback/track_mapper.dart';
 import '../../playback/subtitle_target.dart';
+import '../../playback/subtitle_track_labels.dart';
 
 class PlaybackSubtitleOptions extends StatelessWidget {
   const PlaybackSubtitleOptions({
@@ -13,6 +14,7 @@ class PlaybackSubtitleOptions extends StatelessWidget {
     this.localAssets = const [],
     this.onSelectNative,
     this.onSelectLocal,
+    this.onExportDiagnostics,
     super.key,
   });
 
@@ -23,6 +25,7 @@ class PlaybackSubtitleOptions extends StatelessWidget {
   final List<LocalExternalAsset> localAssets;
   final void Function(NativeSubtitleTrack)? onSelectNative;
   final void Function(LocalExternalAsset)? onSelectLocal;
+  final VoidCallback? onExportDiagnostics;
 
   bool get _isApplying =>
       playbackState.subtitleSelectionStatus == SubtitleSelectionStatus.applying;
@@ -55,9 +58,22 @@ class PlaybackSubtitleOptions extends StatelessWidget {
           SubtitleSelectionStatus.failed)
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-          child: Text(
-            playbackState.subtitleSelectionError ?? '字幕加载失败，请重试',
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                playbackState.subtitleSelectionError ?? '字幕加载失败，请重试',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              const Text('可重试当前字幕、切换其他字幕或关闭字幕'),
+              if (onExportDiagnostics != null)
+                TextButton.icon(
+                  key: const ValueKey('subtitle-export-diagnostics'),
+                  onPressed: onExportDiagnostics,
+                  icon: const Icon(Icons.description_outlined),
+                  label: const Text('导出本次日志'),
+                ),
+            ],
           ),
         ),
       ListTile(
@@ -72,7 +88,7 @@ class PlaybackSubtitleOptions extends StatelessWidget {
             : _isSubtitleDisabled
             ? const Icon(Icons.check, color: Color(0xFF80CBC4))
             : null,
-        onTap: _isApplying || _isSubtitleDisabled ? null : () => onSelect(null),
+        onTap: _isApplying ? null : () => onSelect(null),
       ),
       if (nativeTracks.isNotEmpty)
         const Padding(
@@ -83,14 +99,8 @@ class PlaybackSubtitleOptions extends StatelessWidget {
         ListTile(
           key: ValueKey('native-subtitle-${target.track.id}'),
           leading: const Icon(Icons.subtitles_outlined),
-          title: Text(target.track.title ?? target.track.language ?? '字幕'),
-          subtitle: Text(
-            [
-              '轨道 ${ordinal + 1}',
-              ?target.track.language,
-              ?target.track.codec?.toUpperCase(),
-            ].join(' · '),
-          ),
+          title: Text(_nativeLabel(target, ordinal).title),
+          subtitle: Text(_nativeLabel(target, ordinal).details),
           trailing:
               playbackState.appliedNativeSubtitleId == target.track.id &&
                   playbackState.subtitleSelectionStatus ==
@@ -106,23 +116,16 @@ class PlaybackSubtitleOptions extends StatelessWidget {
           padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Text('媒体库字幕'),
         ),
-      for (final track in tracks)
+      for (final (ordinal, track) in tracks.indexed)
         ListTile(
+          key: ValueKey('server-subtitle-${track.index}-$ordinal'),
           leading: Icon(
             track.isExternal
                 ? Icons.closed_caption_outlined
                 : Icons.subtitles_outlined,
           ),
-          title: Text(track.title ?? track.language ?? '字幕 ${track.index}'),
-          subtitle: Text(
-            [
-              ?track.language,
-              ?track.codec?.toUpperCase(),
-              if (track.isForced) '强制',
-              if (track.isDefault) '默认',
-              if (track.isExternal) '外挂',
-            ].join(' · '),
-          ),
+          title: Text(_serverLabel(track, ordinal).title),
+          subtitle: Text(_serverLabel(track, ordinal).details),
           trailing: _isApplying
               ? const SizedBox(
                   width: 18,
@@ -132,12 +135,13 @@ class PlaybackSubtitleOptions extends StatelessWidget {
               : _isTrackApplied(track)
               ? const Icon(Icons.check, color: Color(0xFF80CBC4))
               : null,
-          onTap: _isApplying || _isTrackApplied(track)
+          onTap: _isApplying || !_canSelect(track)
               ? null
               : () {
-                  final local = localAssets
-                      .where((asset) => asset.index == track.index)
-                      .firstOrNull;
+                  final matches = localAssets.where(
+                    (asset) => asset.index == track.index,
+                  );
+                  final local = matches.length == 1 ? matches.single : null;
                   if (local != null && onSelectLocal != null) {
                     onSelectLocal!(local);
                   } else {
@@ -147,4 +151,25 @@ class PlaybackSubtitleOptions extends StatelessWidget {
         ),
     ],
   );
+
+  bool _canSelect(PlaybackTrack track) =>
+      tracks.where((candidate) => candidate.index == track.index).length == 1 &&
+      localAssets.where((asset) => asset.index == track.index).length <= 1;
+
+  SubtitleTrackLabel _serverLabel(PlaybackTrack track, int ordinal) =>
+      labelServerSubtitle(
+        track: track,
+        ordinal: ordinal + 1,
+        plan: playbackState.plan,
+        downloaded:
+            localAssets.where((asset) => asset.index == track.index).length ==
+            1,
+      );
+
+  SubtitleTrackLabel _nativeLabel(NativeSubtitleTrack target, int ordinal) =>
+      labelNativeSubtitle(
+        track: target.track,
+        ordinal: ordinal + 1,
+        plan: playbackState.plan,
+      );
 }

@@ -18,6 +18,8 @@ import 'package:emby_my_client/library/library_local_media_scan_service.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/platform/platform_capabilities.dart';
 import 'package:emby_my_client/playback/playback_settings_repository.dart';
+import 'package:emby_my_client/playback/subtitle_preferences.dart';
+import 'package:emby_my_client/playback/subtitle_preferences_repository.dart';
 import 'package:emby_my_client/realtime/emby_websocket_client.dart';
 import 'package:emby_my_client/settings/library_category_settings.dart';
 import 'package:emby_my_client/state/app_controller.dart';
@@ -27,6 +29,70 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(sqfliteFfiInit);
+
+  test(
+    'switch invalidates old subtitle writes but keeps the remembered choice',
+    () async {
+      final harness = await _Harness.create(
+        seedSessions: const [_sessionA, _sessionB],
+      );
+      addTearDown(harness.dispose);
+      final repo = harness.controller.subtitlePreferencesRepository;
+      final old = await repo.load(_sessionA);
+      await repo.remember(
+        _sessionA,
+        itemId: 'movie',
+        mediaSourceId: 'source',
+        choice: const SubtitleRememberedChoice.disabled(),
+      );
+      await harness.controller.switchAccount(harness.accountB.accountId);
+      await expectLater(
+        repo.remember(
+          _sessionA,
+          itemId: 'movie',
+          mediaSourceId: 'source',
+          choice: const SubtitleRememberedChoice.disabled(),
+          expectedGeneration: old.generation,
+        ),
+        throwsA(isA<SubtitlePreferencesInvalidated>()),
+      );
+      expect((await repo.load(_sessionA)).rememberedCount, 1);
+      expect((await repo.load(_sessionB)).rememberedCount, 0);
+    },
+  );
+
+  test(
+    'removing current or inactive accounts always clears only their subtitle memory',
+    () async {
+      for (final removeCurrent in [false, true]) {
+        for (final deleteLocalData in [false, true]) {
+          final harness = await _Harness.create(
+            seedSessions: const [_sessionA, _sessionB],
+            accountDataCleanup: _RecordingAccountDataCleanup(),
+          );
+          final repo = harness.controller.subtitlePreferencesRepository;
+          for (final session in [_sessionA, _sessionB]) {
+            await repo.load(session);
+            await repo.remember(
+              session,
+              itemId: 'movie',
+              mediaSourceId: 'source',
+              choice: const SubtitleRememberedChoice.disabled(),
+            );
+          }
+          final removed = removeCurrent ? harness.accountA : harness.accountB;
+          final retained = removeCurrent ? harness.accountB : harness.accountA;
+          await harness.controller.removeAccount(
+            removed.accountId,
+            deleteLocalData: deleteLocalData,
+          );
+          expect((await repo.load(removed.session)).rememberedCount, 0);
+          expect((await repo.load(retained.session)).rememberedCount, 1);
+          await harness.dispose();
+        }
+      }
+    },
+  );
 
   test('initialization restores the last selected server account', () async {
     final harness = await _Harness.create(
@@ -396,6 +462,9 @@ void main() {
         playbackSettingsRepository: PlaybackSettingsRepository(
           storage: _MemoryPlaybackSettingsStorage(),
         ),
+        subtitlePreferencesRepository: SubtitlePreferencesRepository(
+          storage: _MemoryPlaybackSettingsStorage(),
+        ),
         libraryScanServiceFactory: tracker.createScan,
         downloadServiceFactory: tracker.createDownload,
       );
@@ -517,6 +586,9 @@ class _Harness {
       capabilities: PlatformCapabilities.ipad,
       libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
       playbackSettingsRepository: PlaybackSettingsRepository(
+        storage: _MemoryPlaybackSettingsStorage(),
+      ),
+      subtitlePreferencesRepository: SubtitlePreferencesRepository(
         storage: _MemoryPlaybackSettingsStorage(),
       ),
       accountDataCleanup: accountDataCleanup,

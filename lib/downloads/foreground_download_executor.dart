@@ -323,6 +323,8 @@ class _DownloadTaskHandler extends TaskHandler {
         // Keep the command queue available so delete/shutdown can cancel the
         // asset transfer while it is in progress.
         if (taskId != null) unawaited(service.repairSubtitles(taskId));
+      case DownloadExecutorCommand.cancelSubtitleRepair:
+        if (taskId != null) await service.cancelSubtitleRepair(taskId);
       case DownloadExecutorCommand.settingsChanged:
         await service.reloadSettings();
       case DownloadExecutorCommand.wake:

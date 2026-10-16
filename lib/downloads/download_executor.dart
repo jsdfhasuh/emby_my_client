@@ -7,6 +7,7 @@ enum DownloadExecutorCommand {
   settingsChanged,
   wake,
   repairSubtitles,
+  cancelSubtitleRepair,
 }
 
 class DownloadCommandQueue {

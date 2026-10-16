@@ -82,6 +82,256 @@ void main() {
     },
   );
 
+  test(
+    'cancel subtitle repair keeps video and existing subtitles playable',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      final subtitle = File(
+        task.metadata.playbackStreams.single['DeliveryUrl'] as String,
+      );
+      final subtitleBefore = await subtitle.readAsBytes();
+      final completedAt = (await harness.service.offlineItem(
+        task.itemId,
+      ))!.completedAt;
+      assets.waitForCancel = true;
+      final repairing = harness.service.repairSubtitles(task.id);
+      await assets.started.future;
+      expect(harness.service.isRepairingSubtitles(task.id), isTrue);
+      await harness.service.cancelSubtitleRepair(task.id);
+      await repairing;
+      final retained = harness.service.taskForItem(task.itemId)!;
+      expect(retained.status, DownloadStatus.completed);
+      expect(retained.lastErrorCode, 'subtitleRepairCancelled');
+      expect(await File(task.finalPath).readAsBytes(), _mediaBytes);
+      expect(await subtitle.readAsBytes(), subtitleBefore);
+      expect(
+        (await harness.service.offlineItem(task.itemId))!.completedAt,
+        completedAt,
+      );
+      expect(transport.calls, hasLength(1));
+      expect(harness.service.hasActiveWork, isFalse);
+    },
+  );
+
+  test(
+    'offline subtitle repair retains playable video and reports the reason',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final preflight = _FakePreflight();
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(
+        transport,
+        assetService: assets,
+        preflight: preflight,
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      preflight.networkError = const DownloadPreflightException(
+        code: 'networkUnavailable',
+        message: 'fixture offline',
+      );
+      await harness.service.repairSubtitles(task.id);
+      expect(
+        harness.service.taskForItem(task.itemId)!.lastErrorCode,
+        'subtitleRepair:networkUnavailable',
+      );
+      expect(await harness.service.offlineItem(task.itemId), isNotNull);
+      expect(assets.calls, 1);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'startup rechecks deleted sidecars and retains the existing video',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      final subtitle = File(
+        task.metadata.playbackStreams.single['DeliveryUrl'] as String,
+      );
+      await subtitle.delete();
+      await harness.service.shutdown();
+      final reopened = DownloadService(
+        api: harness.api,
+        scope: _scope,
+        repository: harness.repository,
+        transport: transport,
+        directoryResolver: (_) async => harness.directory,
+      );
+      addTearDown(() async {
+        await reopened.shutdown();
+        reopened.dispose();
+      });
+      await reopened.initialize();
+      final restored = reopened.tasks.single;
+      expect(restored.status, DownloadStatus.completed);
+      expect(restored.metadata.subtitlesNeedRepair, isTrue);
+      expect(restored.metadata.playbackStreams, isEmpty);
+      expect(
+        (await harness.repository.offlineItem(
+          _scope,
+          task.itemId,
+        ))!.metadata.playbackStreams,
+        isEmpty,
+      );
+      expect(await reopened.offlineItem(task.itemId), isNotNull);
+      expect(await File(task.finalPath).readAsBytes(), _mediaBytes);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'shutdown during repair reopens with the completed files intact',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      assets.waitForCancel = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await assets.started.future;
+      await harness.service.shutdown();
+      await repair;
+      final reopened = DownloadService(
+        api: harness.api,
+        scope: _scope,
+        repository: harness.repository,
+        transport: transport,
+        directoryResolver: (_) async => harness.directory,
+      );
+      addTearDown(() async {
+        await reopened.shutdown();
+        reopened.dispose();
+      });
+      await reopened.initialize();
+      expect(reopened.tasks.single.status, DownloadStatus.completed);
+      expect(reopened.tasks.single.lastErrorCode, 'subtitleRepairInterrupted');
+      expect(
+        (await reopened.offlineItem(task.itemId))!.metadata.playbackStreams,
+        hasLength(1),
+      );
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test(
+    'delete wins when subtitle repair is already committing its manifest',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      late _GatedRepository repository;
+      final harness = await _Harness.create(
+        _FakeTransport(handler: (_) async => _response(_mediaBytes)),
+        assetService: assets,
+        repositoryFactory: (database) =>
+            repository = _GatedRepository(database),
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      repository.gate = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await repository.entered.future;
+      final deletion = harness.service.delete(task.id);
+      await _waitUntil(
+        () => harness.service.tasks.single.status == DownloadStatus.cancelling,
+      );
+      repository.release.complete();
+      await Future.wait([repair, deletion]);
+      expect(harness.service.tasks, isEmpty);
+      expect(await repository.offlineItem(_scope, task.itemId), isNull);
+      expect(await File(task.finalPath).exists(), isFalse);
+      final assetDirectory = Directory(
+        path.join(harness.directory.path, 'assets'),
+      );
+      final remainingAssets = await assetDirectory.exists()
+          ? await assetDirectory
+                .list(recursive: true)
+                .where((file) => file is File)
+                .toList()
+          : <FileSystemEntity>[];
+      expect(remainingAssets, isEmpty);
+    },
+  );
+
+  test(
+    'repair cancellation wins during manifest commit without deleting video',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      late _GatedRepository repository;
+      final harness = await _Harness.create(
+        _FakeTransport(handler: (_) async => _response(_mediaBytes)),
+        assetService: assets,
+        repositoryFactory: (database) =>
+            repository = _GatedRepository(database),
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      repository.gate = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await repository.entered.future;
+      final cancellation = harness.service.cancelSubtitleRepair(task.id);
+      repository.release.complete();
+      await Future.wait([repair, cancellation]);
+      expect(
+        harness.service.tasks.single.lastErrorCode,
+        'subtitleRepairCancelled',
+      );
+      expect(await File(task.finalPath).readAsBytes(), _mediaBytes);
+      expect(await repository.offlineItem(_scope, task.itemId), isNotNull);
+    },
+  );
+
+  test(
+    'repair can be cancelled before its first file check finishes',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final harness = await _Harness.create(
+        _FakeTransport(handler: (_) async => _response(_mediaBytes)),
+        assetService: assets,
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      final repair = harness.service.repairSubtitles(task.id);
+      await harness.service.cancelSubtitleRepair(task.id);
+      await repair;
+      expect(
+        harness.service.tasks.single.lastErrorCode,
+        'subtitleRepairCancelled',
+      );
+      expect(assets.calls, 1);
+      expect(await harness.service.offlineItem(task.itemId), isNotNull);
+    },
+  );
+
   test('late A transfer is drained before B downloads the same item', () async {
     final responseGate = Completer<DownloadResponse>();
     final transportA = _FakeTransport(handler: (_) => responseGate.future);
@@ -204,6 +454,208 @@ void main() {
     expect(completed.integrity?.digest, digest);
     expect(stored.integrity, completed.integrity);
   });
+
+  for (final check in ['playback', 'explicit cache', 'reopen']) {
+    test(
+      '$check detects same-size media corruption without deleting assets',
+      () async {
+        final assets = _RepairAssets()..succeed = true;
+        final transport = _FakeTransport(
+          handler: (_) async => _response(
+            _mediaBytes,
+            headers: {
+              'content-length': '${_mediaBytes.length}',
+              'content-type': 'video/x-matroska',
+              'digest': 'sha-256=${_digest(sha256, _mediaBytes)}',
+            },
+          ),
+        );
+        final harness = await _Harness.create(transport, assetService: assets);
+        addTearDown(harness.dispose);
+        await harness.service.enqueue(_item);
+        final task = await _waitForTask(harness.service, (t) => t.isComplete);
+        await _waitUntil(() => !harness.service.hasActiveWork);
+        final original = (await harness.service.offlineItems()).single;
+        expect(original.expectedBytes, _mediaBytes.length);
+        expect(original.integrity, task.integrity);
+        final sidecar = File(
+          original.metadata.mediaStreams.single['DeliveryUrl'] as String,
+        );
+        final subtitleBytes = await sidecar.readAsBytes();
+        final file = File(task.finalPath);
+        final modified = await file.lastModified();
+        expect(_otherMediaBytes.length, _mediaBytes.length);
+        await file.writeAsBytes(_otherMediaBytes);
+        await file.setLastModified(modified);
+        DownloadService checked = harness.service;
+        if (check == 'reopen') {
+          await harness.service.shutdown();
+          checked = DownloadService(
+            api: harness.api,
+            scope: _scope,
+            repository: harness.repository,
+            transport: transport,
+            directoryResolver: (_) async => harness.directory,
+          );
+          final reopened = checked;
+          addTearDown(() async {
+            await reopened.shutdown();
+            reopened.dispose();
+          });
+          await checked.initialize();
+        } else if (check == 'explicit cache') {
+          expect(await checked.offlineItems(verifyFresh: true), isEmpty);
+        } else {
+          expect(await checked.offlineItem(task.itemId), isNull);
+        }
+        final invalid = checked.tasks.single;
+        expect(invalid.status, DownloadStatus.failed);
+        expect(invalid.lastErrorCode, 'checksumMismatch');
+        expect(invalid.requiresFreshDownload, isTrue);
+        expect(
+          await harness.repository.offlineItem(_scope, task.itemId),
+          isNull,
+        );
+        expect(await file.readAsBytes(), _otherMediaBytes);
+        expect(await sidecar.readAsBytes(), subtitleBytes);
+        expect(
+          invalid.metadata.mediaStreams.single['OfflineSubtitleState'],
+          'available',
+        );
+        expect(transport.calls, hasLength(1));
+      },
+    );
+  }
+
+  test(
+    'shutdown keeps a queued delete while subtitle manifest commit drains',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      late _GatedRepository repository;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(
+        transport,
+        assetService: assets,
+        repositoryFactory: (database) =>
+            repository = _GatedRepository(database),
+      );
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      repository.gate = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await repository.entered.future;
+      final deletion = harness.service.delete(task.id);
+      await _waitUntil(
+        () => harness.service.tasks.single.status == DownloadStatus.cancelling,
+      );
+      final stopping = harness.service.shutdown();
+      await Future<void>.delayed(Duration.zero);
+      repository.release.complete();
+      await Future.wait([repair, deletion, stopping]);
+      final reopened = DownloadService(
+        api: harness.api,
+        scope: _scope,
+        repository: repository,
+        transport: transport,
+        directoryResolver: (_) async => harness.directory,
+      );
+      addTearDown(() async {
+        await reopened.shutdown();
+        reopened.dispose();
+      });
+      await reopened.initialize();
+      expect(reopened.tasks, isEmpty);
+      expect(await repository.offlineItem(_scope, task.itemId), isNull);
+      expect(await File(task.finalPath).exists(), isFalse);
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  for (final duringRepair in [false, true]) {
+    for (final stopAfterDelete in [false, true]) {
+      test(
+        'late checksum invalidation cannot resurrect a deleted task: repair=$duringRepair shutdown=$stopAfterDelete',
+        () async {
+          late _GatedInvalidationRepository repository;
+          final transport = _FakeTransport(
+            handler: (_) async => _response(
+              _mediaBytes,
+              headers: {
+                'content-length': '${_mediaBytes.length}',
+                'content-type': 'video/x-matroska',
+                'digest': 'sha-256=${_digest(sha256, _mediaBytes)}',
+              },
+            ),
+          );
+          final harness = await _Harness.create(
+            transport,
+            repositoryFactory: (database) =>
+                repository = _GatedInvalidationRepository(database),
+          );
+          addTearDown(harness.dispose);
+          addTearDown(() {
+            if (!repository.release.isCompleted) repository.release.complete();
+          });
+          await harness.service.enqueue(_item);
+          final task = await _waitForTask(harness.service, (t) => t.isComplete);
+          await _waitUntil(() => !harness.service.hasActiveWork);
+          await File(task.finalPath).writeAsBytes(_otherMediaBytes);
+          final inspection = duringRepair
+              ? harness.service.repairSubtitles(task.id).then((_) => null)
+              : harness.service.offlineItem(task.itemId);
+          await repository.entered.future;
+          var deletionFinished = false;
+          final deletion = harness.service.delete(task.id).then((_) {
+            deletionFinished = true;
+          });
+          await _waitUntil(
+            () =>
+                harness.service.tasks.single.status ==
+                DownloadStatus.cancelling,
+          );
+          // Give an incorrectly untracked delete time to finish before the
+          // delayed database write resumes, reproducing the original race.
+          await Future.any([
+            deletion,
+            Future<void>.delayed(const Duration(milliseconds: 100)),
+          ]);
+          expect(
+            deletionFinished,
+            isFalse,
+            reason: 'Delete must drain the pending integrity write',
+          );
+          final stopping = stopAfterDelete
+              ? harness.service.shutdown()
+              : Future<void>.value();
+          repository.release.complete();
+          expect(await inspection, isNull);
+          await Future.wait([deletion, stopping]);
+          expect(harness.service.tasks, isEmpty);
+          expect(await repository.listTasks(_scope), isEmpty);
+          expect(await repository.offlineItem(_scope, task.itemId), isNull);
+          expect(await File(task.finalPath).exists(), isFalse);
+          final reopened = DownloadService(
+            api: harness.api,
+            scope: _scope,
+            repository: repository,
+            transport: transport,
+            directoryResolver: (_) async => harness.directory,
+          );
+          addTearDown(() async {
+            await reopened.shutdown();
+            reopened.dispose();
+          });
+          await reopened.initialize();
+          expect(reopened.tasks, isEmpty);
+          expect(transport.calls, hasLength(1));
+        },
+      );
+    }
+  }
 
   test('validates Content-MD5 when the server provides it', () async {
     final digest = _digest(md5, _mediaBytes);
@@ -1978,6 +2430,7 @@ class _Harness {
   static Future<_Harness> create(
     DownloadTransport transport, {
     DownloadAssetService? assetService,
+    DownloadRepository Function(LocalDatabase)? repositoryFactory,
     bool initialize = true,
     DownloadPreflight? preflight,
     DownloadSettingsStore? settingsStore,
@@ -1989,7 +2442,8 @@ class _Harness {
       factory: databaseFactoryFfi,
       pathResolver: () async => inMemoryDatabasePath,
     );
-    final repository = DownloadRepository(database);
+    final repository =
+        repositoryFactory?.call(database) ?? DownloadRepository(database);
     final directory = await Directory.systemTemp.createTemp(
       'emby-download-test-',
     );
@@ -2027,6 +2481,37 @@ class _Harness {
   }
 }
 
+class _GatedInvalidationRepository extends DownloadRepository {
+  _GatedInvalidationRepository(super.database);
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<void> saveTask(DownloadTaskRecord task) async {
+    if (task.status == DownloadStatus.failed &&
+        task.lastErrorCode == 'checksumMismatch' &&
+        !entered.isCompleted) {
+      entered.complete();
+      await release.future;
+    }
+    await super.saveTask(task);
+  }
+}
+
+class _GatedRepository extends DownloadRepository {
+  _GatedRepository(super.database);
+  bool gate = false;
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<void> complete(DownloadTaskRecord task, OfflineMediaItem item) async {
+    if (gate && !entered.isCompleted) {
+      entered.complete();
+      await release.future;
+    }
+    await super.complete(task, item);
+  }
+}
+
 class _RepairAssets implements DownloadAssetService {
   int calls = 0;
   bool succeed = false;
@@ -2045,7 +2530,7 @@ class _RepairAssets implements DownloadAssetService {
     }
     if (!succeed) throw const SocketException('fixture assets offline');
     final subtitle = File(
-      path.join(downloadDirectory.path, 'assets', 'subtitle.srt'),
+      path.join(downloadDirectory.path, 'assets', 'subtitle-$calls.srt'),
     );
     await subtitle.parent.create(recursive: true);
     await subtitle.writeAsString('1\n00:00:00,000 --> 00:00:01,000\nFixture\n');

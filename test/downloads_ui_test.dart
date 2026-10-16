@@ -1,4 +1,9 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:emby_my_client/downloads/download_integrity.dart';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/diagnostic_log.dart';
@@ -6,6 +11,7 @@ import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/data/browse_cache.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
+import 'package:emby_my_client/downloads/download_assets.dart';
 import 'package:emby_my_client/downloads/download_preflight.dart';
 import 'package:emby_my_client/downloads/download_repository.dart';
 import 'package:emby_my_client/downloads/download_service.dart';
@@ -36,7 +42,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create();
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
     harness.api.browseState.cached(
       'fixture',
       BrowseSnapshot({}, DateTime.utc(2026)),
@@ -81,7 +87,7 @@ void main() {
         await tester.runAsync(() async {
           harness = await _UiHarness.create(withCompletedDownload: true);
         });
-        addTearDown(harness.dispose);
+        addTearDown(() => _disposeUiHarness(tester, harness));
         if (offline) {
           harness.api.browseState.cached(
             'fixture',
@@ -135,7 +141,7 @@ void main() {
       await tester.runAsync(() async {
         harness = await _UiHarness.create();
       });
-      addTearDown(harness.dispose);
+      addTearDown(() => _disposeUiHarness(tester, harness));
       harness.api.browseState.cached(
         'fixture',
         BrowseSnapshot({}, DateTime.utc(2026)),
@@ -166,7 +172,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create();
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -187,6 +193,106 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'subtitle repair can be cancelled while preserving offline playback',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      late _PendingRepairAssets assets;
+      late _UiHarness harness;
+      await tester.runAsync(() async {
+        assets = _PendingRepairAssets();
+        harness = await _UiHarness.create(
+          withCompletedDownload: true,
+          assetService: assets,
+        );
+      });
+      addTearDown(() => _disposeUiHarness(tester, harness));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: DownloadsScreen(api: harness.api, downloads: harness.service),
+        ),
+      );
+      late Future<void> repair;
+      await tester.runAsync(() async {
+        repair = harness.service.repairSubtitles('task-1');
+        await assets.started.future.timeout(const Duration(seconds: 5));
+      });
+      await tester.pump();
+      expect(find.byTooltip('取消字幕修复（保留下载）'), findsOneWidget);
+      expect(find.byTooltip('离线播放'), findsOneWidget);
+      expect(find.textContaining('正在修复，可取消'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byTooltip('取消字幕修复（保留下载）'));
+      await tester.runAsync(() => repair.timeout(const Duration(seconds: 5)));
+      await tester.pump();
+      expect(find.textContaining('修复已取消'), findsOneWidget);
+      expect(find.byTooltip('检查并补下载字幕'), findsOneWidget);
+      expect(find.byTooltip('离线播放'), findsOneWidget);
+      expect(harness.service.tasks.single.isComplete, isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      var stopped = false;
+      final stopping = harness.service.shutdown().then((_) => stopped = true);
+      for (var attempt = 0; attempt < 100 && !stopped; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)),
+        );
+        await tester.pump();
+      }
+      expect(
+        stopped,
+        isTrue,
+        reason: 'Shutdown must drain all verification IO',
+      );
+      await stopping;
+    },
+  );
+
+  for (final withDigest in [false, true]) {
+    testWidgets(
+      'cache check accurately reports digest availability: $withDigest',
+      (tester) async {
+        late _UiHarness harness;
+        await tester.runAsync(() async {
+          harness = await _UiHarness.create(
+            withCompletedDownload: true,
+            integrity: withDigest
+                ? DownloadIntegrity.fromStored(
+                    'sha-256',
+                    base64Encode(sha256.convert(_mediaBytes).bytes),
+                  )
+                : null,
+          );
+        });
+        addTearDown(() => _disposeUiHarness(tester, harness));
+        await tester.pumpWidget(
+          MaterialApp(
+            home: DownloadsScreen(api: harness.api, downloads: harness.service),
+          ),
+        );
+        await tester.tap(find.byTooltip('检查下载缓存'));
+        final result = find.textContaining(
+          withDigest ? '1 个通过摘要校验' : '1 个无摘要（仅检查文件头和大小）',
+        );
+        for (
+          var attempt = 0;
+          attempt < 100 && result.evaluate().isEmpty;
+          attempt++
+        ) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)),
+          );
+          await tester.pump();
+        }
+        expect(result, findsOneWidget);
+        expect(harness.service.tasks.single.isComplete, isTrue);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   testWidgets('downloads screen presents offline playback and delete dialog', (
     tester,
   ) async {
@@ -196,7 +302,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create(withCompletedDownload: true);
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -207,6 +313,13 @@ void main() {
     await tester.pump();
 
     expect(find.text('Offline Test'), findsOneWidget);
+    expect(find.byKey(const ValueKey('download-video-task-1')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('download-subtitles-task-1')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('download-cover-task-1')), findsOneWidget);
+    expect(find.text('服务器未提供封面'), findsOneWidget);
     expect(find.textContaining('视频可离线播放 · 12 B / 12 B'), findsOneWidget);
     expect(find.textContaining('字幕待检查，可补下载'), findsOneWidget);
     expect(find.byTooltip('检查并补下载字幕'), findsOneWidget);
@@ -237,7 +350,7 @@ void main() {
       await tester.runAsync(() async {
         harness = await _UiHarness.create(withCompletedDownload: true);
       });
-      addTearDown(harness.dispose);
+      addTearDown(() => _disposeUiHarness(tester, harness));
       final mediaFile = File(harness.service.tasks.single.finalPath);
 
       await tester.pumpWidget(
@@ -310,7 +423,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create(withWaitingDownload: true);
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -335,7 +448,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create(withCorruptDownload: true);
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -345,7 +458,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('本地文件损坏 · 4 B / 12 B'), findsOneWidget);
+    expect(find.text('视频：本地文件损坏 · 4 B / 12 B'), findsOneWidget);
     expect(find.byTooltip('重新下载'), findsOneWidget);
     expect(find.byTooltip('离线播放'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -360,7 +473,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create(withCorruptDownload: true);
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -391,7 +504,7 @@ void main() {
     await tester.runAsync(() async {
       harness = await _UiHarness.create(withStorageWaitingDownload: true);
     });
-    addTearDown(harness.dispose);
+    addTearDown(() => _disposeUiHarness(tester, harness));
 
     await tester.pumpWidget(
       MaterialApp(
@@ -502,8 +615,11 @@ void _subtitleRouteTests() {
             await tester.tap(find.text('字幕'));
             await tester.pumpAndSettle();
             expect(
-              find.textContaining(
-                action == 'metadataConflict' ? '无法确认服务器字幕' : '字幕加载失败',
+              find.descendant(
+                of: find.byType(PlaybackSubtitleOptions),
+                matching: find.textContaining(
+                  action == 'metadataConflict' ? '无法确认服务器字幕' : '字幕未能加载，原因尚未确认',
+                ),
               ),
               findsOneWidget,
             );
@@ -708,6 +824,29 @@ class _PlayerRouteObserver extends NavigatorObserver {
   }
 }
 
+// File IO from initState completes through Flutter's fake async zone. Keep
+// pumping during shutdown so all tracked checks drain before deleting fixtures.
+Future<void> _disposeUiHarness(WidgetTester tester, _UiHarness harness) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  var stopped = false;
+  final stopping = harness.service.shutdown().whenComplete(
+    () => stopped = true,
+  );
+  for (var attempt = 0; attempt < 100 && !stopped; attempt++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 5)),
+    );
+    await tester.pump();
+  }
+  expect(
+    stopped,
+    isTrue,
+    reason: 'Shutdown must drain verification IO before fixture deletion',
+  );
+  await stopping;
+  await tester.runAsync(harness.dispose);
+}
+
 class _UiHarness {
   _UiHarness({
     required this.directory,
@@ -725,6 +864,8 @@ class _UiHarness {
     bool withWaitingDownload = false,
     bool withStorageWaitingDownload = false,
     List<Map<String, dynamic>>? mediaStreams,
+    DownloadAssetService? assetService,
+    DownloadIntegrity? integrity,
   }) async {
     final directory = await Directory.systemTemp.createTemp('emby-ui-test-');
     final store = _MemoryDownloadStore();
@@ -754,6 +895,7 @@ class _UiHarness {
         createdAt: now,
         updatedAt: now,
         expectedBytes: _mediaBytes.length,
+        integrity: integrity,
       );
       await store.complete(
         task,
@@ -818,6 +960,7 @@ class _UiHarness {
       api: api,
       scope: _scope,
       repository: store,
+      assetService: assetService,
       directoryResolver: (_) async => directory,
       preflight: withWaitingDownload ? const _WifiBlockedPreflight() : null,
     );
@@ -1027,3 +1170,16 @@ const _mediaBytes = <int>[
   0x74,
   0x72,
 ];
+
+class _PendingRepairAssets implements DownloadAssetService {
+  final started = Completer<void>();
+  @override
+  Future<OfflineMediaMetadata> downloadAssets(
+    DownloadTaskRecord task,
+    Directory directory, {
+    CancelToken? cancelToken,
+  }) async {
+    started.complete();
+    throw await cancelToken!.whenCancel;
+  }
+}

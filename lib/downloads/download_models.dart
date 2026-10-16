@@ -17,6 +17,8 @@ enum DownloadStatus {
 
 enum DownloadSourceKind { original }
 
+enum OfflineAssetState { unknown, available, missing, failed, notProvided }
+
 class OfflineMediaMetadata {
   OfflineMediaMetadata({
     required this.name,
@@ -31,6 +33,7 @@ class OfflineMediaMetadata {
     this.container,
     this.primaryImageTag,
     this.primaryImagePath,
+    this.primaryImageState = OfflineAssetState.unknown,
     this.subtitleDiscoveryComplete = false,
   }) : mediaStreams = List.unmodifiable(mediaStreams);
 
@@ -72,39 +75,61 @@ class OfflineMediaMetadata {
   final String? container;
   final String? primaryImageTag;
   final String? primaryImagePath;
+  final OfflineAssetState primaryImageState;
   final List<Map<String, dynamic>> mediaStreams;
   final bool subtitleDiscoveryComplete;
 
   static bool isExternalSubtitle(Map<String, dynamic> stream) =>
       stream['Type']?.toString().toLowerCase() == 'subtitle' &&
-      stream['IsExternal'] == true;
+      (stream['IsExternal'] == true ||
+          stream['DeliveryMethod']?.toString().trim().toLowerCase() ==
+              'external');
 
   bool get subtitlesNeedRepair =>
       !subtitleDiscoveryComplete ||
       mediaStreams
           .where(isExternalSubtitle)
-          .any((stream) => stream['OfflineSubtitleState'] != 'available');
+          .any(
+            (stream) =>
+                stream['OfflineSubtitleState'] != 'available' ||
+                stream['OfflineSubtitleError'] != null,
+          );
 
   String get subtitleStatusText {
-    if (!subtitleDiscoveryComplete) return '字幕待检查，可补下载';
     final external = mediaStreams.where(isExternalSubtitle).toList();
-    final missing = external
-        .where((stream) => stream['OfflineSubtitleState'] != 'available')
+    final available = external
+        .where((stream) => stream['OfflineSubtitleState'] == 'available')
         .length;
-    if (missing > 0) return '缺少 $missing 条字幕，可重试';
-    if (external.isNotEmpty) return '字幕已保存';
+    if (!subtitleDiscoveryComplete) {
+      return available > 0 ? '已保存 $available 条字幕，发现待重试' : '字幕待检查，可补下载';
+    }
+    final missing = external.length - available;
+    if (missing > 0) return '已保存 $available 条，缺少 $missing 条字幕，可补下载';
+    if (external.any((stream) => stream['OfflineSubtitleError'] != null)) {
+      return '已保存 $available 条字幕，刷新失败，已保留原文件';
+    }
+    if (external.isNotEmpty) return '字幕已保存（$available 条）';
     return mediaStreams.any(
           (s) => s['Type']?.toString().toLowerCase() == 'subtitle',
         )
-        ? '内嵌字幕随原视频保留'
+        ? '内嵌字幕随原视频保存'
         : '服务器未提供字幕';
   }
+
+  String get coverStatusText => switch (primaryImageState) {
+    OfflineAssetState.available => '封面已保存',
+    OfflineAssetState.missing => '封面文件缺失',
+    OfflineAssetState.failed => '封面不可用',
+    OfflineAssetState.notProvided => '服务器未提供封面',
+    OfflineAssetState.unknown => '封面待检查',
+  };
 
   List<Map<String, dynamic>> get playbackStreams => mediaStreams
       .where(
         (stream) =>
             !isExternalSubtitle(stream) ||
-            stream['OfflineSubtitleState'] == 'available' ||
+            (stream['OfflineSubtitleState'] == 'available' &&
+                isLocalAssetPath(stream['DeliveryUrl'])) ||
             (stream['OfflineSubtitleState'] == null &&
                 isLocalAssetPath(stream['DeliveryUrl'])),
       )
@@ -120,8 +145,7 @@ class OfflineMediaMetadata {
     if (imagePath != null) result.add(imagePath);
     for (final stream in mediaStreams) {
       final deliveryUrl = stream['DeliveryUrl'];
-      if (stream['Type']?.toString().toLowerCase() == 'subtitle' &&
-          stream['IsExternal'] == true &&
+      if (isExternalSubtitle(stream) &&
           deliveryUrl is String &&
           (isLocalAssetPath(deliveryUrl) ||
               (!deliveryUrl.contains('://') && !deliveryUrl.contains('?')))) {
@@ -135,6 +159,7 @@ class OfflineMediaMetadata {
     List<Map<String, dynamic>>? mediaStreams,
     String? primaryImagePath,
     bool clearPrimaryImagePath = false,
+    OfflineAssetState? primaryImageState,
     bool? subtitleDiscoveryComplete,
   }) => OfflineMediaMetadata(
     name: name,
@@ -150,6 +175,7 @@ class OfflineMediaMetadata {
     primaryImagePath: clearPrimaryImagePath
         ? null
         : primaryImagePath ?? this.primaryImagePath,
+    primaryImageState: primaryImageState ?? this.primaryImageState,
     mediaStreams: mediaStreams ?? this.mediaStreams,
     subtitleDiscoveryComplete:
         subtitleDiscoveryComplete ?? this.subtitleDiscoveryComplete,
@@ -167,6 +193,7 @@ class OfflineMediaMetadata {
     if (container != null) 'container': container,
     if (primaryImageTag != null) 'primaryImageTag': primaryImageTag,
     if (primaryImagePath != null) 'primaryImagePath': primaryImagePath,
+    'primaryImageState': primaryImageState.name,
     'mediaStreams': mediaStreams,
     'subtitleDiscoveryComplete': subtitleDiscoveryComplete,
   };
@@ -184,6 +211,11 @@ class OfflineMediaMetadata {
         container: _string(json['container']),
         primaryImageTag: _string(json['primaryImageTag']),
         primaryImagePath: _string(json['primaryImagePath']),
+        primaryImageState:
+            OfflineAssetState.values
+                .where((state) => state.name == json['primaryImageState'])
+                .firstOrNull ??
+            OfflineAssetState.unknown,
         subtitleDiscoveryComplete: json['subtitleDiscoveryComplete'] == true,
         mediaStreams: (json['mediaStreams'] as List<dynamic>? ?? const [])
             .whereType<Map>()
@@ -347,6 +379,8 @@ class OfflineMediaItem {
     required this.metadata,
     required this.localMediaPath,
     required this.completedAt,
+    this.expectedBytes,
+    this.integrity,
     this.progress,
   });
 
@@ -356,6 +390,9 @@ class OfflineMediaItem {
   final OfflineMediaMetadata metadata;
   final String localMediaPath;
   final DateTime completedAt;
+  // Hydrated from the existing task manifest; absent on legacy standalone items.
+  final int? expectedBytes;
+  final DownloadIntegrity? integrity;
   final OfflineProgressRecord? progress;
 
   EmbyItem toEmbyItem() {

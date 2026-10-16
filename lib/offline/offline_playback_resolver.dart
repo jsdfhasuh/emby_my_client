@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import '../downloads/download_models.dart';
+import '../downloads/download_asset_verifier.dart';
+import '../downloads/download_media_verifier.dart';
 import '../models/emby_models.dart';
 import '../playback/emby_stream_resolver.dart';
 
@@ -29,12 +31,22 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       throw StateError('Offline item identity does not match playback item');
     }
     final file = File(offlineItem.localMediaPath);
-    if (!await file.exists() || await file.length() <= 0) {
-      throw const FileSystemException('Offline media file is missing');
-    }
-    final defaultSubtitleStreamIndex = _defaultSubtitleStreamIndex(
-      offlineItem.metadata.playbackStreams,
+    final mediaError = await DownloadMediaVerifier().check(
+      file,
+      expectedBytes: offlineItem.expectedBytes,
+      integrity: offlineItem.integrity,
+      fresh: true,
     );
+    if (mediaError != null) {
+      throw FileSystemException(
+        'Offline media verification failed: $mediaError',
+      );
+    }
+    final metadata = await verifyOfflineAssets(offlineItem.metadata);
+    final streams = metadata.playbackStreams;
+    final defaultSubtitleStreamIndex = _defaultSubtitleStreamIndex(streams);
+    // Keep an explicit request so the controller reports unavailable selection
+    // rather than silently choosing another track. Defaults use verified assets.
     final resolvedSubtitleStreamIndex = subtitleDisabled
         ? null
         : subtitleStreamIndex ?? defaultSubtitleStreamIndex;
@@ -43,7 +55,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       supportsDirectPlay: true,
       supportsDirectStream: false,
       supportsTranscoding: false,
-      mediaStreams: offlineItem.metadata.playbackStreams,
+      mediaStreams: streams,
       transcodingReasons: const [],
       container: offlineItem.metadata.container,
       defaultSubtitleStreamIndex: defaultSubtitleStreamIndex,
@@ -61,7 +73,7 @@ class OfflinePlaybackResolver implements PlaybackStreamResolver {
       sourceProtocol: 'File',
       duration: Duration(microseconds: (item.runTimeTicks ?? 0) ~/ 10),
       transportKind: PlaybackTransportKind.offlineLocal,
-      mediaStreams: offlineItem.metadata.playbackStreams,
+      mediaStreams: streams,
       transcodingReasons: const [],
       availableMediaSources: [source],
     );

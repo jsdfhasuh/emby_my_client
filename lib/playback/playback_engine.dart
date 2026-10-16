@@ -148,6 +148,10 @@ class SubtitleMappingContext {
   );
 }
 
+abstract interface class SubtitleCodecProvider {
+  String? get activeSubtitleCodec;
+}
+
 abstract interface class SubtitleInputEpochProvider {
   int get subtitleInputEpoch;
 }
@@ -222,6 +226,7 @@ class MediaKitPlaybackEngine
         PlaybackNativeResourceOwner,
         SubtitleMappingContextProvider,
         SubtitleInputEpochProvider,
+        SubtitleCodecProvider,
         PlaybackCacheEngine,
         PlaybackCacheIdentitySnapshotReader {
   MediaKitPlaybackEngine(
@@ -1000,6 +1005,10 @@ class MediaKitPlaybackEngine
 
   Future<void> _resetSubtitleRendering() => _configureSubtitleRendering(null);
 
+  String? _activeSubtitleCodec;
+  @override
+  String? get activeSubtitleCodec => _activeSubtitleCodec;
+
   Future<void> _configureSubtitleRendering(String? nativeCodec) async {
     final native = player.platform;
     if (native is! NativePlayer) return;
@@ -1010,6 +1019,7 @@ class MediaKitPlaybackEngine
     if (await native.getProperty('sub-visibility') != value) {
       throw const SourceInputException('subtitle_render_unconfirmed');
     }
+    _activeSubtitleCodec = nativeCodec;
   }
 
   Future<void> _confirmSubtitle(String expected) async {

@@ -1,4 +1,5 @@
 import 'subtitle_target.dart';
+import 'subtitle_problem.dart';
 import '../models/emby_models.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_coordinator.dart';
@@ -127,6 +128,8 @@ class PlaybackState {
     this.appliedNativeSubtitleId,
     this.subtitleApplicationGeneration = 0,
     this.subtitleSelectionError,
+    this.subtitleProblem,
+    this.actualSubtitleCodec,
     this.errorMessage,
     this.statusMessage,
     this.cacheProfile,
@@ -159,6 +162,8 @@ class PlaybackState {
   final String? appliedNativeSubtitleId;
   final int subtitleApplicationGeneration;
   final String? subtitleSelectionError;
+  final SubtitleProblem? subtitleProblem;
+  final String? actualSubtitleCodec;
   final String? errorMessage;
   final String? statusMessage;
   final ResolvedPlaybackCacheProfile? cacheProfile;
@@ -204,6 +209,9 @@ class PlaybackState {
     bool clearAppliedSubtitleStreamIndex = false,
     int? subtitleApplicationGeneration,
     String? subtitleSelectionError,
+    SubtitleProblem? subtitleProblem,
+    String? actualSubtitleCodec,
+    bool clearActualSubtitleCodec = false,
     bool clearSubtitleSelectionError = false,
     String? errorMessage,
     bool clearError = false,
@@ -251,6 +259,20 @@ class PlaybackState {
         : appliedNativeSubtitleId ?? this.appliedNativeSubtitleId,
     subtitleApplicationGeneration:
         subtitleApplicationGeneration ?? this.subtitleApplicationGeneration,
+    actualSubtitleCodec:
+        (clearActualSubtitleCodec ||
+            (subtitleSelectionStatus != null &&
+                subtitleSelectionStatus !=
+                    SubtitleSelectionStatus.appliedEmbedded &&
+                subtitleSelectionStatus !=
+                    SubtitleSelectionStatus.appliedExternal &&
+                subtitleSelectionStatus !=
+                    SubtitleSelectionStatus.appliedServer))
+        ? null
+        : actualSubtitleCodec ?? this.actualSubtitleCodec,
+    subtitleProblem: clearSubtitleSelectionError
+        ? null
+        : subtitleProblem ?? this.subtitleProblem,
     subtitleSelectionError: clearSubtitleSelectionError
         ? null
         : subtitleSelectionError ?? this.subtitleSelectionError,
