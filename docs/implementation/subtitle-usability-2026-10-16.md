@@ -780,6 +780,47 @@ regression/build201 with source hashes and per-mode snapshots. No unchanged
 CI run was retried. Android rendering will be checked by the next exact-commit
 workflow; no new local Android run is claimed for this probe change.
 
+### Build 202 first failure: iOS plugin type unavailable during compilation
+
+Commit 00a312e6234dd1fc5d7fabb917fbaa83fd96dad3 triggered automatic run
+38918810461, attempt 1. **Quality and Android completed successfully**:
+1937 full tests, native subtitle/position pixels, 32 Flutter texture frames and
+34 production-route stages passed. The parent's replay of the actual saved
+route records confirmed 28 paused player stages, six non-player stages, all
+seven cleanup fields true, and no callback errors or blocked menu events.
+
+The iPadOS job failed in Run native diagnostics and libmpv capability XCTest
+before executing tests: media_kit_video 2.0.1's MPVVideoOutParams.swift line 23
+could not find mpv_node_list in scope. xcodebuild exited 65. The device IPA and
+Release were therefore not produced. The complete 1,432,893-byte iOS job log,
+1,278,959-byte successful Android job log, original run metadata and Android UI
+artifact are preserved in release/build-202-first-failure. The initial finding
+was a Swift/C type-import compilation failure. The complete log subsequently
+confirmed the cause: curl failed to connect to github.com while downloading
+the fixed mpv v0.36.0 headers, then the upstream podspec ignored make's failure.
+CocoaPods reported installation success without the required C declarations.
+No unchanged CI attempt was rerun.
+
+The repair invokes the original locked media_kit_video 2.0.1 Makefile before
+CocoaPods. It retains each bounded attempt's output, exit code, duration and
+partial download, and checks the archive against the upstream fixed SHA256.
+All four generated headers must match the verified archive byte for byte.
+After pod installation, their public copies and umbrella imports must also
+match. A successful command alone cannot pass either gate. Evidence uploads
+run even after failure. Dependency locks, package identity, signing and release
+policy remain unchanged; no package source or podspec is patched.
+
+The first Windows test run passed 12 checks and exposed one POSIX-simulation
+fixture error (missing SIGKILL); its original log is retained. After fixing
+that fixture, all 13 checks passed on Windows and Linux. An isolated Ubuntu
+run retained the original Makefile's three failures under dash (unsupported
+here-string syntax, with all downloaded archive hashes correct). Setting only
+the Linux make shell to bash then completed the actual original Makefile on
+its first attempt in 4.681 seconds; the pinned archive and all four output
+headers passed verification. Darwin execution was not changed. These local
+checks do not claim a macOS pod install or Xcode result; the next exact-commit
+workflow must establish those results before publication.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

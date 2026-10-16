@@ -459,9 +459,31 @@ jobs:
           flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.lock
 
+      - name: Verify pinned iOS header preparation failure gates
+        run: python3 -m unittest discover -s scripts/ios -p 'test_prepare_media_kit_headers.py' -v
+
+      - name: Prepare pinned mpv headers before CocoaPods
+        run: >-
+          python3 scripts/ios/prepare_media_kit_headers.py
+          --evidence build/ios/artifacts/mpv-headers/prepare
+
       - name: Install CocoaPods with deployment lock
         working-directory: ios
         run: bundle exec pod install --deployment
+
+      - name: Verify CocoaPods imported the pinned mpv headers
+        run: >-
+          python3 scripts/ios/prepare_media_kit_headers.py
+          --verify-pods ios/Pods
+          --evidence build/ios/artifacts/mpv-headers/pods
+
+      - name: Upload mpv header preparation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-mpv-headers-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: build/ios/artifacts/mpv-headers/
 
       - name: Check CocoaPods lock drift
         run: git diff --exit-code -- ios/Podfile.lock
