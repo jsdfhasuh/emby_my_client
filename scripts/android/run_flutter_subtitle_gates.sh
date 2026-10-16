@@ -10,7 +10,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
 export PATH="$sdk/platform-tools:$PATH"
 export ANDROID_SERIAL=emulator-5558
-if adb devices | awk '$1 == "emulator-5558" {found=1} END {exit !found}'; then
+if ! devices="$(timeout --kill-after=1s 5s adb devices)"; then
+  echo 'Failed to query the dedicated subtitle emulator serial' >&2
+  exit 1
+fi
+if awk '$1 == "emulator-5558" {found=1} END {exit !found}' <<< "$devices"; then
   echo 'Dedicated subtitle emulator serial is already occupied' >&2
   exit 65
 fi
@@ -23,22 +27,63 @@ echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" create avd --force \
   -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect \
   >"$RUNNER_TEMP/subtitle-ui-emulator.log" 2>&1 &
 emulator_pid=$!
+# Only this script's child is signalled; no shared adb server or other emulator
+# is stopped. Do not wait on a live process after adb loses the device.
+wait_for_emulator_exit() {
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$emulator_pid" 2>/dev/null; then
+      wait "$emulator_pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 cleanup() {
-  adb -s "$ANDROID_SERIAL" emu kill >/dev/null 2>&1 || true
-  wait "$emulator_pid" 2>/dev/null || true
+  local status=$?
+  trap - EXIT
+  echo "SUBTITLE_EMULATOR_CLEANUP=START status=$status"
+  timeout --kill-after=1s 5s adb -s "$ANDROID_SERIAL" emu kill >/dev/null 2>&1 || true
+  if ! wait_for_emulator_exit; then
+    echo 'SUBTITLE_EMULATOR_CLEANUP=TERM'
+    kill -TERM "$emulator_pid" 2>/dev/null || true
+    if ! wait_for_emulator_exit; then
+      echo 'SUBTITLE_EMULATOR_CLEANUP=KILL'
+      kill -KILL "$emulator_pid" 2>/dev/null || true
+      if ! wait_for_emulator_exit; then
+        echo 'SUBTITLE_EMULATOR_CLEANUP=FAILED owned process did not exit' >&2
+        [[ "$status" -ne 0 ]] || status=1
+        exit "$status"
+      fi
+    fi
+  fi
+  echo "SUBTITLE_EMULATOR_CLEANUP=DONE status=$status"
+  exit "$status"
 }
 trap cleanup EXIT
 booted=''
+boot_deadline=$((SECONDS + 360))
+echo 'SUBTITLE_EMULATOR_BOOT=WAITING serial=emulator-5558'
 for _ in $(seq 1 180); do
   if ! kill -0 "$emulator_pid" 2>/dev/null; then
-    cat "$RUNNER_TEMP/subtitle-ui-emulator.log" >&2
+    echo "Subtitle emulator log retained: $RUNNER_TEMP/subtitle-ui-emulator.log" >&2
     exit 1
   fi
-  booted="$(adb -s "$ANDROID_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+  # Offline/not-yet-listed is expected during startup, not an errexit failure.
+  if ! booted="$(timeout --kill-after=1s 5s adb -s "$ANDROID_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"; then
+    booted=''
+  fi
   [[ "$booted" == '1' ]] && break
+  [[ "$SECONDS" -lt "$boot_deadline" ]] || break
   sleep 2
 done
-[[ "$booted" == '1' ]] || { cat "$RUNNER_TEMP/subtitle-ui-emulator.log" >&2; exit 1; }
+if [[ "$booted" != '1' ]]; then
+  echo 'SUBTITLE_EMULATOR_BOOT=FAILED' >&2
+  echo "Subtitle emulator log retained: $RUNNER_TEMP/subtitle-ui-emulator.log" >&2
+  exit 1
+fi
+echo 'SUBTITLE_EMULATOR_BOOT=READY serial=emulator-5558'
+
 python3 "$root/scripts/android/run_flutter_subtitle_texture.py" --serial "$ANDROID_SERIAL" \
   --apk "$texture_apk" --output "$root/build/android/artifacts/subtitle-texture"
 python3 "$root/scripts/android/run_player_route_ui.py" --serial "$ANDROID_SERIAL" \

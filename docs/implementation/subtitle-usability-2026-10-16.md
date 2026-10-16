@@ -303,6 +303,37 @@ passed both cases with eight PNGs. Format and analysis passed. All three Windows
 attempts are preserved (07, 10 and 12 under regression/build193); the last pass
 does not erase the incomplete run. The next exact-commit CI is still required.
 
+### Build 194 wrapper cancellation
+
+Commit 7fd010713b939cb1c56923147e77e97571c0a8d0 triggered run 38884659015,
+attempt 1. Its Linux suite passed all **1912 tests**; production APK builds,
+compatibility policy, native subtitle pixels and subtitle-position pixels also
+passed. The API 33 UI wrapper did not reach either Python gate. The root agent
+actively cancelled this run to retrieve evidence and repair a separately proven
+wrapper defect. Its result remains **cancelled**, not an automatic CI failure or
+a successful release. iPadOS and publication did not execute.
+
+The exact original shell wrapper was tested once against isolated fake SDK/adb/
+emulator commands. An initial offline device caused the `set -e` boot assignment
+to exit after one probe in 0.115 seconds. When `adb emu kill` also failed, its
+unconditional cleanup `wait` remained blocked beyond the three-second external
+diagnostic limit with the owned fake emulator alive. Those first results are
+preserved under regression/build194/offline-repro. The real CI log completed
+AVD creation at 10:20:14 UTC; its emulator artifact reported successful boot in
+46897 milliseconds, but no UI gate output appeared before cancellation at
+10:29:56 UTC. This is consistent with the reproduced defect; the original CI
+shell did not record a line-by-line trace.
+
+The wrapper follow-up treats bounded offline boot probes as not ready and gives
+owned-process cleanup a finite shutdown sequence while retaining the original
+failure status. Before the fix, the first four regression checks reported
+three failures and one pass. All five final fake-command checks passed, including
+a boot probe that ignores TERM and requires timeout's bounded KILL. The complete
+Android verifier discovery then passed **40 tests** with Pillow 11.3.0 and no
+skips; final shell syntax and ShellCheck passed. Actual Flutter texture and
+production-route acceptance still depend
+on a new successful exact-commit run; build 194 supplies no UI acceptance result.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,
