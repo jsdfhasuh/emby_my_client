@@ -334,6 +334,56 @@ skips; final shell syntax and ShellCheck passed. Actual Flutter texture and
 production-route acceptance still depend
 on a new successful exact-commit run; build 194 supplies no UI acceptance result.
 
+### Build 195 first production-route CI failure
+
+Commit a95b19e02d69218887fb92c18028910b2ed1348d triggered run 38888512556,
+attempt 1. The full Linux suite passed **1912 tests**, release preparation passed
+**32 tests**, and Android verifier discovery passed **40 tests**. Native subtitle
+and position gates passed. The repaired wrapper reached both Flutter gates and
+returned failure normally with explicit cleanup status 1; it did not hang.
+
+The actual Android texture gate passed **32 frames** with zero native errors and
+complete cleanup. Production navigation completed only **9 of 34 stages**. During
+the second online cycle, native subtitle 1 was selected and the generated PGS
+ALPHA content was visible, but the next options-sheet open timed out. The first
+failure screenshot shows the production player and visible options button with
+no bottom sheet. The route's seven cleanup fields are all true. This is a failed
+route acceptance result; texture pixels and selected-track state do not replace
+its missing navigation stages. iPadOS and publication were skipped, and no
+build-195 Release was published. Raw logs, run identity, screenshot and structured
+failure data remain under release/build-195-first-failure. The precise input or
+modal lifecycle cause requires the follow-up investigation below.
+
+One predeclared diagnostic run used the same 640 by 360 screen at density 160,
+with texture first and the instrumented production route second. It passed all
+32 texture and 34 route stages. This did not reproduce or explain the original
+CI failure. Its pointer and route traces are retained separately as diagnostic
+evidence, rather than replacing the failed CI record.
+
+A small controlled regression then reproduced a vulnerability in the test's
+pointer protocol. With a Tooltip IconButton inside a parent double-tap detector,
+an injected 650-millisecond synchronous pointer-down dispatch stall caused the
+old down / await 40 milliseconds / up sequence to register a tooltip long press
+and invoke the button zero times. A synchronous real pointer down/up pair
+invoked it once, without a tooltip or double tap. Both initial control checks
+passed their explicit expected outcomes. The original CI did not record dispatch
+timing, so this experiment does not prove that it suffered the injected stall.
+
+The follow-up changes only the harness pointer protocol to a synchronous pair,
+as used by WidgetTester.tap, and retains actual hit-tested UI events. It retains
+the post-tap settling interval, all 34 route stages, all screenshot thresholds,
+and lightweight pointer/route diagnostics. No production gesture or playback
+behavior changes. The controlled comparison is saved as
+regression/build195/08-touch-control-first.log. The final two touch regressions,
+formatting and analysis passed. One predeclared run of the final driver then
+passed **32 texture stages followed by 34 production-route stages**, with all
+seven route cleanup fields true. Evidence and source hashes are retained in
+regression/build195/handoff.json and serial-fixed-first. Real offline ASS/SRT
+glyphs are visible in the route screenshots; paused-at-zero PGS menu selections
+are not counted as additional PGS pixel proof. The separate 32-frame texture
+gate supplies that rendering evidence. Full acceptance still requires the next
+exact-commit CI and actual Release verification.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,

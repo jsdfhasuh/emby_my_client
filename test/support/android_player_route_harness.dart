@@ -19,6 +19,7 @@ import 'package:media_kit/media_kit.dart';
 
 import 'synthetic_playback_origin.dart';
 import 'synthetic_download_fixture.dart';
+import 'harness_touch.dart';
 
 const _controlOrigin = 'http://127.0.0.1:38766';
 final _client = HttpClient();
@@ -26,9 +27,14 @@ var _reported = 0;
 var _pointer = 10000;
 final _eventClock = Stopwatch()..start();
 final _interactions = <Map<String, Object?>>[];
+final _routeEvents = <Map<String, Object?>>[];
+final _routeObserver = _RouteObserver();
+const _traceGestures = bool.fromEnvironment('SUBTITLE_ROUTE_TRACE');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  debugPrintGestureArenaDiagnostics = _traceGestures;
+  debugPrintRecognizerCallbacksTrace = _traceGestures;
   MediaKit.ensureInitialized();
   final response = await (await _client.getUrl(
     Uri.parse('$_controlOrigin/synthetic-pgs.mkv'),
@@ -75,6 +81,7 @@ Future<void> main() async {
           repository: settings,
           child: MaterialApp(
             debugShowCheckedModeBanner: false,
+            navigatorObservers: [_routeObserver],
             theme: ThemeData.dark(useMaterial3: true),
             home: Builder(
               builder: (context) => Scaffold(
@@ -332,23 +339,25 @@ Future<void> _until(bool Function() predicate, String stage) async {
 
 Future<void> _tapAt(Offset point) async {
   final pointer = _pointer++;
-  GestureBinding.instance.handlePointerEvent(
-    PointerDownEvent(
-      pointer: pointer,
-      position: point,
-      timeStamp: _eventClock.elapsed,
-      viewId: WidgetsBinding.instance.platformDispatcher.views.first.viewId,
-    ),
+  final downAt = _eventClock.elapsedMicroseconds;
+  dispatchHarnessTap(
+    position: point,
+    pointer: pointer,
+    viewId: WidgetsBinding.instance.platformDispatcher.views.first.viewId,
+    timestamp: () => _eventClock.elapsed,
   );
-  await Future<void>.delayed(const Duration(milliseconds: 40));
-  GestureBinding.instance.handlePointerEvent(
-    PointerUpEvent(
-      pointer: pointer,
-      position: point,
-      timeStamp: _eventClock.elapsed,
-      viewId: WidgetsBinding.instance.platformDispatcher.views.first.viewId,
-    ),
-  );
+  final upAt = _eventClock.elapsedMicroseconds;
+  _interactions.add({
+    'action': 'pointer-sequence',
+    'pointer': pointer,
+    'point': [point.dx, point.dy],
+    'downAtUs': downAt,
+    'upAtUs': upAt,
+    'heldMilliseconds': (upAt - downAt) / 1000,
+  });
+  if (_traceGestures) {
+    debugPrint('ROUTE_POINTER ${jsonEncode(_interactions.last)}');
+  }
   await Future<void>.delayed(const Duration(milliseconds: 350));
 }
 
@@ -400,6 +409,9 @@ Future<void> _tapElement(Element element) async {
     if (element.widget is Text) 'text': (element.widget as Text).data,
     'point': [point.dx, point.dy],
     'targetHit': targetHit,
+    'atUs': _eventClock.elapsedMicroseconds,
+    if (element.widget is IconButton)
+      'enabled': (element.widget as IconButton).onPressed != null,
     'hitTargets': hit.path
         .map((entry) => entry.target.runtimeType.toString())
         .toList(),
@@ -629,6 +641,9 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
       'stack': '$stack',
       'verifiedStages': _reported,
       'screen': [screen.width, screen.height],
+      'physicalSize': [view.physicalSize.width, view.physicalSize.height],
+      'devicePixelRatio': view.devicePixelRatio,
+      'routeEvents': _routeEvents,
       'interactions': _interactions,
       'nodes': nodes,
     }),
@@ -661,5 +676,28 @@ class _MemoryStorage implements PlaybackSettingsStorage {
   @override
   Future<void> delete(String key) async {
     values.remove(key);
+  }
+}
+
+class _RouteObserver extends NavigatorObserver {
+  void _record(String event, Route<dynamic> route) {
+    final value = <String, Object?>{
+      'event': event,
+      'route': route.runtimeType.toString(),
+      'atUs': _eventClock.elapsedMicroseconds,
+      'isCurrent': route.isCurrent,
+    };
+    _routeEvents.add(value);
+    if (_traceGestures) debugPrint('ROUTE_NAV ${jsonEncode(value)}');
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _record('push', route);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _record('pop', route);
   }
 }
