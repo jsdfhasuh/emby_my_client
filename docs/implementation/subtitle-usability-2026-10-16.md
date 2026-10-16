@@ -1193,6 +1193,41 @@ Physical phones, user movies, iOS subtitle pixels and audible quality remain
 NOT_RUN. Exact-commit full CI and actual Release/update compatibility verification
 are still required. All first failures remain preserved, and no CI was rerun.
 
+### Build 206 first failure: navigation tests target a hidden Return
+
+Commit a342fdb7583329022f24427254a8518a8ddc41e4 triggered automatic run
+38949912236, attempt 1. Format and analysis passed; the full suite passed 1992
+and failed three existing isolated media_kit genre-navigation tests. Android
+pixel gates did not run, and iPadOS and Release were skipped. The original
+1,084,398-byte quality log is retained in release/build-206-first-failure with
+SHA256 4b9e39bda40d93b2cd2026d7f1fc26faa87635efda503e5941f63c894171ff2f.
+
+All three child logs warn that tapping the normal Return tooltip missed its
+hit-test target. PlayerScreen then remains after the original 300, 300 and 400
+pump limits. Two parent tests also time out; those timeouts follow the missed
+actions and do not justify extending deadlines. These navigation fixtures have
+no playable source and originally wait for texture creation, not playback ready.
+One separate Linux observation retained the original click and deadlines while
+recording fixed state counts: error Return exists and is hit-testable; the normal
+Return exists but is not hit-testable. The old click still fails. That diagnostic
+failure is preserved in regression/build206/02-linux-diagnostic-first.log.
+
+The three tests now select the real error Return when present, otherwise the
+normal player Return, assert the chosen action is hit-testable, and tap it.
+Navigation, pagination, scroll-position, route-preservation and native-resource
+release assertions remain. No production code, Android harness, skip, timeout or
+release configuration changes accompany this test correction. It does not
+explain build 205's missing original native error. No unchanged CI was rerun.
+
+The first corrected Linux run passed all 17 cases: the seven genre-navigation
+cases (including all three isolated native children), one offline error-return
+case and nine route-lifecycle cases. No missed-hit warning remained. Targeted
+formatting reported zero changes and full-project analysis found no issues.
+Root checked the exact source hash and narrow diff; only this test file and this
+record changed. Prior Android pixel evidence remains scoped to its own frozen
+source; the new commit still requires the full automatic CI and actual Release
+verification. No new Android measurement is claimed for this test-only change.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

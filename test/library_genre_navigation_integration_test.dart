@@ -161,7 +161,7 @@ void main() {
       expect(find.byType(LibraryBrowseScreen), findsNothing);
       expect(find.byType(SnackBar), findsNothing);
 
-      await tester.tap(find.byTooltip('返回'));
+      await _tapVisiblePlayerReturn(tester);
       await _pumpUntilGone(
         tester,
         find.byType(PlayerScreen, skipOffstage: false),
@@ -211,7 +211,7 @@ void main() {
       _trackPlayerRelease(tester, videoOutput);
       await _pumpUntilCompleted(tester, videoOutput.ready);
       expect(find.byType(PlayerScreen), findsOneWidget);
-      await tester.tap(find.byTooltip('返回'));
+      await _tapVisiblePlayerReturn(tester);
       await _pumpUntilGone(
         tester,
         find.byType(PlayerScreen, skipOffstage: false),
@@ -271,7 +271,7 @@ void main() {
 
       expect(find.byType(ItemDetailScreen), findsNothing);
       expect(find.byType(PlayerScreen), findsOneWidget);
-      await tester.tap(find.byTooltip('返回'));
+      await _tapVisiblePlayerReturn(tester);
       await _pumpUntilGone(
         tester,
         find.byType(PlayerScreen, skipOffstage: false),
@@ -615,6 +615,18 @@ void _trackPlayerRelease(
       channel.playerReleased.complete();
     }
   });
+}
+
+Future<void> _tapVisiblePlayerReturn(WidgetTester tester) async {
+  // This navigation fixture returns no playable source. A failed player keeps
+  // its normal controls mounted but ignores their pointers; use the real error
+  // action when present, and require the selected button to receive the tap.
+  final errorReturn = find.byKey(const ValueKey('player-error-back'));
+  final back = errorReturn.evaluate().isNotEmpty
+      ? errorReturn
+      : find.byKey(const ValueKey('player-back'));
+  expect(back.hitTestable(), findsOneWidget);
+  await tester.tap(back.hitTestable());
 }
 
 Future<void> _pumpUntilFound(
