@@ -821,6 +821,66 @@ headers passed verification. Darwin execution was not changed. These local
 checks do not claim a macOS pod install or Xcode result; the next exact-commit
 workflow must establish those results before publication.
 
+### Build 203 first failure: native selection lost during cache safety reopen
+
+Commit 3b9af8a241dfc5afbcff8be96c9cb677965a2cf2 triggered automatic run
+38924973279, attempt 1. Format, analysis, 1937 full tests, 32 release tests,
+46 Android verification tests and 29 cache-safety tests passed. Native subtitle
+and position checks passed, and all 32 Flutter texture frames passed. The
+production-route check stopped after one of 34 stages with UI timeout: native
+applied check. All seven cleanup fields were true and callbackErrors was empty.
+The complete 1,261,680-byte quality log and original UI artifact are retained
+in release/build-203-first-failure. iPadOS and Release were skipped; the iOS
+header fix therefore remains unverified by macOS CI.
+
+This failure contains a concrete lifecycle sequence: selecting the native row
+closed the sheet at 11.039701 seconds; memory pressure arrived at 11.133255
+seconds in ready/input epoch 1; reopening the sheet observed waitingForReady
+at epoch 3; playback returned to ready at 12.600294 seconds. The final state
+was appliedNone while playback remained paused at 2/12 seconds without EOF.
+The controller intentionally invalidates native/local input-bound targets on
+generation changes, and the preference binding must resolve a safe logical
+choice on the new input. The original trace does not record subtitle status
+at the exact pressure event, so it cannot establish whether that request was
+still awaiting native confirmation. No unchanged CI attempt was rerun.
+
+Controlled tests demonstrated a reachable production race: a manual native
+request still awaiting application was lost when the real memory-pressure
+handler reopened the input. The two original-behavior checks failed, including
+one with late track metadata. The repair captures only a volatile logical
+fingerprint for the owning same-source safety transaction. It keeps subtitles
+off during the reopen, then resolves a unique match against current tracks and
+creates a fresh input binding. Confirmation is required before remembering or
+saving the choice. New manual requests, another source, cancelled ownership and
+retirement invalidate the pending transaction. Missing or ambiguous metadata
+reports a subtitle failure while video remains usable; a later unique match can
+still restore the request. Neither a stale native ID nor an ordinal is reused.
+
+Review added a negative case with a different default subtitle in the reopened
+input. The initial patch failed two such controls: it reported failure while
+leaving that default active. Those failures are retained; the final patch keeps
+the native subtitle disabled until the requested match is confirmed. A delayed
+preference load is also covered. Local subtitle control uses a real generated
+temporary SRT file and a fresh binding. Fixture compilation errors, initial
+unlocalized fixture timeouts, the missing temporary file and one braces lint are
+retained separately from production failures.
+
+The final related suite passed 116 tests, and analysis passed. Safe passive
+cache-lifecycle evidence now includes only typed subtitle status/source enums
+and numeric revision/input epoch fields; invalid values and unrelated data are
+excluded. Existing UI waits, pixel thresholds and navigation gates are unchanged.
+The frozen source hashes and complete local first results are in
+regression/build203. The single frozen-code Android API 33 emulator sequence
+then passed all 32 texture frames and 34 route stages. Root independently replayed
+the saved pixel/protocol artifacts, verified 28 paused player records and six
+non-player records, all seven cleanup fields, clear menu/callback evidence and
+matching source hashes. Visual review confirmed PGS ALPHA in the texture capture
+and EXTERNAL_CUE on the offline production page. No memory-pressure event occurred
+in this local sequence: the pending-choice race is demonstrated by the controlled
+tests, and this pass does not establish the original CI's instantaneous state.
+Physical phones and perceptual audio remain untested. Exact-commit CI and actual
+Release payload verification remain required before publication.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

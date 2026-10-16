@@ -32,6 +32,7 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
   // write is pending. Store only fingerprints, never input-bound targets.
   final _confirmedChoices = <String, SubtitleRememberedChoice>{};
   int _manualRevision = 0;
+  _PendingSafetySubtitleIntent? _safetyIntent;
   SubtitlePreferences get preferences =>
       snapshot?.preferences ?? const SubtitlePreferences();
   bool get _current => !_disposed && controller.acceptsSubtitlePreferences;
@@ -51,11 +52,54 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
   }
 
   void manualSelectionRequested() {
+    _safetyIntent = null;
     _manual = true;
     _pendingSave = true;
     _manualRevision++;
     // Selecting the already-applied row need not emit a controller event.
     scheduleMicrotask(_changed);
+  }
+
+  /// Preserve only an unconfirmed manual intent for this same-source safety
+  /// transaction. The old input-bound target is never retained or replayed.
+  Object? capturePendingSafetyIntent() {
+    final state = controller.state;
+    final plan = state.plan;
+    final target = state.desiredSubtitleSelection.target;
+    if (!_current ||
+        !_pendingSave ||
+        plan == null ||
+        (target is! NativeSubtitleTrack && target is! LocalExternalAsset) ||
+        (state.subtitleSelectionStatus != SubtitleSelectionStatus.applying &&
+            state.subtitleSelectionStatus !=
+                SubtitleSelectionStatus.waitingForTracks)) {
+      return null;
+    }
+    final choice = _catalog(plan).capture(state.desiredSubtitleSelection);
+    return _safetyIntent = _PendingSafetySubtitleIntent(
+      plan.mediaSourceId,
+      choice,
+    );
+  }
+
+  /// Enable resolution only after the owning safety reopen has finished.
+  /// New manual choices and retired sessions invalidate the transaction token.
+  void finishSafetyReopen(Object? token, {required bool completed}) {
+    final intent = _safetyIntent;
+    if (intent == null || !identical(token, intent)) return;
+    if (!completed ||
+        !_current ||
+        controller.state.phase != PlaybackPhase.ready ||
+        controller.state.plan?.mediaSourceId != intent.source) {
+      _safetyIntent = null;
+      return;
+    }
+    intent.inputEpoch = controller.subtitleInputEpoch;
+    _manual = false;
+    _pendingSave = false;
+    _manualRevision++;
+    _resolvedSource = null;
+    _changed();
   }
 
   void _changed() {
@@ -64,6 +108,14 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
     final plan = state.plan;
     if (plan == null || plan.mediaSourceId.isEmpty || snapshot == null) return;
     final epoch = controller.subtitleInputEpoch;
+    var intent = _safetyIntent;
+    if (intent != null) {
+      if (intent.source != plan.mediaSourceId ||
+          (intent.inputEpoch != null && intent.inputEpoch != epoch)) {
+        _safetyIntent = null;
+        intent = null;
+      }
+    }
     final sourceChanged = _source != plan.mediaSourceId;
     if (sourceChanged || _inputEpoch != epoch) {
       if (_source != null) {
@@ -71,6 +123,7 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
         // Keep that pending intent until the new input confirms it. A native
         // or local target cannot cross this boundary and must be re-resolved.
         final pendingServerChoice =
+            intent == null &&
             !sourceChanged &&
             _pendingSave &&
             (state.desiredSubtitleSelection.source ==
@@ -85,12 +138,15 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
       _resolvedSource = null;
       resolution = null;
     }
+    // Keep epoch bookkeeping current, but do not resolve an intermediate input.
+    if (intent != null && intent.inputEpoch == null) return;
     if (_pendingSave &&
         _confirmed(state) &&
         state.desiredSubtitleSelection.inputEpoch == epoch) {
       _pendingSave = false;
       final choice = _catalog(plan).capture(state.desiredSubtitleSelection);
       if (choice != null) {
+        _safetyIntent = null;
         _confirmedChoices[plan.mediaSourceId] = choice;
         unawaited(_remember(plan.mediaSourceId, choice));
       }
@@ -104,20 +160,30 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
     }
     // An explicit entry/remote selection wins over automatic preferences.
     if (state.desiredSubtitleSelection.source !=
-        SubtitleSelectionSource.serverDefault) {
+            SubtitleSelectionSource.serverDefault &&
+        !(intent != null && state.desiredSubtitleSelection.isDisabled)) {
       return;
     }
-    resolution = _catalog(plan).resolve(
-      remembered:
-          _confirmedChoices[plan.mediaSourceId] ??
-          snapshot!.rememberedFor(
-            itemId: controller.item.id,
-            mediaSourceId: plan.mediaSourceId,
-          ),
-      preferences: preferences,
-    );
+    resolution = intent != null && intent.choice == null
+        ? const SubtitlePreferenceResolution(
+            status: SubtitlePreferenceStatus.unavailable,
+            origin: SubtitlePreferenceOrigin.remembered,
+          )
+        : _catalog(plan).resolve(
+            remembered:
+                intent?.choice ??
+                _confirmedChoices[plan.mediaSourceId] ??
+                snapshot!.rememberedFor(
+                  itemId: controller.item.id,
+                  mediaSourceId: plan.mediaSourceId,
+                ),
+            preferences: preferences,
+          );
     final choice = resolution!.selection;
     if (choice == null) {
+      if (intent != null) {
+        controller.reportSubtitleRestoreUnavailable(inputEpoch: epoch);
+      }
       notifyListeners();
       return;
     }
@@ -135,6 +201,11 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
           return;
         }
         _resolvedSource = source;
+        // This is still the original manual request, but only the newly bound
+        // successful application may enter confirmed memory or durable storage.
+        if (intent != null && identical(_safetyIntent, intent)) {
+          _pendingSave = true;
+        }
         if (choice.target case final NativeSubtitleTrack target) {
           await controller.selectNativeSubtitle(target, automatic: true);
         } else if (choice.target case final LocalExternalAsset target) {
@@ -147,6 +218,13 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
         }
       } finally {
         _busy = false;
+        if (intent != null &&
+            identical(_safetyIntent, intent) &&
+            controller.state.subtitleSelectionStatus ==
+                SubtitleSelectionStatus.failed) {
+          _safetyIntent = null;
+          _pendingSave = false;
+        }
         if (_current) {
           notifyListeners();
           // A different input can reach ready while the old apply is pending.
@@ -240,7 +318,16 @@ class SubtitlePreferenceBinding extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _safetyIntent = null;
     controller.removeListener(_changed);
     super.dispose();
   }
+}
+
+/// In-memory request identity, not evidence that a subtitle was applied.
+class _PendingSafetySubtitleIntent {
+  _PendingSafetySubtitleIntent(this.source, this.choice);
+  final String source;
+  final SubtitleRememberedChoice? choice;
+  int? inputEpoch;
 }

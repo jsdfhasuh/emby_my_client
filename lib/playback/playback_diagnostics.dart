@@ -1,3 +1,4 @@
+import 'playback_state.dart';
 import 'subtitle_target.dart';
 import '../core/strm_diagnostics.dart';
 import 'source_input_failure.dart';
@@ -237,7 +238,13 @@ class PlaybackDiagnostics {
     );
   }
 
-  void cacheSafetyTriggered(PlaybackCacheSafetyReason reason) {
+  void cacheSafetyTriggered(
+    PlaybackCacheSafetyReason reason, {
+    SubtitleSelectionStatus? subtitleStatus,
+    SubtitleSelectionSource? subtitleSource,
+    int? subtitleRevision,
+    int? inputEpoch,
+  }) {
     final event = switch (reason) {
       PlaybackCacheSafetyReason.budget =>
         PlaybackDiagnosticEvent.cacheBudgetGuardReached,
@@ -248,6 +255,10 @@ class PlaybackDiagnostics {
     };
     _emit(event, [
       'reason=${reason.name}',
+      if (subtitleStatus != null) 'subtitleStatus=${subtitleStatus.name}',
+      if (subtitleSource != null) 'subtitleSource=${subtitleSource.name}',
+      if (subtitleRevision != null) 'subtitleRevision=$subtitleRevision',
+      if (inputEpoch != null) 'inputEpoch=$inputEpoch',
     ], level: PlaybackDiagnosticLevel.warning);
   }
 

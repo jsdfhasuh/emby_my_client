@@ -218,6 +218,28 @@ class PlaybackController extends ChangeNotifier {
     return assets;
   }
 
+  /// A pending manual choice could not be uniquely rebound after safety reopen.
+  /// Keep video ready and expose the failure while late tracks can still arrive.
+  void reportSubtitleRestoreUnavailable({required int inputEpoch}) {
+    if (!_isCurrent(_generation) ||
+        _state.phase != PlaybackPhase.ready ||
+        inputEpoch != _subtitleInputEpoch ||
+        (_state.desiredSubtitleSelection.source !=
+                SubtitleSelectionSource.serverDefault &&
+            !_state.desiredSubtitleSelection.isDisabled) ||
+        _state.subtitleSelectionStatus == SubtitleSelectionStatus.failed) {
+      return;
+    }
+    _markSubtitleFailed(
+      selection: _desiredSubtitleSelection,
+      token: _generation,
+      boundEngine: engine,
+      error: const SubtitleSelectionFailure(
+        SubtitleFailureReason.nativeTrackUnavailable,
+      ),
+    );
+  }
+
   Future<void> selectNativeSubtitle(
     NativeSubtitleTrack target, {
     bool automatic = false,
@@ -2417,37 +2439,51 @@ class PlaybackController extends ChangeNotifier {
     final retained = _state.plan?.usesControlledInput == true
         ? _state.plan
         : null;
-    _advanceGeneration();
-    _progressTimer?.cancel();
-    _cancelCacheCoordinator();
-    if (!lease.isCurrent || _shuttingDown) return;
-    _setState(
-      _state.copyWith(
-        isBuffering: true,
-        statusMessage: '正在调整缓存…',
-        cacheFallbackReason: _forcedCacheFallbackReason,
-      ),
-    );
-    await _stopForControlledRestart(
-      position,
-      preserveReporting: retained != null,
-    );
-    if (!lease.isCurrent || _shuttingDown) return;
-    await _cleanupCacheSessionSafely();
-    if (_disposed || _shuttingDown || !lease.isCurrent) return;
-    await _startPlayback(
-      resumePosition: position,
-      playAfterReady: wasPlaying,
-      openingStatusMessage: '正在调整缓存…',
-      preparedPlan: retained,
-      continueReporting: retained != null,
-    );
-    if (!_disposed &&
-        !_shuttingDown &&
-        lease.isCurrent &&
-        _state.phase == PlaybackPhase.failed) {
+    final preferences = subtitlePreferences;
+    final subtitleIntent = preferences?.capturePendingSafetyIntent();
+    try {
+      _advanceGeneration();
+      if (subtitleIntent != null) {
+        // A different server default must not flash while rebinding the user's
+        // pending choice. Only a fresh unique match may enable subtitles again.
+        _desiredSubtitleSelection = const SubtitleSelection.disabled();
+      }
+      _progressTimer?.cancel();
+      _cancelCacheCoordinator();
+      if (!lease.isCurrent || _shuttingDown) return;
       _setState(
-        _state.copyWith(errorMessage: '缓存调整失败，请返回后重试', clearStatus: true),
+        _state.copyWith(
+          isBuffering: true,
+          statusMessage: '正在调整缓存…',
+          cacheFallbackReason: _forcedCacheFallbackReason,
+        ),
+      );
+      await _stopForControlledRestart(
+        position,
+        preserveReporting: retained != null,
+      );
+      if (!lease.isCurrent || _shuttingDown) return;
+      await _cleanupCacheSessionSafely();
+      if (_disposed || _shuttingDown || !lease.isCurrent) return;
+      await _startPlayback(
+        resumePosition: position,
+        playAfterReady: wasPlaying,
+        openingStatusMessage: '正在调整缓存…',
+        preparedPlan: retained,
+        continueReporting: retained != null,
+      );
+      if (!_disposed &&
+          !_shuttingDown &&
+          lease.isCurrent &&
+          _state.phase == PlaybackPhase.failed) {
+        _setState(
+          _state.copyWith(errorMessage: '缓存调整失败，请返回后重试', clearStatus: true),
+        );
+      }
+    } finally {
+      preferences?.finishSafetyReopen(
+        subtitleIntent,
+        completed: lease.isCurrent,
       );
     }
   }
@@ -4405,7 +4441,13 @@ class PlaybackController extends ChangeNotifier {
 
   void _recordCacheSafetyDiagnostic(PlaybackCacheSafetyReason reason) {
     if (_cacheSafetyDiagnosticsWritten.add(reason)) {
-      _diagnostics.cacheSafetyTriggered(reason);
+      _diagnostics.cacheSafetyTriggered(
+        reason,
+        subtitleStatus: _state.subtitleSelectionStatus,
+        subtitleSource: _state.desiredSubtitleSelection.source,
+        subtitleRevision: _state.desiredSubtitleSelection.requestRevision,
+        inputEpoch: _subtitleInputEpoch,
+      );
     }
   }
 

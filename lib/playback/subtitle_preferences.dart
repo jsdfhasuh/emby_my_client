@@ -183,7 +183,9 @@ class SubtitleChoiceCatalog {
   final String mediaSourceId;
   final List<_Candidate> _candidates;
 
-  /// Call only after the controller confirms this manual choice was applied.
+  /// Persist only after the controller confirms this manual choice was applied.
+  /// A same-source safety reopen may also use this digest for a volatile pending
+  /// intent; it must resolve fresh input bindings and confirm before saving.
   /// Ambiguous fingerprints may be saved but will never be restored by order.
   SubtitleRememberedChoice? capture(SubtitleSelection selection) {
     if (mediaSourceId.trim().isEmpty) return null;

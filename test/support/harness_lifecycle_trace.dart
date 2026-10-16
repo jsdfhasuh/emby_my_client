@@ -40,6 +40,42 @@ Map<String, Object>? safeHarnessLifecycleEvent(String line) {
     if (value == null || !entry.value.contains(value)) return null;
     result[entry.key] = value;
   }
+  if (event == 'playback_cache_memory_pressure' ||
+      event == 'playback_cache_low_space' ||
+      event == 'playback_cache_budget_guard_reached') {
+    const subtitleEnums = {
+      'subtitleStatus': {
+        'notApplied',
+        'applying',
+        'waitingForTracks',
+        'appliedNone',
+        'appliedEmbedded',
+        'appliedExternal',
+        'appliedServer',
+        'disabled',
+        'failed',
+      },
+      'subtitleSource': {
+        'serverDefault',
+        'explicit',
+        'native',
+        'localExternal',
+        'disabled',
+      },
+    };
+    for (final entry in subtitleEnums.entries) {
+      final value = tokens[entry.key];
+      if (value != null && entry.value.contains(value)) {
+        result[entry.key] = value;
+      }
+    }
+    for (final name in ['subtitleRevision', 'inputEpoch']) {
+      final value = tokens[name];
+      if (value != null && RegExp(r'^[0-9]{1,10}$').hasMatch(value)) {
+        result[name] = int.parse(value);
+      }
+    }
+  }
   const fingerprints = {
     'seek_failed',
     'partial_file',
