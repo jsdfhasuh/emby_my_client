@@ -10,6 +10,7 @@ import 'package:emby_my_client/playback/playback_settings_scope.dart';
 import 'package:emby_my_client/playback/subtitle_preferences_repository.dart';
 import 'package:emby_my_client/playback/subtitle_preferences_scope.dart';
 import 'package:emby_my_client/ui/player_screen.dart';
+import 'package:emby_my_client/ui/widgets/configured_playback_video.dart';
 import 'package:emby_my_client/ui/downloads/downloads_screen.dart';
 import 'package:emby_my_client/ui/widgets/playback_timeline.dart';
 import 'package:emby_my_client/ui/widgets/playback_subtitle_options.dart';
@@ -20,6 +21,7 @@ import 'package:media_kit/media_kit.dart';
 import 'synthetic_playback_origin.dart';
 import 'synthetic_download_fixture.dart';
 import 'harness_touch.dart';
+import 'harness_playback.dart';
 
 const _controlOrigin = 'http://127.0.0.1:38766';
 final _client = HttpClient();
@@ -28,13 +30,33 @@ var _pointer = 10000;
 final _eventClock = Stopwatch()..start();
 final _interactions = <Map<String, Object?>>[];
 final _routeEvents = <Map<String, Object?>>[];
+final _gestureTrace = <Map<String, Object?>>[];
 final _routeObserver = _RouteObserver();
 const _traceGestures = bool.fromEnvironment('SUBTITLE_ROUTE_TRACE');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  debugPrintGestureArenaDiagnostics = _traceGestures;
-  debugPrintRecognizerCallbacksTrace = _traceGestures;
+  // This generated-media debug target keeps callback evidence even when the
+  // console trace is off. Never filter unrelated application/native messages.
+  final originalDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    final gesture =
+        message != null &&
+        (message.contains('Gesture arena') ||
+            (message.contains('GestureRecognizer') &&
+                message.contains('callback.')));
+    if (gesture) {
+      _gestureTrace.add({
+        'atUs': _eventClock.elapsedMicroseconds,
+        'message': message,
+      });
+      if (_gestureTrace.length > 512) _gestureTrace.removeAt(0);
+      if (!_traceGestures) return;
+    }
+    originalDebugPrint(message, wrapWidth: wrapWidth);
+  };
+  debugPrintGestureArenaDiagnostics = true;
+  debugPrintRecognizerCallbacksTrace = true;
   MediaKit.ensureInitialized();
   final response = await (await _client.getUrl(
     Uri.parse('$_controlOrigin/synthetic-pgs.mkv'),
@@ -387,6 +409,7 @@ Future<void> _tapElement(Element element) async {
     });
     return !blocked;
   }, 'tap target route settled');
+  final beforeEnsure = _tapContext(element);
   await Scrollable.ensureVisible(
     element,
     duration: const Duration(milliseconds: 200),
@@ -410,14 +433,67 @@ Future<void> _tapElement(Element element) async {
     'point': [point.dx, point.dy],
     'targetHit': targetHit,
     'atUs': _eventClock.elapsedMicroseconds,
+    'beforeEnsure': beforeEnsure,
+    'atTap': _tapContext(element),
+    if (element.widget is ListTile)
+      'enabled': (element.widget as ListTile).onTap != null,
     if (element.widget is IconButton)
       'enabled': (element.widget as IconButton).onPressed != null,
+    if (element.widget is IconButton)
+      'tooltip': (element.widget as IconButton).tooltip,
     'hitTargets': hit.path
         .map((entry) => entry.target.runtimeType.toString())
         .toList(),
   });
+  if (_traceGestures) {
+    final compact = {..._interactions.last}
+      ..remove('hitTargets')
+      ..remove('beforeEnsure');
+    debugPrint('ROUTE_INTERACTION ${jsonEncode(compact)}');
+  }
   if (!targetHit) throw StateError('Tap target failed hit test');
   await _tapAt(point);
+}
+
+Map<String, Object?> _tapContext(Element element) {
+  final scrolls = <Map<String, Object?>>[];
+  PlaybackSubtitleOptions? options;
+  element.visitAncestorElements((ancestor) {
+    if (ancestor.widget is PlaybackSubtitleOptions) {
+      options = ancestor.widget as PlaybackSubtitleOptions;
+    }
+    if (ancestor is StatefulElement && ancestor.state is ScrollableState) {
+      final position = (ancestor.state as ScrollableState).position;
+      scrolls.add({
+        'axis': position.axis.name,
+        'pixels': position.hasPixels ? position.pixels : null,
+        'isScrolling': position.isScrollingNotifier.value,
+      });
+    }
+    return true;
+  });
+  final tab = DefaultTabController.maybeOf(element);
+  final state = options?.playbackState;
+  return {
+    'scrolls': scrolls,
+    'playback': _dartPlaybackSnapshot(),
+    if (tab != null)
+      'tab': {
+        'index': tab.index,
+        'indexIsChanging': tab.indexIsChanging,
+        'animation': tab.animation?.value,
+      },
+    if (state != null)
+      'subtitle': {
+        'phase': state.phase.name,
+        'status': state.subtitleSelectionStatus.name,
+        'appliedNativeId': state.appliedNativeSubtitleId,
+        'desiredInputEpoch': state.desiredSubtitleSelection.inputEpoch,
+        'desiredRevision': state.desiredSubtitleSelection.requestRevision,
+        'sourceId': state.plan?.mediaSourceId,
+        'onSelectNativeAvailable': options?.onSelectNative != null,
+      },
+  };
 }
 
 Future<void> _showControls() async {
@@ -512,14 +588,88 @@ Future<void> _selectNative(String id) async {
   await Future<void>.delayed(const Duration(milliseconds: 400));
 }
 
+Player? _routePlayer() =>
+    (_elements((w) => w is ConfiguredPlaybackVideo).firstOrNull?.widget
+            as ConfiguredPlaybackVideo?)
+        ?.controller
+        .player;
+
+Map<String, Object?> _dartPlaybackSnapshot() {
+  final player = _routePlayer();
+  final tooltip = (_key('player-play-pause')?.widget as IconButton?)?.tooltip;
+  return {
+    'playerFound': player != null,
+    'uiPlaying': tooltip == '暂停'
+        ? true
+        : tooltip == '播放'
+        ? false
+        : null,
+    'dartPlaying': player?.state.playing,
+    'dartCompleted': player?.state.completed,
+    'dartPositionMs': player?.state.position.inMilliseconds,
+    'dartDurationMs': player?.state.duration.inMilliseconds,
+  };
+}
+
+Future<Map<String, Object?>> _playbackSnapshot() async {
+  final result = _dartPlaybackSnapshot();
+  final native = _routePlayer()?.platform;
+  if (native is NativePlayer) {
+    try {
+      for (final property in [
+        'pause',
+        'time-pos',
+        'duration',
+        'eof-reached',
+        'seeking',
+      ]) {
+        result[property] = await native
+            .getProperty(property)
+            .timeout(const Duration(seconds: 2));
+      }
+    } catch (error) {
+      result['nativeReadError'] = '$error';
+    }
+  }
+  return result;
+}
+
+bool _playingAcknowledged(Map<String, Object?> value, bool playing) =>
+    value['playerFound'] == true &&
+    value['uiPlaying'] == playing &&
+    value['dartPlaying'] == playing &&
+    value['dartCompleted'] == false &&
+    value['pause'] == (playing ? 'no' : 'yes') &&
+    value['eof-reached'] == 'no' &&
+    !value.containsKey('nativeReadError');
+
+Future<void> _waitForPlaying(bool playing) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 15));
+  Map<String, Object?> snapshot;
+  do {
+    snapshot = await _playbackSnapshot();
+    if (_playingAcknowledged(snapshot, playing)) {
+      _interactions.add({
+        'action': 'playback-ack',
+        'atUs': _eventClock.elapsedMicroseconds,
+        'playing': playing,
+        'playback': snapshot,
+      });
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+  } while (DateTime.now().isBefore(deadline));
+  throw StateError(
+    'Playback acknowledgement timeout: playing=$playing, $snapshot',
+  );
+}
+
 Future<void> _pause() async {
   await _showControls();
-  final button = _key('player-play-pause')?.widget as IconButton?;
-  if (button?.tooltip == '暂停') await _tapKey('player-play-pause');
-  await _until(
-    () => (_key('player-play-pause')?.widget as IconButton?)?.tooltip == '播放',
-    'paused',
-  );
+  // Callers first acknowledge play; a stale pre-play tooltip is not completion.
+  await _waitForPlaying(true);
+  await _tapKey('player-play-pause');
+  await _waitForPlaying(false);
 }
 
 Future<void> _playUntilCue(String cue) async {
@@ -531,9 +681,11 @@ Future<void> _playUntilCue(String cue) async {
       Offset(slider.size.width * .28, slider.size.height / 2),
     ),
   );
-  await _tapKey('player-play-pause');
-  await _until(() => _hasCue(cue), 'visible $cue');
-  await _pause();
+  await playHarnessCueAndPause(
+    tapPlayPause: () => _tapKey('player-play-pause'),
+    waitForPlaying: _waitForPlaying,
+    waitForCue: () => _until(() => _hasCue(cue), 'visible $cue'),
+  );
 }
 
 Future<void> _stage(
@@ -555,8 +707,13 @@ Future<void> _stage(
       'Downloaded playback must use the verified local file without network',
     );
   }
+  final playback = routeShown ? await _playbackSnapshot() : null;
+  if (routeShown && !_playingAcknowledged(playback!, false)) {
+    throw StateError('UI stage must be paused: $stage, $playback');
+  }
   await _report({
     'stage': stage,
+    'playback': playback,
     'routeShown': routeShown,
     'downloadListShown': _downloadListShown(),
     'entryPoint': download == null ? 'direct-http' : 'downloads',
@@ -609,6 +766,7 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
       if (widget is Text) 'text': widget.data ?? widget.textSpan?.toPlainText(),
       'onScreen': rect != null && screen.overlaps(rect) && !offstage,
       if (rect != null) 'rect': [rect.left, rect.top, rect.width, rect.height],
+      if (widget is ListTile) 'enabled': widget.onTap != null,
       if (widget is Tab)
         'tabIndex': DefaultTabController.maybeOf(element)?.index,
       if (widget is PlaybackSubtitleOptions) ...{
@@ -640,10 +798,12 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
       'error': '$error',
       'stack': '$stack',
       'verifiedStages': _reported,
+      'playback': await _playbackSnapshot(),
       'screen': [screen.width, screen.height],
       'physicalSize': [view.physicalSize.width, view.physicalSize.height],
       'devicePixelRatio': view.devicePixelRatio,
       'routeEvents': _routeEvents,
+      'gestureTrace': _gestureTrace,
       'interactions': _interactions,
       'nodes': nodes,
     }),

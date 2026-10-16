@@ -384,6 +384,70 @@ are not counted as additional PGS pixel proof. The separate 32-frame texture
 gate supplies that rendering evidence. Full acceptance still requires the next
 exact-commit CI and actual Release verification.
 
+### Build 196 first native-row close failure
+
+Commit f814f14bd491fe5ea5de08acd099b8daf99c8b0d triggered run 38892950383,
+attempt 1. The full Linux suite passed **1914 tests**, release preparation passed
+**32 tests**, Android verifier discovery passed **40 tests**, and the cache safety
+check passed **29 tests**. Native pixels, position pixels and all **32 Flutter
+texture frames** passed. Production navigation failed at **10 of 34 stages**:
+after the second online cycle selected PGS ALPHA, tapping native subtitle 2 did
+not close the options sheet within the existing deadline.
+
+The new diagnostic recorded a successful RenderBox hit at (320, 148.8) and a
+5.559-millisecond pointer down/up sequence. That does not support attributing
+this failure to a long press. The final screenshot shows the open subtitle list
+with PGS BETA visible; there was no matching modal pop. The state recorded after
+the timeout was ready/appliedEmbedded without a subtitle error. The existing
+record does not establish whether the row callback was enabled at the exact tap
+or whether its scroll activity was idle. The production callback closes the
+sheet before starting asynchronous subtitle selection, so a decoder wait alone
+does not explain the missing pop.
+
+All seven route cleanup fields are true, and emulator cleanup returned status 1
+normally. iPadOS and publication were skipped; no build-196 Release was created.
+The exact first logs, metadata, pointer/route records and screenshots remain in
+release/build-196-first-failure. The distinct build-195 open failure remains
+preserved above. Neither was rerun to select a passing result.
+
+One predeclared follow-up diagnostic preserved the exact click behavior and
+added row availability, scroll/tab state and gesture callback traces. Its texture
+gate passed all 32 frames, but its route gate failed at **14 of 34 stages** with
+an options-open timeout. This is a separate first local failure, retained in
+regression/build196/serial-diagnostic-first, rather than a reproduction of the
+CI's BETA-row close timeout.
+
+The local trace and screenshots establish a driver acknowledgment defect. The
+ASS stage returned from the old pause helper while its screenshot still showed
+the pause icon, meaning playback continued. The helper trusted a stale play
+button tooltip, and a cue already present after seeking allowed the next pause
+check before the play event had reached the UI. Later play/pause toggles reversed
+the intended state. The SRT stage reached 11502 milliseconds of the 12-second
+fixture. A MaterialPageRoute pop at 52.125070 seconds occurred before the options
+button's actual onTap callback, as the fixture reached its end. The enabled
+options button had received a 4.746-millisecond touch without scroll ancestors;
+its callback did execute after the route had already begun exiting.
+
+The test-only follow-up confirms play/pause using the actual button tooltip,
+Player.state and native pause/end-of-file state together. All toggles still use
+real UI events. A cue cannot bypass the play acknowledgment, and a player-route
+stage cannot be accepted while playback is still running. Native pause, position,
+duration, seek and completion evidence is saved alongside stage/failure records.
+The 12-second fixture and existing route/pixel thresholds remain unchanged.
+This fixes the independently proven local driver failure; it does not establish
+the cause of build 196's earlier native-sheet close failure.
+
+The final focused run passed four checks: two acknowledgment controls plus the
+two retained touch controls. Formatting and analysis passed. One predeclared
+serial run of the final driver passed **32 texture frames followed by 34 route
+stages**; all **28 shown-player stages** recorded native pause=yes, UI and Dart
+playing=false, and no end-of-file state. All seven cleanup fields are true. The
+fixed external-text screenshot shows EXTERNAL_CUE while paused at three seconds.
+Evidence and tested source hashes are saved in regression/build196/handoff.json.
+Failure diagnostics additionally retain a bounded 512-message gesture/callback
+history, without discarding unrelated application or native messages. This local
+acceptance does not replace the pending exact-commit CI and Release checks.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,
