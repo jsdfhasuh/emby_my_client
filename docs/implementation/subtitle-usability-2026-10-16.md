@@ -266,6 +266,43 @@ The local-test-ledger.json record links accepted and earlier failed runs.
 - Earlier formatting, lint, Windows shell sandbox and native-probe setup failures
   remain retained. Their environment-only retries are identified separately.
 
+### Build 193 first CI failure
+
+Commit a38a18f5bc9bfac07c5920a2e1b8f28ea5da6599 triggered the single
+push run 38882067860 (attempt 1). Its full Linux suite reported **1911 passed,
+1 failed**: the HTTP SubtitleView/native test did not obtain CUE_ALPHA_FIRST
+within its five-second limit. The original test did not identify which A step
+failed. iPadOS and publication were skipped, and this attempt produced no new
+Release. Raw UTF-8 logs and exact run metadata remain in the external
+release/build-193-first-failure evidence directory.
+
+The unchanged focused test initially passed in a matching Linux Flutter/libmpv
+scratch environment. A full diagnostic run also passed the two target cases,
+but ended with 1901 passed and 11 other failures; it is retained as diagnostic
+evidence, not acceptance. Instrumentation found repeated `ao/null` errors,
+`illegal state: start() while paused`, in the original SubtitleView-only test,
+which had no VideoController and therefore used an audio-only null clock.
+The precise cause of the original CI cue timeout was not independently proven.
+
+A predeclared four-cycle file/HTTP comparison required both decoded/native cue
+identity and real painted glyphs, with the original greater-than-50 bright-pixel
+threshold. All eight original-clock cases failed the added native-error check;
+all eight explicit video-clock cases passed, producing 32 glyph PNGs. The
+minimal follow-up changes this host test to `aid=no` / `vid=auto`, checks zero
+native errors, binds each selection to a fresh subtitle event and completed
+seek at a distinct target, and retains the five-second deadline. Every A/B/A
+screenshot receives a unique step name. No production audio or seek policy is
+changed, and this host test is not evidence of Android audio quality.
+
+The first stricter Windows run exposed a previously unchecked file-cache error;
+this fixture test now explicitly disables unrelated disk caching and verifies
+the readback. A subsequent Windows tester exited with code 79 without completing
+both cases; its cause remains unexplained. One verbose diagnostic run then
+passed both cases and retained eight PNGs. The final Linux focused run also
+passed both cases with eight PNGs. Format and analysis passed. All three Windows
+attempts are preserved (07, 10 and 12 under regression/build193); the last pass
+does not erase the incomplete run. The next exact-commit CI is still required.
+
 No physical-phone acceptance run was performed for this change. The user's
 films and Emby credentials were not accessed. iOS subtitle pixels, arbitrary
 server media and perceived audio quality remain untested. Generated-media,

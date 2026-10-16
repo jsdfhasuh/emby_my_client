@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -25,6 +27,10 @@ void main() {
         late Directory directory;
         late ProgressiveOrigin origin;
         late List<EngineTrack> tracks;
+        late NativePlayer native;
+        final nativeErrors = <String>[];
+        final observers = <StreamSubscription<dynamic>>[];
+        var subtitleRevision = 0;
         await tester.runAsync(() async {
           MediaKit.ensureInitialized();
           directory = await Directory.systemTemp.createTemp('subtitle-paint-');
@@ -36,7 +42,24 @@ void main() {
               subtitleVideoReply(request, bytes);
           player = Player(configuration: const PlayerConfiguration(vo: 'null'));
           engine = MediaKitPlaybackEngine(player);
-          await (player.platform as NativePlayer).setProperty('ao', 'null');
+          native = player.platform as NativePlayer;
+          observers.add(
+            player.stream.log.listen((entry) {
+              if (entry.level == 'error' || entry.level == 'fatal') {
+                nativeErrors.add('${entry.prefix}: ${entry.text}');
+              }
+            }),
+          );
+          observers.add(
+            player.stream.subtitle.listen((_) => subtitleRevision++),
+          );
+          await native.setProperty('ao', 'null');
+          // This SubtitleView test has no VideoController. Use the generated
+          // raw-video clock, not the null audio driver's rapid-seek state machine.
+          await native.setProperty('aid', 'no');
+          await native.setProperty('vid', 'auto');
+          // Disk caching is covered separately and needs a host cache directory.
+          await native.setProperty('cache-on-disk', 'no');
           final discovered = engine.subtitleTracksStream.firstWhere(
             (value) => value.where(TrackMapper.isRealTrack).length == 3,
           );
@@ -65,9 +88,13 @@ void main() {
         });
         addTearDown(() async {
           await engine.dispose();
+          for (final observer in observers) {
+            await observer.cancel();
+          }
           await origin.close();
           await File('${directory.path}/generated.mkv').delete();
           await directory.delete();
+          expect(nativeErrors, isEmpty, reason: 'Native subtitle test errors');
         });
         final key = GlobalKey();
         await tester.pumpWidget(
@@ -96,15 +123,45 @@ void main() {
             ),
           ),
         );
-        for (final index in [0, 1, 0, 2]) {
+        for (final (step, index) in [0, 1, 0, 2].indexed) {
+          // Distinct forward/backward targets cannot accept the previous seek's
+          // position. All remain inside the real first cue's [0, 10) interval.
+          final target = [1, 3, 2, 4][step];
+          final stage = '${http ? 'HTTP' : 'file'} step=$step track=$index';
+          final beforeSelection = subtitleRevision;
           final cue = subtitleCue(index, false);
-          await tester.runAsync(() async {
+          final decoded = await tester.runAsync(() async {
             await engine.selectSubtitleTrack(tracks[index].id);
-            await engine.seek(const Duration(seconds: 1));
+            await engine.seek(Duration(seconds: target));
             await engine.play();
-            await _until(() => player.state.subtitle.first.trim() == cue);
+            await _until(
+              () async {
+                final state = await _nativeState(native);
+                final position = double.tryParse(state['time-pos'] ?? '');
+                return subtitleRevision > beforeSelection &&
+                    player.state.subtitle.first.trim() == cue &&
+                    state['sub-text']?.trim() == cue &&
+                    state['sid'] == tracks[index].id &&
+                    state['seeking'] == 'no' &&
+                    position != null &&
+                    position >= target + 0.1 &&
+                    position < target + 0.8;
+              },
+              stage: '$stage expected=$cue target=$target',
+              player: player,
+              native: native,
+              nativeErrors: nativeErrors,
+            );
             await engine.pause();
+            expect(nativeErrors, isEmpty, reason: stage);
+            expect(await native.getProperty('sid'), tracks[index].id);
+            expect(await native.getProperty('sub-text'), cue);
+            expect(await native.getProperty('aid'), 'no');
+            expect(await native.getProperty('vid'), '1');
+            expect(await native.getProperty('cache-on-disk'), 'no');
+            return true;
           });
+          expect(decoded, isTrue, reason: stage);
           await tester.pump();
           expect(find.text(cue), findsOneWidget);
           expect(tester.getSize(find.text(cue)).height, greaterThan(0));
@@ -131,7 +188,7 @@ void main() {
                 format: ui.ImageByteFormat.png,
               ))!.buffer.asUint8List();
               await File(
-                '$output/${http ? 'http' : 'file'}-$index.png',
+                '$output/${http ? 'http' : 'file'}-$step-track-$index.png',
               ).writeAsBytes(png);
             }
             frame.dispose();
@@ -141,7 +198,13 @@ void main() {
           await engine.selectSubtitleTrack(null);
           await engine.play();
           await _until(
-            () => player.state.subtitle.every((line) => line.trim().isEmpty),
+            () async =>
+                player.state.subtitle.every((line) => line.trim().isEmpty) &&
+                await native.getProperty('sid') == 'no',
+            stage: '${http ? 'HTTP' : 'file'} disabled',
+            player: player,
+            native: native,
+            nativeErrors: nativeErrors,
           );
           await engine.pause();
         });
@@ -156,12 +219,40 @@ void main() {
   }
 }
 
-Future<void> _until(bool Function() check) async {
-  for (var i = 0; i < 200; i++) {
-    if (check()) return;
+Future<Map<String, String>> _nativeState(NativePlayer native) async {
+  final result = <String, String>{};
+  for (final property in [
+    'sid',
+    'time-pos',
+    'seeking',
+    'pause',
+    'sub-text',
+    'sub-start',
+    'sub-end',
+    'aid',
+    'vid',
+  ]) {
+    result[property] = await native.getProperty(property);
+  }
+  return result;
+}
+
+Future<void> _until(
+  Future<bool> Function() check, {
+  required String stage,
+  required Player player,
+  required NativePlayer native,
+  required List<String> nativeErrors,
+}) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (DateTime.now().isBefore(deadline)) {
+    if (nativeErrors.isNotEmpty) break;
+    if (await check()) return;
     await Future<void>.delayed(const Duration(milliseconds: 25));
   }
-  fail('Decoded subtitle stream did not reach the expected cue');
+  fail(
+    'Decoded subtitle did not reach $stage: ${jsonEncode({'native': await _nativeState(native), 'subtitle': player.state.subtitle, 'positionMs': player.state.position.inMilliseconds, 'nativeErrors': nativeErrors})}',
+  );
 }
 
 class _SubtitleController implements VideoController {
