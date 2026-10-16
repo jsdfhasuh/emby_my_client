@@ -661,6 +661,66 @@ after validation; failure responses and phase receipts remain available. No
 Flutter/device run was repeated for this dependency-only change. Evidence is in
 regression/build199/real-official-first/receipt.json and handoff.json.
 
+### Build 200 first failure: a retired test-driver element
+
+Commit 5851e7f4b6d3272a30520798d75991d1060eb469 triggered automatic run
+38910889499, attempt 1. The new NDK preparation passed in CI with one actual
+verified download. Format, analysis, **1924 full tests**, **32 release tests**,
+**46 Android verifier tests**, and **29 cache safety tests** passed. Both synthetic
+APKs and the application APKs built. The native **40 subtitle frames** and
+**12 position frames**, followed by **32 Flutter texture frames**, passed.
+Production-route navigation failed at **9 of 34 stages**, with all seven cleanup
+fields true and callbackErrors empty. iPadOS and publication were skipped.
+The original 1,228,830-byte job log, JSON and PNG artifacts are preserved in
+release/build-200-first-failure; the separate actual NDK receipt is retained in
+release/build-200-ndk-setup-first.
+
+This run provides a direct memory-pressure observation. The first online input
+logged playback_cache_memory_pressure at 5.869491 seconds, then ready epoch 3
+at 7.412632 seconds. On the second input, the real options button opened its
+sheet at 34.873012 seconds. Memory pressure arrived at 35.072571 seconds while
+paused at 0.5 seconds with input epoch 1; mapping then reported epoch 2 at
+35.104797 seconds. During the resulting menu replacement, the driver retained
+the old subtitle Text element across ensureVisible/endOfFrame awaits. Its next
+findRenderObject call at android_player_route_harness.dart:486 threw because
+that element was defunct. No pointer was dispatched to the subtitle tab for
+that action. The screenshot still shows the actual settings sheet.
+
+The failure is the driver's stale-element access during a real input transition.
+The next driver correction resolves the current target through a stable selector
+after asynchronous preparation, and performs its final hit test and one atomic
+pointer pair in the same synchronous turn. It does not repeat an action after
+sending a pointer or increase the original action deadline. This run's captured
+memory-pressure cause must not be used to retroactively prove the unknown
+upstream triggers in build 198 or the original 195-197 failures.
+
+The controlled legacy case reproduced the inactive-element exception after
+replacing the target during an asynchronous frame. The corrected cases replace
+the target during ensureVisible and endOfFrame, pass through loading content,
+and record exactly one pointer down, one pointer up, and one callback on the
+current element. A missing-target deadline sends no pointer. The final focused
+suite passed **11 tests**, and analysis passed for all three changed test files.
+The first legacy fixture incorrectly reused a Text element, and the first new
+fixture called an assertion inside an overlapping test guard (9 pass, 2 fail).
+Both fixture failures and the initial two curly-brace lint findings are retained
+unchanged in regression/build200; they are not product failures or discarded
+attempts at the Android media run.
+
+The changed driver then completed one predetermined texture-to-route run on the
+owned API 33 emulator: **32 texture frames and 34 route stages passed**, with
+**28 UI/Dart/native paused acknowledgements**, all seven route cleanup fields
+true, all three texture cleanup fields true, zero native texture errors and no
+callback errors. The parent's independent replay also accepted the 34 route
+records and checked the complete menu observations. Actual screenshots visibly
+show PGS ALPHA in the texture test and EXTERNAL_CUE in the offline production
+player. The route's PGS stages establish binding/navigation only; separate
+texture/native pixels establish glyph rendering. This local run did not receive
+memory pressure: the build-200 cause is supported by its original CI trace and
+the controlled replacement tests, not by claiming another local pressure event.
+The emulator was stopped without wiping data. Source/APK hashes, first logs,
+JSON and screenshots are retained in regression/build200. Physical phones,
+private films and iOS subtitle rendering remain untested.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

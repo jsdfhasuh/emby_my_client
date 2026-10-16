@@ -253,7 +253,7 @@ Future<void> main() async {
         download: download,
       );
     }
-    await _tapElement(_elements((w) => w is BackButton).single);
+    await _tapElement(() => _elements((w) => w is BackButton).singleOrNull);
     await _until(
       () => _elements((w) => w is DownloadsScreen).isEmpty,
       'downloads exit',
@@ -450,76 +450,86 @@ Future<void> _tapAt(Offset point) async {
   await Future<void>.delayed(const Duration(milliseconds: 350));
 }
 
-Future<void> _tapElement(Element element) async {
-  // A wall-clock delay does not guarantee a software-rendered route has finished
-  // its transition. Wait for the route's real animation and pointer eligibility.
-  await _until(() {
-    if (!element.mounted) return false;
-    final route = ModalRoute.of(element);
-    if (route != null &&
-        (!route.isCurrent ||
-            (route.animation != null &&
-                route.animation!.status != AnimationStatus.completed))) {
-      return false;
-    }
-    var blocked = false;
-    element.visitAncestorElements((ancestor) {
-      if (ancestor.widget is IgnorePointer &&
-          (ancestor.widget as IgnorePointer).ignoring) {
-        blocked = true;
+Future<void> _tapElement(Element? Function() locate) async {
+  Map<String, Object?> beforeEnsure = {};
+  late Future<void> pointerReleased;
+  await actOnCurrentHarnessTarget(
+    locate: locate,
+    ready: (element) {
+      if (!element.mounted) return false;
+      final route = ModalRoute.of(element);
+      if (route != null &&
+          (!route.isCurrent ||
+              (route.animation != null &&
+                  route.animation!.status != AnimationStatus.completed))) {
+        return false;
       }
-      if (ancestor.widget is Offstage &&
-          (ancestor.widget as Offstage).offstage) {
-        blocked = true;
+      var blocked = false;
+      element.visitAncestorElements((ancestor) {
+        if (ancestor.widget is IgnorePointer &&
+            (ancestor.widget as IgnorePointer).ignoring) {
+          blocked = true;
+        }
+        if (ancestor.widget is Offstage &&
+            (ancestor.widget as Offstage).offstage) {
+          blocked = true;
+        }
+        return true;
+      });
+      return !blocked;
+    },
+    ensureVisible: (element) {
+      beforeEnsure = _tapContext(element);
+      return Scrollable.ensureVisible(
+        element,
+        duration: const Duration(milliseconds: 200),
+      );
+    },
+    endOfFrame: () {
+      WidgetsBinding.instance.scheduleFrame();
+      return WidgetsBinding.instance.endOfFrame;
+    },
+    act: (element) {
+      final box = element.findRenderObject()! as RenderBox;
+      final point = box.localToGlobal(box.size.center(Offset.zero));
+      final hit = HitTestResult();
+      WidgetsBinding.instance.hitTestInView(
+        hit,
+        point,
+        WidgetsBinding.instance.platformDispatcher.views.first.viewId,
+      );
+      final targetHit = hit.path.any((entry) => identical(entry.target, box));
+      _interactions.add({
+        'action': 'tap',
+        'target': element.widget.runtimeType.toString(),
+        'key': element.widget.key?.toString(),
+        if (element.widget is Text) 'text': (element.widget as Text).data,
+        'point': [point.dx, point.dy],
+        'targetHit': targetHit,
+        'atUs': _eventClock.elapsedMicroseconds,
+        'beforeEnsure': beforeEnsure,
+        'atTap': _tapContext(element),
+        if (element.widget is ListTile)
+          'enabled': (element.widget as ListTile).onTap != null,
+        if (element.widget is IconButton)
+          'enabled': (element.widget as IconButton).onPressed != null,
+        if (element.widget is IconButton)
+          'tooltip': (element.widget as IconButton).tooltip,
+        'hitTargets': hit.path
+            .map((entry) => entry.target.runtimeType.toString())
+            .toList(),
+      });
+      if (_traceGestures) {
+        final compact = {..._interactions.last}
+          ..remove('hitTargets')
+          ..remove('beforeEnsure');
+        debugPrint('ROUTE_INTERACTION ${jsonEncode(compact)}');
       }
-      return true;
-    });
-    return !blocked;
-  }, 'tap target route settled');
-  final beforeEnsure = _tapContext(element);
-  await Scrollable.ensureVisible(
-    element,
-    duration: const Duration(milliseconds: 200),
+      if (!targetHit) throw StateError('Tap target failed hit test');
+      pointerReleased = _tapAt(point);
+    },
   );
-  WidgetsBinding.instance.scheduleFrame();
-  await WidgetsBinding.instance.endOfFrame;
-  final box = element.findRenderObject()! as RenderBox;
-  final point = box.localToGlobal(box.size.center(Offset.zero));
-  final hit = HitTestResult();
-  WidgetsBinding.instance.hitTestInView(
-    hit,
-    point,
-    WidgetsBinding.instance.platformDispatcher.views.first.viewId,
-  );
-  final targetHit = hit.path.any((entry) => identical(entry.target, box));
-  _interactions.add({
-    'action': 'tap',
-    'target': element.widget.runtimeType.toString(),
-    'key': element.widget.key?.toString(),
-    if (element.widget is Text) 'text': (element.widget as Text).data,
-    'point': [point.dx, point.dy],
-    'targetHit': targetHit,
-    'atUs': _eventClock.elapsedMicroseconds,
-    'beforeEnsure': beforeEnsure,
-    'atTap': _tapContext(element),
-    if (element.widget is ListTile)
-      'enabled': (element.widget as ListTile).onTap != null,
-    if (element.widget is IconButton)
-      'enabled': (element.widget as IconButton).onPressed != null,
-    if (element.widget is IconButton)
-      'tooltip': (element.widget as IconButton).tooltip,
-    'hitTargets': hit.path
-        .map((entry) => entry.target.runtimeType.toString())
-        .toList(),
-  });
-  if (_traceGestures) {
-    final compact = {..._interactions.last}
-      ..remove('hitTargets')
-      ..remove('beforeEnsure');
-    debugPrint('ROUTE_INTERACTION ${jsonEncode(compact)}');
-  }
-  if (!targetHit) throw StateError('Tap target failed hit test');
-  await _tapAt(point);
+  await pointerReleased;
 }
 
 Map<String, Object?> _tapContext(Element element) {
@@ -574,7 +584,7 @@ Future<void> _showControls() async {
     }
     return true;
   });
-  if (ignored) await _tapElement(_key('player-video')!);
+  if (ignored) await _tapElement(() => _key('player-video'));
 }
 
 Future<void> _tapKey(String key) async {
@@ -612,16 +622,13 @@ Future<void> _tapKey(String key) async {
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
   }
-  await _until(() => _key(key) != null, key);
-  await _tapElement(_key(key)!);
+  await _tapElement(() => _key(key));
 }
 
 Future<void> _tapText(String text) async {
-  await _until(
-    () => _elements((w) => w is Text && w.data == text).isNotEmpty,
-    text,
+  await _tapElement(
+    () => _elements((w) => w is Text && w.data == text).firstOrNull,
   );
-  await _tapElement(_elements((w) => w is Text && w.data == text).first);
 }
 
 Future<void> _options() async {
