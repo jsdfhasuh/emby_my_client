@@ -624,6 +624,43 @@ server media and perceived audio quality remain untested. Generated-media,
 host, emulator and CI results cannot establish those scopes. The separate
 build 192 phone feedback is not validation of this change.
 
+### Build 199 dependency-install first failure
+
+Commit e6adad36f214b1fac898fcc670e13163c8247113 triggered the single automatic
+run 38907907027, attempt 1. Format and analysis passed, followed by **1924 full
+tests**, **32 release preparation tests**, **40 Android verifier tests**, and
+**29 cache safety tests**. The first synthetic-harness build then failed during
+Gradle project configuration: the implicit installation of fixed NDK
+28.2.13676358 reported `ZipException: Archive is not a ZIP archive` and
+assembleDebug exited 1. This occurred before the synthetic APK compiled, so no
+new emulator or UI result exists for this run. iPadOS and publication were skipped.
+
+The original 1,105,902-byte job log and run metadata are retained in
+release/build-199-first-failure. The bad download response itself was not saved;
+its upstream cause is unestablished. The workflow's explicit NDK installation
+was ordered after the first Gradle builds, leaving those builds dependent on
+an implicit SDK download. The next change prepares and validates the same fixed
+NDK before the first build. It does not change the compiler version, signing,
+package identity, publication policy or subtitle acceptance gates. The failed
+run is not retried unchanged.
+
+The bootstrap's first **6 Linux tests** passed, including invalid HTTP bodies,
+checksum mismatch, invalid ZIP, wrong revision, evidence preservation, and real
+unzip executable/symlink handling. The first full Android Python check used the
+container system Python by mistake and ended with **30 tests / 1 import error**
+because Pillow was absent. Its original log remains in
+regression/build199/04-android-suite-final.log. Using the existing CI-equivalent
+Pillow environment, the unchanged full suite passed **46 tests**.
+
+One actual official download was then installed into a new isolated Linux SDK:
+HTTP 200, **722261334 bytes**, official SHA1
+`a7b54a5de87fecd125a17d54f73c446199e72a64`, revision **28.2.13676358**, and
+executable Clang **19.0.1**. The real compiler symlinks were preserved. The
+installer's source hashes match that run. The successful archive is removed
+after validation; failure responses and phase receipts remain available. No
+Flutter/device run was repeated for this dependency-only change. Evidence is in
+regression/build199/real-official-first/receipt.json and handoff.json.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

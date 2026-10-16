@@ -191,6 +191,22 @@ jobs:
           test/playback_cache_evidence_test.dart
           test/playback_diagnostics_test.dart
 
+      - name: Prepare and verify fixed Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/android/prepare_fixed_ndk.py \
+            --sdk-root "${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}" \
+            --evidence build/android/artifacts/ndk-setup
+
+      - name: Upload fixed NDK setup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-ndk-setup-${{ github.run_number }}
+          if-no-files-found: ignore
+          path: build/android/artifacts/ndk-setup/
+
       - name: Build synthetic subtitle UI harnesses separately
         shell: bash
         run: |
@@ -232,7 +248,6 @@ jobs:
           android_sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
           yes | "$android_sdk_root/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$android_sdk_root/cmdline-tools/latest/bin/sdkmanager" --install \
-            "ndk;$ANDROID_NDK_VERSION" \
             'platform-tools' \
             'emulator' \
             'system-images;android-35;google_apis;x86_64'
