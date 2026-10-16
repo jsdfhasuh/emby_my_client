@@ -26,6 +26,481 @@ import 'package:emby_my_client/playback/playback_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'shared ready play timeout cannot masquerade as a newer explicit intent',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+        playPauseTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(controller.shutdown);
+      final gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      var requested = false;
+      Future<void>? play;
+      controller.addListener(() {
+        if (!requested && controller.state.phase == PlaybackPhase.ready) {
+          requested = true;
+          engine.nextPlayGate = gate;
+          play = controller.play();
+        }
+      });
+      await controller.start(playAfterReady: false);
+      await play;
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(engine.openCalls, 1);
+      expect(reporter.starts, isEmpty);
+      gate.complete();
+    },
+  );
+
+  test(
+    'ready settlement ignores timeout of an intent already superseded by successful play',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+        playPauseTimeout: const Duration(milliseconds: 40),
+      );
+      addTearDown(controller.shutdown);
+      final gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      var requested = false;
+      Future<void>? oldPlay;
+      controller.addListener(() {
+        if (!requested && controller.state.phase == PlaybackPhase.ready) {
+          requested = true;
+          engine.nextPlayGate = gate;
+          oldPlay = controller.play();
+        }
+      });
+      final start = controller.start(playAfterReady: false);
+      await _waitUntil(() => engine.blockedPlay);
+      await controller.pause();
+      await controller.play();
+      await oldPlay;
+      await start;
+      expect(controller.state.phase, PlaybackPhase.ready);
+      expect(engine.openCalls, 1);
+      expect(engine.nativePlaying, isTrue);
+      expect(reporter.starts, [false]);
+      gate.complete();
+      await _waitUntil(() => !engine.blockedPlay);
+      expect(engine.nativePlaying, isTrue);
+    },
+  );
+
+  test(
+    'opening playback timeout cannot start fallback over the unsettled native operation',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+        playPauseTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(controller.shutdown);
+      final gate = Completer<void>();
+      engine.nextPlayGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final start = controller.start(
+        resumePosition: const Duration(seconds: 3),
+      );
+      await _waitUntil(() => engine.blockedPlay);
+      await start;
+      expect(
+        engine.openCalls,
+        1,
+        reason: 'typed timeout preserves the native barrier',
+      );
+      expect(controller.state.phase, PlaybackPhase.failed);
+      expect(reporter.starts, isEmpty);
+      gate.complete();
+    },
+  );
+
+  test(
+    'latest playback intent survives a timed out pause completing after play',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        playPauseTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      final gate = Completer<void>();
+      engine.nextPauseGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final oldPause = controller.pause();
+      await _waitUntil(() => engine.blockedPause);
+      await controller.play();
+      await oldPause;
+      expect(engine.nativePlaying, isTrue);
+      gate.complete();
+      await _waitUntil(() => !engine.blockedPause && engine.nativePlaying);
+      expect(controller.state.isPlaying, isTrue);
+    },
+  );
+
+  test(
+    'latest playback intent remains subordinate to lifecycle during open',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      // A nonzero resume seek is independently cancelled by lifecycle
+      // quiescence. Zero exercises successful paused readiness/reporting.
+      engine.positionController.add(Duration.zero);
+      final gate = Completer<void>();
+      engine.gateWindow = 'open';
+      engine.inputGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final restart = controller.handleMemoryPressure();
+      await _waitUntil(() => engine.waitingWindow == 'open');
+      await controller.quiesceForLifecycle();
+      gate.complete();
+      await restart;
+      expect(engine.nativePlaying, isFalse);
+      expect(controller.state.isPlaying, isFalse);
+      expect(reporter.starts.last, isTrue);
+    },
+  );
+
+  test(
+    'latest playback intent survives an older native pause completion',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start();
+      final gate = Completer<void>();
+      engine.nextPauseGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final oldPause = controller.pause();
+      await _waitUntil(() => engine.blockedPause);
+      await controller.play();
+      expect(engine.nativePlaying, isTrue);
+      gate.complete();
+      await oldPause;
+      expect(engine.nativePlaying, isTrue);
+      expect(controller.state.isPlaying, isTrue);
+    },
+  );
+
+  test(
+    'latest playback intent reports lifecycle suspension as paused at ready',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+      );
+      addTearDown(controller.shutdown);
+      var suspended = false;
+      Future<void>? quiescence;
+      controller.addListener(() {
+        if (!suspended && controller.state.phase == PlaybackPhase.ready) {
+          suspended = true;
+          quiescence = controller.quiesceForLifecycle();
+        }
+      });
+      await controller.start();
+      await quiescence;
+      expect(engine.nativePlaying, isFalse);
+      expect(controller.state.isPlaying, isFalse);
+      expect(reporter.starts, [true]);
+    },
+  );
+
+  test(
+    'latest playback intent cannot report Start before a native pause settles',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final reporter = _IntentReporter();
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        reporter: reporter,
+      );
+      addTearDown(controller.shutdown);
+      final gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      var requested = false;
+      Future<void>? pause;
+      controller.addListener(() {
+        if (!requested && controller.state.phase == PlaybackPhase.ready) {
+          requested = true;
+          engine.nextPauseGate = gate;
+          pause = controller.pause();
+        }
+      });
+      final start = controller.start();
+      await _waitUntil(() => engine.blockedPause);
+      expect(reporter.starts, isEmpty);
+      expect(engine.nativePlaying, isTrue);
+      gate.complete();
+      await start;
+      await pause;
+      expect(engine.nativePlaying, isFalse);
+      expect(reporter.starts, [true]);
+    },
+  );
+
+  test(
+    'latest playback intent survives an older native play completion',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start(playAfterReady: false);
+      final gate = Completer<void>();
+      engine.nextPlayGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final oldPlay = controller.play();
+      await _waitUntil(() => engine.blockedPlay);
+      await controller.pause();
+      expect(engine.nativePlaying, isFalse);
+      gate.complete();
+      await oldPlay;
+      expect(
+        engine.nativePlaying,
+        isFalse,
+        reason: 'late native play must be corrected',
+      );
+      expect(controller.state.isPlaying, isFalse);
+    },
+  );
+
+  test('latest playback intent survives an older play timeout', () async {
+    final events = <String>[];
+    final engine = _IntentEngine(events: events);
+    final controller = _controller(
+      engine: engine,
+      storage: _CacheStorage(events),
+      playPauseTimeout: const Duration(milliseconds: 30),
+    );
+    addTearDown(controller.shutdown);
+    await controller.start(playAfterReady: false);
+    final gate = Completer<void>();
+    engine.nextPlayGate = gate;
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    final oldPlay = controller.play();
+    await _waitUntil(() => engine.blockedPlay);
+    await controller.pause();
+    await controller.play();
+    await oldPlay;
+    expect(
+      controller.state.isPlaying,
+      isTrue,
+      reason: 'stale timeout cannot revoke latest play',
+    );
+    engine.positionController.add(const Duration(seconds: 3));
+    await controller.handleMemoryPressure();
+    expect(
+      engine.nativePlaying,
+      isTrue,
+      reason: 'latest intent remains authoritative for reopen',
+    );
+    gate.complete();
+    await _waitUntil(() => !engine.blockedPlay);
+    expect(controller.state.isPlaying, isTrue);
+  });
+
+  test(
+    'latest playback intent wins over old completion after a new input',
+    () async {
+      final events = <String>[];
+      final engine = _IntentEngine(events: events);
+      final controller = _controller(
+        engine: engine,
+        storage: _CacheStorage(events),
+        playPauseTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(controller.shutdown);
+      await controller.start(playAfterReady: false);
+      final gate = Completer<void>();
+      engine.nextPlayGate = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final oldPlay = controller.play();
+      await _waitUntil(() => engine.blockedPlay);
+      await controller.pause();
+      await oldPlay;
+      engine.positionController.add(const Duration(seconds: 3));
+      await controller.handleMemoryPressure();
+      expect(engine.openCalls, 2);
+      gate.complete();
+      await _waitUntil(() => !engine.blockedPlay && !engine.nativePlaying);
+      expect(controller.state.isPlaying, isFalse);
+    },
+  );
+
+  for (final latestPlaying in [false, true]) {
+    test(
+      'latest playback intent supersedes two commands while open: $latestPlaying',
+      () async {
+        final events = <String>[];
+        final engine = _IntentEngine(events: events);
+        final controller = _controller(
+          engine: engine,
+          storage: _CacheStorage(events),
+        );
+        addTearDown(controller.shutdown);
+        await controller.start(playAfterReady: false);
+        engine.positionController.add(const Duration(seconds: 3));
+        final gate = Completer<void>();
+        engine.gateWindow = 'open';
+        engine.inputGate = gate;
+        addTearDown(() {
+          if (!gate.isCompleted) gate.complete();
+        });
+        final restart = controller.handleMemoryPressure();
+        await _waitUntil(() => engine.waitingWindow == 'open');
+        if (latestPlaying) {
+          await controller.pause();
+          await controller.play();
+        } else {
+          await controller.play();
+          await controller.pause();
+        }
+        gate.complete();
+        await restart;
+        expect(engine.nativePlaying, latestPlaying);
+        expect(controller.state.isPlaying, latestPlaying);
+      },
+    );
+  }
+
+  for (final window in ['stop', 'open', 'seek']) {
+    for (final initialPlaying in [false, true]) {
+      test(
+        'latest playback intent wins during safety $window from $initialPlaying',
+        () async {
+          final events = <String>[];
+          final engine = _IntentEngine(events: events);
+          final reporter = _IntentReporter();
+          final controller = _controller(
+            engine: engine,
+            storage: _CacheStorage(events),
+            reporter: reporter,
+          );
+          addTearDown(controller.shutdown);
+          await controller.start(playAfterReady: initialPlaying);
+          engine.positionController.add(const Duration(milliseconds: 3500));
+          final gate = Completer<void>();
+          engine.gateWindow = window;
+          engine.inputGate = gate;
+          addTearDown(() {
+            if (!gate.isCompleted) gate.complete();
+          });
+          final restart = controller.handleMemoryPressure();
+          await _waitUntil(() => engine.waitingWindow == window);
+          if (initialPlaying) {
+            await controller.pause();
+          } else {
+            await controller.play();
+          }
+          gate.complete();
+          await restart;
+          expect(controller.state.phase, PlaybackPhase.ready);
+          expect(
+            engine.nativePlaying,
+            !initialPlaying,
+            reason: 'latest command survives $window',
+          );
+          expect(controller.state.isPlaying, !initialPlaying);
+          expect(
+            reporter.starts.last,
+            initialPlaying,
+            reason: 'Start reflects final playback intent',
+          );
+        },
+      );
+    }
+  }
+
+  for (final initialPlaying in [false, true]) {
+    test(
+      'latest playback intent wins at ready notification from $initialPlaying',
+      () async {
+        final events = <String>[];
+        final engine = _IntentEngine(events: events);
+        final reporter = _IntentReporter();
+        final controller = _controller(
+          engine: engine,
+          storage: _CacheStorage(events),
+          reporter: reporter,
+        );
+        addTearDown(controller.shutdown);
+        var requested = false;
+        Future<void>? latest;
+        controller.addListener(() {
+          if (!requested && controller.state.phase == PlaybackPhase.ready) {
+            requested = true;
+            latest = initialPlaying ? controller.pause() : controller.play();
+          }
+        });
+        await controller.start(playAfterReady: initialPlaying);
+        await latest;
+        expect(engine.nativePlaying, !initialPlaying);
+        expect(reporter.starts.last, initialPlaying);
+      },
+    );
+  }
+
   for (final mode in [
     PlaybackCacheMode.automatic,
     PlaybackCacheMode.aggressive,
@@ -2025,6 +2500,7 @@ PlaybackController _controller({
   PlaybackDiagnosticsTestOverrides? testOverrides,
   PlaybackDiagnostics? diagnostics,
   PlaybackReporter? reporter,
+  Duration playPauseTimeout = const Duration(seconds: 3),
   Duration readyTimeout = const Duration(seconds: 18),
   Duration resumeVerificationTimeout = const Duration(seconds: 2),
   Duration cacheCleanupTimeout = const Duration(seconds: 3),
@@ -2043,6 +2519,7 @@ PlaybackController _controller({
   cacheSettings: cacheSettings,
   testOverrides: testOverrides,
   diagnostics: diagnostics,
+  playPauseTimeout: playPauseTimeout,
   readyTimeout: readyTimeout,
   resumeVerificationTimeout: resumeVerificationTimeout,
   cacheCleanupTimeout: cacheCleanupTimeout,
@@ -2581,5 +3058,98 @@ Future<void> _waitUntil(bool Function() condition) async {
       fail('Timed out waiting for the playback state');
     }
     await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+// Model the native pause bit separately: opening with play:false resets it even
+// if an earlier input accepted play. Gates represent actual input operations.
+class _IntentEngine extends _CacheEngine {
+  _IntentEngine({required super.events});
+  bool nativePlaying = false;
+  bool lifecyclePaused = false;
+  Completer<void>? nextPlayGate;
+  Completer<void>? nextPauseGate;
+  bool blockedPause = false;
+  bool blockedPlay = false;
+  String? gateWindow;
+  String? waitingWindow;
+  Completer<void>? inputGate;
+
+  Future<void> _waitAt(String window) async {
+    if (gateWindow != window) return;
+    waitingWindow = window;
+    await inputGate!.future;
+  }
+
+  void _playing(bool playing) {
+    nativePlaying = playing;
+    playingController.add(playing);
+  }
+
+  @override
+  Future<void> open(
+    Uri uri, {
+    required Map<String, String> headers,
+    required bool play,
+  }) async {
+    if (openCalls > 0) await _waitAt('open');
+    await super.open(uri, headers: headers, play: play);
+    _playing(play && !lifecyclePaused);
+  }
+
+  @override
+  Future<void> stop() async {
+    await _waitAt('stop');
+    await super.stop();
+    _playing(false);
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    await _waitAt('seek');
+    await super.seek(position);
+  }
+
+  @override
+  Future<void> play() async {
+    final gate = nextPlayGate;
+    nextPlayGate = null;
+    if (gate != null) {
+      blockedPlay = true;
+      await gate.future;
+      blockedPlay = false;
+    }
+    _playing(true);
+  }
+
+  @override
+  Future<void> pause() async {
+    final gate = nextPauseGate;
+    nextPauseGate = null;
+    if (gate != null) {
+      blockedPause = true;
+      await gate.future;
+      blockedPause = false;
+    }
+    _playing(false);
+  }
+
+  @override
+  Future<void> quiesceForLifecycle() async {
+    lifecyclePaused = true;
+    _playing(false);
+  }
+
+  @override
+  Future<void> resumeFromLifecycleQuiescence() async {
+    lifecyclePaused = false;
+  }
+}
+
+class _IntentReporter extends _Reporter {
+  final starts = <bool>[];
+  @override
+  Future<void> reportStart(Duration position, {required bool isPaused}) async {
+    starts.add(isPaused);
   }
 }

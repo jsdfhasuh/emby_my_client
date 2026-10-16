@@ -881,6 +881,90 @@ tests, and this pass does not establish the original CI's instantaneous state.
 Physical phones and perceptual audio remain untested. Exact-commit CI and actual
 Release payload verification remain required before publication.
 
+### Build 204 first failure: play request overlaps cache safety reopen
+
+Commit 4c6afbb01f3616a86ecb9d980856202912a85f14 triggered automatic run
+38931361713, attempt 1. Format, analysis and 1948 full tests passed, as did
+native subtitle/position pixels and all 32 Flutter texture frames. The route
+check passed 13 of 34 stages before timing out waiting for playing=true during
+the second loop's external subtitle playback. UI, Dart and native state all
+remained paused at 3.5/12 seconds, without EOF or seeking. All seven cleanup
+fields were true and callbackErrors was empty. The complete 1,248,489-byte
+quality log and original UI artifacts are preserved in
+release/build-204-first-failure. iPadOS and Release were skipped; no unchanged
+CI attempt was rerun.
+
+This is distinct from build 203's native-applied check. The final play pointer
+sequence hit an enabled Play button at 56.755112 to 56.756566 seconds. Gesture
+arbitration delivered its onTap at 57.195559 seconds. Memory pressure had arrived
+at 57.035099 seconds, with subtitleStatus=appliedExternal, subtitleSource=explicit,
+subtitleRevision=9 and inputEpoch=1. Playback became ready again at 57.583417
+seconds but stayed paused. The original saved trace therefore places the actual
+play callback inside the cache safety reopen. Review is checking how that new
+play intent interacts with the restart's captured playAfterReady value; a code
+snapshot overwrite is a hypothesis until controlled tests establish the path.
+Subtitle display thresholds, pause acknowledgements and UI gesture gates remain
+unchanged. Root also viewed diagnostic-00.png: EXTERNAL_CUE is visibly rendered,
+the Play button is shown, and the timeline is near 00:03/00:12. The observed
+failure concerns playback acknowledgement after the click.
+
+Controlled gates then established a reachable loss of new playback intent during
+stop, open and resume seek, plus stale Start reporting at the ready notification
+boundary: all eight original-behavior cases failed. The controller now gives
+explicit play/pause requests a revision, preserves that intent across internal
+reopens, and delays applying it until input preparation has completed. Calls
+waiting for the same revision share the tracked native operation. Old native
+completions reapply the current intent only to the current, usable engine; they
+cannot publish state into a retired generation or revoke a newer request. Lifecycle quiescence
+retains priority, and Start reporting waits for the current operation to settle.
+
+Review exposed three adjacent timeout mistakes in intermediate implementations,
+each captured as a failing controlled test before correction. The first converted
+a native timeout into a generic error and allowed a second open over an unsettled
+operation. The second let a superseded timeout fail startup after a newer request
+had succeeded. The third let an internal timeout downgrade increment the user
+revision, so two waiters for the same operation mistook it for a new request.
+The final implementation preserves typed, unsuperseded startup timeouts and the
+existing no-fallback barrier; only an actual newer request supersedes a timeout.
+Input command eligibility is reset on each startup attempt and before failure
+cleanup. Internal timeout downgrade does not increment the explicit intent
+revision. Tests assert a separate native-playing bit as well as controller state
+and reporting, including both command orders and delayed native completion.
+
+The final related suite passed 288 tests and analysis reported no issues. All
+first results remain under regression/build204: 02-original-controls.log,
+11-analyze-first.log (lint), 13-timeout-first.log, 16-related-final-first.log
+(a lifecycle fixture whose nonzero resume was correctly cancelled),
+21-superseded-startup-first.log and 27-shared-timeout-first.log. The zero-position
+lifecycle fixture verifies native pause and paused reporting. The earlier fixture
+observed existing cancellation of a nonzero resume; no independent new nonzero
+resume test was added. The original CI trace still does
+not identify the exact controller assignment executed at its failure instant;
+controlled tests establish the reachable defects without retroactively adding
+observations to that trace.
+
+The first frozen-code local Android sequence passed all 32 texture frames, then
+lost its host-side runner after an exec-server transport disconnect. The saved
+route output contains 11 stages through 1-pgs-b, with no terminal record or
+cleanup confirmation; this sequence is incomplete, not an accepted pass. Read-only
+process and socket checks found no surviving serial/route runner while the owned
+emulator and app still existed. The exact runner exit mechanism was not captured.
+The original output and interruption evidence remain in serial-fixed-first.
+After the execution connection recovered, one additional complete sequence was
+authorized in a separate serial-after-transport-interruption directory, against
+the same 254 frozen source/dependency hashes and unchanged acceptance gates. This
+is a replacement for an interrupted local measurement; no failed CI run was
+rerun. The separate complete sequence then passed 32 texture frames and 34
+route stages, with 28 paused-player records, six non-player records, all seven
+route cleanup fields true and no native/callback errors. Root independently
+replayed the saved pixel/protocol artifacts and all 254 source hashes, and viewed
+PGS ALPHA and offline EXTERNAL_CUE text in the screenshots. No memory-pressure
+event occurred in this local run; the race remains established by controlled
+tests, not by an observed local pressure event. The owned emulator was stopped
+without wiping it. Physical phones, private movies and audible quality remain
+untested. Exact-commit CI, the pending macOS header check and actual new Release
+payload verification are still required.
+
 ## Earlier failures and publication boundary
 
 The earlier build 187 findings and build 188/189/190 first failures remain part

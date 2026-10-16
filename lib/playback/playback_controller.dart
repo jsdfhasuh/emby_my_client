@@ -340,6 +340,16 @@ class PlaybackController extends ChangeNotifier {
   _recoveryFingerprintLastSeen = {};
   double _desiredPlaybackRate = 1;
   bool _desiredPlaying = true;
+  int _playbackIntentRevision = 0;
+  int _appliedPlaybackIntentRevision = -1;
+  bool _inputAcceptsPlaybackCommands = false;
+  ({
+    int generation,
+    int revision,
+    PlaybackEngine engine,
+    PlaybackNativeOperation operation,
+  })?
+  _playbackIntentOperation;
   Duration _desiredAudioDelay = Duration.zero;
   Duration _desiredSubtitleDelay = Duration.zero;
   _SubtitleStyle? _desiredSubtitleStyle;
@@ -400,15 +410,13 @@ class PlaybackController extends ChangeNotifier {
     if (!_tryReserveAutomaticOpen(AutomaticPlaybackOpenReason.initial)) {
       return Future.error(StateError('Initial playback open is unavailable'));
     }
-    return _startPlayback(
-      resumePosition: resumePosition,
-      playAfterReady: playAfterReady,
-    );
+    _desiredPlaying = playAfterReady;
+    _playbackIntentRevision++;
+    return _startPlayback(resumePosition: resumePosition);
   }
 
   Future<void> _startPlayback({
     Duration? resumePosition,
-    bool playAfterReady = true,
     bool forceTranscodeInitially = false,
     AutomaticPlaybackOpenReason transcodeFallbackReason =
         AutomaticPlaybackOpenReason.startupTranscodeFallback,
@@ -425,7 +433,6 @@ class PlaybackController extends ChangeNotifier {
     final token = _advanceGeneration();
     await _bindEngine(token);
     _throwIfStale(token);
-    _desiredPlaying = playAfterReady;
     var currentOpeningStatusMessage = openingStatusMessage;
     _setState(
       PlaybackState(
@@ -444,6 +451,8 @@ class PlaybackController extends ChangeNotifier {
     var fellBackToTranscode = false;
 
     while (_isCurrent(token)) {
+      _inputAcceptsPlaybackCommands = false;
+      _appliedPlaybackIntentRevision = -1;
       _cacheFailureObservationGeneration++;
       PlaybackPlan? plan;
       var engineOpenTimedOut = false;
@@ -492,6 +501,9 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         _prepareReadyWait();
+        final openingIntentRevision = _playbackIntentRevision;
+        final openingPlaying =
+            resume == Duration.zero && _desiredPlaying && !_lifecycleSuspended;
         try {
           final boundEngine = engine;
           final openingPlan = plan;
@@ -503,7 +515,7 @@ class PlaybackController extends ChangeNotifier {
                         ? (boundEngine as SourceDirectPlaybackEngine)
                               .openSource(
                                 openingPlan.controlledInputRequest!,
-                                play: resume == Duration.zero && playAfterReady,
+                                play: openingPlaying,
                               )
                         : Future<void>.error(
                             StateError('Source input unavailable'),
@@ -513,7 +525,7 @@ class PlaybackController extends ChangeNotifier {
                       headers: openingPlan.usesServerAuthentication
                           ? playbackHeaders
                           : const <String, String>{},
-                      play: resume == Duration.zero && playAfterReady,
+                      play: openingPlaying,
                     ),
               barrierTimeout: openTimeout,
             ),
@@ -579,15 +591,17 @@ class PlaybackController extends ChangeNotifier {
               }
           }
           _throwIfStale(token);
-          if (playAfterReady) {
-            final boundEngine = engine;
-            await _operationCoordinator.runTrackedNativeOperation(
-              kind: PlaybackNativeOperationKind.play,
-              operation: boundEngine.play,
-              barrierTimeout: playPauseTimeout,
-            );
-          }
         }
+
+        // Explicit requests made while stop/open/seek was in flight belong to
+        // this item, not to the obsolete input. Apply them only after preparation.
+        _inputAcceptsPlaybackCommands = true;
+        if (resume == Duration.zero &&
+            openingIntentRevision == _playbackIntentRevision) {
+          _appliedPlaybackIntentRevision = openingIntentRevision;
+        }
+        await _settleOpeningPlaybackIntent(token);
+        _throwIfStale(token);
 
         _setState(
           _state.copyWith(
@@ -598,10 +612,16 @@ class PlaybackController extends ChangeNotifier {
           ),
         );
         _throwIfStale(token);
+        // A ready listener may itself submit a newer explicit command.
+        await _settleOpeningPlaybackIntent(token);
+        _throwIfStale(token);
         try {
           _syncAppliedTrackReportingPlan();
           await reporter
-              .reportStart(_state.position, isPaused: !playAfterReady)
+              .reportStart(
+                _state.position,
+                isPaused: _lifecycleSuspended || !_desiredPlaying,
+              )
               .timeout(reporterTimeout);
         } catch (error) {
           DiagnosticLog.instance.warning(
@@ -628,6 +648,10 @@ class PlaybackController extends ChangeNotifier {
         if (plan != null) await _stopReporterSafely();
         return;
       } catch (error) {
+        if (_isCurrent(token)) {
+          _inputAcceptsPlaybackCommands = false;
+          _appliedPlaybackIntentRevision = -1;
+        }
         // A logical timeout does not mean the native operation has settled.
         // Neither optimization fallback nor transcode may race that operation.
         engineOpenTimedOut =
@@ -680,7 +704,6 @@ class PlaybackController extends ChangeNotifier {
             _throwIfStale(token);
             _requireProgressiveFallback(progressive);
             _lastSourceFailure = null;
-            playAfterReady = _desiredPlaying;
             DiagnosticLog.instance.info(
               'player',
               'event=progressive_input_fallback stage=startup',
@@ -1097,58 +1120,145 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> play() async {
-    if (_retiring ||
-        _shuttingDown ||
-        _disposed ||
-        _engineDisposed ||
-        _lifecycleSuspended) {
-      return;
-    }
+    if (_retiring || _shuttingDown || _disposed || _lifecycleSuspended) return;
+    _desiredPlaying = true;
+    final revision = ++_playbackIntentRevision;
     final token = _generation;
     final boundEngine = engine;
-    _desiredPlaying = true;
-    var playSucceeded = _state.isPlaying;
-    if (!_state.isPlaying) {
-      try {
-        await _operationCoordinator.runTrackedNativeOperation(
-          kind: PlaybackNativeOperationKind.play,
-          operation: boundEngine.play,
-          barrierTimeout: playPauseTimeout,
-        );
-        playSucceeded = true;
-      } on PlaybackNativeOperationTimedOut {
-        _desiredPlaying = false;
-        if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
-        return;
-      }
+    if (!_inputAcceptsPlaybackCommands || _engineDisposed) return;
+    final applied = await _applyPlaybackIntent(token, boundEngine);
+    if (applied && _isCurrent(token) && revision == _playbackIntentRevision) {
+      await _reportProgress(isPaused: false);
     }
-    if (!_isCurrent(token) ||
-        !identical(engine, boundEngine) ||
-        _lifecycleSuspended) {
-      _setState(_state.copyWith(isPlaying: false));
-      return;
-    }
-    if (playSucceeded) await _reportProgress(isPaused: false);
   }
 
   Future<void> pause() async {
-    final shouldPause = _desiredPlaying || _state.isPlaying;
+    if (_retiring || _shuttingDown || _disposed) return;
     _desiredPlaying = false;
-    if (shouldPause && !_engineDisposed && !_shuttingDown) {
-      final boundEngine = engine;
-      try {
-        await _operationCoordinator.runTrackedNativeOperation(
-          kind: PlaybackNativeOperationKind.pause,
-          operation: boundEngine.pause,
-          barrierTimeout: playPauseTimeout,
-        );
-      } on PlaybackNativeOperationTimedOut {
-        // Logical pause state still wins; a late native completion cannot
-        // restore playing state through a retired generation.
-      }
-    }
+    final revision = ++_playbackIntentRevision;
+    final token = _generation;
+    final boundEngine = engine;
     if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
-    await _reportProgress();
+    if (!_inputAcceptsPlaybackCommands || _engineDisposed) return;
+    await _applyPlaybackIntent(token, boundEngine);
+    if (_isCurrent(token) && revision == _playbackIntentRevision) {
+      await _reportProgress(isPaused: true);
+    }
+  }
+
+  bool _canApplyPlaybackIntent(int token, PlaybackEngine boundEngine) =>
+      _isCurrent(token) &&
+      identical(engine, boundEngine) &&
+      !_engineDisposed &&
+      !_lifecycleSuspended &&
+      _inputAcceptsPlaybackCommands;
+
+  Future<bool> _applyPlaybackIntent(
+    int token,
+    PlaybackEngine boundEngine, {
+    bool force = false,
+    bool propagateTimeout = false,
+  }) async {
+    while (_canApplyPlaybackIntent(token, boundEngine)) {
+      final revision = _playbackIntentRevision;
+      if (!force && _appliedPlaybackIntentRevision == revision) return true;
+      final playing = _desiredPlaying;
+      final pending = _playbackIntentOperation;
+      final operation =
+          !force &&
+              pending?.generation == token &&
+              pending?.revision == revision &&
+              identical(pending?.engine, boundEngine)
+          ? pending!.operation
+          : _operationCoordinator.startTrackedNativeOperation(
+              kind: playing
+                  ? PlaybackNativeOperationKind.play
+                  : PlaybackNativeOperationKind.pause,
+              operation: playing ? boundEngine.play : boundEngine.pause,
+              barrierTimeout: playPauseTimeout,
+            );
+      _playbackIntentOperation = (
+        generation: token,
+        revision: revision,
+        engine: boundEngine,
+        operation: operation,
+      );
+      try {
+        await operation.logicalFuture;
+      } on PlaybackNativeOperationTimedOut {
+        final superseded =
+            revision != _playbackIntentRevision || !_isCurrent(token);
+        // A stale timeout must not revoke a subsequent play/pause request.
+        if (_canApplyPlaybackIntent(token, boundEngine) &&
+            revision == _playbackIntentRevision &&
+            playing) {
+          // This is a failed command, not a newer explicit user request.
+          // Other awaiters of this same operation must still see its timeout.
+          _desiredPlaying = false;
+          if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
+        }
+        unawaited(
+          operation.nativeFuture.then<void>(
+            (_) => _reassertCurrentPlaybackIntent(boundEngine),
+            onError: (Object _, StackTrace _) {},
+          ),
+        );
+        if (superseded) {
+          return _applyPlaybackIntent(
+            token,
+            boundEngine,
+            propagateTimeout: propagateTimeout,
+          );
+        }
+        if (propagateTimeout) rethrow;
+        return false;
+      } finally {
+        if (identical(_playbackIntentOperation?.operation, operation)) {
+          _playbackIntentOperation = null;
+        }
+      }
+      if (!_canApplyPlaybackIntent(token, boundEngine)) {
+        await _reassertCurrentPlaybackIntent(boundEngine);
+        return false;
+      }
+      if (revision == _playbackIntentRevision) {
+        _appliedPlaybackIntentRevision = revision;
+        return true;
+      }
+      // An older native completion may physically undo a newer command. Reapply
+      // the current intent without changing its revision or reporting the old one.
+      force = true;
+    }
+    return false;
+  }
+
+  Future<void> _settleOpeningPlaybackIntent(int token) async {
+    if (await _applyPlaybackIntent(token, engine, propagateTimeout: true)) {
+      return;
+    }
+    _throwIfStale(token);
+    if (_lifecycleSuspended) {
+      // Lifecycle quiescence has priority over autoplay or an earlier play tap.
+      final quiescence = _lifecycleQuiescenceOperation;
+      if (quiescence != null) await quiescence;
+      _throwIfStale(token);
+      return;
+    }
+    throw StateError('Playback intent did not settle during input preparation');
+  }
+
+  Future<void> _reassertCurrentPlaybackIntent(
+    PlaybackEngine boundEngine,
+  ) async {
+    if (!_canApplyPlaybackIntent(_generation, boundEngine)) return;
+    try {
+      await _applyPlaybackIntent(_generation, boundEngine, force: true);
+    } catch (error) {
+      DiagnosticLog.instance.warning(
+        'player',
+        'event=playback_intent_reassert_failed errorType=${error.runtimeType}',
+      );
+    }
   }
 
   Future<void> quiesce() {
@@ -1159,6 +1269,7 @@ class PlaybackController extends ChangeNotifier {
       _retirementState = PlaybackRetirementState.quiescing;
     }
     _desiredPlaying = false;
+    _playbackIntentRevision++;
     _advanceGeneration();
     _cacheCoordinator?.pause();
     if (_state.isPlaying) _setState(_state.copyWith(isPlaying: false));
@@ -1294,7 +1405,6 @@ class PlaybackController extends ChangeNotifier {
             _requireProgressiveFallback(pending.request);
             await _startPlayback(
               resumePosition: pending.position,
-              playAfterReady: _desiredPlaying,
               preparedPlan: pending.plan,
               continueReporting: true,
               transcodeFallbackReason:
@@ -1692,7 +1802,6 @@ class PlaybackController extends ChangeNotifier {
           }
         }
         final position = _state.position;
-        final wasPlaying = _desiredPlaying;
         Future<bool> abandonCandidateIfStale() async {
           if (lease.isCurrent && !_shuttingDown && !_retiring) return false;
           if (candidate != null) await reporter.cleanup(candidate);
@@ -1746,7 +1855,6 @@ class PlaybackController extends ChangeNotifier {
         try {
           await _startPlayback(
             resumePosition: position,
-            playAfterReady: wasPlaying,
             forceTranscodeInitially: forceTranscode,
             preparedPlan: candidate,
           );
@@ -1898,7 +2006,11 @@ class PlaybackController extends ChangeNotifier {
         if (!eventIsCurrent()) return;
         _setState(
           _state.copyWith(
-            isPlaying: playing && !_retiring && !_lifecycleSuspended,
+            isPlaying:
+                playing &&
+                _desiredPlaying &&
+                !_retiring &&
+                !_lifecycleSuspended,
           ),
         );
       }),
@@ -2435,7 +2547,6 @@ class PlaybackController extends ChangeNotifier {
   ) async {
     _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
-    final wasPlaying = _desiredPlaying;
     final retained = _state.plan?.usesControlledInput == true
         ? _state.plan
         : null;
@@ -2467,7 +2578,6 @@ class PlaybackController extends ChangeNotifier {
       if (_disposed || _shuttingDown || !lease.isCurrent) return;
       await _startPlayback(
         resumePosition: position,
-        playAfterReady: wasPlaying,
         openingStatusMessage: '正在调整缓存…',
         preparedPlan: retained,
         continueReporting: retained != null,
@@ -2774,7 +2884,6 @@ class PlaybackController extends ChangeNotifier {
     }
     _lastSourceFailure?.record(recoverable: true, recoveryExecuted: true);
     final position = _state.requestedPosition ?? _state.position;
-    final wasPlaying = _desiredPlaying;
     final wasTranscoding = plan.method == PlayMethod.transcode;
     if (progressiveFallback) _progressiveInputDisabled = true;
     final retained = progressiveFallback
@@ -2831,7 +2940,6 @@ class PlaybackController extends ChangeNotifier {
     }
     await _startPlayback(
       resumePosition: position,
-      playAfterReady: progressiveFallback ? _desiredPlaying : wasPlaying,
       forceTranscodeInitially: wasTranscoding,
       transcodeFallbackReason:
           AutomaticPlaybackOpenReason.runtimeTranscodeRecovery,
@@ -4241,6 +4349,8 @@ class PlaybackController extends ChangeNotifier {
       revision == _lifecycleQuiescenceRevision;
 
   int _advanceGeneration() {
+    _inputAcceptsPlaybackCommands = false;
+    _appliedPlaybackIntentRevision = -1;
     _deferredProgressiveFallback = null;
     _generation++;
     // A native/local choice belongs to one input, including reopening the same URI.
