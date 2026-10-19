@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'harness_seek_barrier.dart';
 
 const _origin = 'http://127.0.0.1:38765';
 final _client = HttpClient();
@@ -111,6 +112,7 @@ Future<void> main() async {
       'physicalPhone': 'NOT_RUN',
       'verifiedStages': _verifiedStages,
       'nativeErrorCount': _nativeErrorCount,
+      'nativeLogs': List<String>.of(_nativeLogs),
       'cleanup': cleanup,
       if (failure != null) 'error': '$failure',
       if (failureStack != null) 'stack': '$failureStack',
@@ -179,15 +181,12 @@ Future<void> _run(
         int second,
       ) async {
         await engine.selectSubtitleTrack(id);
-        await engine.seek(Duration(seconds: second));
-        await engine.play();
-        await _until(
-          () =>
-              engine.player.state.position.inMilliseconds >=
-              second * 1000 + 150,
+        await _seekAndPaint(
+          engine,
+          native,
+          second,
+          expected == 'text' ? 'TEXT_CUE' : null,
         );
-        await engine.pause();
-        await Future<void>.delayed(const Duration(milliseconds: 350));
         final size = MediaQuery.sizeOf(_videoContext!);
         await _report({
           'stage': '$prefix-$stage',
@@ -218,13 +217,7 @@ Future<void> _run(
       await capture('ass', text.id, 'text', 3);
       await engine.selectSubtitleTrack(b.id);
       await engine.loadExternalSubtitle(external.uri);
-      await engine.seek(const Duration(seconds: 3));
-      await engine.play();
-      await _until(
-        () => engine.player.state.subtitle.first.trim() == 'EXTERNAL_CUE',
-      );
-      await engine.pause();
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await _seekAndPaint(engine, native, 3, 'EXTERNAL_CUE');
       await _report({
         'stage': '$prefix-srt',
         'expected': 'text',
@@ -258,6 +251,32 @@ Future<Map<String, Object?>> _fixtureSeekEvidence(NativePlayer native) async =>
         await native.getProperty('hr-seek-demuxer-offset'),
       ),
     };
+
+Future<void> _seekAndPaint(
+  MediaKitPlaybackEngine engine,
+  NativePlayer native,
+  int seconds,
+  String? cue,
+) async {
+  await advanceHarnessAfterSeek(
+    target: Duration(seconds: seconds),
+    pause: engine.pause,
+    seek: engine.seek,
+    play: engine.play,
+    readNative: () async => HarnessSeekSample(
+      seeking: await native.getProperty('seeking') != 'no',
+      paused: await native.getProperty('pause') == 'yes',
+      positionSeconds:
+          double.tryParse(await native.getProperty('time-pos')) ?? double.nan,
+    ),
+  );
+  if (cue != null) {
+    await _until(() => engine.player.state.subtitle.first.trim() == cue);
+  }
+  await Future<void>.delayed(const Duration(milliseconds: 350));
+  WidgetsBinding.instance.scheduleFrame();
+  await WidgetsBinding.instance.endOfFrame;
+}
 
 Future<void> _waitForSurface(VideoController video, NativePlayer native) async {
   await video.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 10));
