@@ -312,6 +312,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.1.2"
+  hysteria2:
+    dependency: "direct main"
+    description:
+      path: "packages/hysteria2"
+      relative: true
+    source: path
+    version: "0.1.0"
   image:
     dependency: transitive
     description:

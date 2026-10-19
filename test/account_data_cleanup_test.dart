@@ -5,6 +5,7 @@ import 'package:emby_my_client/core/server_scope.dart';
 import 'package:emby_my_client/data/account_data_cleanup.dart';
 import 'package:emby_my_client/data/local_database.dart';
 import 'package:emby_my_client/downloads/download_settings.dart';
+import 'package:emby_my_client/downloads/download_connection.dart';
 import 'package:emby_my_client/library/library_browse_state.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/playback_settings.dart';
@@ -25,6 +26,47 @@ void main() {
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
   });
+
+  test(
+    'a busy download connection prevents destructive account cleanup',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'emby-connection-cleanup-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final directory = Directory(
+        path.join(root.path, _firstScope.databaseKey),
+      );
+      await directory.create();
+      final media = File(path.join(directory.path, 'media.bin'));
+      await media.writeAsBytes([1, 2, 3]);
+      final database = LocalDatabase(
+        factory: databaseFactoryFfi,
+        pathResolver: () async => inMemoryDatabasePath,
+      );
+      addTearDown(database.close);
+      var clearedImages = false;
+      final cleanup = AccountDataCleanup(
+        database: database,
+        directoryResolver: (_) async => directory,
+        downloadSettingsStore: MemoryDownloadSettingsStore(),
+        libraryCategorySettingsStore: MemoryLibraryCategorySettingsStore(),
+        librarySortPreferenceStore: MemoryLibrarySortPreferenceStore(),
+        searchHistoryStore: MemorySearchHistoryStore(),
+        clearImages: (_) async {
+          clearedImages = true;
+        },
+        clearDownloadConnection: (_) async =>
+            throw const DownloadConnectionException('configBusy'),
+      );
+      await expectLater(
+        cleanup.delete(scope: _firstScope, session: _firstSession),
+        throwsA(isA<DownloadConnectionException>()),
+      );
+      expect(await media.readAsBytes(), [1, 2, 3]);
+      expect(clearedImages, isFalse);
+    },
+  );
 
   test(
     'deletes only the selected account files, records, and settings',
@@ -116,8 +158,11 @@ void main() {
       );
 
       final clearedImageScopes = <ServerScope>[];
+      final clearedConnectionScopes = <ServerScope>[];
       final cleanup = AccountDataCleanup(
         clearImages: (scope) async => clearedImageScopes.add(scope),
+        clearDownloadConnection: (scope) async =>
+            clearedConnectionScopes.add(scope),
         database: database,
         directoryResolver: (scope) async =>
             Directory(path.join(root.path, scope.databaseKey)),
@@ -131,6 +176,7 @@ void main() {
 
       await cleanup.delete(scope: _firstScope, session: _firstSession);
       expect(clearedImageScopes, [_firstScope]);
+      expect(clearedConnectionScopes, [_firstScope]);
       expect(
         (await subtitlePreferences.load(_firstSession)).rememberedCount,
         0,

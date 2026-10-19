@@ -1,0 +1,3 @@
+-keep class go.** { *; }
+-keep class dev.emby.hysteria2.core.** { *; }
+-keepclasseswithmembernames,includedescriptorclasses class * { native <methods>; }

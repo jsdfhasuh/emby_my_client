@@ -15,6 +15,7 @@ on:
       - 'ios/**'
       - 'native/**'
       - 'android/**'
+      - 'packages/hysteria2/**'
       - 'scripts/android/**'
       - 'scripts/ios/**'
       - 'scripts/release/**'
@@ -50,15 +51,13 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Verify protected files are unchanged from implementation start
+      - name: Verify platform metadata is unchanged from implementation start
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$IMPLEMENTATION_START_HEAD"
           git diff --exit-code "$IMPLEMENTATION_START_HEAD" -- \
             .metadata \
-            pubspec.yaml \
-            pubspec.lock \
             ios/Podfile \
             ios/Podfile.lock \
             ios/Runner/Info.plist \
@@ -207,6 +206,9 @@ jobs:
           if-no-files-found: ignore
           path: build/android/artifacts/ndk-setup/
 
+      - name: Build and verify pinned embedded Hysteria2 core
+        run: python3 scripts/android/build_hysteria2.py all
+
       - name: Build synthetic subtitle UI harnesses separately
         shell: bash
         run: |
@@ -216,6 +218,8 @@ jobs:
           cp build/app/outputs/flutter-apk/app-debug.apk build/android/harness/subtitle-texture.apk
           flutter build apk --debug --target-platform android-x64 --target test/support/android_player_route_harness.dart
           cp build/app/outputs/flutter-apk/app-debug.apk build/android/harness/player-route.apk
+          flutter build apk --debug --target-platform android-x64 --target test/support/android_hysteria2_harness.dart
+          cp build/app/outputs/flutter-apk/app-debug.apk build/android/harness/hysteria2.apk
           # Production builds below replace Flutter outputs before publication.
 
       - name: Derive application version
@@ -230,7 +234,7 @@ jobs:
 
       - name: Test Android APK update compatibility policy
         working-directory: android
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:testDebugUnitTest :hysteria2:testDebugUnitTest
 
       - name: Run Android native libmpv capability smoke test
         shell: bash
@@ -240,6 +244,9 @@ jobs:
           test "${#apk_paths[@]}" -ge 4
           bash scripts/android/verify_mpv_capabilities.sh "${apk_paths[@]}"
           python3 scripts/android/verify_native_artifacts.py "${apk_paths[@]}"
+          for apk in "${apk_paths[@]}"; do
+            python3 packages/hysteria2/tool/verify_artifact.py --apk "$apk"
+          done
 
       - name: Run startable Android libmpv smoke test
         shell: bash
@@ -313,7 +320,8 @@ jobs:
           set -euo pipefail
           bash scripts/android/run_flutter_subtitle_gates.sh \
             build/android/harness/subtitle-texture.apk \
-            build/android/harness/player-route.apk
+            build/android/harness/player-route.apk \
+            build/android/harness/hysteria2.apk
 
       - name: Upload Flutter subtitle and player route evidence
         if: always()
@@ -324,6 +332,7 @@ jobs:
           path: |
             build/android/artifacts/subtitle-texture/
             build/android/artifacts/player-route/
+            build/android/artifacts/hysteria2-smoke/
             ${{ runner.temp }}/subtitle-ui-emulator.log
 
       - name: Verify Android mpv semantic evidence safety
@@ -396,8 +405,6 @@ jobs:
           git fetch --no-tags --depth=1 origin "$IMPLEMENTATION_START_HEAD"
           git diff --exit-code "$IMPLEMENTATION_START_HEAD" -- \
             .metadata \
-            pubspec.yaml \
-            pubspec.lock \
             ios/Podfile \
             ios/Podfile.lock \
             ios/Runner/Info.plist \

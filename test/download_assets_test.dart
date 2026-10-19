@@ -5,12 +5,12 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
-import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/downloads/download_assets.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
+import 'support/dio_download_test_api.dart';
 
 void main() {
   test(
@@ -209,7 +209,7 @@ final _subtitleBytes = utf8.encode(
   '1\n00:00:00,000 --> 00:00:01,000\nFixture\n',
 );
 
-class _AssetApi extends EmbyApi {
+class _AssetApi extends DioDownloadTestApi {
   _AssetApi(Dio dio, {this.streams}) : super(_session, dio: dio);
   final List<Map<String, dynamic>>? streams;
   @override

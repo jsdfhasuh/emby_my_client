@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "go": "1.26.0",
+  "goArchives": {
+    "windows-amd64": {"file": "go1.26.0.windows-amd64.zip", "sha256": "9bbe0fc64236b2b51f6255c05c4232532b8ecc0e6d2e00950bd3021d8a4d07d4"},
+    "linux-amd64": {"file": "go1.26.0.linux-amd64.tar.gz", "sha256": "aac1b08a0fb0c4e0a7c1555beb7b59180b05dfc5a3d62e40e9de90cd42f88235"}
+  },
+  "mobile": "v0.0.0-20261011034528-197770444867",
+  "upstream": {
+    "module": "github.com/apernet/hysteria/core/v2",
+    "version": "v2.13.0",
+    "commit": "ca8fbd874fd6ca82413948de6dc5924405e103e1",
+    "extras": "github.com/apernet/hysteria/extras/v2",
+    "license": "MIT"
+  },
+  "ndk": "28.2.13676358",
+  "androidApi": 24,
+  "androidPlatform": 36,
+  "abis": ["armeabi-v7a", "arm64-v8a", "x86_64"],
+  "gomobileTarget": "android/arm,android/arm64,android/amd64"
+}

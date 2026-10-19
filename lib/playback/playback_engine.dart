@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:media_kit/media_kit.dart';
 
 import '../core/diagnostic_log.dart';
+import '../downloads/download_connection.dart';
 import 'cache/native_playback_property_access.dart';
 import 'cache/playback_cache_capabilities.dart';
 import 'cache/playback_cache_engine.dart';
@@ -235,11 +236,14 @@ class MediaKitPlaybackEngine
     PlaybackOutputQuiescer? outputQuiescer,
     PlaybackDiagnostics? diagnostics,
     NativePlaybackCacheEngine? cacheEngine,
+    DownloadConnectionManager? downloadConnections,
     this.nativeOperationTimeouts = const PlaybackNativeOperationTimeouts(),
   }) : _outputQuiescer =
            outputQuiescer ?? MediaKitPlaybackOutputQuiescer(player),
        _diagnostics = diagnostics ?? PlaybackDiagnostics(),
-       _cacheEngine = cacheEngine {
+       _cacheEngine = cacheEngine,
+       _downloadConnections =
+           downloadConnections ?? DownloadConnectionManager.instance {
     final platform = player.platform;
     if (_cacheEngine == null && platform is NativePlayer) {
       _cacheEngine = NativePlaybackCacheEngine(
@@ -254,6 +258,27 @@ class MediaKitPlaybackEngine
   }
 
   final Player player;
+  final DownloadConnectionManager _downloadConnections;
+  Future<DownloadRouteLease?>? _configurationPlaybackLease;
+
+  Future<void> _holdConfigurationGate() async {
+    final pending = _configurationPlaybackLease ??= _downloadConnections
+        .acquirePlayback();
+    try {
+      await pending;
+    } catch (_) {
+      if (identical(_configurationPlaybackLease, pending)) {
+        _configurationPlaybackLease = null;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _releaseConfigurationGate() async {
+    final pending = _configurationPlaybackLease;
+    _configurationPlaybackLease = null;
+    if (pending != null) await (await pending)?.close();
+  }
 
   @override
   Future<SubtitleMappingContext> readSubtitleMappingContext() async {
@@ -367,6 +392,8 @@ class MediaKitPlaybackEngine
     }
 
     try {
+      await _holdConfigurationGate();
+      check();
       await _subtitleNativeTail;
       check();
       final native = player.platform;
@@ -641,6 +668,10 @@ class MediaKitPlaybackEngine
         }
         await _restoreSourceOptions();
         await _resetSubtitleRendering();
+        await _holdConfigurationGate();
+        if (revision != _inputRevision || _isRetiring || _disposeStarted) {
+          return;
+        }
         await player.open(
           Media(uri.toString(), httpHeaders: headers),
           play: play,
@@ -1109,7 +1140,10 @@ class MediaKitPlaybackEngine
     _sourceInput?.releaseAll();
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.stop,
-      operation: player.stop,
+      operation: () async {
+        await player.stop();
+        await _releaseConfigurationGate();
+      },
     );
   }
 
@@ -1150,6 +1184,7 @@ class MediaKitPlaybackEngine
           await release();
         }
         _resourceReleases.clear();
+        await _releaseConfigurationGate();
       },
       onTimeout: () {
         _retirementState = PlaybackRetirementState.quarantined;

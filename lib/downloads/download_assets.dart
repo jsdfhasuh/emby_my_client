@@ -260,6 +260,7 @@ class EmbyDownloadAssetService
       uri,
       cancelToken: cancelToken,
       followRedirects: false,
+      downloadTaskToken: cancellation,
     );
     for (
       var count = 0;
@@ -267,7 +268,12 @@ class EmbyDownloadAssetService
       count++
     ) {
       final location = response.headers.value('location');
-      await response.data?.stream.drain<void>();
+      final close = response.extra['downloadClose'] as Future<void> Function()?;
+      if (close != null) {
+        await close();
+      } else {
+        await response.data?.stream.listen((_) {}).cancel();
+      }
       if (location == null || count >= 3) {
         throw const FormatException('assetRedirect');
       }
@@ -277,6 +283,7 @@ class EmbyDownloadAssetService
         uri,
         cancelToken: cancelToken,
         followRedirects: false,
+        downloadTaskToken: cancellation,
       );
     }
     File? temporary;
@@ -353,6 +360,9 @@ class EmbyDownloadAssetService
         }
       }
       rethrow;
+    } finally {
+      final close = response.extra['downloadClose'] as Future<void> Function()?;
+      await close?.call();
     }
   }
 

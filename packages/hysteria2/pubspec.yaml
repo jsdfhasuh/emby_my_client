@@ -1,0 +1,19 @@
+name: hysteria2
+description: Embedded Android Hysteria2 transport with engine-owned leases.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.10.0 <4.0.0'
+  flutter: '>=3.35.0'
+dependencies:
+  flutter:
+    sdk: flutter
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.emby.hysteria2
+        pluginClass: Hysteria2Plugin

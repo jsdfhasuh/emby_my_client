@@ -24,6 +24,11 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    packaging {
+        // The Go build is already stripped; preserve its verified provenance.
+        jniLibs.keepDebugSymbols += "**/libgojni.so"
+    }
+
     defaultConfig {
         applicationId = "com.jsdfhasuh.emoemby"
         // You can update the following values to match your application needs.

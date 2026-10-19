@@ -70,6 +70,7 @@ class DownloadService extends ChangeNotifier {
 
   final DownloadMediaVerifier _mediaVerifier = DownloadMediaVerifier();
   final Map<String, DownloadTaskRecord> _tasks = {};
+  final Map<String, Future<DownloadTaskRecord>> _enqueues = {};
   final Map<String, Future<void>> _operations = {};
   final Map<String, Future<DownloadTaskRecord>> _invalidations = {};
   final Set<Future<Object?>> _inspections = {};
@@ -78,17 +79,21 @@ class DownloadService extends ChangeNotifier {
   final Map<String, CancelToken> _cancelTokens = {};
   final Map<String, _RequestedAction> _requestedActions = {};
   final Map<String, String> _networkBlockCodes = {};
+  final Set<String> _configurationResumes = {};
   StreamSubscription<void>? _executorChanges;
   StreamSubscription<void>? _networkChanges;
   Future<void>? _refreshOperation;
   Future<void>? _networkReevaluation;
   Future<void>? _storageReevaluation;
+  Future<void>? _shutdownOperation;
   Timer? _storageRecheckTimer;
   bool _refreshRequested = false;
   bool _networkReevaluationRequested = false;
   DownloadSettings _settings = const DownloadSettings();
   bool _initialized = false;
+  bool _configurationBlocked = false;
   bool _shuttingDown = false;
+  bool _shutdownComplete = false;
   bool _disposed = false;
 
   List<DownloadTaskRecord> get tasks {
@@ -102,6 +107,7 @@ class DownloadService extends ChangeNotifier {
       _repairingSubtitleTasks.contains(taskId) ||
       _tasks[taskId]?.lastErrorCode == 'subtitleRepairing';
   bool get hasActiveWork =>
+      _enqueues.isNotEmpty ||
       _operations.isNotEmpty ||
       _tasks.values.any(
         (task) =>
@@ -243,6 +249,11 @@ class DownloadService extends ChangeNotifier {
       }
       _tasks[task.id] = task;
     }
+    _configurationBlocked = _tasks.values.any(
+      (task) =>
+          task.lastErrorCode == 'configBusy' ||
+          task.lastErrorCode == 'subtitleRepair:configBusy',
+    );
     await cleanupOrphans();
     final executor = _executor;
     if (executor != null) {
@@ -383,6 +394,23 @@ class DownloadService extends ChangeNotifier {
     String? mediaSourceId,
   }) async {
     _ensureActive();
+    final current = _enqueues[item.id];
+    if (current != null) return current;
+
+    late final Future<DownloadTaskRecord> operation;
+    operation = _enqueue(item, mediaSourceId: mediaSourceId).whenComplete(() {
+      if (identical(_enqueues[item.id], operation)) {
+        _enqueues.remove(item.id);
+      }
+    });
+    _enqueues[item.id] = operation;
+    return operation;
+  }
+
+  Future<DownloadTaskRecord> _enqueue(
+    EmbyItem item, {
+    String? mediaSourceId,
+  }) async {
     final current = taskForItem(item.id);
     if (current != null) {
       if (current.requiresFreshDownload) {
@@ -396,6 +424,7 @@ class DownloadService extends ChangeNotifier {
     final fullItem = item.mediaSources.isEmpty
         ? await api.getItem(item.id)
         : item;
+    _ensureActive();
     final sources = fullItem.mediaSources;
     if (sources.isEmpty) {
       throw const EmbyApiException('服务器没有返回可下载的原始媒体源');
@@ -414,12 +443,15 @@ class DownloadService extends ChangeNotifier {
     }
 
     final directory = await _directoryResolver(scope);
+    _ensureActive();
     await directory.create(recursive: true);
+    _ensureActive();
     await _preflight.verifyStorage(
       directory: directory,
       expectedBytes: source.size,
       downloadedBytes: 0,
     );
+    _ensureActive();
     final extension = _fileExtension(source);
     final identity = sha256
         .convert(
@@ -450,10 +482,16 @@ class DownloadService extends ChangeNotifier {
       updatedAt: timestamp,
     );
     await _repository.saveTask(task);
+    if (_shuttingDown || _disposed) {
+      await _repository.removeDownload(task);
+      _ensureActive();
+    }
     _tasks[task.id] = task;
     _notify();
     final executor = _executor;
-    if (executor == null) {
+    if (_shuttingDown || _disposed) {
+      return task;
+    } else if (executor == null) {
       _pumpQueue();
     } else {
       await executor.start();
@@ -510,19 +548,31 @@ class DownloadService extends ChangeNotifier {
     _ensureActive();
     final active = _operations[taskId];
     if (active != null) await active;
+    _ensureActive();
     final task = _tasks[taskId];
     if (task == null ||
         task.status == DownloadStatus.running ||
-        task.status == DownloadStatus.queued ||
         task.status == DownloadStatus.completed) {
       return;
     }
-    final executor = _executor;
-    if (executor != null && await executor.isRunning) {
-      await executor.send(DownloadExecutorCommand.resume, taskId: taskId);
+    if (task.status == DownloadStatus.queued) {
+      if (_configurationBlocked) {
+        _configurationResumes.add(taskId);
+        _pumpQueue();
+      }
       return;
     }
+    final executor = _executor;
+    if (executor != null) {
+      final running = await executor.isRunning;
+      _ensureActive();
+      if (running) {
+        await executor.send(DownloadExecutorCommand.resume, taskId: taskId);
+        return;
+      }
+    }
     _requestedActions.remove(taskId);
+    if (_configurationBlocked) _configurationResumes.add(taskId);
     await _save(
       task.copyWith(
         status: DownloadStatus.queued,
@@ -530,6 +580,10 @@ class DownloadService extends ChangeNotifier {
         updatedAt: DateTime.now().toUtc(),
       ),
     );
+    if (_shuttingDown || _disposed) {
+      await _finishTerminalAction(taskId);
+      _ensureActive();
+    }
     if (executor == null) {
       _pumpQueue();
     } else {
@@ -541,6 +595,7 @@ class DownloadService extends ChangeNotifier {
     _ensureActive();
     final active = _operations[taskId];
     if (active != null) await active;
+    _ensureActive();
     final task = _tasks[taskId];
     if (task == null) return;
     if (!task.requiresFreshDownload) {
@@ -609,13 +664,17 @@ class DownloadService extends ChangeNotifier {
     try {
       await operation;
     } finally {
-      _operations.remove(taskId);
-      _pendingAssetMetadata.remove(taskId);
-      _repairingSubtitleTasks.remove(taskId);
-      _cancelTokens.remove(taskId);
-      _requestedActions.remove(taskId);
-      _notify();
-      _pumpQueue();
+      if (identical(_operations[taskId], operation)) {
+        _operations.remove(taskId);
+        _pendingAssetMetadata.remove(taskId);
+        _repairingSubtitleTasks.remove(taskId);
+        if (identical(_cancelTokens[taskId], token)) {
+          _cancelTokens.remove(taskId);
+        }
+        _requestedActions.remove(taskId);
+        _notify();
+        _pumpQueue();
+      }
     }
   }
 
@@ -644,11 +703,23 @@ class DownloadService extends ChangeNotifier {
     DownloadTaskRecord task,
     CancelToken token,
   ) async {
+    final transport = _transport;
+    final taskTransport = transport is DownloadTaskTransport
+        ? transport as DownloadTaskTransport
+        : null;
+    var beginAttempted = false;
     try {
-      if (await offlineItem(task.itemId) == null) return;
       _throwIfInterrupted(task.id, token);
       await _save(task.copyWith(lastErrorCode: 'subtitleRepairing'));
       await _preflight.verifyNetwork(wifiOnly: _settings.wifiOnly);
+      _throwIfInterrupted(task.id, token);
+      if (taskTransport != null) {
+        beginAttempted = true;
+        await taskTransport.beginTask(token, taskId: task.id);
+      }
+      if (await offlineItem(task.itemId) == null) return;
+      _throwIfInterrupted(task.id, token);
+      _releaseConfigurationBlock();
       await _commitExistingFile(
         task,
         File(task.finalPath),
@@ -656,6 +727,7 @@ class DownloadService extends ChangeNotifier {
         subtitlesOnly: true,
       );
     } catch (error) {
+      if (_errorCode(error) == 'configBusy') _configurationBlocked = true;
       if (_requestedActions[task.id] == _RequestedAction.delete) {
         await _removeTaskAndFiles(_tasks[task.id] ?? task);
       } else if (_tasks.containsKey(task.id)) {
@@ -672,8 +744,9 @@ class DownloadService extends ChangeNotifier {
             ? 'subtitleRepairInterrupted'
             : token.isCancelled
             ? 'subtitleRepairCancelled'
-            : error is DownloadPreflightException
-            ? 'subtitleRepair:${error.code}'
+            : error is DownloadPreflightException ||
+                  error is DownloadConnectionException
+            ? 'subtitleRepair:${_errorCode(error)}'
             : 'subtitleRepairFailed';
         final restored = task.copyWith(lastErrorCode: code);
         final existing = await _repository.offlineItem(scope, task.itemId);
@@ -689,6 +762,8 @@ class DownloadService extends ChangeNotifier {
           _notify();
         }
       }
+    } finally {
+      if (beginAttempted) await taskTransport!.endTask(token);
     }
   }
 
@@ -895,12 +970,13 @@ class DownloadService extends ChangeNotifier {
     );
   }
 
-  Future<void> shutdown() async {
-    if (_shuttingDown) {
-      await Future.wait(_operations.values.toList(growable: false));
-      await _drainInspections();
-      return;
-    }
+  Future<void> shutdown() {
+    // Late callers may be in a different async zone from the drained operation.
+    if (_shutdownComplete) return Future.value();
+    return _shutdownOperation ??= _shutdown();
+  }
+
+  Future<void> _shutdown() async {
     _shuttingDown = true;
     _storageRecheckTimer?.cancel();
     _storageRecheckTimer = null;
@@ -910,6 +986,15 @@ class DownloadService extends ChangeNotifier {
       _requestedActions.putIfAbsent(entry.key, () => _RequestedAction.pause);
       entry.value.cancel('shutdown');
     }
+    await Future.wait(
+      _enqueues.values.toList(growable: false).map((operation) async {
+        try {
+          await operation;
+        } catch (_) {
+          // The enqueue caller owns its error; shutdown still drains its IO.
+        }
+      }),
+    );
     await Future.wait(_operations.values.toList(growable: false));
     await _drainInspections();
     await _executorChanges?.cancel();
@@ -930,6 +1015,7 @@ class DownloadService extends ChangeNotifier {
       // Storage rechecks log failures at their execution boundary.
     }
     await _executor?.dispose();
+    _shutdownComplete = true;
   }
 
   Future<bool> stopExecutor() async {
@@ -1152,17 +1238,29 @@ class DownloadService extends ChangeNotifier {
     final available = max(0, maxConcurrentDownloads - _operations.length);
     if (available == 0) return;
     final queued = _tasks.values
-        .where((task) => task.status == DownloadStatus.queued)
+        .where(
+          (task) =>
+              task.status == DownloadStatus.queued &&
+              !_operations.containsKey(task.id) &&
+              (!_configurationBlocked ||
+                  _configurationResumes.contains(task.id)),
+        )
         .take(available)
         .toList(growable: false);
     for (final task in queued) {
-      final operation = _run(task.id);
+      final token = CancelToken();
+      _cancelTokens[task.id] = token;
+      final operation = _run(task.id, token);
       _operations[task.id] = operation;
       unawaited(
         operation.whenComplete(() {
+          if (!identical(_operations[task.id], operation)) return;
           _operations.remove(task.id);
+          _configurationResumes.remove(task.id);
           _pendingAssetMetadata.remove(task.id);
-          _cancelTokens.remove(task.id);
+          if (identical(_cancelTokens[task.id], token)) {
+            _cancelTokens.remove(task.id);
+          }
           final action = _requestedActions.remove(task.id);
           _networkBlockCodes.remove(task.id);
           _pumpQueue();
@@ -1176,30 +1274,47 @@ class DownloadService extends ChangeNotifier {
     }
   }
 
-  Future<void> _run(String taskId) async {
+  void _releaseConfigurationBlock() {
+    if (!_configurationBlocked) return;
+    _configurationBlocked = false;
+    _configurationResumes.clear();
+    _pumpQueue();
+  }
+
+  Future<void> _run(String taskId, CancelToken token) async {
     var task = _tasks[taskId];
     if (task == null) return;
-    final token = CancelToken();
-    _cancelTokens[taskId] = token;
     task = task.copyWith(
       status: DownloadStatus.running,
       clearLastErrorCode: true,
       updatedAt: DateTime.now().toUtc(),
     );
-    await _save(task);
-
     Object? lastError;
     StackTrace? lastStackTrace;
-    final uris = _transport.sourceUris(
-      itemId: task.itemId,
-      mediaSourceId: task.mediaSourceId,
-    );
+    final transport = _transport;
+    final taskTransport = transport is DownloadTaskTransport
+        ? transport as DownloadTaskTransport
+        : null;
+    var beginAttempted = false;
     try {
+      await _save(task);
+      _throwIfInterrupted(taskId, token);
       await _preflight.verifyNetwork(wifiOnly: _settings.wifiOnly);
+      _throwIfInterrupted(taskId, token);
+      if (taskTransport != null) {
+        beginAttempted = true;
+        await taskTransport.beginTask(token, taskId: taskId);
+      }
       await _preflight.verifyStorage(
         directory: File(task.finalPath).parent,
         expectedBytes: task.expectedBytes,
         downloadedBytes: task.downloadedBytes,
+      );
+      _throwIfInterrupted(taskId, token);
+      _releaseConfigurationBlock();
+      final uris = transport.sourceUris(
+        itemId: task.itemId,
+        mediaSourceId: task.mediaSourceId,
       );
       for (final uri in uris) {
         for (var retry = 0; retry < 3; retry++) {
@@ -1212,16 +1327,14 @@ class DownloadService extends ChangeNotifier {
                 error is _DownloadInterrupted) {
               rethrow;
             }
-            if (error is EmbyApiException && error.isAuthenticationFailure) {
-              rethrow;
-            }
+            if (_isTerminalTransferError(error)) rethrow;
             if (_errorCode(error) == 'checksumMismatch') {
               await _discardCorruptPayload(taskId);
               rethrow;
             }
             lastError = error;
             lastStackTrace = stackTrace;
-            final status = error is EmbyApiException ? error.statusCode : null;
+            final status = _httpStatus(error);
             final transient =
                 status == 429 || (status != null && status >= 500);
             if (!transient || retry == 2) break;
@@ -1232,7 +1345,16 @@ class DownloadService extends ChangeNotifier {
                 updatedAt: DateTime.now().toUtc(),
               ),
             );
-            await _retryDelay(Duration(seconds: 1 << retry));
+            DiagnosticLog.instance.info(
+              'download',
+              'event=download_retry task=${task.id} retry=${task.retryCount + 1} status=$status',
+            );
+            _throwIfInterrupted(taskId, token);
+            await Future.any<void>([
+              _retryDelay(Duration(seconds: 1 << retry)),
+              token.whenCancel.then<void>((_) {}),
+            ]);
+            _throwIfInterrupted(taskId, token);
           }
         }
       }
@@ -1241,7 +1363,29 @@ class DownloadService extends ChangeNotifier {
         lastStackTrace ?? StackTrace.current,
       );
     } catch (error, stackTrace) {
+      final configurationBusy = _errorCode(error) == 'configBusy';
+      if (configurationBusy) {
+        _configurationBlocked = true;
+        _configurationResumes.remove(taskId);
+      }
       if (await _finishTerminalAction(taskId)) return;
+      if (configurationBusy) {
+        final current = _tasks[taskId];
+        if (current == null) return;
+        final downloadedBytes = await _lengthIfPresent(File(current.tempPath));
+        if (await _finishTerminalAction(taskId)) return;
+        final latest = _tasks[taskId];
+        if (latest == null) return;
+        await _save(
+          latest.copyWith(
+            status: DownloadStatus.paused,
+            downloadedBytes: downloadedBytes,
+            lastErrorCode: 'configBusy',
+            updatedAt: DateTime.now().toUtc(),
+          ),
+        );
+        return;
+      }
       final requestedAction = _requestedActions[taskId];
       final networkBlockCode =
           requestedAction == _RequestedAction.waitForNetwork
@@ -1302,11 +1446,14 @@ class DownloadService extends ChangeNotifier {
           updatedAt: DateTime.now().toUtc(),
         ),
       );
+    } finally {
+      if (beginAttempted) await taskTransport!.endTask(token);
     }
   }
 
   Future<void> _transfer(String taskId, Uri uri, CancelToken token) async {
     for (var restart = 0; restart < 2; restart++) {
+      _throwIfInterrupted(taskId, token);
       var task = _tasks[taskId]!;
       final tempFile = File(task.tempPath);
       final finalFile = File(task.finalPath);
@@ -1316,6 +1463,7 @@ class DownloadService extends ChangeNotifier {
       }
       await tempFile.parent.create(recursive: true);
       var offset = await _lengthIfPresent(tempFile);
+      _throwIfInterrupted(taskId, token);
       final response = await _transport.open(
         uri,
         cancelToken: token,
@@ -1323,154 +1471,192 @@ class DownloadService extends ChangeNotifier {
         etag: task.etag,
       );
       try {
-        _throwIfInterrupted(taskId, token);
-      } on _DownloadInterrupted {
-        await response.discard();
-        rethrow;
-      }
-
-      if (response.statusCode == 416) {
-        final total = _contentRangeTotal(response.header('content-range'));
-        if (offset > 0 && total == offset) {
+        if (token.isCancelled || _requestedActions.containsKey(taskId)) {
           await response.discard();
-          await _finalize(taskId, tempFile);
-          return;
         }
-        await response.discard();
-        await _truncate(tempFile);
-        task = task.copyWith(
-          downloadedBytes: 0,
-          clearEtag: true,
-          clearExpectedBytes: true,
-          clearIntegrity: true,
-          updatedAt: DateTime.now().toUtc(),
-        );
-        await _save(task);
-        continue;
-      }
-
-      final contentType = response.header('content-type')?.toLowerCase();
-      if (contentType != null &&
-          (contentType.startsWith('text/') ||
-              contentType.contains('json') ||
-              contentType.contains('html'))) {
-        await response.discard();
-        throw const FormatException('nonMediaContentType');
-      }
-
-      final responseEtag = response.header('etag');
-      final contentRange = response.header('content-range');
-      final rangeStart = _contentRangeStart(contentRange);
-      final responseIntegrity = downloadIntegrityFromHeaders(
-        response.headers,
-        isPartialResponse: response.statusCode == 206,
-      );
-      final integrityChanged =
-          offset > 0 &&
-          task.integrity != null &&
-          responseIntegrity != null &&
-          downloadIntegrityChanged(task.integrity!, responseIntegrity);
-      final mustRestart =
-          (offset > 0 && response.statusCode == 200) ||
-          (response.statusCode == 206 && rangeStart != offset) ||
-          (offset > 0 &&
+        _throwIfInterrupted(taskId, token);
+        if (response.statusCode == 416) {
+          final total = _unsatisfiedContentRangeTotal(
+            response.header('content-range'),
+          );
+          await response.discard();
+          if (total == null) {
+            throw const FormatException('rangeResumeRejected');
+          }
+          final changed =
               task.etag != null &&
-              responseEtag != null &&
-              task.etag != responseEtag) ||
-          integrityChanged;
-      if (mustRestart) {
-        await response.discard();
-        await _truncate(tempFile);
-        task = task.copyWith(
-          downloadedBytes: 0,
-          clearEtag: true,
-          clearExpectedBytes: true,
-          integrity: responseIntegrity,
-          clearIntegrity: responseIntegrity == null,
-          updatedAt: DateTime.now().toUtc(),
-        );
-        await _save(task);
-        continue;
-      }
-
-      if (response.statusCode != 200 && response.statusCode != 206) {
-        await response.discard();
-        throw EmbyApiException(
-          '服务器返回了无法处理的下载响应',
-          statusCode: response.statusCode,
-        );
-      }
-
-      if (response.statusCode == 200) offset = 0;
-      final contentLength = int.tryParse(
-        response.header('content-length') ?? '',
-      );
-      final expected =
-          _contentRangeTotal(contentRange) ??
-          (contentLength == null ? task.expectedBytes : offset + contentLength);
-      final integrity = offset == 0
-          ? responseIntegrity ?? task.integrity
-          : switch ((task.integrity, responseIntegrity)) {
-              (final current?, final candidate?) => preferDownloadIntegrity(
-                current,
-                candidate,
-              ),
-              (final current?, null) => current,
-              (null, final candidate?) => candidate,
-              (null, null) => null,
-            };
-      task = task.copyWith(
-        status: DownloadStatus.running,
-        downloadedBytes: offset,
-        etag: responseEtag,
-        clearEtag: responseEtag == null && offset == 0,
-        expectedBytes: expected,
-        integrity: integrity,
-        clearIntegrity: integrity == null,
-        updatedAt: DateTime.now().toUtc(),
-      );
-      await _save(task);
-
-      final sink = await tempFile.open(
-        mode: offset > 0 ? FileMode.append : FileMode.writeOnly,
-      );
-      var downloaded = offset;
-      var persistedAt = DateTime.now();
-      var persistedBytes = downloaded;
-      try {
-        await for (final chunk in response.stream) {
-          _throwIfInterrupted(taskId, token);
-          await sink.writeFrom(chunk);
-          downloaded += chunk.length;
-          final current = _tasks[taskId]!;
-          _tasks[taskId] = current.copyWith(
-            downloadedBytes: downloaded,
+              response.header('etag') != null &&
+              task.etag != response.header('etag');
+          if (offset > 0 && total == offset && !changed) {
+            await _finalize(taskId, tempFile);
+            return;
+          }
+          await _truncate(tempFile);
+          task = task.copyWith(
+            downloadedBytes: 0,
+            clearEtag: true,
+            clearExpectedBytes: true,
+            clearIntegrity: true,
             updatedAt: DateTime.now().toUtc(),
           );
-          final now = DateTime.now();
-          if (now.difference(persistedAt) >=
-                  const Duration(milliseconds: 750) ||
-              downloaded - persistedBytes >= 4 * 1024 * 1024) {
-            persistedAt = now;
-            persistedBytes = downloaded;
-            await _repository.saveTask(_tasks[taskId]!);
-            _notify();
-          }
+          await _save(task);
+          continue;
         }
+        if (response.statusCode != 200 && response.statusCode != 206) {
+          await response.discard();
+          throw EmbyApiException(
+            '服务器返回了无法处理的下载响应',
+            statusCode: response.statusCode,
+          );
+        }
+
+        final contentType = response.header('content-type')?.toLowerCase();
+        final encoding = response.header('content-encoding')?.toLowerCase();
+        if (encoding != null && encoding != 'identity') {
+          await response.discard();
+          throw const FormatException('contentEncodingRejected');
+        }
+        if (contentType != null &&
+            (contentType.startsWith('text/') ||
+                contentType.contains('json') ||
+                contentType.contains('html'))) {
+          await response.discard();
+          throw const FormatException('nonMediaContentType');
+        }
+
+        final responseEtag = response.header('etag');
+        final range = response.statusCode == 206
+            ? _contentRange(response.header('content-range'))
+            : null;
+        if (response.statusCode == 206 && range == null) {
+          await response.discard();
+          throw const FormatException('rangeResumeRejected');
+        }
+        final responseIntegrity = downloadIntegrityFromHeaders(
+          response.headers,
+          isPartialResponse: response.statusCode == 206,
+        );
+        final integrityChanged =
+            offset > 0 &&
+            task.integrity != null &&
+            responseIntegrity != null &&
+            downloadIntegrityChanged(task.integrity!, responseIntegrity);
+        final mustRestart =
+            (offset > 0 && response.statusCode == 200) ||
+            (range != null && range.start != offset) ||
+            (offset > 0 &&
+                range != null &&
+                task.expectedBytes != null &&
+                range.total != task.expectedBytes) ||
+            (offset > 0 &&
+                task.etag != null &&
+                responseEtag != null &&
+                task.etag != responseEtag) ||
+            integrityChanged;
+        if (mustRestart) {
+          await response.discard();
+          await _truncate(tempFile);
+          task = task.copyWith(
+            downloadedBytes: 0,
+            clearEtag: true,
+            clearExpectedBytes: true,
+            integrity: responseIntegrity,
+            clearIntegrity: responseIntegrity == null,
+            updatedAt: DateTime.now().toUtc(),
+          );
+          await _save(task);
+          continue;
+        }
+
+        if (response.statusCode == 200) offset = 0;
+        final rawContentLength = response.header('content-length');
+        final contentLength = int.tryParse(rawContentLength ?? '');
+        final bodySpan = range == null ? null : range.end - range.start + 1;
+        if ((rawContentLength != null &&
+                (!RegExp(r'^[0-9]+$').hasMatch(rawContentLength) ||
+                    contentLength == null)) ||
+            (bodySpan != null &&
+                contentLength != null &&
+                bodySpan != contentLength)) {
+          await response.discard();
+          throw const FormatException('contentLengthMismatch');
+        }
+        final expected =
+            range?.total ??
+            (contentLength == null
+                ? task.expectedBytes
+                : offset + contentLength);
+        final integrity = offset == 0
+            ? responseIntegrity ?? task.integrity
+            : switch ((task.integrity, responseIntegrity)) {
+                (final current?, final candidate?) => preferDownloadIntegrity(
+                  current,
+                  candidate,
+                ),
+                (final current?, null) => current,
+                (null, final candidate?) => candidate,
+                (null, null) => null,
+              };
+        task = task.copyWith(
+          status: DownloadStatus.running,
+          downloadedBytes: offset,
+          etag: responseEtag,
+          clearEtag: responseEtag == null && offset == 0,
+          expectedBytes: expected,
+          integrity: integrity,
+          clearIntegrity: integrity == null,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        await _save(task);
+
+        final sink = await tempFile.open(
+          mode: offset > 0 ? FileMode.append : FileMode.writeOnly,
+        );
+        var downloaded = offset;
+        var persistedAt = DateTime.now();
+        var persistedBytes = downloaded;
+        try {
+          await for (final chunk in response.stream) {
+            _throwIfInterrupted(taskId, token);
+            if (bodySpan != null &&
+                downloaded - offset + chunk.length > bodySpan) {
+              throw const FormatException('contentLengthMismatch');
+            }
+            await sink.writeFrom(chunk);
+            downloaded += chunk.length;
+            final current = _tasks[taskId]!;
+            _tasks[taskId] = current.copyWith(
+              downloadedBytes: downloaded,
+              updatedAt: DateTime.now().toUtc(),
+            );
+            final now = DateTime.now();
+            if (now.difference(persistedAt) >=
+                    const Duration(milliseconds: 750) ||
+                downloaded - persistedBytes >= 4 * 1024 * 1024) {
+              persistedAt = now;
+              persistedBytes = downloaded;
+              await _repository.saveTask(_tasks[taskId]!);
+              _notify();
+            }
+          }
+        } finally {
+          await sink.close();
+        }
+        _throwIfInterrupted(taskId, token);
+        task = _tasks[taskId]!.copyWith(
+          downloadedBytes: downloaded,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        await _save(task);
+        if ((bodySpan != null && downloaded - offset != bodySpan) ||
+            (expected != null && downloaded != expected)) {
+          throw const FormatException('contentLengthMismatch');
+        }
+        await _finalize(taskId, tempFile);
+        return;
       } finally {
-        await sink.close();
+        await response.close();
       }
-      _throwIfInterrupted(taskId, token);
-      task = _tasks[taskId]!.copyWith(
-        downloadedBytes: downloaded,
-        updatedAt: DateTime.now().toUtc(),
-      );
-      await _save(task);
-      if (expected != null && expected > 0 && downloaded != expected) {
-        throw const FormatException('contentLengthMismatch');
-      }
-      await _finalize(taskId, tempFile);
-      return;
     }
     throw const FormatException('rangeResumeRejected');
   }
@@ -1591,10 +1777,19 @@ class DownloadService extends ChangeNotifier {
     DownloadTaskRecord task,
     File file,
     String errorCode,
-  ) => _invalidations.putIfAbsent(
-    task.id,
-    () => _runCompletedFileInvalidation(task, file, errorCode),
-  );
+  ) {
+    final current = _invalidations[task.id];
+    if (current != null) return current;
+    late final Future<DownloadTaskRecord> operation;
+    operation = _runCompletedFileInvalidation(task, file, errorCode)
+        .whenComplete(() {
+          if (identical(_invalidations[task.id], operation)) {
+            _invalidations.remove(task.id);
+          }
+        });
+    _invalidations[task.id] = operation;
+    return operation;
+  }
 
   Future<DownloadTaskRecord> _runCompletedFileInvalidation(
     DownloadTaskRecord task,
@@ -1615,7 +1810,6 @@ class DownloadService extends ChangeNotifier {
       await operation;
       return result;
     } finally {
-      _invalidations.remove(task.id);
       if (ownsOperation && identical(_operations[task.id], operation)) {
         _operations.remove(task.id);
         _requestedActions.remove(task.id);
@@ -1748,6 +1942,15 @@ class DownloadService extends ChangeNotifier {
     }
     await _repository.removeDownload(task);
     _tasks.remove(task.id);
+    _configurationResumes.remove(task.id);
+    if (_configurationBlocked &&
+        !_tasks.values.any(
+          (remaining) =>
+              remaining.lastErrorCode == 'configBusy' ||
+              remaining.lastErrorCode == 'subtitleRepair:configBusy',
+        )) {
+      _releaseConfigurationBlock();
+    }
     _notify();
     _syncStorageRecheckTimer();
   }
@@ -1846,7 +2049,32 @@ String? _storageBlockCode(Object error) {
   return null;
 }
 
+int? _httpStatus(Object error) => switch (error) {
+  EmbyApiException() => error.statusCode,
+  DioException() => error.response?.statusCode,
+  _ => null,
+};
+
+bool _isTerminalTransferError(Object error) {
+  if (error is FileSystemException ||
+      error is TlsException ||
+      error is DownloadConnectionException) {
+    return true;
+  }
+  final status = _httpStatus(error);
+  if (status == 401 || status == 403) return true;
+  if (error is DioException) {
+    if (error.type == DioExceptionType.badCertificate) return true;
+    final cause = error.error;
+    if (cause != null && !identical(cause, error)) {
+      return _isTerminalTransferError(cause);
+    }
+  }
+  return false;
+}
+
 bool _isTransportNetworkError(Object error) {
+  if (_isTerminalTransferError(error)) return false;
   if (error is SocketException || error is HttpException) return true;
   if (error is! DioException) return false;
   return switch (error.type) {
@@ -1901,15 +2129,28 @@ String _containerExtension(String? rawContainer) {
   };
 }
 
-int? _contentRangeStart(String? value) {
+({int start, int end, int total})? _contentRange(String? value) {
   if (value == null) return null;
-  final match = RegExp(r'^bytes\s+(\d+)-\d+/\d+$').firstMatch(value.trim());
-  return int.tryParse(match?.group(1) ?? '');
+  final match = RegExp(
+    r'^bytes ([0-9]+)-([0-9]+)/([0-9]+)$',
+  ).firstMatch(value.trim());
+  if (match == null) return null;
+  final start = int.tryParse(match.group(1)!);
+  final end = int.tryParse(match.group(2)!);
+  final total = int.tryParse(match.group(3)!);
+  if (start == null ||
+      end == null ||
+      total == null ||
+      end < start ||
+      end >= total) {
+    return null;
+  }
+  return (start: start, end: end, total: total);
 }
 
-int? _contentRangeTotal(String? value) {
+int? _unsatisfiedContentRangeTotal(String? value) {
   if (value == null) return null;
-  final match = RegExp(r'/(\d+)$').firstMatch(value.trim());
+  final match = RegExp(r'^bytes \*/([0-9]+)$').firstMatch(value.trim());
   return int.tryParse(match?.group(1) ?? '');
 }
 
@@ -1944,12 +2185,24 @@ Future<void> _validateMediaFile(
 
 String _errorCode(Object error) {
   if (error is DownloadPreflightException) return error.code;
-  if (error is EmbyApiException) {
-    final status = error.statusCode;
-    if (status == 401 || status == 403) return 'authenticationRequired';
-    if (status == 404) return 'sourceNotFound';
-    if (status == 429) return 'rateLimited';
-    if (status != null && status >= 500) return 'serverError';
+  if (error is DownloadConnectionException) return error.code;
+  if (error is TlsException ||
+      (error is DioException &&
+          error.type == DioExceptionType.badCertificate)) {
+    return 'tlsError';
+  }
+  final status = _httpStatus(error);
+  if (status == 401 || status == 403) return 'authenticationRequired';
+  if (status == 404) return 'sourceNotFound';
+  if (status == 429) return 'rateLimited';
+  if (status != null && status >= 500) return 'serverError';
+  if (error is DioException) {
+    final cause = error.error;
+    if (cause != null &&
+        !identical(cause, error) &&
+        _isTerminalTransferError(cause)) {
+      return _errorCode(cause);
+    }
   }
   if (error is FileSystemException) return 'storageError';
   if (error is FormatException) return error.message;

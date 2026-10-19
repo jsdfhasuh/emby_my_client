@@ -5,10 +5,104 @@ import 'package:emby_my_client/playback/cache/playback_cache_engine.dart';
 import 'package:emby_my_client/playback/playback_engine.dart';
 import 'package:emby_my_client/playback/playback_operation_coordinator.dart';
 import 'package:emby_my_client/playback/playback_output_quiescer.dart';
+import 'package:emby_my_client/downloads/download_connection.dart';
+import 'package:emby_my_client/playback/source_http_input.dart';
+import 'source_http_input_test.dart' show fixtureRequest;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
 void main() {
+  test(
+    'newer source preparation wins while a shared gate is pending',
+    () async {
+      final connections = _PendingPlaybackConnection();
+      final engine = MediaKitPlaybackEngine(
+        Player(platformPlayer: _FakePlatformPlayer()),
+        outputQuiescer: _FakePlaybackOutputQuiescer(),
+        downloadConnections: connections,
+      );
+      addTearDown(engine.dispose);
+      final first = engine.prepareSource(
+        fixtureRequest('https://cdn.example.test/first.avi'),
+      );
+      final older = expectLater(
+        first,
+        throwsA(
+          isA<SourceInputException>().having(
+            (error) => error.reason,
+            'older request',
+            'cancelled',
+          ),
+        ),
+      );
+      await connections.started.future;
+      final second = engine.prepareSource(
+        fixtureRequest('https://cdn.example.test/second.avi'),
+      );
+      final newer = expectLater(
+        second,
+        throwsA(
+          isA<SourceInputException>().having(
+            (error) => error.code,
+            'newer reaches backend',
+            'native_unavailable',
+          ),
+        ),
+      );
+      connections.gate.complete(
+        DownloadRouteLease(
+          mode: DownloadConnectionMode.direct,
+          release: () async {
+            connections.releases++;
+          },
+        ),
+      );
+      await Future.wait([older, newer]);
+      await engine.dispose();
+      expect(connections.releases, 1);
+    },
+  );
+
+  test(
+    'stop invalidates source preparation while its configuration gate is pending',
+    () async {
+      final platform = _FakePlatformPlayer();
+      final connections = _PendingPlaybackConnection();
+      final engine = MediaKitPlaybackEngine(
+        Player(platformPlayer: platform),
+        outputQuiescer: _FakePlaybackOutputQuiescer(),
+        downloadConnections: connections,
+      );
+      addTearDown(engine.dispose);
+      final preparation = engine.prepareSource(
+        fixtureRequest('https://cdn.example.test/media.avi'),
+      );
+      final observed = expectLater(
+        preparation,
+        throwsA(
+          isA<SourceInputException>().having(
+            (error) => error.reason,
+            'cancelled',
+            'cancelled',
+          ),
+        ),
+      );
+      await connections.started.future;
+      final stopping = engine.stop();
+      connections.gate.complete(
+        DownloadRouteLease(
+          mode: DownloadConnectionMode.direct,
+          release: () async {
+            connections.releases++;
+          },
+        ),
+      );
+      await observed;
+      await stopping;
+      expect(connections.releases, 1);
+    },
+  );
+
   test(
     'retained probe release waits for true disposal and runs once',
     () async {
@@ -410,9 +504,26 @@ MediaKitPlaybackEngine _createEngine(
   nativeOperationTimeouts: nativeOperationTimeouts,
 );
 
+class _PendingPlaybackConnection extends DownloadConnectionManager {
+  _PendingPlaybackConnection() : super(supportedOverride: true);
+  final started = Completer<void>();
+  final gate = Completer<DownloadRouteLease?>();
+  int releases = 0;
+  @override
+  Future<DownloadRouteLease?> acquirePlayback() {
+    started.complete();
+    return gate.future;
+  }
+}
+
 class _FakePlatformPlayer extends PlatformPlayer {
   _FakePlatformPlayer({this.emitPlayingWhenOpenCompletes = false})
     : super(configuration: const PlayerConfiguration());
+
+  @override
+  Future<void> stop() async {
+    events.add('stop');
+  }
 
   final bool emitPlayingWhenOpenCompletes;
   Completer<void>? openGate;

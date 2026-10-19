@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../core/diagnostic_log.dart';
 import '../models/emby_models.dart';
+import '../downloads/download_connection.dart';
+import 'downloads/download_connection_screen.dart';
 import '../playback/cache/playback_cache_settings.dart';
 import '../playback/cache/playback_cache_storage.dart';
 import '../playback/playback_settings.dart';
@@ -175,6 +177,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
           padding: const EdgeInsets.symmetric(vertical: 12),
           children: [
             AppUpdateEntry(enabled: !_deletingAccountData),
+            if (DownloadConnectionManager.instance.supported)
+              ListTile(
+                key: const ValueKey('download-connection-entry'),
+                leading: const Icon(Icons.route_outlined),
+                title: const Text('离线下载连接'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: _deletingAccountData
+                    ? null
+                    : () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) =>
+                              DownloadConnectionScreen(session: widget.session),
+                        ),
+                      ),
+              ),
             const Divider(),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),

@@ -5,6 +5,7 @@ import 'package:path/path.dart' as path;
 import '../core/server_scope.dart';
 import '../downloads/download_path_policy.dart';
 import '../downloads/download_settings.dart';
+import '../downloads/download_connection.dart';
 import '../models/emby_models.dart';
 import '../playback/playback_settings_repository.dart';
 import '../playback/subtitle_preferences_repository.dart';
@@ -25,8 +26,11 @@ class AccountDataCleanup {
     PlaybackSettingsRepository? playbackSettingsRepository,
     SubtitlePreferencesRepository? subtitlePreferencesRepository,
     Future<void> Function(ServerScope)? clearImages,
+    Future<void> Function(ServerScope)? clearDownloadConnection,
   }) : _database = database,
        _clearImages = clearImages ?? embyImageCacheManager.clearScope,
+       _clearDownloadConnection =
+           clearDownloadConnection ?? _deleteDownloadConnection,
        _directoryResolver = directoryResolver ?? defaultDownloadDirectory,
        _downloadSettingsStore =
            downloadSettingsStore ?? SharedPreferencesDownloadSettingsStore(),
@@ -46,6 +50,7 @@ class AccountDataCleanup {
 
   final LocalDatabase _database;
   final Future<void> Function(ServerScope) _clearImages;
+  final Future<void> Function(ServerScope) _clearDownloadConnection;
   final Future<Directory> Function(ServerScope scope) _directoryResolver;
   final DownloadSettingsStore _downloadSettingsStore;
   final LibraryCategorySettingsStore _libraryCategorySettingsStore;
@@ -80,6 +85,11 @@ class AccountDataCleanup {
           !await parentPolicy.resolvesWithinRoot(directory)) {
         throw StateError('Refusing to delete an unsafe account directory');
       }
+    }
+
+    // Fail before deleting files if playback or a download still owns the route.
+    await _clearDownloadConnection(scope);
+    if (entityType != FileSystemEntityType.notFound) {
       await directory.delete(recursive: true);
     }
 
@@ -94,4 +104,9 @@ class AccountDataCleanup {
       _subtitlePreferencesRepository.deleteAccountPreferences(session),
     ]);
   }
+}
+
+Future<void> _deleteDownloadConnection(ServerScope scope) async {
+  final manager = DownloadConnectionManager.instance;
+  if (manager.supported) await manager.delete(scope);
 }

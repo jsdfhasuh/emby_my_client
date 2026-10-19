@@ -918,6 +918,113 @@ void main() {
     expect(failed.lastErrorCode, 'authenticationRequired');
   });
 
+  test('still falls back to another endpoint after a socket failure', () async {
+    final transport = _FakeTransport(
+      uriCount: 2,
+      handler: (call) async {
+        if (call.index == 0) {
+          throw const SocketException('fixture disconnected');
+        }
+        return _response(_mediaBytes);
+      },
+    );
+    final harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    await _waitForTask(harness.service, (t) => t.isComplete);
+
+    expect(transport.calls, hasLength(2));
+    expect(transport.calls.map((call) => call.uri.path), [
+      '/${_item.id}/0',
+      '/${_item.id}/1',
+    ]);
+  });
+
+  for (final (label, error, code) in <(String, Object, String)>[
+    ('filesystem', const FileSystemException('fixture denied'), 'storageError'),
+    ('handshake', const HandshakeException('fixture TLS'), 'tlsError'),
+    ('TLS', const TlsException('fixture TLS'), 'tlsError'),
+    (
+      'certificate',
+      DioException(
+        requestOptions: RequestOptions(path: '/download'),
+        type: DioExceptionType.badCertificate,
+      ),
+      'tlsError',
+    ),
+    (
+      'wrapped TLS',
+      DioException(
+        requestOptions: RequestOptions(path: '/download'),
+        type: DioExceptionType.connectionError,
+        error: const HandshakeException('fixture TLS'),
+      ),
+      'tlsError',
+    ),
+    (
+      'wrapped filesystem',
+      DioException(
+        requestOptions: RequestOptions(path: '/download'),
+        error: const FileSystemException('fixture denied'),
+      ),
+      'storageError',
+    ),
+    for (final status in [401, 403])
+      (
+        'Dio HTTP $status',
+        DioException(
+          requestOptions: RequestOptions(path: '/download'),
+          type: DioExceptionType.badResponse,
+          response: Response<void>(
+            requestOptions: RequestOptions(path: '/download'),
+            statusCode: status,
+          ),
+        ),
+        'authenticationRequired',
+      ),
+    for (final code in ['tunnelUnavailable', 'configurationUnavailable'])
+      (code, DownloadConnectionException(code), code),
+  ]) {
+    test('does not fall back after $label errors', () async {
+      final transport = _FakeTransport(
+        uriCount: 4,
+        handler: (_) async => throw error,
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final failed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.failed,
+      );
+
+      expect(transport.calls, hasLength(1));
+      expect(failed.retryCount, 0);
+      expect(failed.lastErrorCode, code);
+    });
+  }
+
+  test('authentication response status wins over a JSON error body', () async {
+    final transport = _FakeTransport(
+      uriCount: 4,
+      handler: (_) async => _response(
+        const [],
+        statusCode: 401,
+        headers: {'content-type': 'application/json'},
+      ),
+    );
+    final harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    final failed = await _waitForTask(
+      harness.service,
+      (task) => task.status == DownloadStatus.failed,
+    );
+
+    expect(transport.calls, hasLength(1));
+    expect(failed.lastErrorCode, 'authenticationRequired');
+  });
+
   test('retries HTTP 429 with bounded exponential delays', () async {
     final delays = <Duration>[];
     final transport = _FakeTransport(
@@ -988,6 +1095,51 @@ void main() {
     expect(transport.calls, hasLength(3));
     expect(failed.lastErrorCode, 'rateLimited');
   });
+
+  for (final action in ['pause', 'delete', 'shutdown']) {
+    test('$action interrupts a pending retry delay', () async {
+      final delayEntered = Completer<void>();
+      final releaseDelay = Completer<void>();
+      final transport = _FakeTransport(
+        uriCount: 4,
+        handler: (_) async {
+          throw const EmbyApiException('fixture unavailable', statusCode: 503);
+        },
+      );
+      final harness = await _Harness.create(
+        transport,
+        retryDelay: (_) {
+          delayEntered.complete();
+          return releaseDelay.future;
+        },
+      );
+      addTearDown(harness.dispose);
+      addTearDown(() {
+        if (!releaseDelay.isCompleted) releaseDelay.complete();
+      });
+      final task = await harness.service.enqueue(_item);
+      await delayEntered.future;
+      final stopping = switch (action) {
+        'pause' => harness.service.pause(task.id),
+        'delete' => harness.service.delete(task.id),
+        _ => harness.service.shutdown(),
+      };
+      await stopping.timeout(const Duration(seconds: 1));
+      await _waitUntil(() => !harness.service.hasActiveWork);
+
+      expect(releaseDelay.isCompleted, isFalse);
+      expect(transport.calls, hasLength(1));
+      if (action == 'delete') {
+        expect(harness.service.tasks, isEmpty);
+      } else {
+        expect(harness.service.tasks.single.status, DownloadStatus.paused);
+        expect(harness.service.tasks.single.retryCount, 1);
+      }
+      // The losing delay can still fail later without becoming unhandled.
+      releaseDelay.completeError(StateError('fixture late delay failure'));
+      await Future<void>.delayed(Duration.zero);
+    });
+  }
 
   test('restarts from zero when the ETag changes during resume', () async {
     var discardedChangedResponse = false;
@@ -1077,6 +1229,209 @@ void main() {
     expect(await File(failed.finalPath).exists(), isFalse);
   });
 
+  for (final contentRange in <String?>[
+    null,
+    'bytes 4-3/12',
+    'bytes 4-12/12',
+    'bytes 4-13/12',
+    'bytes 4-11/0',
+    'bytes 4-11/*',
+    'bytes 4-999999999999999999999999/12',
+    'garbage 4-11/12',
+    'bytes 4-11/12 trailing',
+  ]) {
+    test('rejects invalid HTTP 206 Content-Range: $contentRange', () async {
+      final transport = _FakeTransport(
+        handler: (_) async => _response(
+          _mediaBytes.sublist(4),
+          statusCode: 206,
+          headers: {'content-range': ?contentRange},
+        ),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+      await harness.service.resume(task.id);
+      final failed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.failed,
+      );
+
+      expect(failed.lastErrorCode, 'rangeResumeRejected');
+      expect(failed.downloadedBytes, 4);
+      expect(transport.calls, hasLength(1));
+      expect(
+        await File(task.tempPath).readAsBytes(),
+        _mediaBytes.sublist(0, 4),
+      );
+      expect(await File(task.finalPath).exists(), isFalse);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+    });
+  }
+
+  for (final withContentLength in [false, true]) {
+    test(
+      'rejects a body exceeding its declared range end: length=$withContentLength',
+      () async {
+        final transport = _FakeTransport(
+          handler: (_) async => _response(
+            _mediaBytes.sublist(4),
+            statusCode: 206,
+            headers: {
+              'content-range': 'bytes 4-10/12',
+              if (withContentLength) 'content-length': '8',
+            },
+          ),
+        );
+        final harness = await _Harness.create(transport, initialize: false);
+        addTearDown(harness.dispose);
+        final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+        await harness.service.resume(task.id);
+        final failed = await _waitForTask(
+          harness.service,
+          (task) => task.status == DownloadStatus.failed,
+        );
+
+        expect(failed.lastErrorCode, 'contentLengthMismatch');
+        expect(failed.downloadedBytes, 4);
+        expect(await File(task.tempPath).length(), 4);
+        expect(await File(task.finalPath).exists(), isFalse);
+        expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+      },
+    );
+  }
+
+  test('rejects a body shorter than its declared range span', () async {
+    final transport = _FakeTransport(
+      handler: (_) async => _response(
+        _mediaBytes.sublist(4, 11),
+        statusCode: 206,
+        headers: {'content-range': 'bytes 4-11/12'},
+      ),
+    );
+    final harness = await _Harness.create(transport, initialize: false);
+    addTearDown(harness.dispose);
+    final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+    await harness.service.resume(task.id);
+    final failed = await _waitForTask(
+      harness.service,
+      (task) => task.status == DownloadStatus.failed,
+    );
+
+    expect(failed.lastErrorCode, 'contentLengthMismatch');
+    expect(failed.downloadedBytes, 11);
+    expect(await File(task.tempPath).readAsBytes(), _mediaBytes.sublist(0, 11));
+    expect(await File(task.finalPath).exists(), isFalse);
+  });
+
+  test('accepts a complete HTTP 206 range starting at zero', () async {
+    final transport = _FakeTransport(
+      handler: (_) async => _response(
+        _mediaBytes,
+        statusCode: 206,
+        headers: {'content-range': 'bytes 0-11/12', 'content-length': '12'},
+      ),
+    );
+    final harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    final completed = await _waitForTask(harness.service, (t) => t.isComplete);
+
+    expect(await File(completed.finalPath).readAsBytes(), _mediaBytes);
+  });
+
+  test(
+    'restarts once when a valid HTTP 206 range starts at the wrong offset',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => _response(
+          _mediaBytes.sublist(call.index == 0 ? 3 : 0),
+          statusCode: 206,
+          headers: {'content-range': 'bytes ${call.index == 0 ? 3 : 0}-11/12'},
+        ),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+      await harness.service.resume(task.id);
+      final completed = await _waitForTask(
+        harness.service,
+        (t) => t.isComplete,
+      );
+
+      expect(transport.calls.map((call) => call.offset), [4, 0]);
+      expect(await File(completed.finalPath).readAsBytes(), _mediaBytes);
+    },
+  );
+
+  test(
+    'HTTP 200 resume clears stale metadata and ignores Content-Range',
+    () async {
+      final replacement = _otherMediaBytes.sublist(0, 8);
+      final transport = _FakeTransport(
+        handler: (_) async => _response(
+          replacement,
+          headers: {'content-range': 'bytes 0-998/999'},
+        ),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(
+        harness,
+        _mediaBytes.sublist(0, 4),
+        integrity: DownloadIntegrity.fromStored(
+          'sha-256',
+          _digest(sha256, _mediaBytes),
+        ),
+      );
+      await harness.service.resume(task.id);
+      final completed = await _waitForTask(
+        harness.service,
+        (t) => t.isComplete,
+      );
+
+      expect(transport.calls.map((call) => call.offset), [4, 0]);
+      expect(transport.calls.last.etag, isNull);
+      expect(completed.integrity, isNull);
+      expect(completed.etag, isNull);
+      expect(completed.expectedBytes, replacement.length);
+      expect(await File(task.finalPath).readAsBytes(), replacement);
+    },
+  );
+
+  for (final contentRange in <String?>[
+    null,
+    'garbage/12',
+    'bytes 0-11/12',
+    'bytes*/12',
+    'bytes */12 trailing',
+    'bytes */-12',
+  ]) {
+    test('rejects malformed HTTP 416 Content-Range: $contentRange', () async {
+      final transport = _FakeTransport(
+        handler: (_) async => _response(
+          const [],
+          statusCode: 416,
+          headers: {'content-range': ?contentRange},
+        ),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(harness, _mediaBytes);
+      await harness.service.resume(task.id);
+      final failed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.failed,
+      );
+
+      expect(failed.lastErrorCode, 'rangeResumeRejected');
+      expect(transport.calls, hasLength(1));
+      expect(await File(task.tempPath).readAsBytes(), _mediaBytes);
+      expect(await File(task.finalPath).exists(), isFalse);
+      expect(await harness.repository.listOfflineItems(_scope), isEmpty);
+    });
+  }
+
   test('finalizes a complete part file after HTTP 416', () async {
     var discardedResponse = false;
     final transport = _FakeTransport(
@@ -1120,6 +1475,33 @@ void main() {
     expect(await File(completed.finalPath).readAsBytes(), _mediaBytes);
     expect(await File(completed.tempPath).exists(), isFalse);
   });
+
+  test(
+    'HTTP 416 with a changed ETag restarts rather than accepting old bytes',
+    () async {
+      final transport = _FakeTransport(
+        handler: (call) async => call.index == 0
+            ? DownloadResponse(
+                statusCode: 416,
+                headers: {
+                  'content-range': 'bytes */${_mediaBytes.length}',
+                  'etag': '"media-v2"',
+                },
+                stream: const Stream.empty(),
+              )
+            : _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(harness, _mediaBytes);
+      await harness.service.resume(task.id);
+      await _waitForTask(harness.service, (candidate) => candidate.isComplete);
+      expect(transport.calls.map((call) => call.offset), [
+        _mediaBytes.length,
+        0,
+      ]);
+    },
+  );
 
   test('discards a non-media response before reporting failure', () async {
     var discardedResponse = false;
@@ -1168,8 +1550,254 @@ void main() {
     expect(harness.service.tasks, hasLength(1));
   });
 
-  test('reports a non-space file write failure without waiting', () async {
+  test('concurrent enqueues merge by item with concurrency two', () async {
+    late _GatedEnqueueRepository repository;
     final transport = _FakeTransport(
+      handler: (_) async => _response(_mediaBytes),
+    );
+    final harness = await _Harness.create(
+      transport,
+      maxConcurrentDownloads: 2,
+      repositoryFactory: (database) =>
+          repository = _GatedEnqueueRepository(database),
+    );
+    addTearDown(harness.dispose);
+    addTearDown(repository.unblock);
+    final item = _downloadItem(
+      _item.id,
+      sources: [
+        ..._item.mediaSources,
+        const PlaybackMediaSource(
+          id: 'source-2',
+          supportsDirectPlay: true,
+          supportsDirectStream: true,
+          supportsTranscoding: false,
+          mediaStreams: [],
+          transcodingReasons: [],
+          container: 'mkv',
+          size: 12,
+        ),
+      ],
+    );
+
+    final first = harness.service.enqueue(item);
+    await repository.entered.future;
+    final second = harness.service.enqueue(item, mediaSourceId: 'source-2');
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.queuedWrites, 1);
+    repository.unblock();
+    final enqueued = await Future.wait([first, second]);
+    final completed = await _waitForTask(harness.service, (t) => t.isComplete);
+    await _waitUntil(() => !harness.service.hasActiveWork);
+
+    final expectedId = sha256
+        .convert(
+          utf8.encode('${_scope.databaseKey}\u0000${item.id}\u0000source-1'),
+        )
+        .toString();
+    expect(enqueued.map((task) => task.id), [expectedId, expectedId]);
+    expect(completed.id, expectedId);
+    expect(completed.mediaSourceId, 'source-1');
+    expect(repository.queuedWrites, 1);
+    expect(transport.calls, hasLength(1));
+    expect(harness.service.tasks, hasLength(1));
+    expect(await harness.repository.listTasks(_scope), hasLength(1));
+    expect(await harness.repository.listOfflineItems(_scope), hasLength(1));
+    expect(await File(completed.finalPath).readAsBytes(), _mediaBytes);
+  });
+
+  test('queue excludes a queued ID that already has an operation', () async {
+    late _GatedRunningRepository repository;
+    final transport = _FakeTransport(
+      handler: (_) async => _response(_mediaBytes),
+    );
+    final harness = await _Harness.create(
+      transport,
+      maxConcurrentDownloads: 2,
+      repositoryFactory: (database) =>
+          repository = _GatedRunningRepository(database),
+    );
+    addTearDown(harness.dispose);
+    addTearDown(repository.unblock);
+    await harness.service.enqueue(_item);
+    await repository.entered.future;
+
+    // The running write is gated, so refresh still reads the queued checkpoint.
+    await harness.service.refresh();
+    expect(repository.runningWrites, 1);
+    repository.unblock();
+    final completed = await _waitForTask(harness.service, (t) => t.isComplete);
+    await _waitUntil(() => !harness.service.hasActiveWork);
+
+    expect(transport.calls, hasLength(1));
+    expect(await File(completed.finalPath).readAsBytes(), _mediaBytes);
+  });
+
+  test(
+    'shutdown drains an enqueue write without resurrecting a task',
+    () async {
+      late _GatedEnqueueRepository repository;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final executor = _FakeExecutor(running: false);
+      final harness = await _Harness.create(
+        transport,
+        executor: executor,
+        repositoryFactory: (database) =>
+            repository = _GatedEnqueueRepository(database),
+      );
+      addTearDown(harness.dispose);
+      addTearDown(repository.unblock);
+      final enqueue = harness.service.enqueue(_item);
+      final rejected = expectLater(enqueue, throwsStateError);
+      await repository.entered.future;
+      var stopped = false;
+      final stopping = harness.service.shutdown().then((_) => stopped = true);
+      var stoppedAgain = false;
+      final stoppingAgain = harness.service.shutdown().then((_) {
+        stoppedAgain = true;
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(stopped, isFalse);
+      expect(stoppedAgain, isFalse);
+      repository.unblock();
+      await Future.wait([rejected, stopping, stoppingAgain]);
+
+      expect(harness.service.tasks, isEmpty);
+      expect(harness.service.hasActiveWork, isFalse);
+      expect(await repository.listTasks(_scope), isEmpty);
+      expect(await repository.listOfflineItems(_scope), isEmpty);
+      expect(executor.starts, 0);
+      expect(transport.calls, isEmpty);
+    },
+  );
+
+  test('a failed in-flight enqueue does not block a later enqueue', () async {
+    final preflight = _FakePreflight(
+      storageError: const DownloadPreflightException(
+        code: 'insufficientStorage',
+        message: 'fixture full',
+      ),
+    );
+    final transport = _FakeTransport(
+      handler: (_) async => _response(_mediaBytes),
+    );
+    final harness = await _Harness.create(transport, preflight: preflight);
+    addTearDown(harness.dispose);
+    await expectLater(
+      Future.wait([
+        harness.service.enqueue(_item),
+        harness.service.enqueue(_item),
+      ]),
+      throwsA(isA<DownloadPreflightException>()),
+    );
+    preflight.storageError = null;
+    await harness.service.enqueue(_item);
+    await _waitForTask(harness.service, (t) => t.isComplete);
+    expect(transport.calls, hasLength(1));
+  });
+
+  test(
+    'shutdown drains an enqueue that is resuming an existing task',
+    () async {
+      late _GatedEnqueueRepository repository;
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(
+        transport,
+        initialize: false,
+        repositoryFactory: (database) =>
+            repository = _GatedEnqueueRepository(database),
+      );
+      addTearDown(harness.dispose);
+      addTearDown(repository.unblock);
+      final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+      final rejected = expectLater(
+        harness.service.enqueue(_item),
+        throwsStateError,
+      );
+      await repository.entered.future;
+      final stopping = harness.service.shutdown();
+      repository.unblock();
+      await Future.wait([rejected, stopping]);
+
+      final retained = (await repository.listTasks(_scope)).single;
+      expect(retained.status, DownloadStatus.paused);
+      expect(retained.downloadedBytes, 4);
+      expect(retained.lastErrorCode, 'processInterrupted');
+      expect(await File(task.tempPath).length(), 4);
+      expect(transport.calls, isEmpty);
+    },
+  );
+
+  test(
+    'shutdown waits for enqueue preflight without persisting a task',
+    () async {
+      final preflight = _GatedStoragePreflight();
+      final transport = _FakeTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, preflight: preflight);
+      addTearDown(harness.dispose);
+      addTearDown(preflight.unblock);
+      final rejected = expectLater(
+        harness.service.enqueue(_item),
+        throwsStateError,
+      );
+      await preflight.entered.future;
+      var stopped = false;
+      final stopping = harness.service.shutdown().then((_) => stopped = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(stopped, isFalse);
+      preflight.unblock();
+      await Future.wait([rejected, stopping]);
+
+      expect(harness.service.tasks, isEmpty);
+      expect(await harness.repository.listTasks(_scope), isEmpty);
+      expect(transport.calls, isEmpty);
+    },
+  );
+
+  testWidgets('completed shutdown can be awaited from another async zone', (
+    tester,
+  ) async {
+    late _Harness harness;
+    await tester.runAsync(() async {
+      harness = await _Harness.create(
+        _FakeTransport(handler: (_) async => _response(_mediaBytes)),
+      );
+    });
+    addTearDown(() async {
+      await tester.runAsync(() async {
+        harness.service.dispose();
+        await harness.api.dispose();
+        await harness.database.close();
+        await harness.directory.delete(recursive: true);
+      });
+    });
+    var stopped = false;
+    final stopping = harness.service.shutdown().then((_) => stopped = true);
+    for (var attempt = 0; attempt < 100 && !stopped; attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+      );
+      await tester.pump();
+    }
+    expect(stopped, isTrue);
+    await stopping;
+
+    await tester.runAsync(
+      () => harness.service.shutdown().timeout(const Duration(seconds: 1)),
+    );
+    expect(harness.service.hasActiveWork, isFalse);
+  });
+
+  test('reports a non-space file write failure without waiting', () async {
+    var closed = false;
+    final transport = _FakeTransport(
+      uriCount: 4,
       handler: (call) async => DownloadResponse(
         statusCode: 200,
         headers: {
@@ -1177,6 +1805,7 @@ void main() {
           'content-type': 'video/x-matroska',
         },
         stream: _fileWriteFailureAfter(_mediaBytes.sublist(0, 4)),
+        onClose: () async => closed = true,
       ),
     );
     final harness = await _Harness.create(transport);
@@ -1193,6 +1822,61 @@ void main() {
     expect(failed.downloadedBytes, 4);
     expect(await File(failed.tempPath).length(), 4);
     expect(await File(failed.finalPath).exists(), isFalse);
+    expect(transport.calls, hasLength(1));
+    expect(closed, isTrue);
+  });
+
+  test('closes the response when opening the output sink fails', () async {
+    var closed = false;
+    var listened = false;
+    late _Harness harness;
+    final transport = _FakeTransport(
+      uriCount: 4,
+      handler: (_) async {
+        await Directory(harness.service.tasks.single.tempPath).create();
+        return DownloadResponse(
+          statusCode: 200,
+          headers: {'content-length': '${_mediaBytes.length}'},
+          stream: Stream<List<int>>.multi((controller) {
+            listened = true;
+            controller.close();
+          }),
+          onClose: () async => closed = true,
+        );
+      },
+    );
+    harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    final failed = await _waitForTask(
+      harness.service,
+      (task) => task.status == DownloadStatus.failed,
+    );
+    await _waitUntil(() => !harness.service.hasActiveWork);
+
+    expect(failed.lastErrorCode, 'storageError');
+    expect(listened, isFalse);
+    expect(closed, isTrue);
+    expect(transport.calls, hasLength(1));
+  });
+
+  test('closes the response after its body has been consumed', () async {
+    var closes = 0;
+    final transport = _FakeTransport(
+      handler: (_) async => DownloadResponse(
+        statusCode: 200,
+        headers: {'content-length': '${_mediaBytes.length}'},
+        stream: Stream.value(_mediaBytes),
+        onClose: () async => closes++,
+      ),
+    );
+    final harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    await harness.service.enqueue(_item);
+    await _waitForTask(harness.service, (t) => t.isComplete);
+    await _waitUntil(() => !harness.service.hasActiveWork);
+
+    expect(closes, 1);
   });
 
   test('restores an interrupted running task as paused', () async {
@@ -2410,6 +3094,288 @@ void main() {
     ]);
     expect((await settingsStore.load(_scope)).wifiOnly, isFalse);
   });
+
+  test('task lease covers the media transfer and its assets', () async {
+    final assets = _GatedAssets();
+    late _TaskTransport transport;
+    transport = _TaskTransport(
+      handler: (call) async {
+        expect(transport.activeTokens, contains(call.cancelToken));
+        return _response(_mediaBytes);
+      },
+    );
+    final harness = await _Harness.create(transport, assetService: assets);
+    addTearDown(harness.dispose);
+    addTearDown(assets.unblock);
+    final task = await harness.service.enqueue(_item);
+    await assets.entered.future;
+
+    expect(transport.begun.single.$1, task.id);
+    expect(assets.token, same(transport.begun.single.$2));
+    expect(assets.token, same(transport.calls.single.cancelToken));
+    expect(transport.activeTokens, contains(assets.token));
+    expect(transport.ended, isEmpty);
+    assets.unblock();
+    await _waitForTask(harness.service, (t) => t.isComplete);
+    await _waitUntil(() => !harness.service.hasActiveWork);
+
+    expect(transport.ended, [assets.token]);
+    expect(transport.activeTokens, isEmpty);
+  });
+
+  test(
+    'subtitle repair retains its lease and token until cancellation',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final transport = _TaskTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      assets.waitForCancel = true;
+      final repair = harness.service.repairSubtitles(task.id);
+      await assets.started.future;
+      final repairToken = transport.begun.last.$2;
+
+      expect(transport.begun, hasLength(2));
+      expect(transport.begun.last.$1, task.id);
+      expect(assets.lastCancelToken, same(repairToken));
+      expect(transport.activeTokens, contains(repairToken));
+      expect(transport.ended, hasLength(1));
+      await harness.service.cancelSubtitleRepair(task.id);
+      await repair;
+
+      expect(repairToken.isCancelled, isTrue);
+      expect(transport.ended.last, same(repairToken));
+      expect(transport.activeTokens, isEmpty);
+      expect(harness.service.tasks.single.isComplete, isTrue);
+      expect(transport.calls, hasLength(1));
+      expect(await File(task.finalPath).readAsBytes(), _mediaBytes);
+    },
+  );
+
+  test(
+    'repair configBusy preserves completed media and can be retried manually',
+    () async {
+      final assets = _RepairAssets()..succeed = true;
+      final transport = _TaskTransport(
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, assetService: assets);
+      addTearDown(harness.dispose);
+      await harness.service.enqueue(_item);
+      final task = await _waitForTask(harness.service, (t) => t.isComplete);
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      transport.beginError = const DownloadConnectionException('configBusy');
+      await harness.service.repairSubtitles(task.id);
+
+      expect(harness.service.tasks.single.status, DownloadStatus.completed);
+      expect(
+        harness.service.tasks.single.lastErrorCode,
+        'subtitleRepair:configBusy',
+      );
+      expect(assets.calls, 1);
+      expect(transport.begun, hasLength(2));
+      expect(transport.ended, hasLength(2));
+      expect(transport.activeTokens, isEmpty);
+      expect(await harness.service.offlineItem(task.itemId), isNotNull);
+      final queued = await harness.service.enqueue(_downloadItem('item-2'));
+      expect(transport.begun, hasLength(2));
+      expect(
+        harness.service.taskForItem(queued.itemId)!.status,
+        DownloadStatus.queued,
+      );
+
+      transport.beginError = null;
+      await harness.service.repairSubtitles(task.id);
+      await _waitUntil(
+        () =>
+            harness.service.tasks.every((task) => task.isComplete) &&
+            !harness.service.hasActiveWork,
+      );
+      expect(harness.service.taskForItem(task.itemId)!.lastErrorCode, isNull);
+      expect(transport.begun, hasLength(4));
+      expect(transport.ended, hasLength(4));
+      expect(transport.activeTokens, isEmpty);
+      expect(await File(task.finalPath).readAsBytes(), _mediaBytes);
+    },
+  );
+
+  for (final code in ['tunnelUnavailable', 'configurationUnavailable']) {
+    test('beginTask $code failure ends the task without fallback', () async {
+      final transport = _TaskTransport(
+        uriCount: 4,
+        beginError: DownloadConnectionException(code),
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport, initialize: false);
+      addTearDown(harness.dispose);
+      final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+      await harness.service.resume(task.id);
+      final failed = await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.failed,
+      );
+      await _waitUntil(() => !harness.service.hasActiveWork);
+
+      expect(failed.lastErrorCode, code);
+      expect(failed.downloadedBytes, 4);
+      expect(failed.retryCount, 0);
+      expect(transport.calls, isEmpty);
+      expect(transport.begun, hasLength(1));
+      expect(transport.ended.single, same(transport.begun.single.$2));
+      expect(transport.activeTokens, isEmpty);
+      expect(await File(task.tempPath).length(), 4);
+    });
+  }
+
+  test(
+    'deleting a configuration-blocked task does not strand the queue',
+    () async {
+      final transport = _TaskTransport(
+        beginError: const DownloadConnectionException('configBusy'),
+        handler: (_) async => _response(_mediaBytes),
+      );
+      final harness = await _Harness.create(transport);
+      addTearDown(harness.dispose);
+      final first = await harness.service.enqueue(_item);
+      await _waitForTask(
+        harness.service,
+        (task) => task.status == DownloadStatus.paused,
+      );
+      await _waitUntil(() => !harness.service.hasActiveWork);
+      final second = await harness.service.enqueue(_downloadItem('item-2'));
+      expect(
+        harness.service.taskForItem(second.itemId)!.status,
+        DownloadStatus.queued,
+      );
+      transport.beginError = null;
+      await harness.service.delete(first.id);
+      await _waitUntil(
+        () => harness.service.taskForItem(second.itemId)!.isComplete,
+      );
+      expect(transport.calls, hasLength(1));
+    },
+  );
+
+  test('configBusy pauses the task and queue until a manual resume', () async {
+    final transport = _TaskTransport(
+      beginError: const DownloadConnectionException('configBusy'),
+      handler: (call) async => _response(
+        _mediaBytes.sublist(call.offset),
+        statusCode: call.offset > 0 ? 206 : 200,
+        headers: {
+          'content-length': '${_mediaBytes.length - call.offset}',
+          if (call.offset > 0) 'content-range': 'bytes 4-11/12',
+        },
+      ),
+    );
+    final harness = await _Harness.create(
+      transport,
+      initialize: false,
+      maxConcurrentDownloads: 2,
+    );
+    addTearDown(harness.dispose);
+    addTearDown(() {
+      final gate = transport.beginGate;
+      if (gate != null && !gate.isCompleted) gate.complete();
+    });
+    final task = await _restorePartial(harness, _mediaBytes.sublist(0, 4));
+    await harness.service.resume(task.id);
+    final paused = await _waitForTask(
+      harness.service,
+      (task) =>
+          task.status == DownloadStatus.paused &&
+          task.lastErrorCode == 'configBusy',
+    );
+    await _waitUntil(() => !harness.service.hasActiveWork);
+    final queued = await harness.service.enqueue(_downloadItem('item-2'));
+    await harness.service.refresh();
+
+    expect(paused.downloadedBytes, 4);
+    expect(paused.retryCount, 0);
+    expect(paused.etag, '"media-v1"');
+    expect(await File(task.tempPath).readAsBytes(), _mediaBytes.sublist(0, 4));
+    expect(
+      harness.service.taskForItem(queued.itemId)!.status,
+      DownloadStatus.queued,
+    );
+    expect(transport.begun, hasLength(1));
+    expect(transport.ended, hasLength(1));
+    expect(transport.calls, isEmpty);
+
+    await harness.service.resume(task.id);
+    await _waitUntil(
+      () =>
+          transport.ended.length == 2 &&
+          harness.service.taskForItem(task.itemId)!.status ==
+              DownloadStatus.paused,
+    );
+    await harness.service.refresh();
+    expect(transport.begun.map((entry) => entry.$1), [task.id, task.id]);
+    expect(transport.calls, isEmpty);
+
+    transport.beginError = null;
+    transport.beginGate = Completer<void>();
+    await harness.service.resume(task.id);
+    await _waitUntil(() => transport.begun.length == 3);
+    expect(transport.begun.last.$1, task.id);
+    expect(transport.calls, isEmpty);
+    expect(
+      harness.service.taskForItem(queued.itemId)!.status,
+      DownloadStatus.queued,
+    );
+    transport.beginGate!.complete();
+    await _waitUntil(
+      () =>
+          harness.service.tasks.every((task) => task.isComplete) &&
+          !harness.service.hasActiveWork,
+    );
+    expect(transport.begun.map((entry) => entry.$1), [
+      task.id,
+      task.id,
+      task.id,
+      queued.id,
+    ]);
+    expect(transport.calls.map((call) => call.offset), unorderedEquals([4, 0]));
+    expect(transport.activeTokens, isEmpty);
+  });
+
+  test('shutdown drains pending task acquisition and release', () async {
+    final beginGate = Completer<void>();
+    final endGate = Completer<void>();
+    final transport =
+        _TaskTransport(handler: (_) async => _response(_mediaBytes))
+          ..beginGate = beginGate
+          ..endGate = endGate;
+    final harness = await _Harness.create(transport);
+    addTearDown(harness.dispose);
+    addTearDown(() {
+      if (!beginGate.isCompleted) beginGate.complete();
+      if (!endGate.isCompleted) endGate.complete();
+    });
+    await harness.service.enqueue(_item);
+    await transport.beginEntered.future;
+    var stopped = false;
+    final stopping = harness.service.shutdown().then((_) => stopped = true);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.begun.single.$2.isCancelled, isTrue);
+    expect(stopped, isFalse);
+    beginGate.complete();
+    await transport.endEntered.future;
+    expect(stopped, isFalse);
+    expect(transport.calls, isEmpty);
+    endGate.complete();
+    await stopping;
+
+    expect(transport.activeTokens, isEmpty);
+    expect(harness.service.tasks.single.status, DownloadStatus.paused);
+    expect(harness.service.tasks.single.lastErrorCode, 'processInterrupted');
+  });
 }
 
 class _Harness {
@@ -2436,6 +3402,7 @@ class _Harness {
     DownloadSettingsStore? settingsStore,
     DownloadExecutor? executor,
     DownloadRetryDelay? retryDelay,
+    int maxConcurrentDownloads = 1,
     Duration storageRecheckInterval = const Duration(seconds: 15),
   }) async {
     final database = LocalDatabase(
@@ -2459,7 +3426,7 @@ class _Harness {
       preflight: preflight,
       settingsStore: settingsStore,
       executor: executor,
-      maxConcurrentDownloads: 1,
+      maxConcurrentDownloads: maxConcurrentDownloads,
       storageRecheckInterval: storageRecheckInterval,
     );
     if (initialize) await service.initialize();
@@ -2478,6 +3445,50 @@ class _Harness {
     await api.dispose();
     await database.close();
     if (await directory.exists()) await directory.delete(recursive: true);
+  }
+}
+
+class _GatedEnqueueRepository extends DownloadRepository {
+  _GatedEnqueueRepository(super.database);
+
+  final entered = Completer<void>();
+  final _release = Completer<void>();
+  int queuedWrites = 0;
+
+  void unblock() {
+    if (!_release.isCompleted) _release.complete();
+  }
+
+  @override
+  Future<void> saveTask(DownloadTaskRecord task) async {
+    if (task.status == DownloadStatus.queued) {
+      queuedWrites++;
+      if (!entered.isCompleted) entered.complete();
+      await _release.future;
+    }
+    await super.saveTask(task);
+  }
+}
+
+class _GatedRunningRepository extends DownloadRepository {
+  _GatedRunningRepository(super.database);
+
+  final entered = Completer<void>();
+  final _release = Completer<void>();
+  int runningWrites = 0;
+
+  void unblock() {
+    if (!_release.isCompleted) _release.complete();
+  }
+
+  @override
+  Future<void> saveTask(DownloadTaskRecord task) async {
+    if (task.status == DownloadStatus.running) {
+      runningWrites++;
+      if (!entered.isCompleted) entered.complete();
+      await _release.future;
+    }
+    await super.saveTask(task);
   }
 }
 
@@ -2516,6 +3527,7 @@ class _RepairAssets implements DownloadAssetService {
   int calls = 0;
   bool succeed = false;
   bool waitForCancel = false;
+  CancelToken? lastCancelToken;
   final started = Completer<void>();
   @override
   Future<OfflineMediaMetadata> downloadAssets(
@@ -2524,6 +3536,7 @@ class _RepairAssets implements DownloadAssetService {
     CancelToken? cancelToken,
   }) async {
     calls++;
+    lastCancelToken = cancelToken;
     if (waitForCancel) {
       started.complete();
       throw await cancelToken!.whenCancel;
@@ -2585,6 +3598,59 @@ class _FakeTransport implements DownloadTransport {
   }
 }
 
+class _TaskTransport extends _FakeTransport implements DownloadTaskTransport {
+  _TaskTransport({required super.handler, super.uriCount, this.beginError});
+
+  Object? beginError;
+  Completer<void>? beginGate;
+  Completer<void>? endGate;
+  final beginEntered = Completer<void>();
+  final endEntered = Completer<void>();
+  final List<(String, CancelToken)> begun = [];
+  final List<CancelToken> ended = [];
+  final Set<CancelToken> activeTokens = {};
+
+  @override
+  Future<void> beginTask(CancelToken token, {required String taskId}) async {
+    begun.add((taskId, token));
+    activeTokens.add(token);
+    if (!beginEntered.isCompleted) beginEntered.complete();
+    await beginGate?.future;
+    final error = beginError;
+    if (error != null) throw error;
+  }
+
+  @override
+  Future<void> endTask(CancelToken token) async {
+    ended.add(token);
+    if (!endEntered.isCompleted) endEntered.complete();
+    await endGate?.future;
+    activeTokens.remove(token);
+  }
+}
+
+class _GatedAssets implements DownloadAssetService {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  CancelToken? token;
+
+  void unblock() {
+    if (!release.isCompleted) release.complete();
+  }
+
+  @override
+  Future<OfflineMediaMetadata> downloadAssets(
+    DownloadTaskRecord task,
+    Directory downloadDirectory, {
+    CancelToken? cancelToken,
+  }) async {
+    token = cancelToken;
+    entered.complete();
+    await release.future;
+    return task.metadata.copyWith(subtitleDiscoveryComplete: true);
+  }
+}
+
 class _FakePreflight implements DownloadPreflight {
   _FakePreflight({
     this.storageError,
@@ -2629,6 +3695,30 @@ class _FakePreflight implements DownloadPreflight {
   }) async {
     final error = storageError;
     if (error != null) throw error;
+  }
+}
+
+class _GatedStoragePreflight extends _FakePreflight {
+  final entered = Completer<void>();
+  final _release = Completer<void>();
+
+  void unblock() {
+    if (!_release.isCompleted) _release.complete();
+  }
+
+  @override
+  Future<void> verifyStorage({
+    required Directory directory,
+    required int? expectedBytes,
+    required int downloadedBytes,
+  }) async {
+    if (!entered.isCompleted) entered.complete();
+    await _release.future;
+    await super.verifyStorage(
+      directory: directory,
+      expectedBytes: expectedBytes,
+      downloadedBytes: downloadedBytes,
+    );
   }
 }
 
@@ -2730,6 +3820,41 @@ DownloadResponse _response(
 
 String _digest(Hash hash, List<int> bytes) =>
     base64Encode(hash.convert(bytes).bytes);
+
+Future<DownloadTaskRecord> _restorePartial(
+  _Harness harness,
+  List<int> bytes, {
+  DownloadIntegrity? integrity,
+}) async {
+  final task =
+      _task(
+        tempPath: path.join(harness.directory.path, 'range.part'),
+        finalPath: path.join(harness.directory.path, 'range.mkv'),
+        status: DownloadStatus.paused,
+      ).copyWith(
+        downloadedBytes: bytes.length,
+        expectedBytes: _mediaBytes.length,
+        etag: '"media-v1"',
+        integrity: integrity,
+      );
+  await File(task.tempPath).writeAsBytes(bytes);
+  await harness.repository.saveTask(task);
+  await harness.service.initialize();
+  return task;
+}
+
+EmbyItem _downloadItem(String id, {List<PlaybackMediaSource>? sources}) =>
+    EmbyItem(
+      id: id,
+      name: _item.name,
+      type: _item.type,
+      mediaType: _item.mediaType,
+      imageTags: const {},
+      backdropImageTags: const [],
+      genres: const [],
+      userData: const EmbyUserData(),
+      mediaSources: sources ?? _item.mediaSources,
+    );
 
 Stream<List<int>> _pauseAfter(List<int> bytes, CancelToken token) async* {
   yield bytes;

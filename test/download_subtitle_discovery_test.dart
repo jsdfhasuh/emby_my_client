@@ -1,11 +1,11 @@
 import 'dart:async';
+import 'support/dio_download_test_api.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/core/server_scope.dart';
-import 'package:emby_my_client/data/emby_api.dart';
 import 'package:emby_my_client/downloads/download_assets.dart';
 import 'package:emby_my_client/downloads/download_models.dart';
 import 'package:emby_my_client/models/emby_models.dart';
@@ -37,7 +37,10 @@ void main() {
   ]) {
     test('subtitle discovery and asset result: $mode', () async {
       final wire = _Wire(mode);
-      final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+      final api = DioDownloadTestApi(
+        _session,
+        dio: Dio()..httpClientAdapter = wire,
+      );
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'subtitle-discovery-',
@@ -138,7 +141,10 @@ void main() {
     'failed refresh retains verified subtitles and skips cover and video',
     () async {
       final wire = _Wire('success');
-      final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+      final api = DioDownloadTestApi(
+        _session,
+        dio: Dio()..httpClientAdapter = wire,
+      );
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'subtitle-preserve-',
@@ -187,7 +193,10 @@ void main() {
     'cancelled refresh preserves previously published subtitle bytes',
     () async {
       final wire = _Wire('success');
-      final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+      final api = DioDownloadTestApi(
+        _session,
+        dio: Dio()..httpClientAdapter = wire,
+      );
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'subtitle-retain-cancel-',
@@ -225,7 +234,10 @@ void main() {
     'offline discovery and removed tracks retain existing subtitles',
     () async {
       final wire = _Wire('success');
-      final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+      final api = DioDownloadTestApi(
+        _session,
+        dio: Dio()..httpClientAdapter = wire,
+      );
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'subtitle-retain-discovery-',
@@ -257,7 +269,10 @@ void main() {
     'successful refresh publishes a new revision without replacing old files',
     () async {
       final wire = _Wire('success');
-      final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+      final api = DioDownloadTestApi(
+        _session,
+        dio: Dio()..httpClientAdapter = wire,
+      );
       addTearDown(api.dispose);
       final directory = await Directory.systemTemp.createTemp(
         'subtitle-revisions-',
@@ -318,7 +333,10 @@ void main() {
                 'DeliveryUrl': '/Videos/item/source-B/Subtitles/4/Stream.vtt',
             },
           ];
-        final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+        final api = DioDownloadTestApi(
+          _session,
+          dio: Dio()..httpClientAdapter = wire,
+        );
         addTearDown(api.dispose);
         final directory = await Directory.systemTemp.createTemp(
           'negotiated-sidecar-',
@@ -463,7 +481,10 @@ void main() {
               'DeliveryMethod': 'External',
             },
           ];
-        final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+        final api = DioDownloadTestApi(
+          _session,
+          dio: Dio()..httpClientAdapter = wire,
+        );
         addTearDown(api.dispose);
         final directory = await Directory.systemTemp.createTemp(
           'unsupported-delivery-',
@@ -496,7 +517,10 @@ void main() {
     final token = CancelToken();
     final wire = _Wire('success')
       ..onSubtitle = () => token.cancel('fixture cancel');
-    final api = EmbyApi(_session, dio: Dio()..httpClientAdapter = wire);
+    final api = DioDownloadTestApi(
+      _session,
+      dio: Dio()..httpClientAdapter = wire,
+    );
     addTearDown(api.dispose);
     final directory = await Directory.systemTemp.createTemp('subtitle-cancel-');
     addTearDown(() => directory.delete(recursive: true));

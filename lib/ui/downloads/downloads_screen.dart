@@ -449,7 +449,8 @@ String _statusText(DownloadTaskRecord task) {
     DownloadStatus.waitingForNetwork =>
       '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.waitingForStorage => '等待存储空间 · $size',
-    DownloadStatus.paused => '已暂停 · $size',
+    DownloadStatus.paused =>
+      task.lastErrorCode == 'configBusy' ? '连接设置占用，已暂停 · $size' : '已暂停 · $size',
     DownloadStatus.completed => '视频可离线播放 · $size',
     DownloadStatus.failed => '${_friendlyError(task.lastErrorCode)} · $size',
     DownloadStatus.cancelling => '正在删除',
@@ -464,6 +465,8 @@ String _subtitleStatusText(DownloadTaskRecord task) {
     'subtitleRepairInterrupted' => '修复已中断，可重试；$state',
     'subtitleRepair:networkUnavailable' => '当前无网络，联网后可重试；$state',
     'subtitleRepair:wifiRequired' => '等待 Wi-Fi 后可重试；$state',
+    'subtitleRepair:configBusy' => '连接设置占用，稍后可重试；$state',
+    'subtitleRepair:tunnelUnavailable' => 'Hysteria2 不可用，稍后可重试；$state',
     'subtitleRepairFailed' => '修复失败，可重试；$state',
     _ => state,
   };
@@ -478,6 +481,11 @@ String _friendlyError(String? code) => switch (code) {
   'insufficientStorage' => '可用空间不足',
   'networkUnavailable' => '当前没有网络',
   'wifiRequired' => '等待 Wi-Fi',
+  'configBusy' => '连接设置正在使用，请稍后恢复',
+  'tunnelUnavailable' => 'Hysteria2 连接失败，请检查配置或暂停后切换线路',
+  'configurationUnavailable' => '无法读取离线下载连接配置',
+  'tlsError' => 'TLS 连接或证书校验失败',
+  'redirectRejected' || 'tlsDowngrade' => '下载重定向被安全策略拒绝',
   'missingFile' => '本地文件丢失',
   'localMediaCorrupt' => '本地文件损坏',
   'invalidLocalPath' => '本地文件路径无效',

@@ -1,0 +1,139 @@
+import groovy.json.JsonSlurper
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+
+group 'dev.emby.hysteria2'
+version '0.1.0'
+
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath 'com.android.tools.build:gradle:8.11.1' }
+}
+apply plugin: 'com.android.library'
+
+def packageRoot = projectDir.parentFile
+def lockFile = new File(packageRoot, 'build-lock.json')
+def pin = new JsonSlurper().parse(lockFile)
+def aarFile = file('libs/hysteria2.aar')
+def manifestFile = file('libs/hysteria2.provenance.json')
+def verified = layout.buildDirectory.dir('verified-hysteria2')
+def sha = { byte[] data -> MessageDigest.getInstance('SHA-256').digest(data).encodeHex().toString() }
+
+def checkElf = { byte[] data, String abi ->
+    def expected = ['armeabi-v7a': [1, 40], 'arm64-v8a': [2, 183], 'x86_64': [2, 62]][abi]
+    if (data.length < 64 || data[0..3] != [127, 69, 76, 70] || data[4] != expected[0] || data[5] != 1) {
+        throw new GradleException("Invalid Hysteria2 ELF: ${abi}")
+    }
+    def b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+    if (b.getShort(16) != 3 || b.getShort(18) != expected[1]) {
+        throw new GradleException("Hysteria2 ELF architecture mismatch: ${abi}")
+    }
+    boolean elf64 = expected[0] == 2
+    long start = elf64 ? b.getLong(32) : Integer.toUnsignedLong(b.getInt(28))
+    int step = Short.toUnsignedInt(b.getShort(elf64 ? 54 : 42))
+    int count = Short.toUnsignedInt(b.getShort(elf64 ? 56 : 44))
+    if (step < (elf64 ? 56 : 32) || start + (long) step * count > data.length) {
+        throw new GradleException("Invalid Hysteria2 ELF headers: ${abi}")
+    }
+    int loads = 0
+    for (int i = 0; i < count; i++) {
+        int at = (int) (start + i * step)
+        if (b.getInt(at) != 1) continue
+        loads++
+        long offset = elf64 ? b.getLong(at + 8) : Integer.toUnsignedLong(b.getInt(at + 4))
+        long address = elf64 ? b.getLong(at + 16) : Integer.toUnsignedLong(b.getInt(at + 8))
+        long align = elf64 ? b.getLong(at + 48) : Integer.toUnsignedLong(b.getInt(at + 28))
+        if (align < 16384 || (align & (align - 1)) != 0 || offset % 16384 != address % 16384) {
+            throw new GradleException("Hysteria2 ELF lacks 16 KB page support: ${abi}")
+        }
+    }
+    if (loads == 0) throw new GradleException("Hysteria2 ELF has no LOAD segments: ${abi}")
+}
+
+def verifyCore = tasks.register('verifyHysteria2Core') {
+    inputs.files(lockFile, aarFile, manifestFile)
+    inputs.files(fileTree(new File(packageRoot, 'go')) { include '**/*.go', 'go.mod', 'go.sum' })
+    inputs.file(new File(packageRoot, 'LICENSE'))
+    outputs.dir(verified)
+    outputs.upToDateWhen { false }
+    doLast {
+        if (!aarFile.isFile() || !manifestFile.isFile()) {
+            throw new GradleException('Build embedded Hysteria2 first: python scripts/android/build_hysteria2.py all')
+        }
+        def spec = new JsonSlurper().parse(manifestFile)
+        ['schema', 'go', 'mobile', 'ndk', 'upstream', 'abis'].each { key ->
+            if (spec[key] != pin[key]) throw new GradleException("Hysteria2 build pin mismatch: ${key}")
+        }
+        def sources = [lockFile, new File(packageRoot, 'LICENSE'), new File(packageRoot, 'go/go.mod'), new File(packageRoot, 'go/go.sum')]
+        sources.addAll(fileTree(new File(packageRoot, 'go')) { include '**/*.go' }.files)
+        def actualInputs = sources.collectEntries { source ->
+            [(packageRoot.toPath().relativize(source.toPath()).toString().replace('\\', '/')): sha(source.bytes)]
+        }
+        if (actualInputs != spec.inputs) throw new GradleException('Hysteria2 AAR is stale; rebuild from the current Go sources')
+        if (sha(aarFile.bytes) != spec.sha256) throw new GradleException('Hysteria2 AAR SHA256 mismatch')
+        def deps = spec.dependencies.collectEntries { [(it.module): it] }
+        [pin.upstream.module, pin.upstream.extras].each { module ->
+            if (deps[module]?.version != pin.upstream.version || !deps[module]?.licenses) {
+                throw new GradleException('Missing Hysteria2 upstream license')
+            }
+        }
+        deps.values().each { dep ->
+            if (!dep.licenses || !dep.sum || !(dep.license in ['MIT', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0'])) {
+                throw new GradleException("Unaudited Hysteria2 dependency license: ${dep.module}")
+            }
+        }
+        new ZipFile(aarFile).withCloseable { zip ->
+            def names = zip.entries().toList().collect { it.name }
+            if (names.size() != names.toSet().size()) throw new GradleException('Duplicate Hysteria2 AAR members')
+            def natives = pin.abis.collect { "jni/${it}/libgojni.so".toString() }.toSet()
+            if (names.findAll { it.endsWith('.so') }.toSet() != natives || spec.libraries.keySet() != natives) {
+                throw new GradleException('Hysteria2 AAR must include exactly arm, arm64 and x86_64')
+            }
+            natives.each { name ->
+                byte[] bytes = zip.getInputStream(zip.getEntry(name)).withCloseable { it.bytes }
+                if (sha(bytes) != spec.libraries[name]) throw new GradleException('Hysteria2 JNI SHA256 mismatch')
+                checkElf(bytes, name.split('/')[1])
+            }
+            String notice = 'assets/hysteria2/THIRD_PARTY_NOTICES.txt'
+            if (zip.getEntry(notice) == null || zip.getEntry('classes.jar') == null) {
+                throw new GradleException('Missing Hysteria2 classes or native license notices')
+            }
+            byte[] notices = zip.getInputStream(zip.getEntry(notice)).withCloseable { it.bytes }
+            if (sha(notices) != spec.noticesSha256) throw new GradleException('Hysteria2 license notice SHA256 mismatch')
+            // Unpack only validated names, avoiding local-AAR dependencies in an Android library.
+            def directory = verified.get().asFile
+            (natives + [notice, 'classes.jar']).each { name ->
+                def destination = new File(directory, name)
+                destination.parentFile.mkdirs()
+                destination.bytes = zip.getInputStream(zip.getEntry(name)).withCloseable { it.bytes }
+            }
+        }
+    }
+}
+
+android {
+    namespace 'dev.emby.hysteria2'
+    compileSdk 36
+    ndkVersion pin.ndk
+    defaultConfig {
+        minSdk 24
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    sourceSets.main {
+        jniLibs.srcDir(verified.map { it.dir('jni') })
+        assets.srcDir(verified.map { it.dir('assets') })
+    }
+}
+
+dependencies {
+    implementation files(verified.map { it.file('classes.jar').asFile }).builtBy(verifyCore)
+    testImplementation 'junit:junit:4.13.2'
+}
+tasks.named('preBuild').configure { dependsOn(verifyCore) }
+tasks.withType(JavaCompile).configureEach { dependsOn(verifyCore) }

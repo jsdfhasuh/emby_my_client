@@ -2,6 +2,7 @@ import '../core/strm_diagnostics.dart';
 import '../core/token_redactor.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
@@ -20,6 +21,33 @@ import '../realtime/emby_websocket_client.dart';
 import 'emby_session_service.dart';
 import 'emby_user_data_service.dart';
 import 'browse_cache.dart';
+import '../downloads/download_connection.dart';
+import '../downloads/download_http_client.dart';
+
+class _DownloadSession {
+  _DownloadSession(this.lease, this.client);
+  final DownloadRouteLease lease;
+  final DownloadHttpClient client;
+  Future<void>? _closing;
+  Future<void> close() => _closing ??= _close();
+  Future<void> _close() async {
+    client.close();
+    await lease.close();
+  }
+}
+
+Stream<Uint8List> _downloadBody(
+  Stream<List<int>> stream,
+  Future<void> Function() close,
+) async* {
+  try {
+    await for (final bytes in stream) {
+      yield bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+    }
+  } finally {
+    await close();
+  }
+}
 
 bool isLocalNetworkAddress(String raw) {
   var value = raw.trim();
@@ -87,11 +115,14 @@ class EmbyApi {
     FutureOr<void> Function()? onRealtimeConnected,
     EmbySocketConnector? realtimeConnector,
     this.browseCache,
+    DownloadConnectionManager? downloadConnections,
   }) : _deviceName = deviceName,
        _dio = dio ?? _createDio(session, deviceName),
        _onSessionExpired = onSessionExpired,
        _onRemoteCapabilitiesReported = onRemoteCapabilitiesReported,
-       _onRealtimeConnected = onRealtimeConnected {
+       _onRealtimeConnected = onRealtimeConnected,
+       _downloadConnections =
+           downloadConnections ?? DownloadConnectionManager.instance {
     TokenRedactor.register(session.accessToken);
     if (dio != null) {
       _configureDio(dio, session, deviceName);
@@ -127,6 +158,52 @@ class EmbyApi {
   final Map<String, int> _browseRequestVersions = {};
   final String _deviceName;
   final Dio _dio;
+  final DownloadConnectionManager _downloadConnections;
+  final Map<CancelToken, Future<_DownloadSession>> _downloadSessions = {};
+  final Set<_DownloadSession> _transientDownloadSessions = {};
+
+  Future<void> beginDownloadTask(CancelToken token, {String? taskId}) async {
+    await (_downloadSessions[token] ??= _createDownloadSession(
+      token,
+      taskId: taskId,
+    ));
+  }
+
+  Future<_DownloadSession> _createDownloadSession(
+    CancelToken token, {
+    String? taskId,
+  }) async {
+    if (_disposed || token.isCancelled) {
+      throw token.cancelError ??
+          const DownloadConnectionException('connectionClosed');
+    }
+    final lease = await _downloadConnections.acquireDownload(scope);
+    if (_disposed || token.isCancelled) {
+      await lease.close();
+      throw token.cancelError ??
+          const DownloadConnectionException('connectionClosed');
+    }
+    return _DownloadSession(
+      lease,
+      DownloadHttpClient(
+        server: Uri.parse(session.serverUrl),
+        headers: playbackHeaders,
+        proxy: lease.proxy,
+        taskId: taskId,
+      ),
+    );
+  }
+
+  Future<void> endDownloadTask(CancelToken token) async {
+    final pending = _downloadSessions.remove(token);
+    if (pending == null) return;
+    try {
+      await (await pending).close();
+    } catch (_) {
+      // Startup errors are already delivered to the task; cleanup stays idempotent.
+    }
+  }
+
   final FutureOr<void> Function()? _onSessionExpired;
   final FutureOr<void> Function()? _onRemoteCapabilitiesReported;
   final FutureOr<void> Function()? _onRealtimeConnected;
@@ -174,41 +251,54 @@ class EmbyApi {
     int offset = 0,
     String? etag,
     bool followRedirects = true,
+    CancelToken? downloadTaskToken,
   }) async {
-    final headers = <String, String>{
-      'Accept-Encoding': 'identity',
-      if (offset > 0) 'Range': 'bytes=$offset-',
-      if (offset > 0 && etag != null && etag.isNotEmpty) 'If-Range': etag,
-    };
+    final taskToken = downloadTaskToken ?? cancelToken;
+    final existing = _downloadSessions[taskToken];
+    final transient = existing == null;
+    final route = await (existing ?? _createDownloadSession(taskToken));
+    if (transient) _transientDownloadSessions.add(route);
     try {
-      return await _dio.getUri<ResponseBody>(
+      final response = await route.client.open(
         uri,
         cancelToken: cancelToken,
-        options: Options(
-          responseType: ResponseType.stream,
-          followRedirects: followRedirects,
-          headers: headers,
-          validateStatus: (status) =>
-              status == 200 ||
-              status == 206 ||
-              status == 416 ||
-              (!followRedirects && [301, 302, 303, 307, 308].contains(status)),
+        offset: offset,
+        etag: etag,
+        followRedirects: followRedirects,
+      );
+      Future<void> close() async {
+        await response.close();
+        if (transient) {
+          _transientDownloadSessions.remove(route);
+          await route.close();
+        }
+      }
+
+      return Response<ResponseBody>(
+        requestOptions: RequestOptions(path: uri.toString()),
+        statusCode: response.statusCode,
+        headers: Headers.fromMap(
+          response.headers.map((name, value) => MapEntry(name, [value])),
         ),
+        data: ResponseBody(
+          _downloadBody(response.stream, close),
+          response.statusCode,
+        ),
+        extra: {'downloadClose': close},
       );
-    } on DioException catch (error) {
-      DiagnosticLog.instance.error(
-        'download',
-        'GET ${error.requestOptions.uri} failed with '
-            'HTTP ${error.response?.statusCode ?? 'none'}',
-        error: error.message,
-      );
-      final friendly = _friendlyError(error);
+    } on DownloadHttpStatusException catch (error) {
+      _transientDownloadSessions.remove(route);
+      if (transient) await route.close();
       if (!_disposed &&
-          friendly.isAuthenticationFailure &&
+          const {401, 403}.contains(error.statusCode) &&
           _onSessionExpired != null) {
         unawaited(Future<void>.sync(_onSessionExpired));
       }
-      throw friendly;
+      throw EmbyApiException('下载请求失败', statusCode: error.statusCode);
+    } catch (_) {
+      _transientDownloadSessions.remove(route);
+      if (transient) await route.close();
+      rethrow;
     }
   }
 
@@ -390,6 +480,13 @@ class EmbyApi {
     _disposed = true;
     browseState.dispose();
     await realtime.dispose();
+    for (final token in _downloadSessions.keys.toList()) {
+      await endDownloadTask(token);
+    }
+    for (final route in _transientDownloadSessions.toList()) {
+      await route.close();
+    }
+    _transientDownloadSessions.clear();
     _dio.close(force: true);
   }
 

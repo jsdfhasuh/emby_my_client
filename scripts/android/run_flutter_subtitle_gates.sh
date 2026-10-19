@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -ne 2 || ! -s "$1" || ! -s "$2" ]]; then
-  echo 'Usage: run_flutter_subtitle_gates.sh texture.apk player-route.apk' >&2
+if [[ $# -lt 2 || $# -gt 3 || ! -s "$1" || ! -s "$2" ]]; then
+  echo 'Usage: run_flutter_subtitle_gates.sh texture.apk player-route.apk [hysteria2.apk]' >&2
   exit 64
 fi
 texture_apk="$1"
 route_apk="$2"
+hysteria_apk="${3:-}"
+if [[ -n "$hysteria_apk" && ! -s "$hysteria_apk" ]]; then
+  echo 'Hysteria2 smoke APK is missing' >&2
+  exit 64
+fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
 export PATH="$sdk/platform-tools:$PATH"
@@ -88,3 +93,7 @@ python3 "$root/scripts/android/run_flutter_subtitle_texture.py" --serial "$ANDRO
   --apk "$texture_apk" --output "$root/build/android/artifacts/subtitle-texture"
 python3 "$root/scripts/android/run_player_route_ui.py" --serial "$ANDROID_SERIAL" \
   --apk "$route_apk" --output "$root/build/android/artifacts/player-route"
+if [[ -n "$hysteria_apk" ]]; then
+  python3 "$root/scripts/android/run_hysteria2_smoke.py" --serial "$ANDROID_SERIAL" \
+    --apk "$hysteria_apk" --evidence "$root/build/android/artifacts/hysteria2-smoke"
+fi
