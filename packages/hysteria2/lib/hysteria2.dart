@@ -23,16 +23,20 @@ class Hysteria2Platform {
     required Map<String, Object?> config,
   }) async {
     return Map<String, Object?>.from(
-      (await _channel.invokeMapMethod<String, Object?>('connect',
-          <String, Object?>{'leaseId': leaseId, 'config': config}))!,
+      (await _channel.invokeMapMethod<String, Object?>(
+        'connect',
+        <String, Object?>{'leaseId': leaseId, 'config': config},
+      ))!,
     );
   }
 
-  Future<void> release(String leaseId) =>
-      _channel.invokeMethod<void>('release', <String, Object?>{'leaseId': leaseId});
+  Future<void> release(String leaseId) => _channel.invokeMethod<void>(
+    'release',
+    <String, Object?>{'leaseId': leaseId},
+  );
 
   /// Counts and state only; never returns configuration or credentials.
   Future<Map<String, Object?>> status() async => Map<String, Object?>.from(
-        (await _channel.invokeMapMethod<String, Object?>('status'))!,
-      );
+    (await _channel.invokeMapMethod<String, Object?>('status'))!,
+  );
 }
