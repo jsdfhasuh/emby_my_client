@@ -50,3 +50,19 @@ bool harnessStartupAcknowledged(Map<String, Object?> value) =>
     value['seeking'] == 'no' &&
     (harnessPlayingAcknowledged(value, true) ||
         harnessPlayingAcknowledged(value, false));
+
+/// A replacement input is valid on a later probe, but one probe must never
+/// combine the previous route's player with the current controller's engine.
+bool harnessStartupResourceStable({
+  required Object? engineBefore,
+  required Object? engineAfter,
+  required Object? routePlayerBefore,
+  required Object? routePlayerAfter,
+  required Object? boundPlayer,
+}) =>
+    engineBefore != null &&
+    routePlayerBefore != null &&
+    boundPlayer != null &&
+    identical(engineBefore, engineAfter) &&
+    identical(routePlayerBefore, routePlayerAfter) &&
+    identical(routePlayerBefore, boundPlayer);

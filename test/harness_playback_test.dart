@@ -6,6 +6,55 @@ import 'support/harness_playback.dart';
 
 void main() {
   test(
+    'startup probes can bind a replacement without accepting mixed resources',
+    () {
+      final oldEngine = Object(), newEngine = Object();
+      final oldPlayer = Object(), newPlayer = Object();
+      expect(identical(oldPlayer, newPlayer), isFalse);
+      expect(
+        harnessStartupResourceStable(
+          engineBefore: newEngine,
+          engineAfter: newEngine,
+          routePlayerBefore: newPlayer,
+          routePlayerAfter: newPlayer,
+          boundPlayer: newPlayer,
+        ),
+        isTrue,
+      );
+      expect(
+        harnessStartupResourceStable(
+          engineBefore: oldEngine,
+          engineAfter: newEngine,
+          routePlayerBefore: oldPlayer,
+          routePlayerAfter: newPlayer,
+          boundPlayer: oldPlayer,
+        ),
+        isFalse,
+      );
+      expect(
+        harnessStartupResourceStable(
+          engineBefore: newEngine,
+          engineAfter: newEngine,
+          routePlayerBefore: oldPlayer,
+          routePlayerAfter: oldPlayer,
+          boundPlayer: newPlayer,
+        ),
+        isFalse,
+      );
+      expect(
+        harnessStartupResourceStable(
+          engineBefore: null,
+          engineAfter: null,
+          routePlayerBefore: null,
+          routePlayerAfter: null,
+          boundPlayer: null,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test(
     'startup paused input must become ready before actual play and pause',
     () async {
       final ready = Completer<bool>();

@@ -26,6 +26,7 @@ import 'harness_playback.dart';
 import 'harness_lifecycle_trace.dart';
 import 'package:emby_my_client/playback/playback_controller.dart';
 import 'package:emby_my_client/playback/playback_state.dart';
+import 'package:emby_my_client/playback/playback_engine.dart';
 
 const _controlOrigin = 'http://127.0.0.1:38766';
 final _client = HttpClient();
@@ -38,6 +39,8 @@ final _gestureTrace = <Map<String, Object?>>[];
 final _menuTrace = <Map<String, Object?>>[];
 final _lifecycleTrace = <Map<String, Object?>>[];
 final _callbackErrors = <Map<String, Object?>>[];
+var _startupMemoryPressureExercised = false;
+var _startupResourceReplacements = 0;
 final _routeObserver = _RouteObserver();
 const _traceGestures = bool.fromEnvironment('SUBTITLE_ROUTE_TRACE');
 
@@ -345,6 +348,8 @@ Future<void> main() async {
       'physicalPhone': 'NOT_RUN',
       'nativePixelGate': 'SEPARATE_REQUIRED',
       'verifiedStages': _reported,
+      'startupMemoryPressureExercised': _startupMemoryPressureExercised,
+      'startupResourceReplacements': _startupResourceReplacements,
       'cleanup': cleanup,
       'menuTrace': _menuTrace,
       'lifecycleTrace': _lifecycleTrace,
@@ -755,17 +760,17 @@ Future<void> _pause() async {
     throw StateError('Startup controller unavailable');
   }
   final controller = controllers.single;
-  final player = _routePlayer();
-  if (player == null) throw StateError('Startup player unavailable');
+  if (_routePlayer() == null) throw StateError('Startup player unavailable');
   Future<bool> waitReady({bool? playing}) async {
     final deadline = DateTime.now().add(const Duration(seconds: 15));
     Map<String, Object?> snapshot;
     do {
       final epoch = controller.subtitleInputEpoch;
+      final engineBefore = controller.engine;
+      final playerBefore = _routePlayer();
       final readyBefore =
           controller.state.phase == PlaybackPhase.ready &&
           controller.state.plan != null;
-      final sameBefore = identical(player, _routePlayer());
       snapshot = await _playbackSnapshot();
       snapshot.addAll({
         'controllerReadyBefore': readyBefore,
@@ -774,7 +779,15 @@ Future<void> _pause() async {
             controller.state.plan != null,
         'epochBefore': epoch,
         'epochAfter': controller.subtitleInputEpoch,
-        'samePlayer': sameBefore && identical(player, _routePlayer()),
+        'samePlayer': harnessStartupResourceStable(
+          engineBefore: engineBefore,
+          engineAfter: controller.engine,
+          routePlayerBefore: playerBefore,
+          routePlayerAfter: _routePlayer(),
+          boundPlayer: engineBefore is MediaKitPlaybackEngine
+              ? engineBefore.player
+              : null,
+        ),
       });
       if (harnessStartupAcknowledged(snapshot) &&
           (playing == null || snapshot['dartPlaying'] == playing)) {
@@ -798,6 +811,13 @@ Future<void> _pause() async {
     () => _elements((w) => w is BottomSheet).isEmpty,
     'startup readiness sheet close',
   );
+  if (!_startupMemoryPressureExercised) {
+    _startupMemoryPressureExercised = true;
+    final before = controller.engine;
+    await controller.handleMemoryPressure();
+    if (!identical(before, controller.engine)) _startupResourceReplacements++;
+    await waitReady();
+  }
   await pauseHarnessStartup(
     waitForReadyPlaying: () => waitReady(),
     tapPlayPause: () => _tapKey('player-play-pause'),
@@ -946,6 +966,8 @@ Future<void> _diagnostic(Object error, StackTrace stack) async {
   request.write(
     jsonEncode({
       'scope': 'diagnostic-not-acceptance',
+      'startupMemoryPressureExercised': _startupMemoryPressureExercised,
+      'startupResourceReplacements': _startupResourceReplacements,
       'error': '$error',
       'stack': '$stack',
       'verifiedStages': _reported,
