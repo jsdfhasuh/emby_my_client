@@ -12,8 +12,7 @@ fi
 
 installed="$(brew list --versions ldid 2>/dev/null || true)"
 installed_version="${installed#ldid }"
-if [[ "$installed_version" != "$LDID_VERSION" &&
-  "$installed_version" != "${LDID_VERSION}_${FORMULA_REVISION}" ]]; then
+if [[ "$installed_version" != "${LDID_VERSION}_${FORMULA_REVISION}" ]]; then
   echo "Expected Homebrew Core ldid $LDID_VERSION (formula revision $FORMULA_REVISION), got: ${installed:-not installed}" >&2
   exit 1
 fi
@@ -48,6 +47,11 @@ grep -Fq "tag:      \"$SOURCE_TAG\"" "$formula_file"
 grep -Fq "revision: \"$SOURCE_REVISION\"" "$formula_file"
 grep -Fq "revision $FORMULA_REVISION" "$formula_file"
 
+# Version metadata alone does not detect a bottle linked to a removed dylib.
+# The locked formula's test actually fakesigns a disposable Mach-O fixture.
+HOMEBREW_NO_AUTO_UPDATE=1 brew linkage --test local/ldid-lock/ldid
+HOMEBREW_NO_AUTO_UPDATE=1 brew test --verbose local/ldid-lock/ldid
+
 echo "ldid_path=$ldid_path"
 echo "ldid_version=$LDID_VERSION"
 echo "ldid_formula_version=$installed_version"
@@ -57,3 +61,5 @@ echo "formula_url=$FORMULA_URL"
 echo "formula_sha256=$FORMULA_SHA256"
 echo "source_tag=$SOURCE_TAG"
 echo "source_revision=$SOURCE_REVISION"
+echo 'ldid_linkage=passed'
+echo 'ldid_signing_smoke=passed'

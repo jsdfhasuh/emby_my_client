@@ -12,7 +12,7 @@ cp "$ROOT_DIR/scripts/ios/"{install_ldid.sh,verify_ldid.sh} "$TEMP_DIR/repo/scri
 cat >"$TEMP_DIR/formula.rb" <<'FORMULA'
 tag:      "v2.1.5"
 revision: "fixture-source"
-revision 1
+revision 2
 FORMULA
 formula_sha="$(shasum -a 256 "$TEMP_DIR/formula.rb" | awk '{print $1}')"
 cat >"$TEMP_DIR/repo/scripts/ios/ldid.lock" <<LOCK
@@ -20,7 +20,7 @@ LDID_VERSION='2.1.5'
 HOMEBREW_CORE_COMMIT='fixture-core'
 FORMULA_URL='https://fixture.invalid/ldid.rb'
 FORMULA_SHA256='$formula_sha'
-FORMULA_REVISION='1'
+FORMULA_REVISION='2'
 SOURCE_TAG='v2.1.5'
 SOURCE_REVISION='fixture-source'
 LOCK
@@ -34,9 +34,17 @@ case "$*" in
   'install --formula local/ldid-lock/ldid') touch "$FIXTURE/installed" ;;
   'list --versions ldid')
     [[ -f "$FIXTURE/installed" && -f "$FIXTURE/tap/Formula/ldid.rb" ]] || exit 1
-    printf 'ldid %s\n' "${MOCK_LDID_VERSION:-2.1.5_1}"
+    printf 'ldid %s\n' "${MOCK_LDID_VERSION:-2.1.5_2}"
     ;;
   '--prefix'|'--prefix ldid') printf '%s\n' "$FIXTURE/prefix" ;;
+  'linkage --test local/ldid-lock/ldid')
+    printf 'linkage\n' >>"$FIXTURE/runtime-checks"
+    exit "${MOCK_LINKAGE_EXIT:-0}"
+    ;;
+  'test --verbose local/ldid-lock/ldid')
+    printf 'signing\n' >>"$FIXTURE/runtime-checks"
+    exit "${MOCK_SIGNING_EXIT:-0}"
+    ;;
   'untap --force local/ldid-lock') rm -f "$FIXTURE/tap/Formula/ldid.rb" ;;
   *) printf 'Unexpected brew call: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -57,11 +65,27 @@ export PATH="$TEMP_DIR/prefix/bin:$PATH"
 # after the old installer's EXIT trap removed the owning tap.
 "$TEMP_DIR/repo/scripts/ios/verify_ldid.sh" >/dev/null
 [[ -f "$TEMP_DIR/tap/Formula/ldid.rb" ]]
+[[ "$(grep -c '^linkage$' "$TEMP_DIR/runtime-checks")" == 2 ]]
+[[ "$(grep -c '^signing$' "$TEMP_DIR/runtime-checks")" == 2 ]]
 
-if MOCK_LDID_VERSION=9.9.9 "$TEMP_DIR/repo/scripts/ios/verify_ldid.sh" >/dev/null 2>&1; then
-  echo 'Wrong ldid version was accepted' >&2
-  exit 1
-fi
+for version in 9.9.9 2.1.5 2.1.5_1; do
+  if MOCK_LDID_VERSION="$version" "$TEMP_DIR/repo/scripts/ios/verify_ldid.sh" >/dev/null 2>&1; then
+    echo "Wrong ldid version/revision was accepted: $version" >&2
+    exit 1
+  fi
+done
+for failure in MOCK_LINKAGE_EXIT=1 MOCK_SIGNING_EXIT=134; do
+  if env "$failure" "$TEMP_DIR/repo/scripts/ios/verify_ldid.sh" >/dev/null 2>&1; then
+    echo "Broken ldid runtime was accepted: $failure" >&2
+    exit 1
+  fi
+  if env "$failure" "$TEMP_DIR/repo/scripts/ios/install_ldid.sh" >/dev/null 2>&1; then
+    echo "Broken ldid installation was accepted: $failure" >&2
+    exit 1
+  fi
+  [[ ! -f "$TEMP_DIR/tap/Formula/ldid.rb" ]]
+  "$TEMP_DIR/repo/scripts/ios/install_ldid.sh" >/dev/null
+done
 if MOCK_LDID_VERSION=9.9.9 "$TEMP_DIR/repo/scripts/ios/install_ldid.sh" >/dev/null 2>&1; then
   echo 'Invalid installation was accepted' >&2
   exit 1
@@ -72,4 +96,4 @@ if "$TEMP_DIR/repo/scripts/ios/install_ldid.sh" >/dev/null 2>&1; then
   echo 'Changed formula hash was accepted' >&2
   exit 1
 fi
-echo 'ldid installation lifecycle and rejection gates passed'
+echo 'ldid installation lifecycle, runtime and rejection gates passed'
