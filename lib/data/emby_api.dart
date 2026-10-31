@@ -1172,7 +1172,13 @@ class EmbyApi {
         'http': response.statusCode,
         'elapsedMs': watch.elapsedMilliseconds,
       });
-      detail = EmbyItem.fromJson(_map(response.data));
+      final data = _map(response.data);
+      if (data['PlayAccess']?.toString().toLowerCase() == 'none') {
+        throw const PlaybackResolveException(
+          PlaybackResolveFailure.serverDenied,
+        );
+      }
+      detail = EmbyItem.fromJson(data);
       if (detail!.id != item.id) {
         throw const PlaybackResolveException(
           PlaybackResolveFailure.sourceIdentityConflict,
@@ -1255,7 +1261,9 @@ class EmbyApi {
         StrmDirectPlayPolicy.requireDirectRequest(
           forceTranscode: forceTranscode,
         );
-      } else {
+      }
+      if (classification != SourceClassification.confirmedStrm ||
+          selected == null) {
         final value = await fresh();
         if (value.mediaSources.isNotEmpty) {
           selected = StrmDirectPlayPolicy.selectOnce(
@@ -1341,21 +1349,41 @@ class EmbyApi {
         classification = SourceClassification.confirmedStrm;
       }
       StrmDirectPlayPolicy.requireDirectRequest(forceTranscode: forceTranscode);
-      final info = await strict();
-      StrmDirectPlayPolicy.checkError(info.errorCode);
+      // A fresh, authorized detail can expose the STRM URL without triggering
+      // Emby's remote ffprobe. Never reuse a cached URL or graft old headers.
+      var availableSources = (await fresh()).mediaSources;
+      String? playSessionId;
+      var resolution = 'detail_direct';
+      if (availableSources.isEmpty && strictInfo != null) {
+        // Older servers may expose sources only in the identification response.
+        availableSources = strictInfo!.mediaSources;
+        playSessionId = strictInfo!.playSessionId;
+        resolution = 'playback_info';
+      }
       selected = StrmDirectPlayPolicy.fixedSource(
-        info.mediaSources,
+        availableSources,
         selectedId!,
       );
       StrmDirectPlayPolicy.requireNoServerResource(selected);
       if (selected.path == null ||
           !selected.path!.startsWith(RegExp(r'https?://'))) {
+        final info = await strict();
+        StrmDirectPlayPolicy.checkError(info.errorCode);
+        availableSources = info.mediaSources;
         selected = StrmDirectPlayPolicy.fixedSource(
-          (await fresh()).mediaSources,
+          availableSources,
           selectedId,
         );
+        StrmDirectPlayPolicy.requireNoServerResource(selected);
+        playSessionId = info.playSessionId;
+        resolution = 'playback_info';
       }
       check();
+      diagnosticTrace.emit('strm_resolve', {
+        'resolution': resolution,
+        'fixedSource': true,
+        'outcome': 'succeeded',
+      });
       diagnosticTrace.detail('metadata', {
         'sourceUrl': selected.path,
         'itemId': item.id,
@@ -1375,7 +1403,7 @@ class EmbyApi {
           generation: generation,
         ),
         embyServer: Uri.parse(session.serverUrl),
-        playSessionId: info.playSessionId,
+        playSessionId: playSessionId,
       );
       return PlaybackPlan(
         uri: Uri.parse('embyinput://pending'),
@@ -1386,7 +1414,7 @@ class EmbyApi {
         sourceRequest: snapshot.request,
         mediaStreams: snapshot.mediaStreams,
         transcodingReasons: const [],
-        availableMediaSources: info.mediaSources,
+        availableMediaSources: availableSources,
         audioStreamIndex: audioStreamIndex ?? selected.defaultAudioStreamIndex,
         subtitleStreamIndex: subtitleDisabled
             ? null

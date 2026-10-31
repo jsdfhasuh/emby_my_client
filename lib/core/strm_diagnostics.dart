@@ -50,6 +50,7 @@ abstract final class StrmDiagnosticSchema {
     'strm_entry': {'entry'},
     'strm_resolve': {
       'classification',
+      'resolution',
       'fixedSource',
       'conflict',
       'group',
@@ -171,6 +172,7 @@ abstract final class StrmDiagnosticSchema {
     },
     'entry': {'fullscreen', 'inline', 'unavailable'},
     'classification': {'strm', 'regular', 'unknown'},
+    'resolution': {'detail_direct', 'playback_info'},
     'group': {'strict', 'regular', 'detail'},
     'route': {'source_direct', 'server', 'offline'},
     'inputMode': {'stream_cb', 'player'},

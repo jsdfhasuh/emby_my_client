@@ -45,6 +45,42 @@ void main() {
   _deliveryRegressionTests();
   _nativeIdentityRegressionTests();
   _subtitleRegressionTests();
+  test('STRM prepare and open outlive ordinary open budget', () async {
+    final requests = <RequestOptions>[];
+    final api = _api(requests, remoteStrm: true);
+    addTearDown(api.dispose);
+    final preparation = Completer<void>();
+    final opening = Completer<void>();
+    final engine = _SlowSourcePreparationEngine(
+      preparation.future,
+      opening.future,
+    );
+    engine.onOpen = (_) =>
+        engine.durationController.add(const Duration(hours: 1));
+    final controller = PlaybackController(
+      item: _plainItem,
+      engine: engine,
+      resolver: EmbyStreamResolver(api),
+      reporter: PlaybackSessionReporter(api: api, item: _plainItem),
+      playbackHeaders: api.playbackHeaders,
+      openTimeout: const Duration(milliseconds: 5),
+      sourceOpenTimeout: const Duration(seconds: 1),
+      progressInterval: const Duration(hours: 1),
+    );
+    addTearDown(controller.shutdown);
+    final start = controller.start(subtitleDisabled: true);
+    await engine.preparing.future;
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(controller.state.phase, isNot(PlaybackPhase.failed));
+    preparation.complete();
+    await _waitUntil(() => engine.openUris.isNotEmpty);
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(controller.state.phase, PlaybackPhase.opening);
+    opening.complete();
+    await start;
+    expect(controller.state.phase, PlaybackPhase.ready);
+    expect(engine.openUris, hasLength(1));
+  });
   test(
     'source startup keeps reading past ordinary readiness deadline',
     () async {
@@ -2862,6 +2898,23 @@ Future<void> _waitUntil(bool Function() predicate) async {
     await Future<void>.delayed(Duration.zero);
   }
   fail('Timed out waiting for asynchronous test condition');
+}
+
+class _SlowSourcePreparationEngine extends _FakeEngine
+    implements SourceDirectPreparationEngine {
+  _SlowSourcePreparationEngine(this.preparation, Future<void> opening)
+    : super(openOperation: opening);
+  final Future<void> preparation;
+  final preparing = Completer<void>();
+
+  @override
+  Future<VerifiedSourceInput> prepareSource(
+    PlaybackResourceRequest request,
+  ) async {
+    preparing.complete();
+    await preparation;
+    return VerifiedSourceInput(request: request, sizeBytes: 1000000);
+  }
 }
 
 class _FakeEngine

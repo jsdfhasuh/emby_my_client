@@ -56,9 +56,10 @@ class PlaybackController extends ChangeNotifier {
     PlaybackDiagnostics? diagnostics,
     int maxStreamingBitrate = 120000000,
     this.readyTimeout = const Duration(seconds: 18),
-    this.sourceReadyIdleTimeout = const Duration(seconds: 15),
+    this.sourceReadyIdleTimeout = const Duration(seconds: 30),
     this.sourceReadyTimeout = const Duration(seconds: 120),
     this.openTimeout = const Duration(seconds: 18),
+    this.sourceOpenTimeout = const Duration(seconds: 120),
     this.resumeVerificationTimeout = const Duration(seconds: 2),
     this.seekCallTimeout = const Duration(seconds: 8),
     this.playPauseTimeout = const Duration(seconds: 3),
@@ -119,6 +120,7 @@ class PlaybackController extends ChangeNotifier {
   final Duration sourceReadyIdleTimeout;
   final Duration sourceReadyTimeout;
   final Duration openTimeout;
+  final Duration sourceOpenTimeout;
   final Duration resumeVerificationTimeout;
   final Duration seekCallTimeout;
   final Duration playPauseTimeout;
@@ -530,6 +532,9 @@ class PlaybackController extends ChangeNotifier {
         try {
           final boundEngine = engine;
           final openingPlan = plan;
+          final openingTimeout = plan.isSourceDirect
+              ? sourceOpenTimeout
+              : openTimeout;
           await _withDeadline(
             _operationCoordinator.runTrackedNativeOperation(
               kind: PlaybackNativeOperationKind.open,
@@ -550,9 +555,9 @@ class PlaybackController extends ChangeNotifier {
                           : const <String, String>{},
                       play: openingPlaying,
                     ),
-              barrierTimeout: openTimeout,
+              barrierTimeout: openingTimeout,
             ),
-            openTimeout,
+            openingTimeout,
             PlaybackOperationTimeoutKind.engineOpen,
           );
         } on PlaybackNativeOperationTimedOut catch (error) {
@@ -922,7 +927,9 @@ class PlaybackController extends ChangeNotifier {
               verified = await (sourceEngine as SourceDirectPreparationEngine)
                   .prepareSource(request);
             },
-            barrierTimeout: openTimeout,
+            barrierTimeout: plan.isSourceDirect
+                ? sourceOpenTimeout
+                : openTimeout,
           );
           _throwIfStale(token);
           if (!request.sessionActive) throw const _PlaybackCancelled();
@@ -3066,6 +3073,7 @@ class PlaybackController extends ChangeNotifier {
       seekSettleTimeout: resumeVerificationTimeout,
       nativeOperationTimeouts: PlaybackNativeOperationTimeouts(
         open: openTimeout,
+        sourceOpen: sourceOpenTimeout,
         play: playPauseTimeout,
         pause: playPauseTimeout,
         seek: seekCallTimeout,

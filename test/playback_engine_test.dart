@@ -12,6 +12,47 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
 void main() {
+  for (final expires in [false, true]) {
+    test(
+      'STRM preparation has its own bounded open budget (expires=$expires)',
+      () async {
+        final connections = _PendingPlaybackConnection();
+        final engine = MediaKitPlaybackEngine(
+          Player(platformPlayer: _FakePlatformPlayer()),
+          outputQuiescer: _FakePlaybackOutputQuiescer(),
+          downloadConnections: connections,
+          nativeOperationTimeouts: PlaybackNativeOperationTimeouts(
+            open: const Duration(milliseconds: 5),
+            sourceOpen: Duration(milliseconds: expires ? 10 : 1000),
+          ),
+        );
+        addTearDown(engine.dispose);
+        final preparation = engine.prepareSource(
+          fixtureRequest('https://cdn.example.test/source.mp4'),
+        );
+        final checked = expectLater(
+          preparation,
+          throwsA(
+            expires
+                ? isA<PlaybackNativeOperationTimedOut>()
+                : isA<SourceInputException>(),
+          ),
+        );
+        await connections.started.future;
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        connections.gate.complete(
+          DownloadRouteLease(
+            mode: DownloadConnectionMode.direct,
+            release: () async {
+              connections.releases++;
+            },
+          ),
+        );
+        await checked;
+      },
+    );
+  }
+
   test(
     'newer source preparation wins while a shared gate is pending',
     () async {

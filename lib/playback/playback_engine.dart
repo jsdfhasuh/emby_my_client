@@ -358,6 +358,9 @@ class MediaKitPlaybackEngine
     late _PreparedSource prepared;
     await _runNativeOperation(
       kind: PlaybackNativeOperationKind.open,
+      timeout: request.isProgressive
+          ? null
+          : nativeOperationTimeouts.sourceOpen,
       operation: () async {
         prepared = await _prepareSourceInput(request);
       },
@@ -456,6 +459,9 @@ class MediaKitPlaybackEngine
     var revision = _inputRevision;
     return _runNativeOperation(
       kind: PlaybackNativeOperationKind.open,
+      timeout: request.isProgressive
+          ? null
+          : nativeOperationTimeouts.sourceOpen,
       operation: () async {
         var stage = 'native_register';
         try {
@@ -845,7 +851,12 @@ class MediaKitPlaybackEngine
   Future<void> _runNativeOperation({
     required PlaybackNativeOperationKind kind,
     required PlaybackEngineOperation operation,
-  }) => _startNativeOperation(kind: kind, operation: operation).logicalFuture;
+    Duration? timeout,
+  }) => _startNativeOperation(
+    kind: kind,
+    operation: operation,
+    timeout: timeout,
+  ).logicalFuture;
 
   Future<void> _returnNativeOperation({
     required PlaybackNativeOperationKind kind,
@@ -866,10 +877,11 @@ class MediaKitPlaybackEngine
     required PlaybackNativeOperationKind kind,
     required PlaybackEngineOperation operation,
     void Function()? onTimeout,
+    Duration? timeout,
   }) {
     final nativeOperation = PlaybackNativeOperation.start(
       kind: kind,
-      timeout: nativeOperationTimeouts.forKind(kind),
+      timeout: timeout ?? nativeOperationTimeouts.forKind(kind),
       operation: operation,
       onTimeout: onTimeout ?? () => _nativeOperationTimedOut(kind),
     );

@@ -128,7 +128,7 @@ void main() {
   );
 
   test(
-    'Bootstrap STRM resolves strict metadata and actually plays/resumes without Emby video',
+    'Bootstrap STRM uses detail metadata and actually plays/resumes without PlaybackInfo',
     () async {
       MediaKit.ensureInitialized();
       final logFixture = await fileLog();
@@ -145,9 +145,10 @@ void main() {
                 Response(
                   requestOptions: options,
                   statusCode: 200,
-                  data: options.path.endsWith('/PlaybackInfo')
+                  data: options.path == '/Users/user/Items/item'
                       ? {
-                          'PlaySessionId': 'cycle',
+                          'Id': 'item',
+                          'Path': '/disk/movie.strm',
                           'MediaSources': [
                             {
                               'Id': 'source',
@@ -305,11 +306,12 @@ void main() {
         ),
         isTrue,
       );
-      final playback = requests
-          .where((r) => r.path.endsWith('/PlaybackInfo'))
-          .single;
-      expect(playback.data['EnableTranscoding'], false);
-      expect(playback.data['EnableDirectStream'], false);
+      expect(requests.where((r) => r.path.endsWith('/PlaybackInfo')), isEmpty);
+      expect(
+        requests.where((r) => r.path == '/Users/user/Items/item'),
+        hasLength(1),
+      );
+      expect(controller.state.plan!.playSessionId, isNull);
       expect(
         requests.any(
           (r) => r.path.contains('/Videos/') || r.path.contains('/Download'),
@@ -326,7 +328,14 @@ void main() {
         requests.where((r) => r.path == '/Sessions/Playing/Stopped'),
         hasLength(1),
       );
+      expect(
+        requests
+            .where((r) => r.path.startsWith('/Sessions/Playing'))
+            .every((r) => !(r.data as Map).containsKey('PlaySessionId')),
+        isTrue,
+      );
       final exported = await report(logFixture.log, 'native-bootstrap');
+      expect(exported.content, contains('resolution=detail_direct'));
       expect(
         exported.content,
         contains('route=source_direct inputMode=stream_cb'),

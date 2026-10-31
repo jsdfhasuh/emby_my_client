@@ -26,6 +26,7 @@ class PlaybackNativeOperationTimeouts {
   const PlaybackNativeOperationTimeouts({
     this.urgentMute = const Duration(milliseconds: 750),
     this.open = const Duration(seconds: 18),
+    this.sourceOpen = const Duration(seconds: 120),
     this.play = const Duration(seconds: 3),
     this.pause = const Duration(seconds: 3),
     this.seek = const Duration(seconds: 8),
@@ -39,6 +40,7 @@ class PlaybackNativeOperationTimeouts {
 
   final Duration urgentMute;
   final Duration open;
+  final Duration sourceOpen;
   final Duration play;
   final Duration pause;
   final Duration seek;

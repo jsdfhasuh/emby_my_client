@@ -51,6 +51,7 @@ Future<PlaybackPlan> resolve(StrmTrace trace, String url) async {
             requestOptions: o,
             statusCode: 200,
             data: {
+              'Id': 'private-item',
               'MediaSources': [
                 {
                   'Id': 'private-source',

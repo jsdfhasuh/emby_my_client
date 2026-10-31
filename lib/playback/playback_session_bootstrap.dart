@@ -50,6 +50,7 @@ abstract final class PlaybackSessionBootstrap {
       testOverrides: testOverrides,
       maxStreamingBitrate: settings.maxStreamingBitrate,
       openTimeout: nativeOperationTimeouts.open,
+      sourceOpenTimeout: nativeOperationTimeouts.sourceOpen,
       seekCallTimeout: nativeOperationTimeouts.seek,
       playPauseTimeout: nativeOperationTimeouts.play,
       propertyWriteTimeout: nativeOperationTimeouts.propertyWrite,
