@@ -1,0 +1,145 @@
+name: Validate playback CI repair
+
+on:
+  push:
+    branches: [chatgpt/ci-repair-20261107]
+    paths: [.github/workflows/repair-ci-once.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: playback-ci-repair-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair-and-verify:
+    if: github.ref == 'refs/heads/chatgpt/ci-repair-20261107'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/ci-repair-20261107
+          fetch-depth: 0
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          channel: stable
+          cache: true
+      - name: Apply guarded source fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          base = '364bd064386530c9823c4b4fb8db247e893a9eb6'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          p = Path('lib/playback/playback_controller.dart')
+          text = p.read_text()
+          marker = '  static String friendlyPlaybackError(Object error) {'
+          start = text.index(marker) + len(marker)
+          end = text.index('    final message = error.toString().toLowerCase();', start)
+          prefix = text[start:end]
+          print('Original structured error handling:')
+          print(prefix)
+          prop = re.search(r'\b([A-Za-z_]\w*)\.(?:safeHttp|httpStatus)\b', prefix)
+          if prop is None:
+              raise RuntimeError('Expected structured HTTP error handling was not found')
+          var = prop.group(1)
+          if var == 'error':
+              old_if = '    if (error is SourceInputException) {'
+              if prefix.count(old_if) != 1:
+                  raise RuntimeError('Unexpected direct exception handling; refusing a broad rewrite')
+              prefix = prefix.replace(old_if, '    if (sourceError != null) {', 1)
+              prefix = re.sub(r'\berror\.(safeHttp|httpStatus|reason)\b', r'sourceError.\1', prefix)
+              var = 'sourceError'
+          else:
+              guard = re.search(r'    if\s*\(\s*' + re.escape(var) + r'\s*!=\s*null\s*\)\s*\{', prefix)
+              if guard is None:
+                  raise RuntimeError('Expected nullable source error guard was not found')
+              prefix = prefix[guard.start():]
+          normalization = '\n    final SourceInputException? ' + var + ';\n' + (
+              '    if (error is SourceInputException) {\n'
+              '      VAR = error;\n'
+              '    } else if (error is SourceInputFailure) {\n'
+              '      VAR = error.error;\n'
+              '    } else {\n'
+              '      VAR = null;\n'
+              '    }\n'
+          ).replace('VAR', var)
+          p.write_text(text[:start] + normalization + prefix + text[end:])
+
+          p = Path('test/playback_core_test.dart')
+          text = p.read_text()
+          duplicate = "import 'package:emby_my_client/playback/source_input_failure.dart';\n"
+          text = text.replace(duplicate, '')
+          p.write_text(text)
+
+          p = Path('test/strm_diagnostics_test.dart')
+          text = p.read_text()
+          text, count = re.subn(r'\bStackTrace\s+__\b', 'StackTrace _', text)
+          text, count2 = re.subn(r'\(\s*_\s*,\s*__\s*\)', '(_, _)', text)
+          print(f'Normalized unused stack-trace callback parameters: {count + count2}')
+          p.write_text(text)
+
+          regression = Path('test/playback_error_type_regression_test.dart')
+          if regression.exists():
+              raise RuntimeError('Regression test already exists; refusing to overwrite')
+          regression.write_text("""import 'package:emby_my_client/core/strm_diagnostics.dart';
+          import 'package:emby_my_client/playback/playback_controller.dart';
+          import 'package:emby_my_client/playback/source_input_failure.dart';
+          import 'package:flutter_test/flutter_test.dart';
+
+          void main() {
+            test('direct and wrapped source errors retain the HTTP status', () {
+              const error = SourceInputException(
+                'source_denied',
+                stage: 'range_response',
+                httpStatus: 403,
+              );
+              final failure = SourceInputFailure(
+                error: error,
+                trace: StrmTrace(),
+                openAttempt: 1,
+                request: 1,
+                stale: false,
+              );
+              final direct = PlaybackController.friendlyPlaybackError(error);
+              final wrapped = PlaybackController.friendlyPlaybackError(failure);
+              expect(direct, contains('HTTP 403'));
+              expect(wrapped, direct);
+            });
+          }
+          """)
+          PY
+      - name: Resolve dependencies
+        run: flutter pub get
+      - name: Format changed Dart files
+        run: >-
+          dart format
+          lib/playback/playback_controller.dart
+          test/playback_core_test.dart
+          test/strm_diagnostics_test.dart
+          test/playback_error_type_regression_test.dart
+      - name: Check whitespace and repository formatting
+        run: |
+          git diff --check
+          dart format --output=none --set-exit-if-changed lib test
+      - name: Analyze
+        run: flutter analyze
+      - name: Run complete Flutter test suite
+        run: flutter test --reporter expanded
+      - name: Commit only verified source changes to repair branch
+        shell: bash
+        run: |
+          git diff -- lib/playback/playback_controller.dart test/playback_core_test.dart test/strm_diagnostics_test.dart
+          git config user.name 'ChatGPT Web'
+          git config user.email 'chatgpt-web@users.noreply.github.com'
+          git add lib/playback/playback_controller.dart test/playback_core_test.dart test/strm_diagnostics_test.dart test/playback_error_type_regression_test.dart
+          git commit -m 'fix: preserve typed playback errors and resolve analyzer failures' -m 'ChatGPT Web: explicitly normalize source exceptions, remove a redundant test import, use wildcard callback parameters, and cover wrapped HTTP errors. Verified with Flutter 3.38.9 format, analyze, and the full Flutter test suite.'
+          git push origin HEAD:refs/heads/chatgpt/ci-repair-20261107
+          echo "VERIFIED_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
