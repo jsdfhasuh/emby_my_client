@@ -39,6 +39,8 @@ class SourceInputException implements Exception {
           'tls_downgrade' ||
           'redirect_location' => 'redirect',
           'source_denied' ||
+          'source_server_error' ||
+          'source_http_error' ||
           'range_unsupported' ||
           'source_changed' ||
           'invalid_range' => 'range_response',

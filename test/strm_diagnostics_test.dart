@@ -239,7 +239,7 @@ void main() {
     },
   );
 
-  for (final status in [401, 403, 200, 206]) {
+  for (final status in [401, 403, 404, 429, 500, 503, 200, 206]) {
     test(
       'real HTTP $status survives input failure to file and export safely',
       () async {
@@ -260,6 +260,10 @@ void main() {
         );
         final reason = status == 401 || status == 403
             ? 'source_denied'
+            : status >= 500
+            ? 'source_server_error'
+            : status >= 400
+            ? 'source_http_error'
             : 'range_unsupported';
         await expectLater(
           input.prepare(),
@@ -284,6 +288,50 @@ void main() {
       },
     );
   }
+
+  test('HTTP error body is sanitized before file storage and export', () async {
+    final fixture = await fileLog();
+    final trace = StrmTrace(log: fixture.log);
+    final origin = await ProgressiveOrigin.start();
+    addTearDown(origin.close);
+    origin.intercept = (_) async => (
+      status: 500,
+      headers: {'Content-Type': 'text/html; charset=utf-8'},
+      body: utf8.encode(
+        '<html><h1>upstream read failed</h1>\n'
+        'password="private-body-password"\n'
+        'Authorization: Bearer private-body-bearer\n'
+        'Cookie: session=private-body-cookie\n'
+        'https://source.invalid/file?sign=private-body-signature\n'
+        '</html>',
+      ),
+    );
+    final plan = await resolve(trace, '${origin.origin}/private-file');
+    final input = SourceHttpInput(
+      plan.sourceRequest!,
+      embyServer: plan.sourceRequest!.embyServer,
+      openAttempt: trace.nextOpen(),
+    );
+    addTearDown(input.close);
+    await expectLater(input.prepare(), throwsA(isA<SourceInputException>()));
+    trace.finish();
+    final stored = await fixture.log.read();
+    final exported = await report(fixture.log, 'http-error-body');
+    for (final content in [stored, exported.content]) {
+      expect(content, contains('stage=response_body'));
+      expect(content, contains('upstream read failed'));
+      expect(content, contains('"bodyReadOutcome":"complete"'));
+      for (final secret in [
+        'private-body-password',
+        'private-body-bearer',
+        'private-body-cookie',
+        'private-body-signature',
+      ]) {
+        expect(content, isNot(contains(secret)));
+      }
+      expect(content, contains('reason=source_server_error http=500'));
+    }
+  });
 
   test(
     'cancelled in-flight input remains on old trace after new playback',

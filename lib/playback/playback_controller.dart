@@ -2137,7 +2137,7 @@ class PlaybackController extends ChangeNotifier {
         _state.copyWith(
           phase: PlaybackPhase.failed,
           isBuffering: false,
-          errorMessage: '源站读取失败，请返回后重试',
+          errorMessage: friendlyPlaybackError(failure.error),
         ),
       );
     }
@@ -4798,6 +4798,18 @@ class PlaybackController extends ChangeNotifier {
   }
 
   static String friendlyPlaybackError(Object error) {
+    if (error is SourceInputException) {
+      final http = error.safeHttp;
+      final status = http == null ? '' : '（HTTP $http）';
+      final sourceMessage = switch (error.reason) {
+        'source_server_error' => '片源服务返回错误$status，请稍后重试',
+        'source_http_error' => '片源 HTTP 请求失败$status',
+        'source_denied' => '片源访问被拒绝$status，请检查访问权限',
+        'range_unsupported' => '片源分段读取响应不符合要求$status',
+        _ => null,
+      };
+      if (sourceMessage != null) return sourceMessage;
+    }
     final message = error.toString().toLowerCase();
     if (message.contains('resume seek did not settle')) {
       return '恢复播放位置超时，请重试';

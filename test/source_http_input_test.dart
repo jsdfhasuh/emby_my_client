@@ -29,6 +29,54 @@ PlaybackResourceRequest fixtureRequest(
 );
 
 void main() {
+  for (final status in [401, 403, 404, 429, 500, 503]) {
+    test(
+      'HTTP $status preserves its status and revokes native retry',
+      () async {
+        final server = await ProgressiveOrigin.start();
+        addTearDown(server.close);
+        server.intercept = (_) async => (
+          status: status,
+          headers: {'Content-Type': 'text/plain'},
+          body: <int>[],
+        );
+        final request = PlaybackResourceRequest.progressive(
+          rawUrl:
+              '${server.origin}/Videos/item/stream.avi?MediaSourceId=source',
+          headers: const {},
+          identity: fixtureRequest('${server.origin}/video.avi').identity,
+          embyServer: Uri.parse(server.origin),
+        );
+        expect(request.allowsNativeFallback, isTrue);
+        final input = SourceHttpInput(request, embyServer: request.embyServer);
+        addTearDown(input.close);
+        final reason = status == 401 || status == 403
+            ? 'source_denied'
+            : status >= 500
+            ? 'source_server_error'
+            : 'source_http_error';
+        await expectLater(
+          input.prepare(),
+          throwsA(
+            isA<SourceInputException>()
+                .having((error) => error.reason, 'reason', reason)
+                .having((error) => error.safeHttp, 'status', status)
+                .having((error) => error.safeStage, 'stage', 'range_response')
+                .having(
+                  (error) => error.allowsSeekRecovery,
+                  'seek retry',
+                  false,
+                ),
+          ),
+        );
+        expect(request.allowsNativeFallback, isFalse);
+        expect(server.requests, hasLength(1));
+        expect(input.networkBytes, 0);
+        expect(input.ranges, 0);
+      },
+    );
+  }
+
   test(
     'tail index uses 1 MiB fetches for 64 KiB reads and caches seeks',
     () async {

@@ -4,6 +4,7 @@ import '../core/token_redactor.dart';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../core/export_credential_redactor.dart';
 import 'playback_resource_request.dart';
 import 'source_input_failure.dart';
 import 'source_read_ahead_policy.dart';
@@ -146,6 +147,8 @@ class SourceHttpInput {
           'redirect_loop',
           'redirect_location',
           'source_denied',
+          'source_server_error',
+          'source_http_error',
           'source_changed',
           'invalid_range',
           'body_limit',
@@ -740,7 +743,8 @@ class SourceHttpInput {
             onTimeout: () {
               timedOut = true;
               transfer.cancel();
-              throw SourceInputException('timeout', stage: transfer.stage);
+              throw transfer.responseFailure ??
+                  SourceInputException('timeout', stage: transfer.stage);
             },
           );
       if (transfer.closed) throw const SourceInputException('cancelled');
@@ -911,14 +915,22 @@ class SourceHttpInput {
           range == null ||
           (encoding != null && encoding != 'identity')) {
         final failure = SourceInputException(
-          response.statusCode == 401 || response.statusCode == 403
-              ? 'source_denied'
-              : 'range_unsupported',
+          switch (response.statusCode) {
+            401 || 403 => 'source_denied',
+            >= 500 && <= 599 => 'source_server_error',
+            >= 200 && < 300 => 'range_unsupported',
+            _ => 'source_http_error',
+          },
           stage: 'range_response',
           httpStatus: response.statusCode,
         );
+        transfer.responseFailure = failure;
         _recordPolicyFailure(failure, stage: 'range_response');
-        await response.listen((_) {}).cancel();
+        if (failure.reason == 'range_unsupported') {
+          await response.listen((_) {}).cancel();
+        } else {
+          await _recordErrorBody(response, transfer);
+        }
         throw failure;
       }
       final start = int.parse(range[1]!);
@@ -986,6 +998,83 @@ class SourceHttpInput {
       return bytes.takeBytes();
     }
     throw const SourceInputException('redirect_limit');
+  }
+
+  Future<void> _recordErrorBody(
+    HttpClientResponse response,
+    _HttpTransfer transfer,
+  ) async {
+    const byteLimit = 4096;
+    const timeLimit = Duration(seconds: 1);
+    final bytes = BytesBuilder(copy: false);
+    var outcome = 'skipped';
+    var truncated = false;
+    String? body;
+    final iterator = StreamIterator<List<int>>(response);
+    try {
+      final type = response.headers.contentType;
+      final encoding = response.headers.value(
+        HttpHeaders.contentEncodingHeader,
+      );
+      final textual =
+          type != null &&
+          (type.primaryType == 'text' ||
+              type.mimeType == 'application/json' ||
+              type.mimeType == 'application/xml' ||
+              type.subType.endsWith('+json') ||
+              type.subType.endsWith('+xml'));
+      if (textual &&
+          (encoding == null || encoding.toLowerCase() == 'identity')) {
+        final watch = Stopwatch()..start();
+        outcome = 'complete';
+        while (true) {
+          final remaining = timeLimit - watch.elapsed;
+          if (remaining <= Duration.zero) throw TimeoutException('error body');
+          if (!await iterator.moveNext().timeout(remaining)) break;
+          final chunk = iterator.current;
+          final available = byteLimit - bytes.length;
+          bytes.add(chunk.take(available).toList());
+          if (chunk.length > available ||
+              (bytes.length == byteLimit &&
+                  response.contentLength != byteLimit)) {
+            outcome = 'limit';
+            truncated = true;
+            break;
+          }
+        }
+        // An incomplete sample can end inside a quoted secret. Never persist
+        // partial bodies; sanitize only complete, bounded text before logging.
+        if (outcome == 'complete') {
+          final text = type.charset?.toLowerCase() == 'iso-8859-1'
+              ? latin1.decode(bytes.toBytes())
+              : utf8.decode(bytes.toBytes(), allowMalformed: true);
+          body = ExportCredentialRedactor.redact(text);
+          if (body.length > byteLimit) {
+            body = body.substring(0, byteLimit);
+            truncated = true;
+          }
+        }
+      }
+    } on TimeoutException {
+      outcome = 'timeout';
+      truncated = true;
+    } catch (_) {
+      outcome = 'failed';
+      truncated = true;
+    } finally {
+      try {
+        await iterator.cancel();
+      } catch (_) {
+        // Diagnostic collection must preserve the original HTTP failure.
+      }
+      transfer.detail('response_body', {
+        'http': response.statusCode,
+        'responseBody': ?body,
+        'bodyBytes': bytes.length,
+        'bodyTruncated': truncated,
+        'bodyReadOutcome': outcome,
+      });
+    }
   }
 
   Future<ConnectionTask<Socket>> _connect(
@@ -1145,6 +1234,7 @@ class _HttpTransfer {
   bool demand, cancelled = false;
   String stage = 'connect';
   int? responseStatus;
+  SourceInputException? responseFailure;
   int requestNumber = 0;
   int policyGeneration = 0;
   String? target;

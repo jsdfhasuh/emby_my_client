@@ -34,6 +34,10 @@ abstract final class StrmDiagnosticSchema {
     'osErrorMessage',
     'failure',
     'duplicate',
+    'responseBody',
+    'bodyBytes',
+    'bodyTruncated',
+    'bodyReadOutcome',
   };
   static const common = {
     'trace',
@@ -199,6 +203,8 @@ abstract final class StrmDiagnosticSchema {
     'reason': {
       'unknown',
       'source_denied',
+      'source_server_error',
+      'source_http_error',
       'range_unsupported',
       'source_changed',
       'truncated',

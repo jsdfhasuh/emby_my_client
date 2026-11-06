@@ -132,6 +132,118 @@ void main() {
     },
   );
 
+  test('startup HTTP 500 stays visible without playback recovery', () async {
+    final engine = _ControlledEngine()
+      ..prepareError = const SourceInputException(
+        'source_server_error',
+        stage: 'range_response',
+        httpStatus: 500,
+      );
+    final fixture = _Fixture(engine);
+
+    await fixture.controller.start(subtitleDisabled: true);
+
+    expect(fixture.controller.state.phase, PlaybackPhase.failed);
+    expect(fixture.controller.state.errorMessage, '片源服务返回错误（HTTP 500），请稍后重试');
+    expect(engine.prepared, hasLength(1));
+    expect(engine.controlledOpens, isEmpty);
+    expect(engine.nativeOpens, isEmpty);
+    expect(engine.seekPositions, isEmpty);
+    expect(fixture.resolver.forcedTranscodes, [false]);
+    expect(fixture.reports('/Sessions/Playing'), isEmpty);
+  });
+
+  test('runtime HTTP 500 stays visible without playback recovery', () async {
+    final engine = _ControlledEngine();
+    final fixture = _Fixture(engine);
+    await fixture.controller.start(subtitleDisabled: true);
+    final request = engine.controlledOpens.single.request;
+    final seeksBeforeFailure = List<Duration>.of(engine.seekPositions);
+    engine.failures.add(
+      SourceInputFailure(
+        error: const SourceInputException(
+          'source_server_error',
+          stage: 'range_response',
+          httpStatus: 500,
+        ),
+        trace: request.trace,
+        openAttempt: request.trace.currentAttempt,
+        request: 4,
+        stale: false,
+      ),
+    );
+
+    await _until(() => fixture.controller.state.phase == PlaybackPhase.failed);
+
+    expect(fixture.controller.state.errorMessage, '片源服务返回错误（HTTP 500），请稍后重试');
+    expect(engine.prepared, hasLength(1));
+    expect(engine.controlledOpens, hasLength(1));
+    expect(engine.nativeOpens, isEmpty);
+    expect(engine.seekPositions, seeksBeforeFailure);
+    expect(fixture.resolver.forcedTranscodes, [false]);
+    expect(fixture.reports('/Sessions/Playing'), hasLength(1));
+  });
+
+  test('typed source error messages use only safe status and reason', () {
+    final samples = [
+      (
+        code: 'source_server_error',
+        status: 500,
+        expected: '片源服务返回错误（HTTP 500），请稍后重试',
+      ),
+      (
+        code: 'source_server_error',
+        status: 503,
+        expected: '片源服务返回错误（HTTP 503），请稍后重试',
+      ),
+      (
+        code: 'source_http_error',
+        status: 404,
+        expected: '片源 HTTP 请求失败（HTTP 404）',
+      ),
+      (
+        code: 'source_denied',
+        status: 401,
+        expected: '片源访问被拒绝（HTTP 401），请检查访问权限',
+      ),
+      (
+        code: 'source_denied',
+        status: 403,
+        expected: '片源访问被拒绝（HTTP 403），请检查访问权限',
+      ),
+      (
+        code: 'range_unsupported',
+        status: 200,
+        expected: '片源分段读取响应不符合要求（HTTP 200）',
+      ),
+      (
+        code: 'range_unsupported',
+        status: 206,
+        expected: '片源分段读取响应不符合要求（HTTP 206）',
+      ),
+    ];
+    for (final sample in samples) {
+      final error = SourceInputException(
+        sample.code,
+        httpStatus: sample.status,
+        cause: StateError('private-server-body password=private-secret'),
+      );
+      expect(PlaybackController.friendlyPlaybackError(error), sample.expected);
+    }
+    for (final status in [null, -1, 99, 600, 1234567]) {
+      expect(
+        PlaybackController.friendlyPlaybackError(
+          SourceInputException(
+            'source_server_error',
+            httpStatus: status,
+            cause: StateError('HTTP 500 private-server-body'),
+          ),
+        ),
+        '片源服务返回错误，请稍后重试',
+      );
+    }
+  });
+
   test(
     'range rejection after cross-origin redirect cannot restore server auth',
     () async {

@@ -2,12 +2,17 @@ import 'dart:convert';
 
 import 'token_redactor.dart';
 
-/// Redacts only the Android export copy. URL query values are all treated as
+/// Redacts diagnostic display copies. URL query values are all treated as
 /// private, including values reached through nested percent/JSON encoding.
 abstract final class ExportCredentialRedactor {
   static const marker = '<redacted>';
   static final _fields = RegExp(
     r'''(?<![a-z0-9_-])(?:password|passwd|pwd|pw|secret|client_secret|credential|credentials|token|access_token|accesstoken|refresh_token|x-emby-token|api_key|apikey|signature|sig|session_id|sessionid)["']?\s*[:=]\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s&;,}\[\]"']+))''',
+    caseSensitive: false,
+  );
+  // Complete HTTP bodies may still end inside a quoted credential value.
+  static final _unfinishedFields = RegExp(
+    r'''(?<![a-z0-9_-])(?:password|passwd|pwd|pw|secret|client_secret|credential|credentials|token|access_token|accesstoken|refresh_token|x-emby-token|api_key|apikey|signature|sig|session_id|sessionid)["']?\s*[:=]\s*(?:"([^"]*)|'([^']*))$''',
     caseSensitive: false,
   );
   static final _arrays = RegExp(
@@ -43,6 +48,7 @@ abstract final class ExportCredentialRedactor {
     for (final view in views) {
       for (final pattern in [
         _fields,
+        _unfinishedFields,
         _arrays,
         _headers,
         _query,
