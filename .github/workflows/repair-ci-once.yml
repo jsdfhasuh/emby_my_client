@@ -105,7 +105,9 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get
       - name: Fix only unused-import and wildcard diagnostics
-        run: dart fix --apply --code=unused_import,unnecessary_underscores lib test
+        run: |
+          dart fix --apply --code=unused_import,unnecessary_underscores lib
+          dart fix --apply --code=unused_import,unnecessary_underscores test
       - name: Format changed Dart files
         shell: bash
         run: |
