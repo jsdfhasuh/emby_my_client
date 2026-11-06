@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: playback-ci-repair-${{ github.ref }}
   cancel-in-progress: true
@@ -29,7 +33,6 @@ jobs:
           channel: stable
           cache: true
       - name: Apply guarded source fixes
-        shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -109,7 +112,6 @@ jobs:
           dart fix --apply --code=unused_import,unnecessary_underscores lib
           dart fix --apply --code=unused_import,unnecessary_underscores test
       - name: Format changed Dart files
-        shell: bash
         run: |
           python3 - <<'PY'
           import subprocess
@@ -147,7 +149,6 @@ jobs:
             ci-repair-head.txt
           retention-days: 3
       - name: Commit only verified source changes to repair branch
-        shell: bash
         run: |
           git config user.name 'ChatGPT Web'
           git config user.email 'chatgpt-web@users.noreply.github.com'
