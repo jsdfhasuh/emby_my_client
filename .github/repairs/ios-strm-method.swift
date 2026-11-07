@@ -53,6 +53,7 @@
     func require(_ condition: Bool, _ stage: String, file: StaticString = #filePath,
                  line: UInt = #line) throws {
       // Stop this scenario on the first failed prerequisite; do not print PASSED afterwards.
+      guard !condition else { return }
       _ = try XCTUnwrap(condition ? true : nil, "\(stage): \(snapshot())", file: file, line: line)
     }
     func waitFor(_ name: String, _ predicate: (String) -> Bool) -> Bool {
@@ -64,20 +65,18 @@
       return false
     }
     func load(_ id: Int64) throws {
-      // loadfile returns before the new file is loaded. Discard old notifications first.
-      while let event = mpv_wait_event(context, 0), event.pointee.event_id != MPV_EVENT_NONE {}
-      try require(command(["loadfile", "embyinput://\(id)", "replace"]) >= 0, "load \(id) command")
-      let deadline = ProcessInfo.processInfo.systemUptime + 15
-      var loaded = false
-      while ProcessInfo.processInfo.systemUptime < deadline {
-        if let event = mpv_wait_event(context, 0.01), event.pointee.event_id == MPV_EVENT_FILE_LOADED {
-          loaded = true
-          break
-        }
-      }
-      try require(loaded, "load \(id) FILE_LOADED")
-      try require(property("path") == "embyinput://\(id)", "load \(id) active input")
-      try require(waitFor("video-params/w") { $0 == "32" }, "load \(id) decoded frame")
+      // loadfile returns before loading completes. A decoded, settled first frame
+      // on this exact input is the prerequisite for issuing the first seek.
+      let path = "embyinput://\(id)"
+      try require(command(["loadfile", path, "replace"]) >= 0, "load \(id) command")
+      try require(waitFor("time-pos") {
+        guard let position = Double($0) else { return false }
+        return position >= 0 && position <= 1
+          && property("path") == path
+          && property("idle-active") == "no"
+          && property("video-params/w") == "32"
+          && property("seeking") == "no"
+      }, "load \(id) decoded first frame ready")
     }
     func seek(_ seconds: Double) throws {
       try require(command(["seek", String(seconds), "absolute+exact"]) >= 0, "seek \(seconds) command")
