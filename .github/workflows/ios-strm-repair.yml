@@ -3,7 +3,7 @@ name: Verify iPad STRM repair
 on:
   push:
     branches: [chatgpt/ios-strm-repair-20261107]
-    paths: [.github/workflows/ios-strm-repair.yml]
+    paths: [.github/workflows/ios-strm-repair.yml, .github/repairs/ios-strm-method.swift]
   workflow_dispatch:
 
 permissions:
@@ -155,6 +155,6 @@ jobs:
           git config user.name 'ChatGPT Web'
           git config user.email 'chatgpt-web@users.noreply.github.com'
           git add ios/RunnerTests/RunnerTests.swift .github/workflows/ios-core.yml
-          git commit -m 'test(ios): synchronize native STRM loading and preserve XCTest failure evidence' -m 'ChatGPT Web: require actual file loading and completed stopping before subsequent seeks; reject stale positions; retain phase snapshots and raw XCTest results. Verified using three consecutive native STRM runs and the complete production native suite plus its capability evidence gates. Production packaging and physical-device playback are not verified by this run.'
+          git commit -m 'test(ios): synchronize native STRM loading and preserve XCTest failure evidence' -m 'ChatGPT Web: await the settled first frame on the correct source and completed stopping before subsequent seeks; reject stale positions; retain phase snapshots and raw XCTest results. Verified using three consecutive native STRM runs and the complete production native suite plus its capability evidence gates. Production packaging and physical-device playback are not verified by this run.'
           git push origin HEAD:refs/heads/chatgpt/ios-strm-repair-20261107
           echo "VERIFIED_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
