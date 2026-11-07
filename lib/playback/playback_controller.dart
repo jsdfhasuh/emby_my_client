@@ -2137,7 +2137,10 @@ class PlaybackController extends ChangeNotifier {
         _state.copyWith(
           phase: PlaybackPhase.failed,
           isBuffering: false,
-          errorMessage: friendlyPlaybackError(failure.error),
+          errorMessage: friendlyPlaybackError(
+            failure.error,
+            fallbackMessage: '源站读取失败，请返回后重试',
+          ),
         ),
       );
     }
@@ -4797,11 +4800,23 @@ class PlaybackController extends ChangeNotifier {
     super.dispose();
   }
 
-  static String friendlyPlaybackError(Object error) {
+  static String friendlyPlaybackError(
+    Object error, {
+    String fallbackMessage = '播放失败，请返回后重试',
+  }) {
+    final SourceInputException? sourceError;
     if (error is SourceInputException) {
-      final http = error.safeHttp;
+      sourceError = error;
+    } else if (error is SourceInputFailure) {
+      sourceError = error.error;
+    } else {
+      sourceError = null;
+    }
+
+    if (sourceError != null) {
+      final http = sourceError.safeHttp;
       final status = http == null ? '' : '（HTTP $http）';
-      final sourceMessage = switch (error.reason) {
+      final sourceMessage = switch (sourceError.reason) {
         'source_server_error' => '片源服务返回错误$status，请稍后重试',
         'source_http_error' => '片源 HTTP 请求失败$status',
         'source_denied' => '片源访问被拒绝$status，请检查访问权限',
@@ -4810,7 +4825,7 @@ class PlaybackController extends ChangeNotifier {
       };
       if (sourceMessage != null) return sourceMessage;
     }
-    final message = error.toString().toLowerCase();
+    final message = (sourceError ?? error).toString().toLowerCase();
     if (message.contains('resume seek did not settle')) {
       return '恢复播放位置超时，请重试';
     }
@@ -4838,7 +4853,7 @@ class PlaybackController extends ChangeNotifier {
     if (message.contains('codec') || message.contains('decoder')) {
       return '设备无法解码这个媒体';
     }
-    return '播放失败，请返回后重试';
+    return fallbackMessage;
   }
 }
 
