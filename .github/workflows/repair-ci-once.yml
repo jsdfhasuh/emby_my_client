@@ -42,15 +42,14 @@ jobs:
           cc -shared -fPIC -O2 -Wall -Wextra -Werror -pthread native/strm_input.c -o "$RUNNER_TEMP/libstrm_input.so"
           echo "STRM_INPUT_LIBRARY=$RUNNER_TEMP/libstrm_input.so" >> "$GITHUB_ENV"
           python3 -c 'import ctypes; ctypes.CDLL("libmpv.so"); print("HOST_LIBMPV_LOAD=PASS")'
-      - name: Apply minimal typed-error and fallback repair
+      - name: Apply minimal typed-error and contextual fallback repair
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
           import subprocess
 
-          base = '364bd064386530c9823c4b4fb8db247e893a9eb6'
-          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          subprocess.run(['git', 'merge-base', '--is-ancestor', '364bd064386530c9823c4b4fb8db247e893a9eb6', 'HEAD'], check=True)
           p = Path('lib/playback/playback_controller.dart')
           text = p.read_text()
           marker = '  static String friendlyPlaybackError(Object error) {'
@@ -73,9 +72,6 @@ jobs:
               if guard is None:
                   raise RuntimeError('Expected nullable source-error guard not found')
               prefix = prefix[guard.start():]
-          if prefix.count('        _ => null,') != 1:
-              raise RuntimeError('Expected fallback branch not found')
-          prefix = prefix.replace('        _ => null,', "        'unknown' => '源站读取失败，请返回后重试',\n        _ => null,", 1)
           normalization = '\n    final SourceInputException? ' + var + ';\n' + (
               '    if (error is SourceInputException) {\n'
               '      VAR = error;\n'
@@ -85,7 +81,20 @@ jobs:
               '      VAR = null;\n'
               '    }\n'
           ).replace('VAR', var)
-          p.write_text(text[:start] + normalization + prefix + text[end:])
+          text = text[:start] + normalization + prefix + text[end:]
+          text = text.replace(marker, "  static String friendlyPlaybackError(\n    Object error, {\n    String fallbackMessage = '播放失败，请返回后重试',\n  }) {", 1)
+          method_start = text.index('  static String friendlyPlaybackError(')
+          before, method = text[:method_start], text[method_start:]
+          method = method.replace('    final message = error.toString().toLowerCase();', f'    final message = ({var} ?? error).toString().toLowerCase();', 1)
+          old_return = "    return '播放失败，请返回后重试';"
+          if method.count(old_return) != 1:
+              raise RuntimeError('Expected final generic fallback not found')
+          method = method.replace(old_return, '    return fallbackMessage;', 1)
+          old_call = 'errorMessage: friendlyPlaybackError(failure.error),'
+          if before.count(old_call) != 1:
+              raise RuntimeError('Expected single runtime source-failure call not found')
+          before = before.replace(old_call, "errorMessage: friendlyPlaybackError(\n            failure.error,\n            fallbackMessage: '源站读取失败，请返回后重试',\n          ),", 1)
+          p.write_text(before + method)
           regression = Path('test/playback_error_type_regression_test.dart')
           if regression.exists():
               raise RuntimeError('Regression test already exists; refusing to overwrite')
@@ -93,6 +102,14 @@ jobs:
           import 'package:emby_my_client/playback/playback_controller.dart';
           import 'package:emby_my_client/playback/source_input_failure.dart';
           import 'package:flutter_test/flutter_test.dart';
+
+          SourceInputFailure wrapped(SourceInputException error) => SourceInputFailure(
+            error: error,
+            trace: StrmTrace(),
+            openAttempt: 1,
+            request: 1,
+            stale: false,
+          );
 
           void main() {
             for (final entry in <(String, int)>[
@@ -107,22 +124,29 @@ jobs:
                   stage: 'range_response',
                   httpStatus: entry.$2,
                 );
-                final failure = SourceInputFailure(
-                  error: error,
-                  trace: StrmTrace(),
-                  openAttempt: 1,
-                  request: 1,
-                  stale: false,
-                );
                 final direct = PlaybackController.friendlyPlaybackError(error);
                 expect(direct, contains('HTTP ${entry.$2}'));
-                expect(PlaybackController.friendlyPlaybackError(failure), direct);
+                expect(PlaybackController.friendlyPlaybackError(wrapped(error)), direct);
+                expect(
+                  PlaybackController.friendlyPlaybackError(
+                    error,
+                    fallbackMessage: '源站读取失败，请返回后重试',
+                  ),
+                  direct,
+                );
               });
             }
-            test('unknown source failure keeps the existing source message', () {
+            test('startup and runtime unknown failures keep contextual fallbacks', () {
               const error = SourceInputException('unknown');
               expect(
                 PlaybackController.friendlyPlaybackError(error),
+                '播放失败，请返回后重试',
+              );
+              expect(
+                PlaybackController.friendlyPlaybackError(
+                  error,
+                  fallbackMessage: '源站读取失败，请返回后重试',
+                ),
                 '源站读取失败，请返回后重试',
               );
               expect(
@@ -130,13 +154,14 @@ jobs:
                 '播放失败，请返回后重试',
               );
             });
-            test('existing timeout and resume messages remain specific', () {
-              expect(
-                PlaybackController.friendlyPlaybackError(
-                  const SourceInputException('timeout'),
-                ),
-                '媒体连接超时',
-              );
+            test('direct and wrapped timeouts retain their specific message', () {
+              const error = SourceInputException('timeout');
+              for (final value in <Object>[error, wrapped(error)]) {
+                expect(
+                  PlaybackController.friendlyPlaybackError(value),
+                  '媒体连接超时',
+                );
+              }
               expect(
                 PlaybackController.friendlyPlaybackError(
                   StateError('resume seek did not settle'),
@@ -212,6 +237,6 @@ jobs:
           git config user.name 'ChatGPT Web'
           git config user.email 'chatgpt-web@users.noreply.github.com'
           git add lib test
-          git commit -m 'fix(playback): retain typed HTTP errors and source failure fallback' -m 'ChatGPT Web: explicitly type direct and wrapped source errors, preserve the existing unknown-source message, and cover HTTP and timeout message regressions. Verified with Flutter 3.38.9 formatting, analyze, targeted tests, and the full Flutter suite with libmpv and the controlled native input bridge.'
+          git commit -m 'fix(playback): retain typed HTTP errors and contextual failure messages' -m 'ChatGPT Web: explicitly type direct and wrapped source errors, retain distinct startup/runtime fallback messages, and add six focused regressions. Verified with Flutter 3.38.9 formatting, analyze, targeted tests, and the full Flutter suite with libmpv and the controlled native input bridge.'
           git push origin HEAD:refs/heads/chatgpt/ci-repair-20261107
           echo "VERIFIED_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
