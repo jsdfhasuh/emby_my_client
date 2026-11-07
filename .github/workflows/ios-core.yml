@@ -751,6 +751,33 @@ jobs:
           print(json.dumps(manifest, sort_keys=True, separators=(',', ':')))
           PY
 
+      - name: Preserve native XCTest evidence on success or failure
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence='build/ios/xctest-evidence'
+          result_bundle="$RUNNER_TEMP/runner-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.xcresult"
+          xctest_log="$RUNNER_TEMP/runner-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          mkdir -p "$evidence"
+          if [[ -f "$xctest_log" ]]; then
+            cp "$xctest_log" "$evidence/runner-tests.log"
+          fi
+          if [[ -d "$result_bundle" ]]; then
+            ditto -c -k --keepParent "$result_bundle" "$evidence/runner-tests.xcresult.zip"
+            xcrun xcresulttool get test-results summary --path "$result_bundle" > "$evidence/summary.json"
+            cat "$evidence/summary.json"
+          fi
+
+      - name: Upload native XCTest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xctest-${{ github.run_number }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/ios/xctest-evidence/
+
       - name: Generate Runner entitlement mirrors
         shell: bash
         run: |
