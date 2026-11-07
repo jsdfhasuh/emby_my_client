@@ -1,0 +1,116 @@
+name: Diagnose original iPad STRM timing
+
+on:
+  push:
+    branches: [chatgpt/ios-strm-baseline-20261107]
+    paths: [.github/workflows/ios-strm-baseline.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  baseline:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select production Xcode and Flutter
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.4.app
+          revision=67323de285b00232883f53b84095eb72be97d35c
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          git -C "$RUNNER_TEMP/flutter" fetch --depth=1 origin "$revision"
+          git -C "$RUNNER_TEMP/flutter" checkout --detach "$revision"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" precache --ios
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.6'
+          bundler: '2.5.22'
+          bundler-cache: true
+      - name: Prepare locked native dependencies
+        run: |
+          flutter pub get --enforce-lockfile
+          python3 scripts/ios/prepare_media_kit_headers.py --evidence build/ios/artifacts/mpv-headers/prepare
+          (cd ios && bundle exec pod install --deployment)
+          git diff --exit-code -- pubspec.lock ios/Podfile.lock
+      - name: Instrument bounded repeated baseline without adding synchronization
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          p = Path('ios/RunnerTests/RunnerTests.swift')
+          assert subprocess.check_output(['git','hash-object',str(p)],text=True).strip() == '532788b5fb208804619bf1ee3a9396beb426cab2'
+          text = p.read_text()
+          marker = '  func testControlledStrmInputDecodesSeeksAndResumes() throws {\n'
+          start = text.index(marker) + len(marker)
+          end = text.index('  private func strmFixtureVideo()',start)
+          body = text[start:end]
+          old = '    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })'
+          assert body.count(old) == 2
+          body = body.replace(old, '    try requirePhase(waitFor("video-params/w") { $0 == "32" }, "initial decode")',1)
+          body = body.replace(old, '    try requirePhase(waitFor("video-params/w") { $0 == "32" }, "reload decode")',1)
+          for threshold, label in [('15','initial seek to 16'),('11','reload seek to 12')]:
+              old = '    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= ' + threshold + ' })'
+              assert body.count(old) == 1
+              body = body.replace(old, '    try requirePhase(waitFor("time-pos") { (Double($0) ?? 0) >= ' + threshold + ' }, "' + label + '")')
+          diagnostic = '''    func requirePhase(_ success: Bool, _ stage: String) throws {
+                guard !success else { return }
+                let state = ["path", "idle-active", "video-params/w", "time-pos", "pause", "seeking"].map { name -> String in
+                  guard let value = mpv_get_property_string(context, name) else { return "\\(name)=unavailable" }
+                  defer { mpv_free(value) }
+                  return "\\(name)=\\(String(cString: value))"
+                }.joined(separator: " ")
+                _ = try XCTUnwrap(success ? true : nil, "original iteration \\(iteration), \\(stage): \\(state)")
+              }
+          '''
+          anchor = '    XCTAssertGreaterThanOrEqual(command(["loadfile", "embyinput://1", "replace"]), 0)'
+          assert body.count(anchor) == 1
+          body = body.replace(anchor, diagnostic + anchor)
+          tail = '    print("STRM_CUSTOM_INPUT_DECODE_SEEK_RESUME=PASSED")\n  }\n\n'
+          assert body.endswith(tail)
+          body = body[:-len(tail)] + '    print("BASELINE_ITERATION=\\(iteration) PASSED")\n    }\n  }\n\n'
+          p.write_text(text[:start] + '    for iteration in 1...20 {\n' + body + text[end:])
+          PY
+      - name: Prepare iPad simulator
+        run: |
+          runtime="$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and x["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")))')"
+          device="$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in json.load(sys.stdin)["devicetypes"] if x["name"] == "iPad (10th generation)"))')"
+          udid="$(xcrun simctl create 'iPad STRM Baseline Stress' "$device" "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+      - name: Run full original native suite with repeated STRM scenario
+        working-directory: ios
+        run: |
+          xcodebuild test -workspace Runner.xcworkspace -scheme Runner -configuration Debug \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
+            -resultBundlePath "$RUNNER_TEMP/strm-original-stress.xcresult" \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$RUNNER_TEMP/strm-original-stress.log"
+      - name: Preserve original failure assertions and source
+        if: always()
+        run: |
+          evidence=build/ios/strm-baseline-evidence
+          mkdir -p "$evidence"
+          git diff -- ios/RunnerTests/RunnerTests.swift > "$evidence/instrumentation.patch"
+          cp ios/RunnerTests/RunnerTests.swift "$evidence/RunnerTests.swift"
+          if [[ -f "$RUNNER_TEMP/strm-original-stress.log" ]]; then
+            cp "$RUNNER_TEMP/strm-original-stress.log" "$evidence/"
+          fi
+          if [[ -d "$RUNNER_TEMP/strm-original-stress.xcresult" ]]; then
+            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/strm-original-stress.xcresult" > "$evidence/summary.json"
+            cat "$evidence/summary.json"
+            xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/strm-original-stress.xcresult" > "$evidence/tests.json"
+            ditto -c -k --keepParent "$RUNNER_TEMP/strm-original-stress.xcresult" "$evidence/strm-original-stress.xcresult.zip"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-strm-baseline-evidence
+          path: build/ios/strm-baseline-evidence/
+          retention-days: 7
