@@ -71,9 +71,6 @@ jobs:
                     path: build/ios/xctest-evidence/
 
           '''
-          # Keep the literal's indentation identical to the production jobs/steps layout.
-          lines = addition.splitlines(True)
-          addition = lines[0] + ''.join(line[10:] if line.startswith('          ') else line for line in lines[1:])
           p.write_text(text.replace(anchor, addition + anchor, 1))
           PY
           git diff --check
