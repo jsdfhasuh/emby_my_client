@@ -29,6 +29,7 @@ final class RunnerTests: XCTestCase {
     }
     defer {
       strm_release(bridge, 1)
+      strm_release(bridge, 2)
       mpv_terminate_destroy(context)
       stopping.signal()
       done.wait()
@@ -47,28 +48,58 @@ final class RunnerTests: XCTestCase {
       pointers.append(nil)
       return mpv_command(context, &pointers)
     }
+    func property(_ name: String) -> String? {
+      guard let text = mpv_get_property_string(context, name) else { return nil }
+      defer { mpv_free(text) }
+      return String(cString: text)
+    }
+    func snapshot() -> String {
+      ["path", "idle-active", "video-params/w", "time-pos", "pause", "seeking"]
+        .map { "\($0)=\(property($0) ?? "unavailable")" }.joined(separator: " ")
+    }
+    func require(_ condition: Bool, _ stage: String, file: StaticString = #filePath,
+                 line: UInt = #line) throws {
+      // Stop this scenario on the first failed prerequisite; do not print PASSED afterwards.
+      guard !condition else { return }
+      _ = try XCTUnwrap(condition ? true : nil, "\(stage): \(snapshot())", file: file, line: line)
+    }
     func waitFor(_ name: String, _ predicate: (String) -> Bool) -> Bool {
-      let deadline = Date().addingTimeInterval(15)
-      while Date() < deadline {
-        if let text = mpv_get_property_string(context, name) {
-          let value = String(cString: text); mpv_free(text)
-          if predicate(value) { return true }
-        }
-        Thread.sleep(forTimeInterval: 0.01)
+      let deadline = ProcessInfo.processInfo.systemUptime + 15
+      while ProcessInfo.processInfo.systemUptime < deadline {
+        if let value = property(name), predicate(value) { return true }
+        _ = mpv_wait_event(context, 0.01)
       }
       return false
     }
-    XCTAssertGreaterThanOrEqual(command(["loadfile", "embyinput://1", "replace"]), 0)
-    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })
-    XCTAssertGreaterThanOrEqual(command(["seek", "16", "absolute+exact"]), 0)
-    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= 15 })
+    func load(_ id: Int64) throws {
+      // loadfile returns before loading completes. A decoded, settled first frame
+      // on this exact input is the prerequisite for issuing the first seek.
+      let path = "embyinput://\(id)"
+      try require(command(["loadfile", path, "replace"]) >= 0, "load \(id) command")
+      try require(waitFor("time-pos") {
+        guard let position = Double($0) else { return false }
+        return position >= 0 && position <= 1
+          && property("path") == path
+          && property("idle-active") == "no"
+          && property("video-params/w") == "32"
+          && property("seeking") == "no"
+      }, "load \(id) decoded first frame ready")
+    }
+    func seek(_ seconds: Double) throws {
+      try require(command(["seek", String(seconds), "absolute+exact"]) >= 0, "seek \(seconds) command")
+      try require(waitFor("time-pos") {
+        guard let position = Double($0) else { return false }
+        return abs(position - seconds) <= 1 && property("seeking") == "no"
+      }, "seek \(seconds) settled")
+    }
+    try load(1)
+    try seek(16)
     strm_release(bridge, 1)
-    XCTAssertGreaterThanOrEqual(command(["stop"]), 0)
-    XCTAssertEqual(strm_add(bridge, 2, Int64(fixture.count)), 1)
-    XCTAssertGreaterThanOrEqual(command(["loadfile", "embyinput://2", "replace"]), 0)
-    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })
-    XCTAssertGreaterThanOrEqual(command(["seek", "12", "absolute+exact"]), 0)
-    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= 11 })
+    try require(command(["stop"]) >= 0, "stop first input command")
+    try require(waitFor("idle-active") { $0 == "yes" }, "stop first input completed")
+    try require(strm_add(bridge, 2, Int64(fixture.count)) == 1, "register replacement input")
+    try load(2)
+    try seek(12)
     strm_release(bridge, 2)
     print("STRM_CUSTOM_INPUT_DECODE_SEEK_RESUME=PASSED")
   }
