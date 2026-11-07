@@ -1,0 +1,104 @@
+name: Verify iPad STRM repair
+
+on:
+  push:
+    branches: [chatgpt/ios-strm-repair-20261107]
+    paths: [.github/workflows/ios-strm-repair.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ios-strm-repair-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_REVISION: 67323de285b00232883f53b84095eb72be97d35c
+
+jobs:
+  native-regression:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the production Xcode version
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.4.app
+          xcodebuild -version
+      - name: Install the production Flutter revision
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          git -C "$RUNNER_TEMP/flutter" fetch --depth=1 origin "$FLUTTER_REVISION"
+          git -C "$RUNNER_TEMP/flutter" checkout --detach "$FLUTTER_REVISION"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" precache --ios
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.6'
+          bundler: '2.5.22'
+          bundler-cache: true
+      - name: Prepare locked dependencies and pinned mpv headers
+        run: |
+          flutter pub get --enforce-lockfile
+          python3 scripts/ios/prepare_media_kit_headers.py --evidence build/ios/artifacts/mpv-headers/prepare
+          (cd ios && bundle exec pod install --deployment)
+          python3 scripts/ios/prepare_media_kit_headers.py --verify-pods ios/Pods --evidence build/ios/artifacts/mpv-headers/pods
+          git diff --exit-code -- pubspec.lock ios/Podfile.lock
+      - name: Prepare the same iPad simulator as production
+        run: |
+          runtime_id="$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next((x["identifier"] for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and x["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")), ""))')"
+          test -n "$runtime_id"
+          device_id="$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys; items=json.load(sys.stdin)["devicetypes"]; print(next((x["identifier"] for x in items if x["name"] == "iPad (10th generation)"), next(x["identifier"] for x in items if x.get("productFamily") == "iPad")))')"
+          udid="$(xcrun simctl create 'iPad STRM Diagnostics' "$device_id" "$runtime_id")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+      - name: Add diagnostic messages without changing test synchronization
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('ios/RunnerTests/RunnerTests.swift')
+          text = p.read_text()
+          old = '    XCTAssertTrue(waitFor("video-params/w") { $0 == "32" })'
+          assert text.count(old) == 2
+          text = text.replace(old, old[:-1] + ', "initial decode did not report width 32")', 1)
+          text = text.replace(old, old[:-1] + ', "reload decode did not report width 32")', 1)
+          for target, threshold, label in [('16', '15', 'initial seek'), ('12', '11', 'reload seek')]:
+              old = '    XCTAssertTrue(waitFor("time-pos") { (Double($0) ?? 0) >= ' + threshold + ' })'
+              assert text.count(old) == 1
+              text = text.replace(old, old[:-1] + ', "' + label + ' did not reach target ' + target + '")')
+          p.write_text(text)
+          PY
+      - name: Run the original native scenario with exact failure evidence
+        working-directory: ios
+        run: |
+          xcodebuild test \
+            -workspace Runner.xcworkspace -scheme Runner -configuration Debug \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
+            -resultBundlePath "$RUNNER_TEMP/strm-baseline.xcresult" \
+            -only-testing:RunnerTests/RunnerTests/testControlledStrmInputDecodesSeeksAndResumes \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$RUNNER_TEMP/strm-baseline.log"
+      - name: Preserve XCTest details even when the test fails
+        if: always()
+        run: |
+          mkdir -p build/ios/strm-repair-evidence
+          cp "$RUNNER_TEMP/strm-baseline.log" build/ios/strm-repair-evidence/ 2>/dev/null || true
+          git rev-parse HEAD > build/ios/strm-repair-evidence/head.txt
+          git diff -- ios/RunnerTests/RunnerTests.swift > build/ios/strm-repair-evidence/diagnostic-only.patch
+          if [[ -d "$RUNNER_TEMP/strm-baseline.xcresult" ]]; then
+            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/strm-baseline.xcresult" > build/ios/strm-repair-evidence/summary.json
+            cat build/ios/strm-repair-evidence/summary.json
+            xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/strm-baseline.xcresult" > build/ios/strm-repair-evidence/tests.json
+            ditto -c -k --keepParent "$RUNNER_TEMP/strm-baseline.xcresult" build/ios/strm-repair-evidence/strm-baseline.xcresult.zip
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-strm-repair-evidence
+          path: build/ios/strm-repair-evidence/
+          retention-days: 7
