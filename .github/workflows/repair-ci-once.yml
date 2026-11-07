@@ -20,7 +20,7 @@ concurrency:
 jobs:
   repair-and-verify:
     if: github.ref == 'refs/heads/chatgpt/ci-repair-20261107'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +32,17 @@ jobs:
           flutter-version: '3.38.9'
           channel: stable
           cache: true
-      - name: Apply guarded source fixes
+      - name: Install native test dependencies and controlled input bridge
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libmpv-dev mpv ffmpeg fonts-noto-cjk shellcheck
+          python3 -m venv "$RUNNER_TEMP/subtitle-python"
+          "$RUNNER_TEMP/subtitle-python/bin/python" -m pip install 'Pillow==11.3.0'
+          echo "$RUNNER_TEMP/subtitle-python/bin" >> "$GITHUB_PATH"
+          cc -shared -fPIC -O2 -Wall -Wextra -Werror -pthread native/strm_input.c -o "$RUNNER_TEMP/libstrm_input.so"
+          echo "STRM_INPUT_LIBRARY=$RUNNER_TEMP/libstrm_input.so" >> "$GITHUB_ENV"
+          python3 -c 'import ctypes; ctypes.CDLL("libmpv.so"); print("HOST_LIBMPV_LOAD=PASS")'
+      - name: Apply minimal typed-error and fallback repair
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -47,24 +57,25 @@ jobs:
           start = text.index(marker) + len(marker)
           end = text.index('    final message = error.toString().toLowerCase();', start)
           prefix = text[start:end]
-          print('Original structured error handling:')
-          print(prefix)
           prop = re.search(r'\b([A-Za-z_]\w*)\.(?:safeHttp|httpStatus)\b', prefix)
           if prop is None:
-              raise RuntimeError('Expected structured HTTP error handling was not found')
+              raise RuntimeError('Expected structured HTTP error handling not found')
           var = prop.group(1)
           if var == 'error':
-              old_if = '    if (error is SourceInputException) {'
-              if prefix.count(old_if) != 1:
-                  raise RuntimeError('Unexpected direct exception handling')
-              prefix = prefix.replace(old_if, '    if (sourceError != null) {', 1)
+              old = '    if (error is SourceInputException) {'
+              if prefix.count(old) != 1:
+                  raise RuntimeError('Unexpected source-error guard')
+              prefix = prefix.replace(old, '    if (sourceError != null) {', 1)
               prefix = re.sub(r'\berror\.(safeHttp|httpStatus|reason)\b', r'sourceError.\1', prefix)
               var = 'sourceError'
           else:
               guard = re.search(r'    if\s*\(\s*' + re.escape(var) + r'\s*!=\s*null\s*\)\s*\{', prefix)
               if guard is None:
-                  raise RuntimeError('Expected nullable source error guard was not found')
+                  raise RuntimeError('Expected nullable source-error guard not found')
               prefix = prefix[guard.start():]
+          if prefix.count('        _ => null,') != 1:
+              raise RuntimeError('Expected fallback branch not found')
+          prefix = prefix.replace('        _ => null,', "        'unknown' => '源站读取失败，请返回后重试',\n        _ => null,", 1)
           normalization = '\n    final SourceInputException? ' + var + ';\n' + (
               '    if (error is SourceInputException) {\n'
               '      VAR = error;\n'
@@ -77,41 +88,74 @@ jobs:
           p.write_text(text[:start] + normalization + prefix + text[end:])
           regression = Path('test/playback_error_type_regression_test.dart')
           if regression.exists():
-              raise RuntimeError('Regression test already exists')
+              raise RuntimeError('Regression test already exists; refusing to overwrite')
           regression.write_text("""import 'package:emby_my_client/core/strm_diagnostics.dart';
           import 'package:emby_my_client/playback/playback_controller.dart';
           import 'package:emby_my_client/playback/source_input_failure.dart';
           import 'package:flutter_test/flutter_test.dart';
 
           void main() {
-            test('direct and wrapped source errors retain the HTTP status', () {
-              const error = SourceInputException(
-                'source_denied',
-                stage: 'range_response',
-                httpStatus: 403,
+            for (final entry in <(String, int)>[
+              ('source_server_error', 500),
+              ('source_denied', 403),
+              ('source_http_error', 404),
+              ('range_unsupported', 206),
+            ]) {
+              test('direct and wrapped ${entry.$1} retain HTTP ${entry.$2}', () {
+                final error = SourceInputException(
+                  entry.$1,
+                  stage: 'range_response',
+                  httpStatus: entry.$2,
+                );
+                final failure = SourceInputFailure(
+                  error: error,
+                  trace: StrmTrace(),
+                  openAttempt: 1,
+                  request: 1,
+                  stale: false,
+                );
+                final direct = PlaybackController.friendlyPlaybackError(error);
+                expect(direct, contains('HTTP ${entry.$2}'));
+                expect(PlaybackController.friendlyPlaybackError(failure), direct);
+              });
+            }
+            test('unknown source failure keeps the existing source message', () {
+              const error = SourceInputException('unknown');
+              expect(
+                PlaybackController.friendlyPlaybackError(error),
+                '源站读取失败，请返回后重试',
               );
-              final failure = SourceInputFailure(
-                error: error,
-                trace: StrmTrace(),
-                openAttempt: 1,
-                request: 1,
-                stale: false,
+              expect(
+                PlaybackController.friendlyPlaybackError(StateError('fixture')),
+                '播放失败，请返回后重试',
               );
-              final direct = PlaybackController.friendlyPlaybackError(error);
-              final wrapped = PlaybackController.friendlyPlaybackError(failure);
-              expect(direct, contains('HTTP 403'));
-              expect(wrapped, direct);
+            });
+            test('existing timeout and resume messages remain specific', () {
+              expect(
+                PlaybackController.friendlyPlaybackError(
+                  const SourceInputException('timeout'),
+                ),
+                '媒体连接超时',
+              );
+              expect(
+                PlaybackController.friendlyPlaybackError(
+                  StateError('resume seek did not settle'),
+                ),
+                '恢复播放位置超时，请重试',
+              );
             });
           }
           """)
           PY
-      - name: Resolve dependencies
-        run: flutter pub get
-      - name: Fix only unused-import and wildcard diagnostics
+      - name: Resolve locked dependencies
+        run: |
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+      - name: Apply only compiler-reported lint fixes
         run: |
           dart fix --apply --code=unused_import,unnecessary_underscores lib
           dart fix --apply --code=unused_import,unnecessary_underscores test
-      - name: Format changed Dart files
+      - name: Format and check source
         run: |
           python3 - <<'PY'
           import subprocess
@@ -120,20 +164,35 @@ jobs:
           files.append('test/playback_error_type_regression_test.dart')
           subprocess.run(['dart', 'format', *files], check=True)
           PY
-      - name: Check whitespace and repository formatting
-        run: |
           git diff --check
-          dart format --output=none --set-exit-if-changed lib test
+          dart format --output=none --set-exit-if-changed .
       - name: Analyze
         run: flutter analyze 2>&1 | tee ci-repair-analyze.log
-      - name: Run complete Flutter test suite
+      - name: Run targeted playback and HTTP diagnostic regressions
+        run: >-
+          flutter test --reporter expanded
+          test/playback_error_type_regression_test.dart
+          test/playback_cache_controller_test.dart
+          test/progressive_playback_controller_test.dart
+          test/source_http_error_body_test.dart
+          test/strm_diagnostics_test.dart
+          2>&1 | tee ci-repair-targeted.log
+      - name: Run complete Flutter test suite with native dependencies
         run: flutter test --reporter expanded 2>&1 | tee ci-repair-tests.log
-      - name: Capture reviewable diff
+      - name: Capture reviewable diff and summary
         if: always()
         run: |
           git rev-parse HEAD > ci-repair-head.txt
           git diff -- lib test > ci-repair.patch
           git diff --stat -- lib test
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from pathlib import Path
+          for p in sorted(Path('.').glob('ci-repair*.log')):
+              print(f'### {p.name}')
+              for line in p.read_text(errors='replace').splitlines():
+                  if any(s in line for s in ('[E]', 'All tests passed', 'Some tests failed', 'No issues found', ' error •')):
+                      print(line)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -153,6 +212,6 @@ jobs:
           git config user.name 'ChatGPT Web'
           git config user.email 'chatgpt-web@users.noreply.github.com'
           git add lib test
-          git commit -m 'fix: preserve typed playback errors and resolve analyzer failures' -m 'ChatGPT Web: preserve structured playback errors and fix compiler-reported test lints. Verified with Flutter 3.38.9 format, analyze, and the full Flutter test suite.'
+          git commit -m 'fix(playback): retain typed HTTP errors and source failure fallback' -m 'ChatGPT Web: explicitly type direct and wrapped source errors, preserve the existing unknown-source message, and cover HTTP and timeout message regressions. Verified with Flutter 3.38.9 formatting, analyze, targeted tests, and the full Flutter suite with libmpv and the controlled native input bridge.'
           git push origin HEAD:refs/heads/chatgpt/ci-repair-20261107
           echo "VERIFIED_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
