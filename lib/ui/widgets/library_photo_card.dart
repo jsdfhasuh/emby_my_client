@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
+import '../../library/library_watch_status.dart';
+import 'library_watch_status_badge.dart';
 import 'media_widgets.dart';
 
 class LibraryPhotoCard extends StatelessWidget {
@@ -19,9 +21,10 @@ class LibraryPhotoCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final request = imageRequest;
+    final status = LibraryWatchStatus.forItem(item);
     return Semantics(
       button: true,
-      label: '查看图片：${item.name}',
+      label: '查看图片：${item.name}${status == null ? '' : '，${status.label}'}',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -58,48 +61,15 @@ class LibraryPhotoCard extends StatelessWidget {
                   ),
                 ),
               ),
-              if (item.userData.isFavorite)
-                const Positioned(top: 8, left: 8, child: _PhotoFavoriteBadge()),
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: 10,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Icon(
-                      Icons.image_outlined,
-                      size: 20,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const Text(
-                            '图片',
-                            maxLines: 1,
-                            style: TextStyle(
-                              color: Color(0xFFD7DEE1),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              LibraryWatchStatusOverlay(
+                status: status,
+                isFavorite: item.userData.isFavorite,
+              ),
+              LibraryEntryCardCaption(
+                title: item.name,
+                subtitle: '图片',
+                icon: Icons.image_outlined,
+                hasTopBadge: status != null || item.userData.isFavorite,
               ),
             ],
           ),
@@ -107,17 +77,4 @@ class LibraryPhotoCard extends StatelessWidget {
       ),
     );
   }
-}
-
-class _PhotoFavoriteBadge extends StatelessWidget {
-  const _PhotoFavoriteBadge();
-
-  @override
-  Widget build(BuildContext context) => const DecoratedBox(
-    decoration: BoxDecoration(color: Color(0xDD9A3D46), shape: BoxShape.circle),
-    child: Padding(
-      padding: EdgeInsets.all(5),
-      child: Icon(Icons.favorite, size: 15, color: Colors.white),
-    ),
-  );
 }

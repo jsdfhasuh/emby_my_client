@@ -12,12 +12,14 @@ class ZoomablePhotoPage extends StatefulWidget {
     required this.thumbnailRequest,
     required this.isActive,
     required this.onZoomChanged,
+    this.onDisplayReadyChanged,
   });
 
   final EmbyImageRequest? request;
   final EmbyImageRequest? thumbnailRequest;
   final bool isActive;
   final ValueChanged<bool> onZoomChanged;
+  final ValueChanged<bool>? onDisplayReadyChanged;
 
   @override
   State<ZoomablePhotoPage> createState() => _ZoomablePhotoPageState();
@@ -31,6 +33,8 @@ class _ZoomablePhotoPageState extends State<ZoomablePhotoPage> {
   TapDownDetails? _doubleTapDetails;
   bool _zoomed = false;
   int _loadGeneration = 0;
+  bool _displayReady = false;
+  bool? _reportedDisplayReady;
 
   @override
   void didUpdateWidget(covariant ZoomablePhotoPage oldWidget) {
@@ -38,6 +42,15 @@ class _ZoomablePhotoPageState extends State<ZoomablePhotoPage> {
     if (oldWidget.request?.cacheKey != widget.request?.cacheKey ||
         (oldWidget.isActive && !widget.isActive)) {
       _resetTransform(notify: oldWidget.isActive);
+    }
+    if (oldWidget.request?.cacheKey != widget.request?.cacheKey) {
+      _loadGeneration++;
+      _displayReady = false;
+    }
+    if (oldWidget.request?.cacheKey != widget.request?.cacheKey ||
+        oldWidget.isActive != widget.isActive) {
+      _reportedDisplayReady = null;
+      _scheduleDisplayReport();
     }
   }
 
@@ -81,9 +94,30 @@ class _ZoomablePhotoPageState extends State<ZoomablePhotoPage> {
     widget.onZoomChanged(zoomed);
   }
 
+  void _imageFrameDisplayed(int generation, bool ready) {
+    if (!mounted || generation != _loadGeneration || _displayReady == ready) {
+      return;
+    }
+    _displayReady = ready;
+    _scheduleDisplayReport();
+  }
+
+  void _scheduleDisplayReport() {
+    final generation = _loadGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _loadGeneration) return;
+      final ready = widget.isActive && _displayReady;
+      if (_reportedDisplayReady == ready) return;
+      _reportedDisplayReady = ready;
+      widget.onDisplayReadyChanged?.call(ready);
+    });
+  }
+
   Future<void> _retry() async {
     final request = widget.request;
     if (request == null) return;
+    _displayReady = false;
+    _scheduleDisplayReport();
     await CachedNetworkImage.evictFromCache(
       request.uri.toString(),
       cacheKey: request.cacheKey,
@@ -127,6 +161,7 @@ class _ZoomablePhotoPageState extends State<ZoomablePhotoPage> {
       icon: Icons.photo_outlined,
       fadeInDuration: Duration.zero,
     );
+    final generation = _loadGeneration;
     return CachedNetworkImage(
       key: ValueKey('${request.cacheKey}:$_loadGeneration'),
       imageUrl: request.uri.toString(),
@@ -139,6 +174,20 @@ class _ZoomablePhotoPageState extends State<ZoomablePhotoPage> {
       fit: BoxFit.contain,
       fadeInDuration: const Duration(milliseconds: 150),
       placeholder: (_, _) => preview,
+      imageBuilder: (context, provider) => Image(
+        image: provider,
+        fit: BoxFit.contain,
+        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+          if (frame != null || wasSynchronouslyLoaded) {
+            _imageFrameDisplayed(generation, true);
+          }
+          return child;
+        },
+        errorBuilder: (context, error, stackTrace) {
+          _imageFrameDisplayed(generation, false);
+          return preview;
+        },
+      ),
       errorWidget: (_, _, _) => Stack(
         fit: StackFit.expand,
         children: [

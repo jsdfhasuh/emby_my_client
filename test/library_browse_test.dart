@@ -25,8 +25,8 @@ void main() {
     );
     final directory = normalizeLibraryBrowseState(overlapping);
     expect(directory.scope, LibraryBrowseScope.directory);
-    expect(directory.mediaType, LibraryMediaType.all);
-    expect(directory.playedFilter, LibraryPlayedFilter.all);
+    expect(directory.mediaType, LibraryMediaType.movie);
+    expect(directory.playedFilter, LibraryPlayedFilter.unplayed);
     expect(directory.localFilter, LibraryLocalMediaFilter.all);
     expect(directory.alphabetFilter.isAll, isTrue);
 

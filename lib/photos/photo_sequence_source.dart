@@ -29,11 +29,13 @@ final class MediaViewerResult {
     required this.totalCount,
     required this.totalDirty,
     required this.hasMore,
+    Set<String> userDataChangedItemIds = const {},
     this.paginationStrategy = LibraryPaginationStrategy.stableOffset,
   }) : assert(queryFingerprint != ''),
        assert(nextStartIndex >= 0),
        assert(totalCount == null || totalCount >= 0),
-       rawItems = List.unmodifiable(rawItems);
+       rawItems = List.unmodifiable(rawItems),
+       userDataChangedItemIds = Set.unmodifiable(userDataChangedItemIds);
 
   final String queryFingerprint;
   final List<EmbyItem> rawItems;
@@ -42,6 +44,7 @@ final class MediaViewerResult {
   final int? totalCount;
   final bool totalDirty;
   final bool hasMore;
+  final Set<String> userDataChangedItemIds;
   final LibraryPaginationStrategy paginationStrategy;
 }
 

@@ -129,7 +129,9 @@ void main() {
     await _dispose(tester, api, scanService: scanService);
   });
 
-  testWidgets('photo draft clears source and played filters', (tester) async {
+  testWidgets('photo draft keeps viewed state and clears source filters', (
+    tester,
+  ) async {
     final api = _LayoutApi();
     final scanService = _scanService(api);
     await tester.pumpWidget(
@@ -143,13 +145,18 @@ void main() {
     await selectLibraryMediaType(tester, 'photo');
     expect(find.text('来源'), findsNothing);
     expect(find.text('播放状态'), findsNothing);
+    expect(find.text('查看状态'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('library-played-inProgress')),
+      findsNothing,
+    );
     expect(api.calls, hasLength(1));
     await applyLibraryFilter(tester);
 
     expect(api.calls, hasLength(2));
     expect(api.calls.last.mediaType, LibraryMediaType.photo);
-    expect(api.calls.last.playedFilter, LibraryPlayedFilter.all);
-    expect(find.byTooltip('筛选 · 图片'), findsOneWidget);
+    expect(api.calls.last.playedFilter, LibraryPlayedFilter.unplayed);
+    expect(find.byTooltip('筛选 · 图片 · 未查看'), findsOneWidget);
 
     await openLibraryFilter(tester);
     expect(_isSelected(tester, 'library-media-type-photo'), isTrue);
@@ -245,16 +252,38 @@ void main() {
     await _dispose(tester, api, scanService: scanService);
   });
 
-  testWidgets('pure photo libraries hide ineffective filtering', (
+  testWidgets('pure photo libraries expose viewed state filtering', (
     tester,
   ) async {
     final api = _LayoutApi();
     await tester.pumpWidget(_libraryApp(api, view: _photoLibrary));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('library-filter-button')), findsNothing);
+    expect(find.byKey(const ValueKey('library-filter-button')), findsOneWidget);
+    await openLibraryFilter(tester);
     expect(find.text('媒体类型'), findsNothing);
-    expect(find.byType(ChoiceChip), findsNothing);
+    expect(find.text('查看状态'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('library-played-unplayed')),
+        matching: find.text('未查看'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('library-played-played')),
+        matching: find.text('已查看'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('library-played-inProgress')),
+      findsNothing,
+    );
+    await selectLibraryPlayedFilter(tester, 'played');
+    await applyLibraryFilter(tester);
+    expect(api.calls.last.playedFilter, LibraryPlayedFilter.played);
     expect(tester.takeException(), isNull);
     await _dispose(tester, api);
   });

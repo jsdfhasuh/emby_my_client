@@ -49,6 +49,8 @@ class PhotoViewerController extends ChangeNotifier {
   final List<EmbyItem> _rawItems = [];
   final List<EmbyItem> _mediaItems = [];
   final Set<String> _seenItemIds = {};
+  final Set<String> _userDataChangedItemIds = {};
+  final Map<String, bool> _photoViewedOverrides = {};
 
   int _currentIndex = 0;
   int _nextStartIndex;
@@ -85,8 +87,35 @@ class PhotoViewerController extends ChangeNotifier {
     totalCount: _totalCount,
     totalDirty: _totalDirty,
     hasMore: _hasMore,
+    userDataChangedItemIds: _userDataChangedItemIds,
     paginationStrategy: _source.paginationStrategy,
   );
+
+  void requireUserDataRefresh(String itemId) {
+    if (_disposed || itemId.isEmpty) return;
+    _userDataChangedItemIds.add(itemId);
+  }
+
+  void recordPhotoViewed(String itemId, bool viewed) {
+    if (_disposed) return;
+    _photoViewedOverrides[itemId] = viewed;
+    _userDataChangedItemIds.add(itemId);
+    for (final items in [_rawItems, _mediaItems]) {
+      for (var index = 0; index < items.length; index++) {
+        if (items[index].id == itemId) {
+          items[index] = _withViewedOverride(items[index]);
+        }
+      }
+    }
+    _notify();
+  }
+
+  EmbyItem _withViewedOverride(EmbyItem item) {
+    final viewed = _photoViewedOverrides[item.id];
+    return viewed == null || !item.isPhoto
+        ? item
+        : item.copyWith(userData: item.userData.copyWith(isPlayed: viewed));
+  }
 
   String get positionLabel {
     if (_mediaItems.isEmpty) return '0 / 0';
@@ -164,6 +193,7 @@ class PhotoViewerController extends ChangeNotifier {
       );
       final additions = page.items
           .where((item) => _seenItemIds.add(item.id))
+          .map(_withViewedOverride)
           .toList();
       _rawItems.addAll(additions);
       final media = additions.where(_source.mode.accepts).toList();
@@ -183,8 +213,6 @@ class PhotoViewerController extends ChangeNotifier {
   Future<void> _loadIdentityRescan() async {
     final previousRawIds = _rawItems.map((item) => item.id).toList();
     final previousMediaIds = _mediaItems.map((item) => item.id).toSet();
-    final previousCurrentItemId = currentItemId;
-    final previousCurrentIndex = _currentIndex;
     final previousRawCursor = _nextStartIndex;
     final rescannedItems = <EmbyItem>[];
     final rescannedIds = <String>{};
@@ -210,7 +238,7 @@ class PhotoViewerController extends ChangeNotifier {
       );
       for (final item in page.items) {
         if (!rescannedIds.add(item.id)) continue;
-        rescannedItems.add(item);
+        rescannedItems.add(_withViewedOverride(item));
         if (_source.mode.accepts(item) && !previousMediaIds.contains(item.id)) {
           foundNewMedia = true;
         }
@@ -238,19 +266,29 @@ class PhotoViewerController extends ChangeNotifier {
     _seenItemIds
       ..clear()
       ..addAll(rescannedIds);
+    final latestMedia = List<EmbyItem>.of(_mediaItems);
+    final rescannedMedia = rescannedItems.where(_source.mode.accepts).toList();
+    final rescannedById = {for (final item in rescannedMedia) item.id: item};
+    final viewerIds = <String>{};
+    final viewerItems = <EmbyItem>[];
+    // Viewing can remove photos from an unviewed query while pagination is in
+    // flight. Keep the visible page and the visited prefix at their existing
+    // PageView offsets; the authoritative raw result remains filtered above.
+    // Read the current index now, since the user may have swiped during I/O.
+    for (final item in latestMedia.take(_currentIndex + 1)) {
+      viewerIds.add(item.id);
+      viewerItems.add(rescannedById[item.id] ?? _withViewedOverride(item));
+    }
+    for (final item in latestMedia.skip(_currentIndex + 1)) {
+      final fresh = rescannedById[item.id];
+      if (fresh != null && viewerIds.add(item.id)) viewerItems.add(fresh);
+    }
+    for (final item in rescannedMedia) {
+      if (viewerIds.add(item.id)) viewerItems.add(item);
+    }
     _mediaItems
       ..clear()
-      ..addAll(rescannedItems.where(_source.mode.accepts));
-    if (_mediaItems.isEmpty) {
-      _currentIndex = 0;
-    } else {
-      final restoredIndex = previousCurrentItemId == null
-          ? -1
-          : _mediaItems.indexWhere((item) => item.id == previousCurrentItemId);
-      _currentIndex = restoredIndex >= 0
-          ? restoredIndex
-          : previousCurrentIndex.clamp(0, _mediaItems.length - 1).toInt();
-    }
+      ..addAll(viewerItems);
     _nextStartIndex = scanStartIndex;
     _totalCount = scanTotalCount;
     _totalDirty = scanDirty;

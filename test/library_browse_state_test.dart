@@ -62,10 +62,13 @@ void main() {
                         expect(normalized.facet, isNotNull);
                         expect(normalized.facet!.isValid, isTrue);
                       case LibraryBrowseScope.directory:
-                        expect(normalized.mediaType, LibraryMediaType.all);
+                        expect(normalized.mediaType, mediaType);
                         expect(
                           normalized.playedFilter,
-                          LibraryPlayedFilter.all,
+                          mediaType == LibraryMediaType.photo &&
+                                  playedFilter == LibraryPlayedFilter.inProgress
+                              ? LibraryPlayedFilter.all
+                              : playedFilter,
                         );
                         expect(
                           normalized.localFilter,
@@ -96,7 +99,10 @@ void main() {
                       expect(normalized.alphabetFilter.isAll, isTrue);
                     }
                     if (normalized.mediaType == LibraryMediaType.photo) {
-                      expect(normalized.playedFilter, LibraryPlayedFilter.all);
+                      expect(
+                        normalized.playedFilter,
+                        isNot(LibraryPlayedFilter.inProgress),
+                      );
                     }
                     if (!normalized.mediaType.supportsLocalSourceFilter) {
                       expect(
@@ -290,34 +296,114 @@ void main() {
     );
   });
 
-  test('non-media scopes reject media-only events', () {
-    const directory = LibraryBrowseState.directory();
+  test(
+    'directories accept leaf filters without enabling source or alphabet',
+    () {
+      const directory = LibraryBrowseState.directory();
+
+      expect(
+        reduceLibraryBrowseState(
+          directory,
+          const LibraryMediaTypeSelected(LibraryMediaType.movie),
+        ),
+        const LibraryBrowseState.directory(mediaType: LibraryMediaType.movie),
+      );
+      expect(
+        reduceLibraryBrowseState(
+          directory,
+          const LibraryPlayedFilterSelected(LibraryPlayedFilter.played),
+        ),
+        const LibraryBrowseState.directory(
+          playedFilter: LibraryPlayedFilter.played,
+        ),
+      );
+      expect(
+        reduceLibraryBrowseState(
+          directory,
+          const LibraryLocalFilterSelected(LibraryLocalMediaFilter.regular),
+        ),
+        same(directory),
+      );
+      expect(
+        reduceLibraryBrowseState(
+          directory,
+          LibraryAlphabetFilterSelected(LetterItems('m')),
+        ),
+        same(directory),
+      );
+      expect(LibraryBrowseScope.directory.supportsFiltering, isTrue);
+      expect(LibraryBrowseScope.directory.supportsMediaFilters, isFalse);
+      expect(directory.alphabetEnabled, isFalse);
+    },
+  );
+
+  test('category lists continue to reject leaf filtering events', () {
+    for (final scope in [LibraryBrowseScope.genres, LibraryBrowseScope.tags]) {
+      final state = LibraryBrowseState(scope: scope);
+      for (final event in <LibraryBrowseEvent>[
+        const LibraryMediaTypeSelected(LibraryMediaType.video),
+        const LibraryPlayedFilterSelected(LibraryPlayedFilter.inProgress),
+        const LibraryLocalFilterSelected(LibraryLocalMediaFilter.strm),
+        const LibraryFiltersApplied(
+          LibraryFilterDraft(
+            mediaType: LibraryMediaType.video,
+            playedFilter: LibraryPlayedFilter.unplayed,
+          ),
+        ),
+      ]) {
+        expect(reduceLibraryBrowseState(state, event), same(state));
+      }
+    }
+  });
+
+  test('entering directories preserves leaf filters and sorting', () {
+    final state = LibraryBrowseState(
+      mediaType: LibraryMediaType.video,
+      playedFilter: LibraryPlayedFilter.inProgress,
+      localFilter: LibraryLocalMediaFilter.strm,
+      alphabetFilter: LetterItems('m'),
+      sortBy: LibrarySortBy.playCount,
+      sortOrder: LibrarySortOrder.descending,
+    );
 
     expect(
       reduceLibraryBrowseState(
-        directory,
-        const LibraryMediaTypeSelected(LibraryMediaType.movie),
+        state,
+        const LibraryScopeSelected(LibraryBrowseScope.directory),
       ),
-      same(directory),
-    );
-    expect(
-      reduceLibraryBrowseState(
-        directory,
-        const LibraryPlayedFilterSelected(LibraryPlayedFilter.played),
+      const LibraryBrowseState.directory(
+        mediaType: LibraryMediaType.video,
+        playedFilter: LibraryPlayedFilter.inProgress,
+        sortBy: LibrarySortBy.playCount,
+        sortOrder: LibrarySortOrder.descending,
       ),
-      same(directory),
-    );
-    expect(
-      reduceLibraryBrowseState(
-        directory,
-        const LibraryLocalFilterSelected(LibraryLocalMediaFilter.regular),
-      ),
-      same(directory),
     );
   });
 
   test(
-    'filter draft applies atomically and photo clears incompatible filters',
+    'directory filter drafts retain viewed state and clear source filters',
+    () {
+      expect(
+        reduceLibraryBrowseState(
+          const LibraryBrowseState.directory(),
+          const LibraryFiltersApplied(
+            LibraryFilterDraft(
+              mediaType: LibraryMediaType.photo,
+              playedFilter: LibraryPlayedFilter.played,
+              localFilter: LibraryLocalMediaFilter.strm,
+            ),
+          ),
+        ),
+        const LibraryBrowseState.directory(
+          mediaType: LibraryMediaType.photo,
+          playedFilter: LibraryPlayedFilter.played,
+        ),
+      );
+    },
+  );
+
+  test(
+    'photo draft preserves viewed filtering and clears source filtering',
     () {
       const state = LibraryBrowseState(
         mediaType: LibraryMediaType.movie,
@@ -330,14 +416,38 @@ void main() {
 
       expect(draft.mediaType, LibraryMediaType.photo);
       expect(draft.localFilter, LibraryLocalMediaFilter.all);
-      expect(draft.playedFilter, LibraryPlayedFilter.all);
+      expect(draft.playedFilter, LibraryPlayedFilter.unplayed);
       expect(
         reduceLibraryBrowseState(state, LibraryFiltersApplied(draft)),
-        const LibraryBrowseState(mediaType: LibraryMediaType.photo),
+        const LibraryBrowseState(
+          mediaType: LibraryMediaType.photo,
+          playedFilter: LibraryPlayedFilter.unplayed,
+        ),
       );
       expect(draft.reset(), const LibraryFilterDraft());
     },
   );
+
+  test('photos clear in-progress filtering in drafts and directory state', () {
+    const draft = LibraryFilterDraft(
+      mediaType: LibraryMediaType.video,
+      playedFilter: LibraryPlayedFilter.inProgress,
+    );
+    expect(
+      draft.copyWith(mediaType: LibraryMediaType.photo),
+      const LibraryFilterDraft(mediaType: LibraryMediaType.photo),
+    );
+    expect(
+      reduceLibraryBrowseState(
+        const LibraryBrowseState.directory(
+          mediaType: LibraryMediaType.video,
+          playedFilter: LibraryPlayedFilter.inProgress,
+        ),
+        const LibraryMediaTypeSelected(LibraryMediaType.photo),
+      ),
+      const LibraryBrowseState.directory(mediaType: LibraryMediaType.photo),
+    );
+  });
 
   test('series clears local source filters without clearing played state', () {
     const candidate = LibraryBrowseState(
@@ -379,6 +489,7 @@ void main() {
       const LibraryBrowseState(
         scope: LibraryBrowseScope.favorites,
         mediaType: LibraryMediaType.photo,
+        playedFilter: LibraryPlayedFilter.played,
       ),
     );
   });

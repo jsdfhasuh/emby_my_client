@@ -119,7 +119,7 @@ class LibraryContentProfile {
     supportsTags: false,
     supportsFavorites: true,
     supportsDirectories: true,
-    supportsPlayedFilter: false,
+    supportsPlayedFilter: true,
     supportsLocalSourceFilter: false,
     supportsPlayAll: false,
     allItemTypes: 'Photo',

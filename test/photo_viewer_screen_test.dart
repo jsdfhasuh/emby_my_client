@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:emby_my_client/app.dart';
 import 'package:emby_my_client/data/emby_api.dart';
+import 'package:emby_my_client/library/library_pagination_strategy.dart';
 import 'package:emby_my_client/models/emby_models.dart';
 import 'package:emby_my_client/playback/inline_playback_session.dart';
 import 'package:emby_my_client/photos/photo_sequence_source.dart';
@@ -18,6 +19,322 @@ import 'package:flutter_test/flutter_test.dart';
 import 'shared_preferences_async_test_backend.dart';
 
 void main() {
+  testWidgets(
+    'filtered rescan keeps the displayed photo and PageView aligned',
+    (tester) async {
+      final response = Completer<EmbyItemPage>();
+      final api = EmbyApi(_session, dio: Dio());
+      addTearDown(api.dispose);
+      EmbyItem photo(int index) => EmbyItem(
+        id: 'sequence-$index',
+        name: 'Sequence $index',
+        type: 'Photo',
+        imageTags: const {},
+        backdropImageTags: const [],
+        genres: const [],
+        userData: const EmbyUserData(),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PhotoViewerScreen(
+            api: api,
+            source: FilteredLibraryPhotoSource(
+              queryFingerprint: 'unviewed-sequence',
+              paginationStrategy: LibraryPaginationStrategy.identityRescan,
+              initialItems: [
+                for (var index = 0; index < 6; index++) photo(index),
+              ],
+              initialItemId: 'sequence-4',
+              initialRawCursor: 6,
+              initialTotalCount: 7,
+              initialHasMore: true,
+              loadPage: ({required startIndex, required limit}) =>
+                  response.future,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Sequence 4'), findsOneWidget);
+      expect(
+        tester.widget<PageView>(find.byType(PageView)).controller!.page,
+        4,
+      );
+      response.complete(
+        EmbyItemPage(
+          items: [photo(5), photo(6)],
+          rawItemCount: 2,
+          totalRecordCount: 2,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sequence 4'), findsOneWidget);
+      expect(
+        tester.widget<PageView>(find.byType(PageView)).controller!.page,
+        4,
+      );
+      expect(
+        tester
+            .widget<ZoomablePhotoPage>(
+              find.byKey(const ValueKey('photo-page-sequence-4')),
+            )
+            .isActive,
+        isTrue,
+      );
+      await tester.tap(find.byTooltip('下一个'));
+      await tester.pumpAndSettle();
+      expect(find.text('Sequence 5'), findsOneWidget);
+      expect(
+        tester.widget<PageView>(find.byType(PageView)).controller!.page,
+        5,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'photo viewing waits for a displayed frame and a confirmed save',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      var restoredSystemUi = false;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'SystemChrome.setEnabledSystemUIMode' &&
+            call.arguments == SystemUiMode.edgeToEdge.toString()) {
+          restoredSystemUi = true;
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      final requests = <RequestOptions>[];
+      RequestInterceptorHandler? pendingSave;
+      final dio = Dio()
+        ..interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.method == 'GET') {
+                handler.resolve(_photoStatusResponse(options, viewed: true));
+                return;
+              }
+              requests.add(options);
+              pendingSave = handler;
+            },
+          ),
+        );
+      final api = EmbyApi(_session, dio: dio);
+      addTearDown(api.dispose);
+      MediaViewerResult? returnedResult;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => FilledButton(
+              onPressed: () async {
+                returnedResult = await Navigator.of(context)
+                    .push<MediaViewerResult>(
+                      MaterialPageRoute<MediaViewerResult>(
+                        builder: (_) => PhotoViewerScreen(
+                          api: api,
+                          source: _viewerSource(
+                            items: const [_photo1],
+                            initialItemId: _photo1.id,
+                          ),
+                        ),
+                      ),
+                    );
+              },
+              child: const Text('打开待确认照片'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开待确认照片'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 2));
+      expect(requests, isEmpty);
+      tester
+          .widget<ZoomablePhotoPage>(find.byType(ZoomablePhotoPage))
+          .onDisplayReadyChanged!(true);
+      await tester.pump(const Duration(milliseconds: 999));
+      expect(requests, isEmpty);
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      expect(requests.single.path, '/Users/user-1/PlayedItems/photo-1');
+      expect(requests.single.method, 'POST');
+      expect(find.text('未查看'), findsOneWidget);
+      expect(find.text('已查看'), findsNothing);
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(returnedResult, isNull);
+      expect(restoredSystemUi, isFalse);
+      pendingSave!.resolve(
+        Response<dynamic>(requestOptions: requests.single, statusCode: 204),
+      );
+      await tester.pumpAndSettle();
+      expect(restoredSystemUi, isTrue);
+      expect(returnedResult?.userDataChangedItemIds, {_photo1.id});
+      expect(returnedResult?.rawItems.single.userData.isPlayed, isTrue);
+    },
+  );
+
+  testWidgets(
+    'manual photo unviewed mark is saved and not automatically undone',
+    (tester) async {
+      final requests = <RequestOptions>[];
+      final api = EmbyApi(
+        _session,
+        dio: Dio()
+          ..interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.method == 'GET') {
+                  handler.resolve(_photoStatusResponse(options, viewed: false));
+                  return;
+                }
+                requests.add(options);
+                handler.resolve(
+                  Response<dynamic>(requestOptions: options, statusCode: 204),
+                );
+              },
+            ),
+          ),
+      );
+      addTearDown(api.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PhotoViewerScreen(
+            api: api,
+            source: _viewerSource(
+              items: [
+                _photo1.copyWith(userData: const EmbyUserData(isPlayed: true)),
+              ],
+              initialItemId: _photo1.id,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('photo-viewed-action')));
+      await tester.pumpAndSettle();
+      expect(requests.single.method, 'DELETE');
+      expect(find.text('未查看'), findsOneWidget);
+      tester
+          .widget<ZoomablePhotoPage>(find.byType(ZoomablePhotoPage))
+          .onDisplayReadyChanged!(true);
+      await tester.pump(const Duration(seconds: 2));
+      expect(requests, hasLength(1));
+      expect(find.text('未查看'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('failed manual photo save keeps the state and offers retry', (
+    tester,
+  ) async {
+    var attempts = 0;
+    final api = EmbyApi(
+      _session,
+      dio: Dio()
+        ..interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.method == 'GET') {
+                handler.resolve(_photoStatusResponse(options, viewed: true));
+                return;
+              }
+              attempts++;
+              if (attempts == 1) {
+                handler.reject(
+                  DioException(
+                    requestOptions: options,
+                    response: Response<dynamic>(
+                      requestOptions: options,
+                      statusCode: 500,
+                    ),
+                    type: DioExceptionType.badResponse,
+                  ),
+                );
+              } else {
+                handler.resolve(
+                  Response<dynamic>(requestOptions: options, statusCode: 204),
+                );
+              }
+            },
+          ),
+        ),
+    );
+    addTearDown(api.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PhotoViewerScreen(
+          api: api,
+          source: _viewerSource(
+            items: const [_photo1],
+            initialItemId: _photo1.id,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('photo-viewed-action')));
+    await tester.pumpAndSettle();
+    expect(find.text('未查看'), findsOneWidget);
+    expect(find.text('查看状态保存失败，请重试'), findsOneWidget);
+    expect(find.text('重试：标记为已查看'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byKey(const Key('photo-viewed-action')));
+    await tester.pumpAndSettle();
+    expect(attempts, 2);
+    expect(find.text('已查看'), findsOneWidget);
+    expect(find.text('查看状态保存失败，请重试'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'photo state stays unchanged when the server does not confirm it',
+    (tester) async {
+      final api = EmbyApi(
+        _session,
+        dio: Dio()
+          ..interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                handler.resolve(
+                  options.method == 'GET'
+                      ? _photoStatusResponse(options, viewed: false)
+                      : Response<dynamic>(
+                          requestOptions: options,
+                          statusCode: 204,
+                        ),
+                );
+              },
+            ),
+          ),
+      );
+      addTearDown(api.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PhotoViewerScreen(
+            api: api,
+            source: _viewerSource(
+              items: const [_photo1],
+              initialItemId: _photo1.id,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('photo-viewed-action')));
+      await tester.pumpAndSettle();
+      expect(find.text('未查看'), findsOneWidget);
+      expect(find.text('已查看'), findsNothing);
+      expect(find.text('查看状态保存失败，请重试'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets(
     'offline home video blocks inline startup and resumes after recovery',
     (tester) async {
@@ -473,6 +790,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(returnedResult?.currentItemId, _video1.id);
+      expect(returnedResult?.userDataChangedItemIds, {_video1.id});
       expect(find.text('打开媒体'), findsOneWidget);
       expect(platformCalls.last.arguments, SystemUiMode.edgeToEdge.toString());
     },
@@ -1150,6 +1468,24 @@ const _otherSession = EmbySession(
   username: 'tester',
   accessToken: 'fixture-token-b',
   deviceId: 'device-1',
+);
+
+Response<dynamic> _photoStatusResponse(
+  RequestOptions options, {
+  required bool viewed,
+}) => Response<dynamic>(
+  requestOptions: options,
+  statusCode: 200,
+  data: {
+    'Items': [
+      {
+        'Id': _photo1.id,
+        'Name': _photo1.name,
+        'Type': 'Photo',
+        'UserData': {'Played': viewed},
+      },
+    ],
+  },
 );
 
 class _ViewerSessionHarness {

@@ -41,6 +41,11 @@ class LibraryResultStatistics {
 
   bool get isLocalScan => state.localFilter != LibraryLocalMediaFilter.all;
 
+  bool get isFilteredDirectory =>
+      state.scope == LibraryBrowseScope.directory &&
+      (state.mediaType != LibraryMediaType.all ||
+          state.playedFilter != LibraryPlayedFilter.all);
+
   bool get isLocalScanComplete =>
       isLocalScan && scanStatus == LibraryLocalScanStatus.complete;
 
@@ -115,6 +120,13 @@ class LibraryResultStatistics {
       return '已加载 ${_formatCount(loadedCount)} 项，结果已变化，请刷新统计';
     }
     final total = effectiveTotal;
+    if (isFilteredDirectory) {
+      return total == null
+          ? loadedCount == 0
+                ? '正在筛选当前目录'
+                : '目录筛选已加载 ${_formatCount(loadedCount)} 项（含目录）'
+          : '目录筛选共 ${_formatCount(total)} 项（含目录）';
+    }
     if (total == null) {
       return loadedCount == 0 ? '正在统计' : '已加载 ${_formatCount(loadedCount)} 项';
     }
@@ -135,6 +147,9 @@ class LibraryResultStatistics {
       LibraryBrowseScope.media || LibraryBrowseScope.facet
           when state.playedFilter == LibraryPlayedFilter.played =>
         '已播放共 $formattedTotal 项',
+      LibraryBrowseScope.media || LibraryBrowseScope.facet
+          when state.playedFilter == LibraryPlayedFilter.inProgress =>
+        '观看中共 $formattedTotal 项',
       LibraryBrowseScope.media ||
       LibraryBrowseScope.facet => '共 $formattedTotal 项',
     };
@@ -199,6 +214,11 @@ class LibraryPositionPresentation {
 }
 
 String _rangePrefix(LibraryBrowseState state) {
+  if (state.scope == LibraryBrowseScope.directory &&
+      (state.mediaType != LibraryMediaType.all ||
+          state.playedFilter != LibraryPlayedFilter.all)) {
+    return '目录筛选';
+  }
   if (state.scope == LibraryBrowseScope.favorites) {
     return switch (state.mediaType) {
       LibraryMediaType.all => '收藏',
@@ -210,12 +230,18 @@ String _rangePrefix(LibraryBrowseState state) {
   }
   if (state.playedFilter == LibraryPlayedFilter.unplayed) return '未播放';
   if (state.playedFilter == LibraryPlayedFilter.played) return '已播放';
+  if (state.playedFilter == LibraryPlayedFilter.inProgress) return '观看中';
   if (state.localFilter == LibraryLocalMediaFilter.strm) return 'STRM';
   if (state.localFilter == LibraryLocalMediaFilter.regular) return '普通媒体';
   return '';
 }
 
 String _totalLabel(LibraryBrowseState state, int total) {
+  if (state.scope == LibraryBrowseScope.directory &&
+      (state.mediaType != LibraryMediaType.all ||
+          state.playedFilter != LibraryPlayedFilter.all)) {
+    return '目录筛选共 ${_formatCount(total)} 项（含目录）';
+  }
   if (state.localFilter != LibraryLocalMediaFilter.all) {
     return _localLabel(state, '共 ${_formatCount(total)} 项');
   }

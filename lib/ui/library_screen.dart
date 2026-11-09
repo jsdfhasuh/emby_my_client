@@ -12,6 +12,7 @@ import '../images/emby_image_request.dart';
 import '../library/library_alphabet_filter.dart';
 import '../library/library_browse_state.dart';
 import '../library/library_content_profile.dart';
+import '../library/library_directory_filter.dart';
 import '../library/library_entry_action.dart';
 import '../library/library_grid_geometry.dart';
 import '../library/library_item_membership.dart';
@@ -320,6 +321,44 @@ Future<EmbyItemPage> _loadLocalMediaScanPage({
   genreId: state.facet?.kind == LibraryFacetKind.genre ? state.facet!.id : null,
   tagId: state.facet?.kind == LibraryFacetKind.tag ? state.facet!.id : null,
 );
+
+Future<EmbyItemPage> _loadDirectoryPage({
+  required EmbyApi api,
+  required String parentId,
+  required LibraryBrowseState state,
+  required int startIndex,
+  required int limit,
+}) async => filterLibraryDirectoryPage(
+  await api.getDirectoryChildren(
+    parentId: parentId,
+    startIndex: startIndex,
+    limit: limit,
+    sortBy: state.sortBy,
+    sortOrder: state.sortOrder,
+  ),
+  state,
+);
+
+String _playedFilterLabel(
+  LibraryPlayedFilter filter, {
+  bool photoOnly = false,
+  bool directory = false,
+}) => switch (filter) {
+  LibraryPlayedFilter.all => '全部',
+  LibraryPlayedFilter.unplayed =>
+    photoOnly
+        ? '未查看'
+        : directory
+        ? '未看完'
+        : '未播放',
+  LibraryPlayedFilter.inProgress => '观看中',
+  LibraryPlayedFilter.played =>
+    photoOnly
+        ? '已查看'
+        : directory
+        ? '已观看'
+        : '已播放',
+};
 
 Future<LibraryBrowseState> restoreLibraryRootSortState({
   required EmbyApi api,
@@ -840,12 +879,16 @@ class _LibraryFilterSheet extends StatefulWidget {
     required this.mediaTypes,
     required this.supportsLocalSource,
     required this.supportsPlayed,
+    this.directory = false,
+    this.photoOnly = false,
   });
 
   final LibraryFilterDraft initialDraft;
   final List<LibraryMediaType> mediaTypes;
   final bool supportsLocalSource;
   final bool supportsPlayed;
+  final bool directory;
+  final bool photoOnly;
 
   @override
   State<_LibraryFilterSheet> createState() => _LibraryFilterSheetState();
@@ -854,10 +897,13 @@ class _LibraryFilterSheet extends StatefulWidget {
 class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
   late LibraryFilterDraft _draft = widget.initialDraft;
 
-  bool get _isPhoto => _draft.mediaType == LibraryMediaType.photo;
+  bool get _isPhoto =>
+      widget.photoOnly || _draft.mediaType == LibraryMediaType.photo;
 
   bool get _supportsLocalSource =>
-      widget.supportsLocalSource && _draft.mediaType.supportsLocalSourceFilter;
+      !widget.directory &&
+      widget.supportsLocalSource &&
+      _draft.mediaType.supportsLocalSourceFilter;
 
   void _update(LibraryFilterDraft draft) => setState(() => _draft = draft);
 
@@ -902,22 +948,43 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
                     _update(_draft.copyWith(localFilter: value)),
               ),
             ],
-            if (widget.supportsPlayed && !_isPhoto) ...[
+            if (widget.supportsPlayed) ...[
               const SizedBox(height: 20),
-              Text('播放状态', style: Theme.of(context).textTheme.labelLarge),
+              Text(
+                _isPhoto
+                    ? '查看状态'
+                    : widget.directory
+                    ? '观看状态'
+                    : '播放状态',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
               const SizedBox(height: 8),
               _choiceRow<LibraryPlayedFilter>(
-                values: LibraryPlayedFilter.values,
+                values: [
+                  LibraryPlayedFilter.all,
+                  LibraryPlayedFilter.unplayed,
+                  if (!_isPhoto) LibraryPlayedFilter.inProgress,
+                  LibraryPlayedFilter.played,
+                ],
                 selected: _draft.playedFilter,
                 keyFor: (value) => ValueKey('library-played-${value.name}'),
-                labelFor: (value) => switch (value) {
-                  LibraryPlayedFilter.all => '全部',
-                  LibraryPlayedFilter.unplayed => '未播放',
-                  LibraryPlayedFilter.played => '已播放',
-                },
+                labelFor: (value) => _playedFilterLabel(
+                  value,
+                  photoOnly: _isPhoto,
+                  directory: widget.directory,
+                ),
                 onSelected: (value) =>
                     _update(_draft.copyWith(playedFilter: value)),
               ),
+              if (widget.directory) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _isPhoto
+                      ? '筛选当前目录的图片，子目录和相册入口始终保留。'
+                      : '筛选当前目录的媒体，子目录和相册入口始终保留。未看完包含观看中；图片按是否已查看筛选。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
             ],
             const SizedBox(height: 20),
             OverflowBar(
@@ -1274,7 +1341,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
             .toList(growable: false);
 
   bool get _showFilter =>
-      _isMediaScope &&
+      _state.scope.supportsFiltering &&
       (_filterMediaTypes.length > 1 ||
           _localSourceFilterAvailable ||
           widget.profile.supportsPlayedFilter);
@@ -1285,11 +1352,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       if (_state.localFilter != LibraryLocalMediaFilter.all)
         _state.localFilter.label,
       if (_state.playedFilter != LibraryPlayedFilter.all)
-        switch (_state.playedFilter) {
-          LibraryPlayedFilter.unplayed => '未播放',
-          LibraryPlayedFilter.played => '已播放',
-          LibraryPlayedFilter.all => '',
-        },
+        _playedFilterLabel(
+          _state.playedFilter,
+          photoOnly:
+              _state.mediaType == LibraryMediaType.photo ||
+              widget.profile.kind == LibraryContentProfileKind.photos,
+          directory: _state.scope == LibraryBrowseScope.directory,
+        ),
     ];
     return labels.isEmpty ? '筛选' : '筛选 · ${labels.join(' · ')}';
   }
@@ -1337,10 +1406,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     };
   }
 
+  bool get _filtersDirectory =>
+      _state.scope == LibraryBrowseScope.directory &&
+      (_state.mediaType != LibraryMediaType.all ||
+          _state.playedFilter != LibraryPlayedFilter.all);
+
   LibraryResultStatistics get _statistics => LibraryResultStatistics(
     state: _state,
     loadedCount: _displayItems.length,
-    totalCount: _usesLocalScan && _scanStatus == LibraryLocalScanStatus.complete
+    totalCount: _filtersDirectory
+        ? (_reloadDisplaySnapshot?.hasMore ?? _hasMore) ||
+                  (_reloadDisplaySnapshot?.loadFailed ?? _loadFailed)
+              ? null
+              : _displayItems.length
+        : _usesLocalScan && _scanStatus == LibraryLocalScanStatus.complete
         ? _items.length
         : _reloadDisplaySnapshot == null
         ? _totalCount
@@ -1685,23 +1764,43 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       _loadFailed = false;
     });
     try {
-      final page = await _requestPage(startIndex);
-      if (!mounted || generation != _generation) return;
-      if (revision != _paginationRevision) {
-        setState(() => _loading = false);
-        return;
-      }
-      final cursor = advanceLibraryRawPageCursor(
-        currentStartIndex: startIndex,
-        currentTotalCount: _totalCount,
-        reportedTotalCount: page.totalRecordCount,
-        rawItemCount: page.rawItemCount,
-        pageSize: _pageSize,
-        dirty: _resultTotalDirty,
-      );
+      final incomingItems = <EmbyItem>[];
+      final incomingIds = <String>{};
+      var requestStartIndex = startIndex;
+      var requestTotalCount = _totalCount;
+      var requestDirty = _resultTotalDirty;
+      late LibraryRawPageCursorUpdate cursor;
+      do {
+        final page = await _requestPage(requestStartIndex);
+        if (!mounted || generation != _generation) return;
+        if (revision != _paginationRevision) {
+          setState(() => _loading = false);
+          return;
+        }
+        cursor = advanceLibraryRawPageCursor(
+          currentStartIndex: requestStartIndex,
+          currentTotalCount: requestTotalCount,
+          reportedTotalCount: page.totalRecordCount,
+          rawItemCount: page.rawItemCount,
+          pageSize: _pageSize,
+          dirty: requestDirty,
+        );
+        for (final item in page.items) {
+          if (!_seenItemIds.contains(item.id) && incomingIds.add(item.id)) {
+            incomingItems.add(item);
+          }
+        }
+        requestStartIndex = cursor.nextStartIndex;
+        requestTotalCount = cursor.totalCount;
+        requestDirty = cursor.dirty;
+        _recordCursorDiagnostics(cursor);
+      } while (_filtersDirectory &&
+          cursor.hasMore &&
+          !cursor.paginationStalled &&
+          incomingItems.length < _pageSize);
       final staleCursor = startIndex < _nextStartIndex;
       setState(() {
-        for (final item in page.items) {
+        for (final item in incomingItems) {
           if (!_seenItemIds.add(item.id)) continue;
           _items.add(item);
         }
@@ -1779,7 +1878,10 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           throw const LibraryPaginationStalled();
         }
       } while (scanHasMore &&
-          (scanStartIndex <= previousRawCursor || !foundNewIdentity));
+          (scanStartIndex <= previousRawCursor ||
+              !foundNewIdentity ||
+              (_filtersDirectory &&
+                  rescannedItems.length < previousIds.length + _pageSize)));
       if (!mounted || generation != _generation) return;
       if (revision != _paginationRevision) {
         setState(() => _loading = false);
@@ -1879,7 +1981,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       await _loadMore(expectedGeneration: generation);
       if (!mounted || generation != _generation || _loadFailed) return;
       if (_nextStartIndex <= previousCursor) return;
-    } while (_hasMore && _items.isEmpty);
+    } while (_hasMore &&
+        (_items.isEmpty || (_filtersDirectory && _items.length < _pageSize)));
   }
 
   Future<EmbyItemPage> _requestMediaPage(
@@ -1899,12 +2002,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     LibraryBrowseScope.media ||
     LibraryBrowseScope.favorites ||
     LibraryBrowseScope.facet => _requestMediaPage(_state, startIndex),
-    LibraryBrowseScope.directory => widget.api.getDirectoryChildren(
+    LibraryBrowseScope.directory => _loadDirectoryPage(
+      api: widget.api,
+      state: _state,
       parentId: widget.view.id,
       startIndex: startIndex,
       limit: _pageSize,
-      sortBy: _state.sortBy,
-      sortOrder: _state.sortOrder,
     ),
     LibraryBrowseScope.genres => widget.api.getLibraryGenres(
       parentId: widget.view.id,
@@ -2220,6 +2323,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     final membershipChanges = userData.entries
         .where((entry) {
           final item = loadedItems[entry.key];
+          if (item != null && state.scope == LibraryBrowseScope.directory) {
+            return libraryDirectoryItemMatches(item, state) !=
+                libraryDirectoryItemMatches(
+                  item.copyWith(userData: entry.value),
+                  state,
+                );
+          }
           return item != null &&
               libraryItemMatchesServerMembership(state, item.userData) !=
                   libraryItemMatchesServerMembership(state, entry.value);
@@ -2341,8 +2451,9 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     }
     if (mounted &&
         generation == _generation &&
-        _state.localFilter != LibraryLocalMediaFilter.all &&
-        _items.isEmpty &&
+        (_state.localFilter != LibraryLocalMediaFilter.all ||
+            _filtersDirectory) &&
+        (_items.isEmpty || (_filtersDirectory && _items.length < _pageSize)) &&
         _hasMore &&
         !_loadFailed) {
       await _loadUntilDisplayCapacity(expectedGeneration: generation);
@@ -2492,6 +2603,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
         mediaTypes: _filterMediaTypes,
         supportsLocalSource: _localSourceFilterAvailable,
         supportsPlayed: widget.profile.supportsPlayedFilter,
+        directory: _state.scope == LibraryBrowseScope.directory,
+        photoOnly: widget.profile.kind == LibraryContentProfileKind.photos,
       ),
     );
     if (selected != null && mounted) _dispatch(LibraryFiltersApplied(selected));
@@ -2648,12 +2761,12 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
       required int startIndex,
       required int limit,
     }) => switch (state.scope) {
-      LibraryBrowseScope.directory => api.getDirectoryChildren(
+      LibraryBrowseScope.directory => _loadDirectoryPage(
+        api: api,
+        state: state,
         parentId: viewId,
         startIndex: startIndex,
         limit: limit,
-        sortBy: state.sortBy,
-        sortOrder: state.sortOrder,
       ),
       LibraryBrowseScope.media ||
       LibraryBrowseScope.favorites ||
@@ -2727,8 +2840,13 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     final resultAdvancesCursor = result.nextStartIndex > previousCursor;
     final resultItems = <EmbyItem>[];
     final resultIds = <String>{};
+    final currentUserData = {for (final item in _items) item.id: item.userData};
     for (final item in result.rawItems) {
-      if (resultIds.add(item.id)) resultItems.add(item);
+      if (!resultIds.add(item.id)) continue;
+      final latestUserData = currentUserData[item.id];
+      resultItems.add(
+        latestUserData == null ? item : item.copyWith(userData: latestUserData),
+      );
     }
     setState(() {
       if (result.paginationStrategy ==
@@ -2790,6 +2908,8 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
               profile: widget.profile,
               initialState: _state.scope == LibraryBrowseScope.directory
                   ? LibraryBrowseState.directory(
+                      mediaType: _state.mediaType,
+                      playedFilter: _state.playedFilter,
                       sortBy: _state.sortBy,
                       sortOrder: _state.sortOrder,
                     )
@@ -2854,6 +2974,20 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
           expectedGeneration: generation,
           expectedFingerprint: source.queryFingerprint,
         );
+        if (result.userDataChangedItemIds.isNotEmpty &&
+            source.queryFingerprint == _photoQueryFingerprint(_state)) {
+          try {
+            if (libraryBrowseHasServerMembershipCondition(_state) ||
+                _state.sortBy == LibrarySortBy.playCount) {
+              await _refreshPreservingPosition();
+            } else {
+              await _refreshUserData(result.userDataChangedItemIds);
+            }
+          } catch (error, stackTrace) {
+            _reportUserDataRefreshFailure(error, stackTrace);
+          }
+        }
+        if (!mounted) return;
         if (merged) _scheduleViewerPositionRestore(result.currentItemId);
       case LibraryEntryAction.unsupported:
         DiagnosticLog.instance.warning(
@@ -3125,7 +3259,7 @@ class _LibraryBrowseScreenState extends State<LibraryBrowseScreen>
     if (_state.localFilter != LibraryLocalMediaFilter.all) {
       return _state.localFilter.emptyTitle;
     }
-    if (_isMediaScope &&
+    if (_state.scope.supportsFiltering &&
         (_state.activeFilterCount > 0 ||
             _state.mediaType != LibraryMediaType.all)) {
       return '没有符合筛选条件的项目';

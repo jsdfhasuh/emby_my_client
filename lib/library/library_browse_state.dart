@@ -5,6 +5,9 @@ import 'library_alphabet_filter.dart';
 enum LibraryBrowseScope { media, directory, genres, tags, favorites, facet }
 
 extension LibraryBrowseScopeCapabilities on LibraryBrowseScope {
+  bool get supportsFiltering =>
+      supportsMediaFilters || this == LibraryBrowseScope.directory;
+
   bool get supportsMediaFilters => switch (this) {
     LibraryBrowseScope.media ||
     LibraryBrowseScope.favorites ||
@@ -39,7 +42,8 @@ enum LibraryLocalMediaFilter { all, strm, regular }
 enum LibraryPlayedFilter {
   all(null),
   played('IsPlayed'),
-  unplayed('IsUnplayed');
+  unplayed('IsUnplayed'),
+  inProgress('IsResumable,IsUnplayed');
 
   const LibraryPlayedFilter(this.apiValue);
 
@@ -121,11 +125,11 @@ class LibraryBrowseState {
       facet = null;
 
   const LibraryBrowseState.directory({
+    this.mediaType = LibraryMediaType.all,
+    this.playedFilter = LibraryPlayedFilter.all,
     this.sortBy = LibrarySortBy.name,
     this.sortOrder = LibrarySortOrder.ascending,
   }) : scope = LibraryBrowseScope.directory,
-       mediaType = LibraryMediaType.all,
-       playedFilter = LibraryPlayedFilter.all,
        localFilter = LibraryLocalMediaFilter.all,
        alphabetFilter = const AllItems(),
        facet = null;
@@ -231,6 +235,12 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
       return _preserveIdentity(
         state,
         LibraryBrowseState.directory(
+          mediaType: state.mediaType,
+          playedFilter:
+              state.mediaType == LibraryMediaType.photo &&
+                  state.playedFilter == LibraryPlayedFilter.inProgress
+              ? LibraryPlayedFilter.all
+              : state.playedFilter,
           sortBy: state.sortBy,
           sortOrder: state.sortOrder,
         ),
@@ -244,7 +254,9 @@ LibraryBrowseState normalizeLibraryBrowseState(LibraryBrowseState state) {
 LibraryBrowseState _normalizeMediaFilters(LibraryBrowseState state) {
   if (state.mediaType == LibraryMediaType.photo) {
     return state.copyWith(
-      playedFilter: LibraryPlayedFilter.all,
+      playedFilter: state.playedFilter == LibraryPlayedFilter.inProgress
+          ? LibraryPlayedFilter.all
+          : state.playedFilter,
       localFilter: LibraryLocalMediaFilter.all,
     );
   }
@@ -323,7 +335,12 @@ class LibraryFilterDraft {
       playedFilter: playedFilter ?? this.playedFilter,
     );
     if (next.mediaType == LibraryMediaType.photo) {
-      return const LibraryFilterDraft(mediaType: LibraryMediaType.photo);
+      return LibraryFilterDraft(
+        mediaType: LibraryMediaType.photo,
+        playedFilter: next.playedFilter == LibraryPlayedFilter.inProgress
+            ? LibraryPlayedFilter.all
+            : next.playedFilter,
+      );
     }
     return next.mediaType.supportsLocalSourceFilter
         ? next
@@ -419,11 +436,11 @@ LibraryBrowseState reduceLibraryBrowseState(
   final next = switch (event) {
     LibraryScopeSelected(:final scope) => _selectScope(current, scope),
     LibraryMediaTypeSelected(:final mediaType) =>
-      current.scope.supportsMediaFilters
+      current.scope.supportsFiltering
           ? current.copyWith(mediaType: mediaType)
           : current,
     LibraryPlayedFilterSelected(:final playedFilter) =>
-      current.scope.supportsMediaFilters
+      current.scope.supportsFiltering
           ? current.copyWith(playedFilter: playedFilter)
           : current,
     LibraryLocalFilterSelected(:final localFilter) =>
@@ -431,7 +448,7 @@ LibraryBrowseState reduceLibraryBrowseState(
           ? current.copyWith(localFilter: localFilter)
           : current,
     LibraryFiltersApplied(:final draft) =>
-      current.scope.supportsMediaFilters
+      current.scope.supportsFiltering
           ? current.copyWith(
               mediaType: draft.mediaType,
               localFilter: draft.localFilter,
@@ -467,7 +484,7 @@ LibraryBrowseState _applyCapabilities(
       !capabilities.allowedScopes.contains(current.scope)) {
     next = _selectScope(current, LibraryBrowseScope.media);
   }
-  if (next.scope.supportsMediaFilters &&
+  if (next.scope.supportsFiltering &&
       !capabilities.allowedMediaTypes.contains(next.mediaType)) {
     next = next.copyWith(
       mediaType: capabilities.allowedMediaTypes.contains(LibraryMediaType.all)
@@ -495,7 +512,7 @@ LibraryBrowseState _applyCategoryVisibility(
           !visibility.showFavorites)) {
     next = _selectScope(current, LibraryBrowseScope.media);
   }
-  if (next.scope.supportsMediaFilters &&
+  if (next.scope.supportsFiltering &&
       !visibility.showsMediaType(next.mediaType)) {
     next = next.copyWith(mediaType: LibraryMediaType.all);
   }
@@ -524,6 +541,8 @@ LibraryBrowseState _selectScope(
     LibraryBrowseScope.media => const LibraryBrowseState(),
     LibraryBrowseScope.favorites => const LibraryBrowseState.favorites(),
     LibraryBrowseScope.directory => LibraryBrowseState.directory(
+      mediaType: current.mediaType,
+      playedFilter: current.playedFilter,
       sortBy: current.sortBy,
       sortOrder: current.sortOrder,
     ),

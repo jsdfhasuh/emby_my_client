@@ -20,6 +20,7 @@ import '../../playback/media_kit_inline_playback_session.dart';
 import '../../playback/playback_diagnostics_test_overrides_scope.dart';
 import '../../playback/playback_settings_scope.dart';
 import '../../photos/photo_viewer_controller.dart';
+import '../../photos/photo_viewed_controller.dart';
 import '../../photos/photo_sequence_source.dart';
 import 'inline_video_page.dart';
 import 'zoomable_photo_page.dart';
@@ -55,12 +56,15 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   static const _systemUiRestoreTimeout = Duration(seconds: 1);
 
   late PhotoViewerController _controller;
+  late PhotoViewedController _photoViewed;
+  late Listenable _viewerChanges;
   late PageController _pageController;
   bool _initialized = false;
   bool _openingLocalVideo = false;
   late bool _serverPlaybackBlocked;
   bool _currentPageZoomed = false;
   bool _seekInteractionActive = false;
+  bool _pageScrolling = false;
   bool _closing = false;
   bool _didPop = false;
   int _buildCount = 0;
@@ -103,6 +107,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
         _viewerDimension = viewerDimension;
         _controller.refreshPrefetch();
       }
+      _syncPhotoVisibility();
       return;
     }
     _viewerDimension = viewerDimension;
@@ -140,8 +145,16 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
       imageRequestFor: _viewerRequest,
       prefetcher: prefetcher,
     );
+    _photoViewed = PhotoViewedController(
+      writeViewed: _writePhotoViewed,
+      onSaved: _controller.recordPhotoViewed,
+    );
+    _viewerChanges = Listenable.merge([_controller, _photoViewed]);
+    _controller.addListener(_viewerControllerChanged);
     _pageController = PageController(initialPage: _controller.currentIndex);
     _initialized = true;
+    _viewerControllerChanged();
+    _syncPhotoVisibility();
     if (_controller.mediaItems.isNotEmpty &&
         _controller.mediaItems[_controller.currentIndex].isPlayable) {
       unawaited(Future<void>.microtask(_syncCurrentPlayback));
@@ -152,6 +165,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
     if (_closing) return;
+    _syncPhotoVisibility();
     unawaited(_inlineCoordinator?.handleAppLifecycleState(state));
   }
 
@@ -167,11 +181,14 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     WidgetsBinding.instance.removeObserver(this);
     final inlineCoordinator = _inlineCoordinator;
     if (inlineCoordinator != null) {
+      inlineCoordinator.removeListener(_recordInlinePlayback);
       unawaited(_shutdownInlineCoordinator(inlineCoordinator));
       inlineCoordinator.dispose();
     }
     if (_initialized) {
       _pageController.dispose();
+      _controller.removeListener(_viewerControllerChanged);
+      _photoViewed.dispose();
       _controller.dispose();
     }
     unawaited(_restoreSystemUiSafely());
@@ -197,6 +214,66 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     }
     _controller.setCurrentIndex(index);
     unawaited(_syncCurrentPlayback());
+  }
+
+  void _viewerControllerChanged() {
+    if (!_initialized || _closing) return;
+    final items = _controller.mediaItems;
+    _photoViewed.activate(
+      items.isEmpty ? null : items[_controller.currentIndex],
+    );
+  }
+
+  void _syncPhotoVisibility() {
+    if (!_initialized) return;
+    _photoViewed.setForeground(
+      !_closing &&
+          !_pageScrolling &&
+          _lifecycleState == AppLifecycleState.resumed &&
+          ModalRoute.of(context)?.isCurrent != false &&
+          !_isServerPlaybackBlocked,
+    );
+  }
+
+  bool _onPageScroll(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+    if (notification is ScrollStartNotification) {
+      _pageScrolling = true;
+      _syncPhotoVisibility();
+    } else if (notification is ScrollEndNotification) {
+      _pageScrolling = false;
+      _syncPhotoVisibility();
+    }
+    return false;
+  }
+
+  void _recordInlinePlayback() {
+    final state = _inlineCoordinator?.state;
+    if (state != null && state.isPlaying && state.itemId != null) {
+      _controller.requireUserDataRefresh(state.itemId!);
+    }
+  }
+
+  Future<void> _writePhotoViewed(String itemId, bool viewed) async {
+    await widget.api.userData.setPlayed(itemId, played: viewed);
+    _controller.requireUserDataRefresh(itemId);
+    final userData = await widget.api.getUserDataForItems([itemId]);
+    if (userData[itemId]?.isPlayed != viewed) {
+      throw const EmbyApiException('服务器未确认照片查看状态，请重试');
+    }
+  }
+
+  Future<void> _finishPhotoWrites() async {
+    final unresolvedIds = await _photoViewed.finish();
+    for (final itemId in unresolvedIds) {
+      _controller.requireUserDataRefresh(itemId);
+    }
+  }
+
+  void _togglePhotoViewed() {
+    if (_closing || _isServerPlaybackBlocked) return;
+    _controller.showControlsTemporarily();
+    unawaited(_photoViewed.markCurrent(viewed: !_photoViewed.isViewed));
   }
 
   void _setZoomed(int index, bool zoomed) {
@@ -252,6 +329,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
       initialLifecycleState: _lifecycleState,
     );
     _inlineCoordinator = coordinator;
+    coordinator.addListener(_recordInlinePlayback);
     if (mounted && !_closing) setState(() {});
     return coordinator;
   }
@@ -280,6 +358,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     final blocked = _isServerPlaybackBlocked;
     if (blocked == _serverPlaybackBlocked) return;
     setState(() => _serverPlaybackBlocked = blocked);
+    _syncPhotoVisibility();
     unawaited(_syncCurrentPlayback());
   }
 
@@ -343,6 +422,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
         item: item,
         requireLocal: true,
       );
+      _controller.requireUserDataRefresh(item.id);
     } finally {
       if (mounted && !_closing) {
         setState(() => _openingLocalVideo = false);
@@ -357,17 +437,19 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
     _closing = true;
     _currentPageZoomed = false;
     _seekInteractionActive = false;
+    _syncPhotoVisibility();
     if (mounted) setState(() {});
     return _closeOperation = _closeViewerOnce();
   }
 
   Future<void> _closeViewerOnce() async {
-    final result = _controller.result;
     try {
       final inlineCoordinator = _inlineCoordinator;
-      if (inlineCoordinator != null) {
-        await _shutdownInlineCoordinator(inlineCoordinator);
-      }
+      await Future.wait([
+        _finishPhotoWrites(),
+        if (inlineCoordinator != null)
+          _shutdownInlineCoordinator(inlineCoordinator),
+      ]);
     } finally {
       try {
         await _restoreSystemUiSafely().timeout(_systemUiRestoreTimeout);
@@ -376,7 +458,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
       } finally {
         if (mounted && !_didPop) {
           _didPop = true;
-          Navigator.of(context).pop(result);
+          Navigator.of(context).pop(_controller.result);
         }
       }
     }
@@ -429,7 +511,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
         body: IgnorePointer(
           ignoring: _closing,
           child: ListenableBuilder(
-            listenable: _controller,
+            listenable: _viewerChanges,
             builder: (context, _) {
               final mediaItems = _controller.mediaItems;
               if (mediaItems.isEmpty) {
@@ -447,43 +529,50 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    PageView.builder(
-                      controller: _pageController,
-                      physics: _currentPageZoomed || _seekInteractionActive
-                          ? const NeverScrollableScrollPhysics()
-                          : const PageScrollPhysics(),
-                      itemCount: mediaItems.length,
-                      onPageChanged: _onPageChanged,
-                      itemBuilder: (context, index) {
-                        final item = mediaItems[index];
-                        if (item.isPlayable) {
-                          if (_isServerPlaybackBlocked) {
-                            return _offlineVideoPage(item);
+                    NotificationListener<ScrollNotification>(
+                      onNotification: _onPageScroll,
+                      child: PageView.builder(
+                        controller: _pageController,
+                        physics: _currentPageZoomed || _seekInteractionActive
+                            ? const NeverScrollableScrollPhysics()
+                            : const PageScrollPhysics(),
+                        itemCount: mediaItems.length,
+                        onPageChanged: _onPageChanged,
+                        itemBuilder: (context, index) {
+                          final item = mediaItems[index];
+                          if (item.isPlayable) {
+                            if (_isServerPlaybackBlocked) {
+                              return _offlineVideoPage(item);
+                            }
+                            return InlineVideoPage(
+                              key: ValueKey('video-page-${item.id}'),
+                              itemId: item.id,
+                              coverRequest: _viewerRequest(item),
+                              isActive: index == _controller.currentIndex,
+                              state: InlinePlaybackState(itemId: item.id),
+                              coordinator: index == _controller.currentIndex
+                                  ? _inlineCoordinator
+                                  : null,
+                              onPlay: _playInline,
+                              onPause: _pauseInline,
+                              onSeek: _seekInline,
+                              onRetry: _retryInline,
+                              onSeekInteractionChanged:
+                                  _setSeekInteractionActive,
+                            );
                           }
-                          return InlineVideoPage(
-                            key: ValueKey('video-page-${item.id}'),
-                            itemId: item.id,
-                            coverRequest: _viewerRequest(item),
+                          return ZoomablePhotoPage(
+                            key: ValueKey('photo-page-${item.id}'),
+                            request: _viewerRequest(item),
+                            thumbnailRequest: _thumbnailRequest(item),
                             isActive: index == _controller.currentIndex,
-                            state: InlinePlaybackState(itemId: item.id),
-                            coordinator: index == _controller.currentIndex
-                                ? _inlineCoordinator
-                                : null,
-                            onPlay: _playInline,
-                            onPause: _pauseInline,
-                            onSeek: _seekInline,
-                            onRetry: _retryInline,
-                            onSeekInteractionChanged: _setSeekInteractionActive,
+                            onZoomChanged: (zoomed) =>
+                                _setZoomed(index, zoomed),
+                            onDisplayReadyChanged: (ready) =>
+                                _photoViewed.imageDisplayed(item.id, ready),
                           );
-                        }
-                        return ZoomablePhotoPage(
-                          key: ValueKey('photo-page-${item.id}'),
-                          request: _viewerRequest(item),
-                          thumbnailRequest: _thumbnailRequest(item),
-                          isActive: index == _controller.currentIndex,
-                          onZoomChanged: (zoomed) => _setZoomed(index, zoomed),
-                        );
-                      },
+                        },
+                      ),
                     ),
                     _ViewerControls(
                       visible: _controller.controlsVisible,
@@ -497,6 +586,14 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen>
                       onPrevious: () => _goTo(_controller.currentIndex - 1),
                       onNext: () => _goTo(_controller.currentIndex + 1),
                       onRetryLoadMore: _retryLoadMore,
+                      photoViewed: mediaItems[_controller.currentIndex].isPhoto
+                          ? _photoViewed.isViewed
+                          : null,
+                      photoMarking: _photoViewed.isSaving,
+                      photoSaveFailed: _photoViewed.error != null,
+                      onMarkPhotoViewed: _isServerPlaybackBlocked
+                          ? null
+                          : _togglePhotoViewed,
                     ),
                   ],
                 ),
@@ -547,6 +644,10 @@ class _ViewerControls extends StatelessWidget {
     required this.onPrevious,
     required this.onNext,
     required this.onRetryLoadMore,
+    required this.photoViewed,
+    required this.photoMarking,
+    required this.photoSaveFailed,
+    required this.onMarkPhotoViewed,
   });
 
   final bool visible;
@@ -560,6 +661,10 @@ class _ViewerControls extends StatelessWidget {
   final VoidCallback onPrevious;
   final VoidCallback onNext;
   final VoidCallback onRetryLoadMore;
+  final bool? photoViewed;
+  final bool photoMarking;
+  final bool photoSaveFailed;
+  final VoidCallback? onMarkPhotoViewed;
 
   @override
   Widget build(BuildContext context) {
@@ -624,33 +729,70 @@ class _ViewerControls extends StatelessWidget {
                     colors: [Color(0xCC000000), Colors.transparent],
                   ),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    IconButton(
-                      tooltip: '上一个',
-                      onPressed: canGoPrevious ? onPrevious : null,
-                      icon: const Icon(Icons.chevron_left, size: 34),
-                    ),
-                    const SizedBox(width: 32),
-                    if (loadingMore)
-                      const SizedBox.square(
-                        dimension: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    else if (loadMoreError != null)
-                      IconButton(
-                        tooltip: '重试加载',
-                        onPressed: onRetryLoadMore,
-                        icon: const Icon(Icons.refresh),
-                      )
-                    else
-                      const SizedBox.square(dimension: 24),
-                    const SizedBox(width: 32),
-                    IconButton(
-                      tooltip: '下一个',
-                      onPressed: canGoNext ? onNext : null,
-                      icon: const Icon(Icons.chevron_right, size: 34),
+                    if (photoViewed != null)
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        alignment: WrapAlignment.center,
+                        spacing: 12,
+                        children: [
+                          Text(
+                            photoViewed! ? '已查看' : '未查看',
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          TextButton.icon(
+                            key: const Key('photo-viewed-action'),
+                            onPressed: photoMarking ? null : onMarkPhotoViewed,
+                            icon: Icon(
+                              photoViewed!
+                                  ? Icons.visibility_off_outlined
+                                  : Icons.check_circle_outline,
+                            ),
+                            label: Text(
+                              photoMarking
+                                  ? '正在保存…'
+                                  : '${photoSaveFailed ? '重试：' : ''}'
+                                        '${photoViewed! ? '标记为未查看' : '标记为已查看'}',
+                            ),
+                          ),
+                        ],
+                      ),
+                    if (photoSaveFailed && photoViewed != null)
+                      const Text(
+                        '查看状态保存失败，请重试',
+                        style: TextStyle(color: Colors.orangeAccent),
+                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          tooltip: '上一个',
+                          onPressed: canGoPrevious ? onPrevious : null,
+                          icon: const Icon(Icons.chevron_left, size: 34),
+                        ),
+                        const SizedBox(width: 32),
+                        if (loadingMore)
+                          const SizedBox.square(
+                            dimension: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        else if (loadMoreError != null)
+                          IconButton(
+                            tooltip: '重试加载',
+                            onPressed: onRetryLoadMore,
+                            icon: const Icon(Icons.refresh),
+                          )
+                        else
+                          const SizedBox.square(dimension: 24),
+                        const SizedBox(width: 32),
+                        IconButton(
+                          tooltip: '下一个',
+                          onPressed: canGoNext ? onNext : null,
+                          icon: const Icon(Icons.chevron_right, size: 34),
+                        ),
+                      ],
                     ),
                   ],
                 ),

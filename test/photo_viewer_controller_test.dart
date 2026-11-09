@@ -10,6 +10,44 @@ import 'package:emby_my_client/photos/photo_viewer_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'viewer result returns changed IDs and successfully saved photo status',
+    () {
+      final controller = PhotoViewerController(
+        source: _source(
+          mode: MediaViewerMode.homeMedia,
+          initialItems: [
+            _item('photo', 'Photo'),
+            _item('video', 'Video', mediaType: 'Video'),
+          ],
+          initialItemId: 'photo',
+          initialRawCursor: 2,
+          initialTotalCount: 2,
+          initialHasMore: false,
+          loadPage: _emptyLoader,
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+      addTearDown(controller.dispose);
+      final before = controller.result;
+      expect(before.userDataChangedItemIds, isEmpty);
+      controller.requireUserDataRefresh('video');
+      controller.requireUserDataRefresh('video');
+      controller.recordPhotoViewed('photo', true);
+      final after = controller.result;
+      expect(after.userDataChangedItemIds, {'video', 'photo'});
+      expect(after.rawItems.first.userData.isPlayed, isTrue);
+      expect(controller.mediaItems.first.userData.isPlayed, isTrue);
+      expect(before.userDataChangedItemIds, isEmpty);
+      expect(before.rawItems.first.userData.isPlayed, isFalse);
+      expect(
+        () => after.userDataChangedItemIds.add('other'),
+        throwsUnsupportedError,
+      );
+    },
+  );
+
   test('photos-only mode excludes playable videos', () {
     final controller = PhotoViewerController(
       source: _source(
@@ -345,7 +383,7 @@ void main() {
   });
 
   test(
-    'identity rescan removes a filtered item and keeps the final media ID',
+    'identity rescan retains the visible page until the user advances',
     () async {
       final starts = <int>[];
       final controller = PhotoViewerController(
@@ -388,12 +426,15 @@ void main() {
 
       expect(starts, [0, 60]);
       expect(controller.mediaItems.map((item) => item.id), [
+        for (var index = 0; index < 62; index++) 'photo-$index',
+      ]);
+      expect(controller.result.rawItems.map((item) => item.id), [
         for (var index = 0; index < 59; index++) 'photo-$index',
         'photo-60',
         'photo-61',
       ]);
       expect(controller.currentIndex, 59);
-      expect(controller.currentItemId, 'photo-60');
+      expect(controller.currentItemId, 'photo-59');
       expect(controller.nextStartIndex, 61);
       expect(controller.totalCount, 61);
       expect(controller.totalDirty, isTrue);
@@ -401,7 +442,96 @@ void main() {
         controller.result.paginationStrategy,
         LibraryPaginationStrategy.identityRescan,
       );
+      controller.setCurrentIndex(60);
+      expect(controller.currentItemId, 'photo-60');
       controller.dispose();
+    },
+  );
+
+  test(
+    'viewed photos leaving a query do not shift its visible page offset',
+    () async {
+      final response = Completer<EmbyItemPage>();
+      final controller = PhotoViewerController(
+        source: _source(
+          paginationStrategy: LibraryPaginationStrategy.identityRescan,
+          initialItems: [
+            for (var index = 0; index < 60; index++)
+              _item('photo-$index', 'Photo'),
+          ],
+          initialItemId: 'photo-55',
+          initialRawCursor: 60,
+          initialTotalCount: 62,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) => response.future,
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+      addTearDown(controller.dispose);
+      for (var index = 0; index <= 55; index++) {
+        controller.recordPhotoViewed('photo-$index', true);
+      }
+      response.complete(
+        EmbyItemPage(
+          items: [
+            for (var index = 56; index < 62; index++)
+              _item('photo-$index', 'Photo'),
+          ],
+          rawItemCount: 6,
+          totalRecordCount: 6,
+        ),
+      );
+      await _waitForViewerLoad(controller);
+      expect(controller.currentIndex, 55);
+      expect(controller.currentItemId, 'photo-55');
+      expect(controller.mediaItems[55].userData.isPlayed, isTrue);
+      expect(controller.result.rawItems.map((item) => item.id), [
+        for (var index = 56; index < 62; index++) 'photo-$index',
+      ]);
+      controller.setCurrentIndex(56);
+      expect(controller.currentItemId, 'photo-56');
+      expect(controller.result.userDataChangedItemIds, hasLength(56));
+    },
+  );
+
+  test(
+    'identity rescan anchors the page selected while its request was pending',
+    () async {
+      final response = Completer<EmbyItemPage>();
+      final controller = PhotoViewerController(
+        source: _source(
+          paginationStrategy: LibraryPaginationStrategy.identityRescan,
+          initialItems: [
+            for (var index = 0; index < 6; index++)
+              _item('photo-$index', 'Photo'),
+          ],
+          initialItemId: 'photo-1',
+          initialRawCursor: 6,
+          initialTotalCount: 7,
+          initialHasMore: true,
+          loadPage: ({required startIndex, required limit}) => response.future,
+        ),
+        imageRequestFor: _request,
+        prefetcher: PhotoPrefetcher(load: (_) async {}),
+      );
+      addTearDown(controller.dispose);
+      controller.setCurrentIndex(3);
+      response.complete(
+        EmbyItemPage(
+          items: [
+            for (var index = 4; index < 7; index++)
+              _item('photo-$index', 'Photo'),
+          ],
+          rawItemCount: 3,
+          totalRecordCount: 3,
+        ),
+      );
+      await _waitForViewerLoad(controller);
+      expect(controller.currentIndex, 3);
+      expect(controller.currentItemId, 'photo-3');
+      controller.setCurrentIndex(4);
+      expect(controller.currentItemId, 'photo-4');
     },
   );
 

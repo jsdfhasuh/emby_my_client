@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
+import '../../library/library_watch_status.dart';
+import 'library_watch_status_badge.dart';
 import 'media_widgets.dart';
 
 class LibraryDirectoryEntryCard extends StatelessWidget {
@@ -43,6 +45,7 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final request = imageRequest;
+    final status = LibraryWatchStatus.forItem(item);
     final action = item.isFolder
         ? '打开目录'
         : item.isPhoto
@@ -50,7 +53,7 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
         : '查看媒体';
     return Semantics(
       button: true,
-      label: '$action：${item.name}',
+      label: '$action：${item.name}${status == null ? '' : '，${status.label}'}',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -87,44 +90,15 @@ class LibraryDirectoryEntryCard extends StatelessWidget {
                   ),
                 ),
               ),
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: 10,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Icon(icon, size: 20, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xFFD7DEE1),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              LibraryWatchStatusOverlay(
+                status: status,
+                isFavorite: item.userData.isFavorite,
+              ),
+              LibraryEntryCardCaption(
+                title: item.name,
+                subtitle: subtitle,
+                icon: icon,
+                hasTopBadge: status != null || item.userData.isFavorite,
               ),
             ],
           ),

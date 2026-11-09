@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../images/emby_image_request.dart';
 import '../../models/emby_models.dart';
+import '../../library/library_watch_status.dart';
+import 'library_watch_status_badge.dart';
 import 'media_widgets.dart';
 
 class LibraryMixedEntryCard extends StatelessWidget {
@@ -43,6 +45,7 @@ class LibraryMixedEntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final request = imageRequest;
+    final status = LibraryWatchStatus.forItem(item);
     final action = item.isFolder
         ? '打开目录'
         : item.isPhoto
@@ -50,7 +53,7 @@ class LibraryMixedEntryCard extends StatelessWidget {
         : '查看媒体';
     return Semantics(
       button: true,
-      label: '$action：${item.name}',
+      label: '$action：${item.name}${status == null ? '' : '，${status.label}'}',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -87,48 +90,15 @@ class LibraryMixedEntryCard extends StatelessWidget {
                   ),
                 ),
               ),
-              if (item.userData.isFavorite)
-                const Positioned(top: 8, left: 8, child: _MixedFavoriteBadge()),
-              if (item.isPlayable && item.userData.isPlayed)
-                const Positioned(top: 8, right: 8, child: _MixedPlayedBadge()),
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: 10,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Icon(icon, size: 20, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xFFD7DEE1),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              LibraryWatchStatusOverlay(
+                status: status,
+                isFavorite: item.userData.isFavorite,
+              ),
+              LibraryEntryCardCaption(
+                title: item.name,
+                subtitle: subtitle,
+                icon: icon,
+                hasTopBadge: status != null || item.userData.isFavorite,
               ),
             ],
           ),
@@ -136,30 +106,4 @@ class LibraryMixedEntryCard extends StatelessWidget {
       ),
     );
   }
-}
-
-class _MixedFavoriteBadge extends StatelessWidget {
-  const _MixedFavoriteBadge();
-
-  @override
-  Widget build(BuildContext context) => const DecoratedBox(
-    decoration: BoxDecoration(color: Color(0xDD9A3D46), shape: BoxShape.circle),
-    child: Padding(
-      padding: EdgeInsets.all(5),
-      child: Icon(Icons.favorite, size: 15, color: Colors.white),
-    ),
-  );
-}
-
-class _MixedPlayedBadge extends StatelessWidget {
-  const _MixedPlayedBadge();
-
-  @override
-  Widget build(BuildContext context) => const DecoratedBox(
-    decoration: BoxDecoration(color: Color(0xDD25715C), shape: BoxShape.circle),
-    child: Padding(
-      padding: EdgeInsets.all(5),
-      child: Icon(Icons.check, size: 15, color: Colors.white),
-    ),
-  );
 }

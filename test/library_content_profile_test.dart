@@ -93,18 +93,21 @@ void main() {
     });
   });
 
-  test('photo profile removes unsupported roots and filter capabilities', () {
-    const profile = LibraryContentProfile.photos;
+  test(
+    'photo profile supports viewed state without video-only capabilities',
+    () {
+      const profile = LibraryContentProfile.photos;
 
-    expect(profile.supportsGenres, isFalse);
-    expect(profile.supportsTags, isFalse);
-    expect(profile.supportsPlayedFilter, isFalse);
-    expect(profile.supportsLocalSourceFilter, isFalse);
-    expect(profile.supportsPlayAll, isFalse);
-    expect(profile.visibleScopes(const LibraryCategorySettings()), {
-      LibraryBrowseScope.media,
-      LibraryBrowseScope.directory,
-      LibraryBrowseScope.favorites,
-    });
-  });
+      expect(profile.supportsGenres, isFalse);
+      expect(profile.supportsTags, isFalse);
+      expect(profile.supportsPlayedFilter, isTrue);
+      expect(profile.supportsLocalSourceFilter, isFalse);
+      expect(profile.supportsPlayAll, isFalse);
+      expect(profile.visibleScopes(const LibraryCategorySettings()), {
+        LibraryBrowseScope.media,
+        LibraryBrowseScope.directory,
+        LibraryBrowseScope.favorites,
+      });
+    },
+  );
 }

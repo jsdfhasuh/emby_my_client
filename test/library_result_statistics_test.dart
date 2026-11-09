@@ -4,6 +4,33 @@ import 'package:emby_my_client/library/library_scroll_position_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'filtered directory totals are unknown until its raw scan completes',
+    () {
+      const state = LibraryBrowseState.directory(
+        playedFilter: LibraryPlayedFilter.unplayed,
+      );
+      const partial = LibraryResultStatistics(state: state, loadedCount: 60);
+      const complete = LibraryResultStatistics(
+        state: state,
+        loadedCount: 65,
+        totalCount: 65,
+      );
+      const range = LibraryPositionSnapshot(
+        firstVisible: 1,
+        lastVisible: 6,
+        loadedCount: 60,
+      );
+
+      expect(partial.primaryResultLabel, '目录筛选已加载 60 项（含目录）');
+      expect(partial.present(range).percentageLabel, isNull);
+      expect(partial.present(range).remainingLabel, isNull);
+      expect(complete.primaryResultLabel, '目录筛选共 65 项（含目录）');
+      expect(complete.present(range).rangeLabel, '目录筛选 1–6');
+      expect(complete.present(range).totalLabel, '目录筛选共 65 项（含目录）');
+    },
+  );
+
   const snapshot = LibraryPositionSnapshot(
     firstVisible: 25,
     lastVisible: 48,

@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('photo card has photo semantics and no playback state', (
+  testWidgets('photo card shows viewed status without playback progress', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
@@ -24,12 +24,89 @@ void main() {
       ),
     );
 
-    expect(find.bySemanticsLabel('查看图片：Photo'), findsOneWidget);
+    expect(find.bySemanticsLabel('查看图片：Photo，已查看'), findsOneWidget);
+    expect(find.text('已查看'), findsOneWidget);
     expect(find.text('图片'), findsOneWidget);
     expect(find.byIcon(Icons.image_outlined), findsWidgets);
     expect(find.byIcon(Icons.check), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(tester.takeException(), isNull);
     semantics.dispose();
+  });
+
+  testWidgets('mixed videos expose resume progress and watched state', (
+    tester,
+  ) async {
+    for (final played in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Center(
+            child: SizedBox(
+              width: 240,
+              height: 180,
+              child: LibraryMixedEntryCard(
+                item: _item(
+                  'Video',
+                  userData: EmbyUserData(
+                    isPlayed: played,
+                    playedPercentage: 42,
+                  ),
+                ),
+                imageRequest: null,
+                onTap: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text(played ? '已观看' : '观看中 42%'), findsOneWidget);
+      if (played) {
+        expect(find.byType(LinearProgressIndicator), findsNothing);
+      } else {
+        expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                find.byType(LinearProgressIndicator),
+              )
+              .value,
+          0.42,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    }
+  });
+
+  testWidgets('mixed photos show viewing labels without video progress', (
+    tester,
+  ) async {
+    for (final played in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Center(
+            child: SizedBox(
+              width: 240,
+              height: 180,
+              child: LibraryMixedEntryCard(
+                item: _item(
+                  'Photo',
+                  userData: EmbyUserData(
+                    isPlayed: played,
+                    playedPercentage: 42,
+                  ),
+                ),
+                imageRequest: null,
+                onTap: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text(played ? '已查看' : '未查看'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('photo artwork preserves the complete foreground', (

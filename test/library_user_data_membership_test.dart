@@ -989,6 +989,10 @@ class _MembershipApi extends EmbyApi {
         LibraryPlayedFilter.all => true,
         LibraryPlayedFilter.played => item.userData.isPlayed,
         LibraryPlayedFilter.unplayed => !item.userData.isPlayed,
+        LibraryPlayedFilter.inProgress =>
+          !item.userData.isPlayed &&
+              (item.userData.playbackPositionTicks > 0 ||
+                  item.userData.playedPercentage > 0),
       };
     }).toList();
     _sortForQuery(filtered, sortBy, sortOrder);

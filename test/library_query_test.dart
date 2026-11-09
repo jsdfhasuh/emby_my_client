@@ -7,6 +7,22 @@ import 'package:emby_my_client/models/emby_models.dart' show EmbySession;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('watching query excludes already completed items', () async {
+    RequestOptions? captured;
+    final api = _api((options, handler) {
+      captured = options;
+      handler.resolve(_response(options));
+    });
+    addTearDown(api.dispose);
+
+    await api.getLibraryMediaItems(
+      parentId: 'library-1',
+      playedFilter: LibraryPlayedFilter.inProgress,
+    );
+
+    expect(captured!.queryParameters['Filters'], 'IsResumable,IsUnplayed');
+  });
+
   test('media query has the exact approved default shape', () async {
     RequestOptions? captured;
     final api = _api((options, handler) {

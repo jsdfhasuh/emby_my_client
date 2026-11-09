@@ -16,5 +16,8 @@ bool libraryItemMatchesServerMembership(
     LibraryPlayedFilter.all => true,
     LibraryPlayedFilter.played => userData.isPlayed,
     LibraryPlayedFilter.unplayed => !userData.isPlayed,
+    LibraryPlayedFilter.inProgress =>
+      !userData.isPlayed &&
+          (userData.playbackPositionTicks > 0 || userData.playedPercentage > 0),
   };
 }
